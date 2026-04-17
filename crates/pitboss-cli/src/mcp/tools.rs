@@ -90,6 +90,31 @@ pub struct WaitForAnyArgs {
     pub timeout_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContinueWorkerArgs {
+    pub task_id: String,
+    /// Optional prompt to send with --resume. Defaults to "continue".
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RequestApprovalArgs {
+    pub summary: String,
+    /// Optional per-request timeout override. Falls back to lead_timeout_secs.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalToolResponse {
+    pub approved: bool,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub edited_summary: Option<String>,
+}
+
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -1434,5 +1459,29 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn continue_worker_args_roundtrip() {
+        let a = ContinueWorkerArgs {
+            task_id: "w".into(),
+            prompt: Some("next step".into()),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: ContinueWorkerArgs = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.task_id, "w");
+        assert_eq!(back.prompt.as_deref(), Some("next step"));
+    }
+
+    #[test]
+    fn request_approval_args_roundtrip() {
+        let a = RequestApprovalArgs {
+            summary: "spawn 3 workers".into(),
+            timeout_secs: Some(60),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.summary, "spawn 3 workers");
+        assert_eq!(back.timeout_secs, Some(60));
     }
 }
