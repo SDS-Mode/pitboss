@@ -118,24 +118,42 @@ pub async fn handle_spawn_worker(
         }
     }
 
-    // Guard 3: budget
-    if let (Some(budget), Some(_remaining)) =
-        (state.manifest.budget_usd, state.budget_remaining().await)
-    {
-        let spent = *state.spent_usd.lock().await;
-        // Estimate this worker's cost as median of prior workers or fallback.
-        let estimate = estimate_new_worker_cost(state).await;
-        if spent + estimate > budget {
-            bail!(
-                "budget exceeded: ${:.2} spent + ${:.2} estimated > ${:.2} budget",
-                spent,
-                estimate,
-                budget
-            );
-        }
-    }
+    // Resolve the worker's model up-front so the budget guard can price it.
+    let lead = state.manifest.lead.as_ref();
+    let worker_model = args
+        .model
+        .clone()
+        .or_else(|| lead.map(|l| l.model.clone()))
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
 
     let task_id = format!("worker-{}", Uuid::now_v7());
+
+    // Guard 3: budget (reservation-aware + model-aware). On pass, reserve the
+    // estimated cost so a burst of parallel spawns can't all slip through
+    // before the first completion updates `spent_usd`. The reservation is
+    // released on completion (both success and spawn-fail paths).
+    if let Some(budget) = state.manifest.budget_usd {
+        let spent = *state.spent_usd.lock().await;
+        let reserved = *state.reserved_usd.lock().await;
+        // Estimate this worker's cost using its intended model, as the median
+        // of prior workers priced at their actual models (or a model-specific
+        // fallback if no worker has completed yet).
+        let estimate = estimate_new_worker_cost(state, &worker_model).await;
+        if spent + reserved + estimate > budget {
+            bail!(
+                "budget exceeded: ${:.2} spent + ${:.2} reserved + ${:.2} estimated > ${:.2} budget",
+                spent, reserved, estimate, budget
+            );
+        }
+        // Reserve.
+        *state.reserved_usd.lock().await += estimate;
+        state
+            .worker_reservations
+            .write()
+            .await
+            .insert(task_id.clone(), estimate);
+    }
+
     {
         let mut workers = state.workers.write().await;
         workers.insert(task_id.clone(), WorkerState::Pending);
@@ -156,6 +174,14 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), prompt_preview);
 
+    // Track the worker's resolved model so `estimate_new_worker_cost` can
+    // price completed workers at the correct rate.
+    state
+        .worker_models
+        .write()
+        .await
+        .insert(task_id.clone(), worker_model.clone());
+
     // Resolve the worker's directory: args override -> lead.directory fallback.
     let worker_dir: std::path::PathBuf = args
         .directory
@@ -170,13 +196,8 @@ pub async fn handle_spawn_worker(
                 .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         });
 
-    // Resolve model, tools, timeout: per-args override -> lead defaults -> fallback.
-    let lead = state.manifest.lead.as_ref();
-    let worker_model = args
-        .model
-        .clone()
-        .or_else(|| lead.map(|l| l.model.clone()))
-        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    // Resolve tools, timeout: per-args override -> lead defaults -> fallback.
+    // (worker_model was resolved above for the budget guard.)
     let worker_tools = args
         .tools
         .clone()
@@ -264,6 +285,8 @@ async fn run_worker(
                 p
             }
             Err(e) => {
+                // Release the spawn-time reservation (SpawnFailed path).
+                release_reservation(&state, &task_id).await;
                 // Record a SpawnFailed TaskRecord and broadcast done.
                 let now = Utc::now();
                 let rec = TaskRecord {
@@ -349,6 +372,9 @@ async fn run_worker(
     // Persist record.
     let _ = state.store.append_record(state.run_id, &rec).await;
 
+    // Release the spawn-time reservation before accumulating actual cost.
+    release_reservation(&state, &task_id).await;
+
     // Accumulate cost into spent_usd.
     if let Some(cost) = pitboss_core::prices::cost_usd(&model, &rec.token_usage) {
         *state.spent_usd.lock().await += cost;
@@ -361,6 +387,22 @@ async fn run_worker(
         .await
         .insert(task_id.clone(), WorkerState::Done(rec));
     let _ = state.done_tx.send(task_id);
+}
+
+/// Remove `task_id`'s spawn-time reservation from `reserved_usd`. Safe to
+/// call even if no reservation was placed (returns 0 from the map). Clamped
+/// at 0.0 to avoid f64 arithmetic drift going negative.
+async fn release_reservation(state: &Arc<DispatchState>, task_id: &str) {
+    let reserved_amount = state
+        .worker_reservations
+        .write()
+        .await
+        .remove(task_id)
+        .unwrap_or(0.0);
+    if reserved_amount > 0.0 {
+        let mut r = state.reserved_usd.lock().await;
+        *r = (*r - reserved_amount).max(0.0);
+    }
 }
 
 fn worker_spawn_args(prompt: &str, model: &str, tools: &[String]) -> Vec<String> {
@@ -380,26 +422,42 @@ fn worker_spawn_args(prompt: &str, model: &str, tools: &[String]) -> Vec<String>
     args
 }
 
-const INITIAL_WORKER_COST_EST: f64 = 0.10;
-
-async fn estimate_new_worker_cost(state: &Arc<DispatchState>) -> f64 {
+async fn estimate_new_worker_cost(state: &Arc<DispatchState>, intended_model: &str) -> f64 {
     use pitboss_core::prices::cost_usd;
     let workers = state.workers.read().await;
+    let models = state.worker_models.read().await;
     let mut costs: Vec<f64> = Vec::new();
-    for w in workers.values() {
+    for (id, w) in workers.iter() {
         if let WorkerState::Done(rec) = w {
-            // Try to price using whatever model the worker used. If model isn't
-            // available at record-level, just sum tokens via a neutral rate.
-            if let Some(c) = cost_usd("claude-haiku-4-5", &rec.token_usage) {
+            // Price using THIS worker's actual model, fall back to intended.
+            let m = models.get(id).map(String::as_str).unwrap_or(intended_model);
+            if let Some(c) = cost_usd(m, &rec.token_usage) {
                 costs.push(c);
             }
         }
     }
     if costs.is_empty() {
-        return INITIAL_WORKER_COST_EST;
+        // Model-specific fallback (Haiku $0.10, Sonnet ~$0.50, Opus ~$2.00).
+        return initial_estimate_for(intended_model);
     }
     costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     costs[costs.len() / 2]
+}
+
+/// Initial per-worker cost estimate before any worker has completed. Used as
+/// the fallback inside `estimate_new_worker_cost` and as a model-aware
+/// replacement for the old `INITIAL_WORKER_COST_EST = 0.10` constant which
+/// undercounted Sonnet (~5x) and Opus (~20x) workers.
+///
+/// Normalizes dated model suffixes (e.g. `claude-haiku-4-5-20251001`) the
+/// same way `pitboss_core::prices::rates_for` does.
+pub(crate) fn initial_estimate_for(model: &str) -> f64 {
+    let base = model.split('-').take(4).collect::<Vec<_>>().join("-");
+    match base.as_str() {
+        "claude-opus-4-7" => 2.00,
+        "claude-sonnet-4-6" => 0.50,
+        _ => 0.10, // haiku or unknown
+    }
 }
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
@@ -600,6 +658,10 @@ mod tests {
     use std::sync::Arc;
 
     async fn test_state() -> Arc<DispatchState> {
+        test_state_with_budget(5.0).await
+    }
+
+    async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
         use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
         use crate::manifest::schema::{Effort, WorktreeCleanup};
         use pitboss_core::process::fake::{FakeScript, FakeSpawner};
@@ -636,7 +698,7 @@ mod tests {
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
-            budget_usd: Some(5.0),
+            budget_usd: Some(budget),
             lead_timeout_secs: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -954,6 +1016,10 @@ mod tests {
     /// (with a result event carrying a known token_usage), so the
     /// backgrounded worker actually transitions through the full spawn path.
     async fn completing_test_state() -> Arc<DispatchState> {
+        completing_test_state_with_budget(None).await
+    }
+
+    async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchState> {
         use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
         use crate::manifest::schema::{Effort, WorktreeCleanup};
         use pitboss_core::process::fake::{FakeScript, FakeSpawner};
@@ -988,7 +1054,7 @@ mod tests {
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
-            budget_usd: None,
+            budget_usd: budget,
             lead_timeout_secs: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -1079,5 +1145,110 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(preview, "analyze bug #42");
+    }
+
+    #[tokio::test]
+    async fn burst_spawn_is_budget_capped_via_reservation() {
+        // Budget = $0.25. With a per-worker haiku estimate of $0.10 (the
+        // fallback for haiku when no workers have completed), only 2 workers
+        // should pass the guard in a burst:
+        //   spawn 1: spent 0 + reserved 0 + est 0.10 = 0.10 ≤ 0.25 → OK, reserved becomes 0.10
+        //   spawn 2: spent 0 + reserved 0.10 + est 0.10 = 0.20 ≤ 0.25 → OK, reserved becomes 0.20
+        //   spawn 3: spent 0 + reserved 0.20 + est 0.10 = 0.30 > 0.25 → REJECT
+        let state = test_state_with_budget(0.25).await;
+        // Lead model defaults to "claude-haiku-4-5" in test_state.
+
+        let args = |prompt: &str| SpawnWorkerArgs {
+            prompt: prompt.into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+
+        let r1 = handle_spawn_worker(&state, args("w1")).await;
+        assert!(r1.is_ok(), "first spawn should pass: {r1:?}");
+
+        let r2 = handle_spawn_worker(&state, args("w2")).await;
+        assert!(r2.is_ok(), "second spawn should pass: {r2:?}");
+
+        let r3 = handle_spawn_worker(&state, args("w3")).await;
+        assert!(r3.is_err(), "third spawn should be rejected by reservation");
+        let msg = r3.unwrap_err().to_string();
+        assert!(
+            msg.contains("budget exceeded"),
+            "expected budget-exceeded message, got: {msg}"
+        );
+
+        // Sanity: the reservation should now reflect the two passing spawns.
+        let reserved_now = *state.reserved_usd.lock().await;
+        assert!(
+            (reserved_now - 0.20).abs() < 1e-9,
+            "expected reserved ≈ 0.20, got {reserved_now}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_released_on_worker_completion() {
+        // Spawn one worker, wait for completion, verify reserved_usd returns to 0.
+        use std::time::Duration;
+
+        let state = completing_test_state_with_budget(Some(1.00)).await;
+
+        // Subscribe to done events BEFORE spawning — the completion path is
+        // fast (FakeScript exits immediately after emitting the result line).
+        let mut rx = state.done_tx.subscribe();
+
+        let spawn = handle_spawn_worker(
+            &state,
+            SpawnWorkerArgs {
+                prompt: "p".into(),
+                directory: None,
+                branch: None,
+                tools: None,
+                timeout_secs: None,
+                model: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Reservation should be > 0 at some point between spawn and completion;
+        // under a very fast FakeSpawner the worker can complete before this
+        // read, so we only assert "reservation was initialized to >0". That's
+        // checked indirectly via the `worker_reservations` map having an entry
+        // (or having had one — it's removed on release).
+        // The primary assertion is post-completion.
+
+        let completed_id = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("broadcast arrives in time")
+            .expect("broadcast channel open");
+        assert_eq!(completed_id, spawn.task_id);
+
+        let reserved_after = *state.reserved_usd.lock().await;
+        assert!(
+            reserved_after.abs() < 1e-9,
+            "reservation should be released after completion, got {reserved_after}"
+        );
+        let reservations = state.worker_reservations.read().await;
+        assert!(
+            !reservations.contains_key(&spawn.task_id),
+            "reservation entry should be removed on completion"
+        );
+    }
+
+    #[test]
+    fn initial_estimate_is_model_aware() {
+        assert!((initial_estimate_for("claude-haiku-4-5") - 0.10).abs() < 1e-9);
+        assert!((initial_estimate_for("claude-sonnet-4-6") - 0.50).abs() < 1e-9);
+        assert!((initial_estimate_for("claude-opus-4-7") - 2.00).abs() < 1e-9);
+        // Unknown model falls back to Haiku's rate.
+        assert!((initial_estimate_for("claude-unknown-x-y") - 0.10).abs() < 1e-9);
+        // Dated suffix is normalized (matches `rates_for` in pitboss-core::prices).
+        assert!((initial_estimate_for("claude-haiku-4-5-20251001") - 0.10).abs() < 1e-9);
+        assert!((initial_estimate_for("claude-sonnet-4-6-20251001") - 0.50).abs() < 1e-9);
+        assert!((initial_estimate_for("claude-opus-4-7-20251001") - 2.00).abs() < 1e-9);
     }
 }

@@ -37,6 +37,12 @@ pub struct DispatchState {
     pub workers: RwLock<HashMap<String, WorkerState>>,
     /// Total USD cost spent so far (updated after each worker completes).
     pub spent_usd: Mutex<f64>,
+    /// USD reserved for in-flight workers at spawn time. Incremented when a
+    /// worker is spawned (with its per-model cost estimate), decremented when
+    /// the worker completes and its actual cost is added to `spent_usd`.
+    /// The budget guard checks `spent + reserved + estimate > budget` so a
+    /// burst of spawns can't all pass before any completion updates state.
+    pub reserved_usd: Mutex<f64>,
     /// Broadcast channel that emits a `task_id` whenever a worker transitions
     /// to `Done`. Subscribed to by `wait_for_worker` handlers.
     pub done_tx: broadcast::Sender<String>,
@@ -46,6 +52,13 @@ pub struct DispatchState {
     /// Per-worker prompt preview (first 80 chars of the worker's prompt).
     /// Populated at spawn time; surfaced by `list_workers` / `worker_status`.
     pub worker_prompts: RwLock<HashMap<String, String>>,
+    /// Per-worker resolved model, keyed by task_id. Populated at spawn time so
+    /// `estimate_new_worker_cost` and cost accumulation know the right rate.
+    pub worker_models: RwLock<HashMap<String, String>>,
+    /// Per-worker reserved cost (USD) at spawn time. On completion, the
+    /// reservation is removed from `reserved_usd` and the worker's *actual*
+    /// cost is added to `spent_usd`.
+    pub worker_reservations: RwLock<HashMap<String, f64>>,
     /// Dependencies needed to actually launch worker subprocesses. These are
     /// threaded from `run_hierarchical` so the MCP tool handlers can call
     /// into the same SessionHandle/WorktreeManager pipeline used by the flat
@@ -81,9 +94,12 @@ impl DispatchState {
             lead_id,
             workers: RwLock::new(HashMap::new()),
             spent_usd: Mutex::new(0.0),
+            reserved_usd: Mutex::new(0.0),
             done_tx,
             worker_cancels: RwLock::new(HashMap::new()),
             worker_prompts: RwLock::new(HashMap::new()),
+            worker_models: RwLock::new(HashMap::new()),
+            worker_reservations: RwLock::new(HashMap::new()),
             spawner,
             claude_binary,
             wt_mgr,
