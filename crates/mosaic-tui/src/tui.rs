@@ -347,13 +347,12 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     let tile_title = format_tile_title(state, tile_idx);
     let is_lead = tile_title.starts_with("[LEAD]");
 
-    let border_style = if focused {
+    // Spec §8: focused and lead tiles both render with a distinct cyan + bold
+    // border. The focused branch stays first for semantic clarity even though
+    // it produces an identical style to the unfocused-lead branch today.
+    let border_style = if focused || is_lead {
         Style::default()
             .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else if is_lead {
-        Style::default()
-            .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)

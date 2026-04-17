@@ -27,10 +27,27 @@ pub struct SpawnWorkerResult {
     pub worktree_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Local JsonSchema mirror for `mosaic_core::parser::TokenUsage`.
+///
+/// `mosaic-core` does not depend on `schemars`, so we can't derive `JsonSchema`
+/// on the upstream type without adding a new dep to a low-level crate. This
+/// struct lives here purely to satisfy the schema derivation for `WorkerStatus`
+/// via `#[schemars(with = "TokenUsageSchema")]` — the actual field is still
+/// `mosaic_core::parser::TokenUsage` at the type level, and `Serialize` /
+/// `Deserialize` are wire-compatible because the field layout matches.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+pub struct TokenUsageSchema {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkerStatus {
     pub state: String,
     pub started_at: Option<String>,
+    #[schemars(with = "TokenUsageSchema")]
     pub partial_usage: mosaic_core::parser::TokenUsage,
     pub last_text_preview: Option<String>,
     #[serde(default)]

@@ -83,7 +83,9 @@ The lead has access to these MCP tools: `shire__spawn_worker`,
 In Mosaic, leads show a `[LEAD]` prefix and worker tiles display `← lead-id`
 so you can see who spawned what. `shire resume <run-id>` works for
 hierarchical runs too — it re-invokes the lead with `--resume` and the session
-picks up where it left off.
+picks up where it left off. Only the lead is resumed; workers are not
+individually resumed — the lead's next decisions determine whether to spawn
+fresh workers.
 
 Full design: [`docs/superpowers/specs/2026-04-17-hierarchical-orchestration-design.md`](docs/superpowers/specs/2026-04-17-hierarchical-orchestration-design.md).
 
