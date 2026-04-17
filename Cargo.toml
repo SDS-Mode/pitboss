@@ -6,6 +6,7 @@ members = [
     "crates/pitboss-tui",
     "tests-support/fake-claude",
     "tests-support/fake-mcp-client",
+    "tests-support/fake-control-client",
 ]
 
 [workspace.package]

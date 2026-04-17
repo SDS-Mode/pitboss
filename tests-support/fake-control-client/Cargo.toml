@@ -1,0 +1,13 @@
+[package]
+name         = "fake-control-client"
+version      = "0.0.0"
+edition      = "2021"
+rust-version = "1.82"
+publish      = false
+
+[dependencies]
+tokio      = { workspace = true, features = ["net","io-util","rt-multi-thread","macros","sync","time"] }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+pitboss-cli = { path = "../../crates/pitboss-cli" }
