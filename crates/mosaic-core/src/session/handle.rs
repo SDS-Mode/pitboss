@@ -18,6 +18,7 @@ pub struct SessionHandle {
     spawner: Arc<dyn ProcessSpawner>,
     cmd: SpawnCmd,
     log_path: Option<PathBuf>,
+    stderr_log_path: Option<PathBuf>,
 }
 
 impl SessionHandle {
@@ -31,6 +32,7 @@ impl SessionHandle {
             spawner,
             cmd,
             log_path: None,
+            stderr_log_path: None,
         }
     }
 
@@ -40,11 +42,18 @@ impl SessionHandle {
         self
     }
 
+    #[must_use]
+    pub fn with_stderr_log_path(mut self, p: PathBuf) -> Self {
+        self.stderr_log_path = Some(p);
+        self
+    }
+
     /// # Panics
     ///
     /// Panics if the spawner does not attach stdout to the child process. This
     /// is a programming error — all `ProcessSpawner` implementations must pipe
     /// stdout.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_to_completion(self, cancel: CancelToken, timeout: Duration) -> SessionOutcome {
         let _ = self.task_id; // kept for future logging
         let started_at = Utc::now();
@@ -86,6 +95,27 @@ impl SessionHandle {
 
         let stream_task = tokio::spawn(stream_loop(reader, log_writer, accum_stream));
 
+        // Drain stderr into a separate log file if requested. Many subprocess errors
+        // (including claude's "--verbose required" rejection) only surface on stderr.
+        let stderr_task = if let Some(stderr) = child.take_stderr() {
+            let stderr_log = if let Some(path) = &self.stderr_log_path {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            Some(tokio::spawn(stderr_drain(
+                BufReader::new(stderr).lines(),
+                stderr_log,
+            )))
+        } else {
+            None
+        };
+
         let terminate_fut = cancel.await_terminate();
         tokio::pin!(terminate_fut);
 
@@ -118,8 +148,11 @@ impl SessionHandle {
             }
         };
 
-        // Let stream_task wrap up briefly (it will see EOF when child's stdout closes).
+        // Let stream_task + stderr_task wrap up briefly (they see EOF when child's pipes close).
         let _ = tokio::time::timeout(Duration::from_secs(1), stream_task).await;
+        if let Some(t) = stderr_task {
+            let _ = tokio::time::timeout(Duration::from_secs(1), t).await;
+        }
 
         let exit_code = exit_status
             .as_ref()
@@ -187,7 +220,18 @@ async fn stream_loop(
                 match parse_line(line.as_bytes()) {
                     Ok(Event::AssistantText { text }) => {
                         let mut a = accum.lock().await;
-                        a.last_text = Some(truncate_preview(&text));
+                        // Prefer the longest nontrivial assistant text as the preview.
+                        // Rationale: claude often appends a short confirmation
+                        // ("Done.", "OK") after the real output; taking the last text
+                        // buries the real content. A length-keyed winner avoids that.
+                        let trimmed_len = text.trim().len();
+                        let current_len = a
+                            .last_text
+                            .as_deref()
+                            .map_or(0, |t| t.trim_end_matches('…').trim().len());
+                        if trimmed_len >= current_len {
+                            a.last_text = Some(truncate_preview(&text));
+                        }
                     }
                     Ok(Event::Result {
                         session_id: sid,
@@ -200,6 +244,23 @@ async fn stream_loop(
                         a.saw_result = true;
                     }
                     Ok(_) | Err(_) => {}
+                }
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+async fn stderr_drain(
+    mut reader: tokio::io::Lines<BufReader<Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>>,
+    mut log: Option<tokio::fs::File>,
+) {
+    loop {
+        match reader.next_line().await {
+            Ok(Some(line)) => {
+                if let Some(w) = log.as_mut() {
+                    let _ = w.write_all(line.as_bytes()).await;
+                    let _ = w.write_all(b"\n").await;
                 }
             }
             Ok(None) | Err(_) => return,

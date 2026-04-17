@@ -144,6 +144,11 @@ pub async fn execute(
             .await;
             let failed = !matches!(record.status, TaskStatus::Success);
             table.lock().await.mark_done(&record);
+            // Incrementally append to summary.jsonl so a mid-run kill still
+            // leaves the completed tasks on disk (spec §5.3 invariant).
+            if let Err(e) = store.append_record(run_id, &record).await {
+                tracing::warn!(task_id = %record.task_id, error = %e, "append_record failed");
+            }
             records.lock().await.push(record);
             if failed && halt_on_failure {
                 cancel.drain();
@@ -209,6 +214,7 @@ async fn execute_task(
         .join(&task.id);
     tokio::fs::create_dir_all(&task_dir).await.ok();
     let log_path = task_dir.join("stdout.log");
+    let stderr_log_path = task_dir.join("stderr.log");
 
     // Worktree preparation (optional).
     let mut worktree_handle = None;
@@ -251,6 +257,7 @@ async fn execute_task(
 
     let outcome = SessionHandle::new(task.id.clone(), spawner, cmd)
         .with_log_path(log_path.clone())
+        .with_stderr_log_path(stderr_log_path.clone())
         .run_to_completion(cancel, Duration::from_secs(task.timeout_secs))
         .await;
 
@@ -305,7 +312,10 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     args
 }
 
-#[cfg(all(test, feature = "test-support"))]
+// Note: these tests use mosaic-core's FakeSpawner, which is gated by
+// mosaic-core's "test-support" feature. That feature is always enabled in
+// shire-cli's dev-dependencies, so the tests always compile in `cargo test`.
+#[cfg(test)]
 mod tests {
     use super::*;
     use mosaic_core::process::fake::{FakeScript, FakeSpawner};
@@ -504,5 +514,88 @@ mod tests {
             }
         }
         panic!("no run dir")
+    }
+
+    /// Regression: the dispatch runner must call `store.append_record` after
+    /// each task completes so `summary.jsonl` reflects completed tasks on disk
+    /// incrementally. A prior bug left the file empty until finalize_run.
+    #[tokio::test]
+    async fn summary_jsonl_populated_incrementally() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        let run_dir = TempDir::new().unwrap();
+
+        let resolved = crate::manifest::resolve::ResolvedManifest {
+            max_parallel: 1,
+            halt_on_failure: false,
+            run_dir: run_dir.path().to_path_buf(),
+            worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
+            emit_event_stream: false,
+            tasks: vec![
+                ResolvedTask {
+                    id: "one".into(),
+                    directory: dir.path().to_path_buf(),
+                    prompt: "p".into(),
+                    branch: None,
+                    model: "m".into(),
+                    effort: crate::manifest::schema::Effort::High,
+                    tools: vec![],
+                    timeout_secs: 30,
+                    use_worktree: false,
+                    env: Default::default(),
+                },
+                ResolvedTask {
+                    id: "two".into(),
+                    directory: dir.path().to_path_buf(),
+                    prompt: "p".into(),
+                    branch: None,
+                    model: "m".into(),
+                    effort: crate::manifest::schema::Effort::High,
+                    tools: vec![],
+                    timeout_secs: 30,
+                    use_worktree: false,
+                    env: Default::default(),
+                },
+            ],
+        };
+
+        let spawner = Arc::new(CyclingFake(
+            vec![FakeScript::new()
+                .stdout_line(r#"{"type":"result","session_id":"s","usage":{"input_tokens":1,"output_tokens":2}}"#)
+                .exit_code(0)],
+            std::sync::Mutex::new(0),
+        ));
+        let store = Arc::new(JsonFileStore::new(run_dir.path().to_path_buf()));
+        let rc = execute(
+            resolved,
+            String::new(),
+            PathBuf::new(),
+            PathBuf::from("claude"),
+            None,
+            spawner,
+            store.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rc, 0);
+
+        let jsonl_path = run_dir
+            .path()
+            .join(store_run_id_dir(run_dir.path()))
+            .join("summary.jsonl");
+        let contents =
+            std::fs::read_to_string(&jsonl_path).expect("summary.jsonl must exist and be readable");
+        let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "both tasks should have records appended to summary.jsonl, got: {contents}"
+        );
+        // Each line must parse as a TaskRecord.
+        for l in &lines {
+            let _: mosaic_core::store::TaskRecord =
+                serde_json::from_str(l).unwrap_or_else(|e| panic!("line does not parse: {e}: {l}"));
+        }
     }
 }

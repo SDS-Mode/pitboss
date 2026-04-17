@@ -33,6 +33,7 @@ pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
         Some("assistant") => parse_assistant(&value, raw),
         Some("user") => parse_user(&value, raw),
         Some("result") => parse_result(&value, raw),
+        Some("rate_limit_event") => Ok(parse_rate_limit(&value)),
         _ => Ok(Event::Unknown {
             raw: raw.to_string(),
         }),
@@ -141,6 +142,27 @@ fn parse_result(value: &serde_json::Value, raw: &str) -> Result<Event, ParseErro
         text,
         usage,
     })
+}
+
+fn parse_rate_limit(value: &serde_json::Value) -> Event {
+    let info = value.get("rate_limit_info");
+    let status = info
+        .and_then(|i| i.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let rate_limit_type = info
+        .and_then(|i| i.get("rateLimitType"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let resets_at = info
+        .and_then(|i| i.get("resetsAt"))
+        .and_then(serde_json::Value::as_u64);
+    Event::RateLimit {
+        status,
+        rate_limit_type,
+        resets_at,
+    }
 }
 
 fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
@@ -303,6 +325,42 @@ mod tests {
                 assert_eq!(usage.cache_creation, 0);
             }
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rate_limit_event() {
+        let line = br#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1776402000,"rateLimitType":"five_hour","overageStatus":"rejected"}}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::RateLimit {
+                status,
+                rate_limit_type,
+                resets_at,
+            } => {
+                assert_eq!(status, "allowed");
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert_eq!(resets_at, Some(1_776_402_000));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_event_with_minimal_fields() {
+        let line = br#"{"type":"rate_limit_event","rate_limit_info":{"status":"throttled"}}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::RateLimit {
+                status,
+                rate_limit_type,
+                resets_at,
+            } => {
+                assert_eq!(status, "throttled");
+                assert!(rate_limit_type.is_none());
+                assert!(resets_at.is_none());
+            }
+            other => panic!("unexpected: {other:?}"),
         }
     }
 

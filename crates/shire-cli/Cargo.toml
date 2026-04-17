@@ -10,6 +10,12 @@ name = "shire"
 path = "src/main.rs"
 
 [features]
+# test-support was introduced alongside a self-dependency trick to enable
+# mosaic-core's test-support feature in shire-cli's own unit tests. Since
+# shire-cli now pulls mosaic-core's test-support directly via dev-dependencies,
+# this feature is no longer load-bearing. Kept as an empty opt-in so external
+# consumers that previously passed `--features shire-cli/test-support` don't
+# break.
 test-support = ["mosaic-core/test-support"]
 
 [dependencies]
@@ -30,7 +36,10 @@ chrono             = { workspace = true }
 async-trait        = { workspace = true }
 
 [dev-dependencies]
-shire-cli   = { path = ".", features = ["test-support"] }
+# Note: mosaic-core's test-support feature is pulled in directly here so
+# shire-cli's own tests can use FakeSpawner without requiring the caller to
+# pass --features. shire-cli itself has no library target, so we don't use
+# a self-dependency to enable its own test-support feature.
 tempfile    = { workspace = true }
 serde_json  = { workspace = true }
 libc        = { workspace = true }

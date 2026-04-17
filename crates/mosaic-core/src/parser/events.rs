@@ -26,6 +26,13 @@ pub enum Event {
         text: Option<String>,
         usage: TokenUsage,
     },
+    /// Rate-limit notice emitted by Claude Code. Surfaced as a first-class event
+    /// so operators can see throttling without parsing Unknown payloads.
+    RateLimit {
+        status: String,
+        rate_limit_type: Option<String>,
+        resets_at: Option<u64>,
+    },
     Unknown {
         raw: String,
     },

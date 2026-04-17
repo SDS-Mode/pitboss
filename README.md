@@ -1,14 +1,22 @@
 # Agent Shire
 
-Headless Rust dispatcher for parallel Claude Code agent sessions.
+Rust toolkit for running and observing parallel Claude Code agent sessions.
+Ships two binaries:
+
+- **`shire`** — headless dispatcher. Reads a `shire.toml` manifest, fans out N
+  `claude` subprocesses under a concurrency cap, writes structured per-run
+  artifacts. [See `crates/shire-cli/`.](crates/shire-cli/)
+- **`mosaic`** — terminal observer for in-progress or completed runs (v0.2-alpha).
+  Tile grid of task state, live log tailing, read-only. [See `crates/mosaic-tui/`.](crates/mosaic-tui/)
 
 ## Install
 
 ```
 cargo install --path crates/shire-cli
+cargo install --path crates/mosaic-tui
 ```
 
-## Quick start
+## Quick start — dispatch
 
 Create `shire.toml` in a directory that is inside a git repo:
 
@@ -31,6 +39,16 @@ shire dispatch shire.toml
 ```
 
 Artifacts land in `~/.local/share/shire/runs/<run-id>/`.
+
+## Quick start — observe
+
+```
+mosaic         # opens the most recent run
+mosaic list    # table of runs to stdout
+mosaic 019d99  # opens a run by UUID prefix
+```
+
+See [`crates/mosaic-tui/README.md`](crates/mosaic-tui/README.md) for keybindings.
 
 ## Concurrency
 

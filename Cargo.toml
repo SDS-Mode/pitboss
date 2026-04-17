@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/mosaic-core",
     "crates/shire-cli",
+    "crates/mosaic-tui",
     "tests-support/fake-claude",
 ]
 
@@ -31,3 +32,5 @@ shellexpand        = "3"
 atty               = "0.2"
 tempfile           = "3"
 libc               = "0.2"
+ratatui            = "0.29"
+crossterm          = "0.28"
