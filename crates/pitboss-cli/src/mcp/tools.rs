@@ -445,6 +445,120 @@ fn worker_spawn_args(prompt: &str, model: &str, tools: &[String]) -> Vec<String>
     args
 }
 
+/// Spawn a resume-subprocess for `task_id`, replacing the worker's current
+/// SessionHandle. Used by `pause_worker` → `continue_worker` and by
+/// `reprompt_worker`. Returns immediately after setting state to Running; the
+/// background task drives `run_to_completion` and the terminal TaskRecord.
+pub async fn spawn_resume_worker(
+    state: &Arc<DispatchState>,
+    task_id: String,
+    prompt: String,
+    session_id: String,
+) -> anyhow::Result<()> {
+    use chrono::Utc;
+    let model = state
+        .worker_models
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    let tools: Vec<String> = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.tools.clone())
+        .unwrap_or_default();
+    let timeout_secs = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.timeout_secs)
+        .unwrap_or(3600);
+    let cwd = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.directory.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let worker_cancel = pitboss_core::session::CancelToken::new();
+    state
+        .worker_cancels
+        .write()
+        .await
+        .insert(task_id.clone(), worker_cancel.clone());
+    state.workers.write().await.insert(
+        task_id.clone(),
+        WorkerState::Running {
+            started_at: Utc::now(),
+            session_id: Some(session_id.clone()),
+        },
+    );
+    let state_bg = Arc::clone(state);
+    let task_id_bg = task_id.clone();
+    let lead_id_bg = state.lead_id.clone();
+
+    // Build spawn args with --resume.
+    let mut spawn_args_v = worker_spawn_args(&prompt, &model, &tools);
+    spawn_args_v.insert(0, "--resume".into());
+    spawn_args_v.insert(1, session_id);
+
+    let cmd = pitboss_core::process::SpawnCmd {
+        program: state.claude_binary.clone(),
+        args: spawn_args_v,
+        cwd,
+        env: Default::default(),
+    };
+    let task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let _ = tokio::fs::create_dir_all(&task_dir).await;
+    let log_path = task_dir.join("stdout.log");
+    let stderr_path = task_dir.join("stderr.log");
+
+    tokio::spawn(async move {
+        use pitboss_core::store::{TaskRecord, TaskStatus};
+        let outcome = pitboss_core::session::SessionHandle::new(
+            task_id_bg.clone(),
+            Arc::clone(&state_bg.spawner),
+            cmd,
+        )
+        .with_log_path(log_path.clone())
+        .with_stderr_log_path(stderr_path)
+        .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
+        .await;
+        let status = match outcome.final_state {
+            pitboss_core::session::SessionState::Completed => TaskStatus::Success,
+            pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
+            pitboss_core::session::SessionState::TimedOut => TaskStatus::TimedOut,
+            pitboss_core::session::SessionState::Cancelled => TaskStatus::Cancelled,
+            pitboss_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
+            _ => TaskStatus::Failed,
+        };
+        let rec = TaskRecord {
+            task_id: task_id_bg.clone(),
+            status,
+            exit_code: outcome.exit_code,
+            started_at: outcome.started_at,
+            ended_at: outcome.ended_at,
+            duration_ms: outcome.duration_ms(),
+            worktree_path: None,
+            log_path,
+            token_usage: outcome.token_usage,
+            claude_session_id: outcome.claude_session_id,
+            final_message_preview: outcome.final_message_preview,
+            parent_task_id: Some(lead_id_bg),
+        };
+        let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
+        state_bg
+            .workers
+            .write()
+            .await
+            .insert(task_id_bg.clone(), WorkerState::Done(rec));
+        let _ = state_bg.done_tx.send(task_id_bg);
+    });
+
+    Ok(())
+}
+
 async fn estimate_new_worker_cost(state: &Arc<DispatchState>, intended_model: &str) -> f64 {
     use pitboss_core::prices::cost_usd;
     let workers = state.workers.read().await;

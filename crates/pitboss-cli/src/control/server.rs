@@ -315,6 +315,42 @@ async fn dispatch_op(
                 },
             }
         }
+        ControlOp::ContinueWorker { task_id, prompt } => {
+            let current = state.workers.read().await.get(&task_id).cloned();
+            match current {
+                Some(crate::dispatch::state::WorkerState::Paused { session_id, .. }) => {
+                    let prompt_text = prompt.unwrap_or_else(|| "continue".into());
+                    match crate::mcp::tools::spawn_resume_worker(
+                        state,
+                        task_id.clone(),
+                        prompt_text,
+                        session_id,
+                    )
+                    .await
+                    {
+                        Ok(()) => ControlEvent::OpAcked {
+                            op: "continue_worker".into(),
+                            task_id: Some(task_id),
+                        },
+                        Err(e) => ControlEvent::OpFailed {
+                            op: "continue_worker".into(),
+                            task_id: Some(task_id),
+                            error: e.to_string(),
+                        },
+                    }
+                }
+                Some(_) => ControlEvent::OpUnknownState {
+                    op: "continue_worker".into(),
+                    task_id,
+                    current_state: "not_paused".into(),
+                },
+                None => ControlEvent::OpFailed {
+                    op: "continue_worker".into(),
+                    task_id: Some(task_id),
+                    error: "unknown task_id".into(),
+                },
+            }
+        }
         other => ControlEvent::OpUnknown {
             op: op_tag(&other).into(),
         },
@@ -599,6 +635,68 @@ mod tests {
             }
             other => panic!("expected Paused, got {other:?}"),
         }
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn continue_worker_from_paused_transitions_running() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        state.workers.write().await.insert(
+            "w-1".into(),
+            crate::dispatch::state::WorkerState::Paused {
+                session_id: "sess-xyz".into(),
+                paused_at: chrono::Utc::now(),
+                prior_token_usage: Default::default(),
+            },
+        );
+        state
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-1".into(), "hi".into());
+        state
+            .worker_models
+            .write()
+            .await
+            .insert("w-1".into(), "claude-haiku-4-5".into());
+
+        let sock = dir.path().join("continue.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"continue_worker\",\"task_id\":\"w-1\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "continue_worker"
+        ));
+        let workers = state.workers.read().await;
+        assert!(matches!(
+            workers.get("w-1").unwrap(),
+            crate::dispatch::state::WorkerState::Running { .. }
+        ));
         drop(handle);
     }
 }
