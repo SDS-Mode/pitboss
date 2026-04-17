@@ -230,6 +230,7 @@ async fn dispatch_op(
     state: &Arc<crate::dispatch::state::DispatchState>,
     op: ControlOp,
 ) -> ControlEvent {
+    #[allow(unreachable_patterns)]
     match op {
         ControlOp::Hello { .. } => ControlEvent::OpAcked {
             op: "hello".into(),
@@ -448,6 +449,31 @@ async fn dispatch_op(
                 .collect();
             ControlEvent::WorkersSnapshot { workers: entries }
         }
+        ControlOp::Approve {
+            request_id,
+            approved,
+            comment,
+            edited_summary,
+        } => {
+            let tx = state.approval_bridge.lock().await.remove(&request_id);
+            if let Some(tx) = tx {
+                let _ = tx.send(crate::dispatch::state::ApprovalResponse {
+                    approved,
+                    comment,
+                    edited_summary,
+                });
+                ControlEvent::OpAcked {
+                    op: "approve".into(),
+                    task_id: None,
+                }
+            } else {
+                ControlEvent::OpFailed {
+                    op: "approve".into(),
+                    task_id: None,
+                    error: format!("unknown request_id: {request_id}"),
+                }
+            }
+        }
         other => ControlEvent::OpUnknown {
             op: op_tag(&other).into(),
         },
@@ -545,17 +571,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_op_returns_op_unknown() {
+    async fn unknown_op_returns_parse_error() {
         let dir = TempDir::new().unwrap();
         let run_id = Uuid::now_v7();
         let state = mk_state(dir.path(), run_id);
-        let sock = dir.path().join("control.sock");
+        let sock = dir.path().join("unknown.sock");
         let handle = start_control_server(
             sock.clone(),
             "0.4.0".into(),
             run_id.to_string(),
             "flat".into(),
             state,
+        )
+        .await
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream.write_all(b"{\"op\":\"wibble\"}\n").await.unwrap();
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpFailed { op, .. } if op.is_empty()
+        ));
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn approve_op_completes_pending_request() {
+        use crate::mcp::approval::ApprovalBridge;
+        use std::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        // Pre-seed the bridge map with a request_id + oneshot sender.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .approval_bridge
+            .lock()
+            .await
+            .insert("req-1".into(), tx);
+
+        let sock = dir.path().join("approve.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
         )
         .await
         .unwrap();
@@ -566,7 +637,9 @@ mod tests {
             .await
             .unwrap();
         stream
-            .write_all(b"{\"op\":\"approve\",\"request_id\":\"r\",\"approved\":true}\n")
+            .write_all(
+                b"{\"op\":\"approve\",\"request_id\":\"req-1\",\"approved\":true,\"edited_summary\":\"go\"}\n",
+            )
             .await
             .unwrap();
 
@@ -577,8 +650,18 @@ mod tests {
         let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
         assert!(matches!(
             reply,
-            ControlEvent::OpUnknown { op } if op == "approve"
+            ControlEvent::OpAcked { ref op, .. } if op == "approve"
         ));
+
+        let resp = tokio::time::timeout(Duration::from_millis(500), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(resp.approved);
+        assert_eq!(resp.edited_summary.as_deref(), Some("go"));
+
+        // Silence unused warnings on ApprovalBridge import.
+        let _ = ApprovalBridge::new(state);
         drop(handle);
     }
 
