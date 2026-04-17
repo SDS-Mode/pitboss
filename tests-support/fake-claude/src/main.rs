@@ -4,14 +4,24 @@
 //!   {"stdout": "..."} — writes line to stdout
 //!   {"stderr": "..."} — writes line to stderr
 //!   {"sleep_ms": N}   — sleeps for N milliseconds
+//!   {"tool_use": {"name": "...", "input": {...}}}
+//!       — emits a stream-json assistant tool_use event on stdout
 //!
 //! After the script, exits with MOSAIC_FAKE_EXIT_CODE (default 0).
 //! If MOSAIC_FAKE_HOLD=1, blocks indefinitely after the script (for Ctrl-C tests).
 //! Special-cases --version to print "fake-claude 0.0.0".
 
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
+
+/// Monotonic counter used to generate unique tool_use ids within a process.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn random_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -62,6 +72,23 @@ fn main() {
                 err.flush().unwrap();
             } else if let Some(ms) = action.get("sleep_ms").and_then(|v| v.as_u64()) {
                 thread::sleep(Duration::from_millis(ms));
+            } else if let Some(tu) = action.get("tool_use") {
+                // Emit a stream-json tool_use event wrapper, mirroring how real
+                // claude emits `{"type":"assistant","message":{"content":[...]}}`.
+                let wrapper = serde_json::json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [{
+                            "type": "tool_use",
+                            "id": format!("call-{}", random_id()),
+                            "name": tu.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                            "input": tu.get("input").cloned().unwrap_or(serde_json::Value::Null),
+                        }]
+                    }
+                });
+                let mut out = stdout.lock();
+                writeln!(out, "{}", serde_json::to_string(&wrapper).unwrap()).unwrap();
+                out.flush().unwrap();
             } else {
                 eprintln!("fake-claude: unknown action at line {line_no}: {line}");
             }

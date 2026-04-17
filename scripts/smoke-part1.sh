@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/smoke-part1.sh
-#   SHIRE=/path/to/shire scripts/smoke-part1.sh
+#   PITBOSS=/path/to/pitboss scripts/smoke-part1.sh
 #
 # No API calls; exercises CLI plumbing, manifest validation, exit codes,
 # and concurrency precedence. Finishes in ~5 seconds on a warm build.
@@ -12,16 +12,16 @@
 
 set -u  # deliberately not -e: we want to run all tests even if some fail
 
-SHIRE="${SHIRE:-shire}"
-if ! command -v "$SHIRE" >/dev/null 2>&1 && [ ! -x "$SHIRE" ]; then
-    echo "ERROR: shire binary not found (tried: $SHIRE)" >&2
+PITBOSS="${PITBOSS:-pitboss}"
+if ! command -v "$PITBOSS" >/dev/null 2>&1 && [ ! -x "$PITBOSS" ]; then
+    echo "ERROR: pitboss binary not found (tried: $PITBOSS)" >&2
     echo "Build and try again:" >&2
-    echo "  cargo build --release -p shire-cli" >&2
+    echo "  cargo build --release -p pitboss-cli" >&2
     echo "  export PATH=\"\$(pwd)/target/release:\$PATH\"" >&2
     exit 2
 fi
 
-SCRATCH="$(mktemp -d -t shire-smoke-XXXXXX)"
+SCRATCH="$(mktemp -d -t pitboss-smoke-XXXXXX)"
 REPO="$SCRATCH/repo-a"
 NOT_GIT="$SCRATCH/not-git"
 
@@ -86,15 +86,15 @@ expect_contains() {
 }
 
 # --------------------------------------------------------------------
-echo "=== Agent Shire v0.1 — Part 1 offline tests ==="
-echo "binary:  $("$SHIRE" version 2>/dev/null || echo '?')"
+echo "=== Pitboss v0.1 — Part 1 offline tests ==="
+echo "binary:  $("$PITBOSS" version 2>/dev/null || echo '?')"
 echo "scratch: $SCRATCH"
 echo
 
 # --------------------------------------------------------------------
 # 1.1 Version
-OUT=$("$SHIRE" version 2>&1); CODE=$?
-if [ "$CODE" = "0" ] && [ "$OUT" = "shire 0.1.0" ]; then
+OUT=$("$PITBOSS" version 2>&1); CODE=$?
+if [ "$CODE" = "0" ] && [ "$OUT" = "pitboss 0.1.0" ]; then
     say PASS "1.1 version"
     record "1.1 version" PASS ""
 else
@@ -104,9 +104,9 @@ fi
 
 # --------------------------------------------------------------------
 # 1.2 Help
-"$SHIRE" --help >/dev/null 2>&1; A=$?
-"$SHIRE" dispatch --help >/dev/null 2>&1; B=$?
-"$SHIRE" validate --help >/dev/null 2>&1; C=$?
+"$PITBOSS" --help >/dev/null 2>&1; A=$?
+"$PITBOSS" dispatch --help >/dev/null 2>&1; B=$?
+"$PITBOSS" validate --help >/dev/null 2>&1; C=$?
 if [ "$A" = "0" ] && [ "$B" = "0" ] && [ "$C" = "0" ]; then
     say PASS "1.2 help"
     record "1.2 help" PASS ""
@@ -123,7 +123,7 @@ id = "smoke"
 directory = "$REPO"
 prompt = "hello"
 EOF
-OUT=$("$SHIRE" validate "$SCRATCH/happy.toml" 2>&1); CODE=$?
+OUT=$("$PITBOSS" validate "$SCRATCH/happy.toml" 2>&1); CODE=$?
 if [ "$CODE" = "0" ] && echo "$OUT" | grep -q "OK"; then
     say PASS "1.3 validate happy"
     record "1.3 validate happy" PASS ""
@@ -141,7 +141,7 @@ id = "x"
 directory = "$REPO"
 prompt = "p"
 EOF
-"$SHIRE" dispatch "$SCRATCH/bad-key.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch "$SCRATCH/bad-key.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.4 validate unknown field" "must reject at parse"
 
 # --------------------------------------------------------------------
@@ -152,7 +152,7 @@ id = "x"
 directory = "/absolutely/does/not/exist"
 prompt = "p"
 EOF
-"$SHIRE" dispatch "$SCRATCH/bad-dir.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch "$SCRATCH/bad-dir.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.5 missing directory"
 
 # --------------------------------------------------------------------
@@ -163,7 +163,7 @@ id = "x"
 directory = "$NOT_GIT"
 prompt = "p"
 EOF
-"$SHIRE" dispatch "$SCRATCH/bad-nongit.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch "$SCRATCH/bad-nongit.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.6 non-git dir"
 
 # --------------------------------------------------------------------
@@ -179,12 +179,12 @@ id = "same"
 directory = "$REPO"
 prompt = "b"
 EOF
-"$SHIRE" dispatch "$SCRATCH/bad-dups.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch "$SCRATCH/bad-dups.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.7 duplicate task ids"
 
 # --------------------------------------------------------------------
 # 1.8 Dry-run
-OUT=$("$SHIRE" dispatch --dry-run "$SCRATCH/happy.toml" 2>&1); CODE=$?
+OUT=$("$PITBOSS" dispatch --dry-run "$SCRATCH/happy.toml" 2>&1); CODE=$?
 if [ "$CODE" = "0" ] && echo "$OUT" | grep -q "DRY-RUN"; then
     say PASS "1.8 dry-run"
     record "1.8 dry-run" PASS ""
@@ -195,7 +195,7 @@ fi
 
 # --------------------------------------------------------------------
 # 1.9 Missing claude binary — probe should fail with exit 2
-SHIRE_CLAUDE_BINARY=/nope/claude "$SHIRE" dispatch "$SCRATCH/happy.toml" >/dev/null 2>&1; CODE=$?
+PITBOSS_CLAUDE_BINARY=/nope/claude "$PITBOSS" dispatch "$SCRATCH/happy.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.9 missing claude binary"
 
 # --------------------------------------------------------------------
@@ -207,8 +207,8 @@ id = "a"
 directory = "$REPO"
 prompt = "p"
 EOF
-DEFAULT_OUT=$("$SHIRE" validate "$SCRATCH/conc-default.toml" 2>&1)
-ENV_OUT=$(ANTHROPIC_MAX_CONCURRENT=7 "$SHIRE" validate "$SCRATCH/conc-default.toml" 2>&1)
+DEFAULT_OUT=$("$PITBOSS" validate "$SCRATCH/conc-default.toml" 2>&1)
+ENV_OUT=$(ANTHROPIC_MAX_CONCURRENT=7 "$PITBOSS" validate "$SCRATCH/conc-default.toml" 2>&1)
 
 cat > "$SCRATCH/conc-manifest.toml" <<EOF
 [run]
@@ -218,7 +218,7 @@ id = "a"
 directory = "$REPO"
 prompt = "p"
 EOF
-MANI_OUT=$(ANTHROPIC_MAX_CONCURRENT=7 "$SHIRE" validate "$SCRATCH/conc-manifest.toml" 2>&1)
+MANI_OUT=$(ANTHROPIC_MAX_CONCURRENT=7 "$PITBOSS" validate "$SCRATCH/conc-manifest.toml" 2>&1)
 
 DEFAULT_N=$(echo "$DEFAULT_OUT" | grep -oE 'max_parallel=[0-9]+' | head -1 | cut -d= -f2)
 ENV_N=$(    echo "$ENV_OUT"     | grep -oE 'max_parallel=[0-9]+' | head -1 | cut -d= -f2)

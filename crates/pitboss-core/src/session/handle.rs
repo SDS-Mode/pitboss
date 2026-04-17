@@ -1,0 +1,322 @@
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::Utc;
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
+
+use crate::parser::{parse_line, Event, TokenUsage};
+use crate::process::{ProcessSpawner, SpawnCmd};
+
+use super::{CancelToken, SessionOutcome, SessionState};
+
+pub struct SessionHandle {
+    task_id: String,
+    spawner: Arc<dyn ProcessSpawner>,
+    cmd: SpawnCmd,
+    log_path: Option<PathBuf>,
+    stderr_log_path: Option<PathBuf>,
+}
+
+impl SessionHandle {
+    pub fn new(
+        task_id: impl Into<String>,
+        spawner: Arc<dyn ProcessSpawner>,
+        cmd: SpawnCmd,
+    ) -> Self {
+        Self {
+            task_id: task_id.into(),
+            spawner,
+            cmd,
+            log_path: None,
+            stderr_log_path: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_log_path(mut self, p: PathBuf) -> Self {
+        self.log_path = Some(p);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stderr_log_path(mut self, p: PathBuf) -> Self {
+        self.stderr_log_path = Some(p);
+        self
+    }
+
+    /// # Panics
+    ///
+    /// Panics if the spawner does not attach stdout to the child process. This
+    /// is a programming error — all `ProcessSpawner` implementations must pipe
+    /// stdout.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_to_completion(self, cancel: CancelToken, timeout: Duration) -> SessionOutcome {
+        let _ = self.task_id; // kept for future logging
+        let started_at = Utc::now();
+
+        let mut child = match self.spawner.spawn(self.cmd.clone()).await {
+            Ok(c) => c,
+            Err(e) => {
+                return SessionOutcome {
+                    final_state: SessionState::SpawnFailed {
+                        message: e.to_string(),
+                    },
+                    exit_code: None,
+                    token_usage: TokenUsage::default(),
+                    claude_session_id: None,
+                    final_message_preview: None,
+                    started_at,
+                    ended_at: Utc::now(),
+                };
+            }
+        };
+
+        let stdout = child.take_stdout().expect("stdout piped");
+        let reader = BufReader::new(stdout).lines();
+
+        let log_writer = if let Some(path) = &self.log_path {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        // Shared accumulator — stream_loop writes, we read post-session.
+        let accum = Arc::new(Mutex::new(StreamAccum::default()));
+        let accum_stream = accum.clone();
+
+        let stream_task = tokio::spawn(stream_loop(reader, log_writer, accum_stream));
+
+        // Drain stderr into a separate log file if requested. Many subprocess errors
+        // (including claude's "--verbose required" rejection) only surface on stderr.
+        let stderr_task = if let Some(stderr) = child.take_stderr() {
+            let stderr_log = if let Some(path) = &self.stderr_log_path {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            Some(tokio::spawn(stderr_drain(
+                BufReader::new(stderr).lines(),
+                stderr_log,
+            )))
+        } else {
+            None
+        };
+
+        let terminate_fut = cancel.await_terminate();
+        tokio::pin!(terminate_fut);
+
+        // Primary race: child exit, terminate signal, or overall timeout.
+        let end_reason = tokio::select! {
+            biased;
+            () = &mut terminate_fut => EndReason::Terminated,
+            () = tokio::time::sleep(timeout) => EndReason::TimedOut,
+            status = child.wait() => EndReason::Exited(status.ok()),
+        };
+
+        // If we need to stop the child, send SIGTERM and wait up to TERMINATE_GRACE.
+        // After grace, send SIGKILL. This wait also serves as the SIGTERM → exit window.
+        let exit_status = match end_reason {
+            EndReason::Exited(s) => s,
+            EndReason::Terminated | EndReason::TimedOut => {
+                let _ = child.terminate();
+                match tokio::time::timeout(super::TERMINATE_GRACE, child.wait()).await {
+                    Ok(Ok(s)) => Some(s),
+                    Ok(Err(_)) => None,
+                    Err(_) => {
+                        // Grace expired — force kill.
+                        let _ = child.kill();
+                        tokio::time::timeout(Duration::from_secs(1), child.wait())
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                    }
+                }
+            }
+        };
+
+        // Let stream_task + stderr_task wrap up briefly (they see EOF when child's pipes close).
+        let _ = tokio::time::timeout(Duration::from_secs(1), stream_task).await;
+        if let Some(t) = stderr_task {
+            let _ = tokio::time::timeout(Duration::from_secs(1), t).await;
+        }
+
+        let exit_code = exit_status
+            .as_ref()
+            .and_then(std::process::ExitStatus::code);
+        let ended_at = Utc::now();
+
+        let accum = accum.lock().await;
+        let saw_result = accum.saw_result;
+
+        let final_state = match &end_reason {
+            EndReason::TimedOut => SessionState::TimedOut,
+            EndReason::Terminated => SessionState::Cancelled,
+            EndReason::Exited(_) => match exit_code {
+                Some(0) if saw_result => SessionState::Completed,
+                Some(c) if c != 0 => SessionState::Failed {
+                    message: format!("exit code {c}"),
+                },
+                Some(_) => SessionState::Failed {
+                    message: "no result event".into(),
+                },
+                None => SessionState::Failed {
+                    message: "child did not exit cleanly".into(),
+                },
+            },
+        };
+
+        SessionOutcome {
+            final_state,
+            exit_code,
+            token_usage: accum.usage,
+            claude_session_id: accum.session_id.clone(),
+            final_message_preview: accum.last_text.clone(),
+            started_at,
+            ended_at,
+        }
+    }
+}
+
+enum EndReason {
+    Terminated,
+    TimedOut,
+    Exited(Option<std::process::ExitStatus>),
+}
+
+#[derive(Default)]
+struct StreamAccum {
+    usage: TokenUsage,
+    session_id: Option<String>,
+    last_text: Option<String>,
+    saw_result: bool,
+}
+
+async fn stream_loop(
+    mut reader: tokio::io::Lines<BufReader<Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>>,
+    mut log: Option<tokio::fs::File>,
+    accum: Arc<Mutex<StreamAccum>>,
+) {
+    loop {
+        match reader.next_line().await {
+            Ok(Some(line)) => {
+                if let Some(w) = log.as_mut() {
+                    let _ = w.write_all(line.as_bytes()).await;
+                    let _ = w.write_all(b"\n").await;
+                }
+                match parse_line(line.as_bytes()) {
+                    Ok(Event::AssistantText { text }) => {
+                        let mut a = accum.lock().await;
+                        // Prefer the longest nontrivial assistant text as the preview.
+                        // Rationale: claude often appends a short confirmation
+                        // ("Done.", "OK") after the real output; taking the last text
+                        // buries the real content. A length-keyed winner avoids that.
+                        let trimmed_len = text.trim().len();
+                        let current_len = a
+                            .last_text
+                            .as_deref()
+                            .map_or(0, |t| t.trim_end_matches('…').trim().len());
+                        if trimmed_len >= current_len {
+                            a.last_text = Some(truncate_preview(&text));
+                        }
+                    }
+                    Ok(Event::Result {
+                        session_id: sid,
+                        usage: u,
+                        ..
+                    }) => {
+                        let mut a = accum.lock().await;
+                        a.session_id = Some(sid);
+                        a.usage.add(&u);
+                        a.saw_result = true;
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+async fn stderr_drain(
+    mut reader: tokio::io::Lines<BufReader<Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>>,
+    mut log: Option<tokio::fs::File>,
+) {
+    loop {
+        match reader.next_line().await {
+            Ok(Some(line)) => {
+                if let Some(w) = log.as_mut() {
+                    let _ = w.write_all(line.as_bytes()).await;
+                    let _ = w.write_all(b"\n").await;
+                }
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+fn truncate_preview(s: &str) -> String {
+    // Truncate by character (not byte) to avoid panicking on multi-byte
+    // boundaries — claude's output routinely contains emoji.
+    const MAX_CHARS: usize = 200;
+    let mut chars = s.chars();
+    let prefix: String = (&mut chars).take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        let mut out = prefix;
+        out.push('…');
+        out
+    } else {
+        prefix
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::truncate_preview;
+
+    #[test]
+    fn short_ascii_passes_through() {
+        assert_eq!(truncate_preview("hello"), "hello");
+    }
+
+    #[test]
+    fn long_ascii_truncates_with_ellipsis() {
+        let s = "a".repeat(250);
+        let out = truncate_preview(&s);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 201); // 200 chars + ellipsis
+    }
+
+    #[test]
+    fn emoji_at_boundary_does_not_panic() {
+        // 198 chars of 'a', then 4 emoji (each 4 bytes), then more content —
+        // byte index 200 lands in the middle of an emoji. Old impl panicked.
+        let mut s = "a".repeat(198);
+        s.push_str("🦀🦀🦀🦀 tail");
+        let out = truncate_preview(&s);
+        assert!(out.ends_with('…'));
+        // First 200 chars, then ellipsis.
+        assert_eq!(out.chars().count(), 201);
+    }
+
+    #[test]
+    fn exactly_max_chars_no_ellipsis() {
+        let s = "🦀".repeat(200);
+        let out = truncate_preview(&s);
+        assert!(!out.ends_with('…'));
+        assert_eq!(out.chars().count(), 200);
+    }
+}
