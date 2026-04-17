@@ -126,8 +126,10 @@ pub async fn start_control_server(
     })
 }
 
-/// Serve one client: complete hello handshake, then loop reading ops and
-/// replying. Phase 1 implementation: every non-hello op yields `op_unknown`.
+/// Serve one client: complete hello handshake, install the control_writer,
+/// drain any queued approvals, then concurrently pump outbound events and read
+/// ops from the client. On disconnect clear the control_writer and abort the
+/// pump task.
 async fn serve_connection(
     stream: UnixStream,
     server_version: String,
@@ -140,7 +142,7 @@ async fn serve_connection(
     let writer = Arc::new(Mutex::new(write_half));
     let mut reader = BufReader::new(read_half).lines();
 
-    // Read the client hello.
+    // Hello handshake.
     let first = match reader.next_line().await {
         Ok(Some(line)) => line,
         _ => return,
@@ -185,12 +187,51 @@ async fn serve_connection(
     )
     .await;
 
-    // Read subsequent ops; every one returns OpUnknown until Phase 2.
+    // Install this connection as the control_writer (displace any prior).
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ControlEvent>();
+    {
+        let mut cw = state.control_writer.lock().await;
+        if let Some(old) = cw.take() {
+            let _ = old.send(ControlEvent::Superseded);
+        }
+        *cw = Some(ev_tx.clone());
+    }
+
+    // Drain any queued approvals now that a TUI is connected.
+    {
+        let mut queue = state.approval_queue.lock().await;
+        while let Some(q) = queue.pop_front() {
+            // Transfer responder into the bridge map.
+            state
+                .approval_bridge
+                .lock()
+                .await
+                .insert(q.request_id.clone(), q.responder);
+            // And push the event.
+            let _ = ev_tx.send(ControlEvent::ApprovalRequest {
+                request_id: q.request_id,
+                task_id: q.task_id,
+                summary: q.summary,
+            });
+        }
+    }
+
+    // Concurrent outbound pump: forward events from the mpsc to the socket.
+    let writer_for_pump = writer.clone();
+    let pump = tokio::spawn(async move {
+        while let Some(ev) = ev_rx.recv().await {
+            if send_event(&writer_for_pump, &ev).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Read loop.
     while let Ok(Some(line)) = reader.next_line().await {
         let reply = match serde_json::from_str::<ControlOp>(&line) {
             Ok(op) => dispatch_op(&state, op).await,
             Err(e) => ControlEvent::OpFailed {
-                op: "".into(),
+                op: String::new(),
                 task_id: None,
                 error: format!("parse error: {e}"),
             },
@@ -199,6 +240,13 @@ async fn serve_connection(
             break;
         }
     }
+
+    // Clear control_writer on disconnect.
+    {
+        let mut cw = state.control_writer.lock().await;
+        *cw = None;
+    }
+    pump.abort();
 }
 
 async fn send_event(

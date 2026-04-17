@@ -107,3 +107,102 @@ async fn pause_op_writes_events_jsonl() {
     let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
     assert!(contents.contains("\"kind\":\"pause\""));
 }
+
+use pitboss_cli::mcp::approval::ApprovalBridge;
+
+#[tokio::test]
+async fn block_policy_queue_drains_on_tui_connect() {
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+    ));
+
+    // Kick off a blocking request on a background task (no TUI attached yet).
+    let bridge = ApprovalBridge::new(state.clone());
+    let req_handle = tokio::spawn(async move {
+        bridge
+            .request("lead".into(), "spawn 3".into(), Duration::from_secs(5))
+            .await
+    });
+
+    // Give the request a moment to queue.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(state.approval_queue.lock().await.len(), 1);
+
+    // Connect a TUI. The server drains the queue on connect.
+    let sock = dir.path().join("block-drain.sock");
+    let _h = pitboss_cli::control::server::start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "hierarchical".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+
+    let mut client = fake_control_client::FakeControlClient::connect(&sock, "0.4.0")
+        .await
+        .unwrap();
+
+    // Expect an ApprovalRequest event pushed from the drain.
+    let ev = client
+        .recv_timeout(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .expect("drain pushes approval_request");
+    let request_id = match ev {
+        ControlEvent::ApprovalRequest { request_id, .. } => request_id,
+        other => panic!("expected ApprovalRequest, got {other:?}"),
+    };
+
+    // Respond.
+    client
+        .send(&ControlOp::Approve {
+            request_id,
+            approved: true,
+            comment: None,
+            edited_summary: None,
+        })
+        .await
+        .unwrap();
+
+    // Await the original request's resolution.
+    let resp = tokio::time::timeout(Duration::from_secs(3), req_handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(resp.approved);
+}
