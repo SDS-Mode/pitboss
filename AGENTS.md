@@ -262,6 +262,25 @@ populated with these. You (the operator) don't list them explicitly.
   heavier workers (Sonnet) under a Haiku lead.
 - `tools` defaults to the lead's tools.
 
+### `mcp__pitboss__pause_worker`
+
+Pause a running worker. Snapshots its `claude_session_id` so
+`continue_worker` can resume. Args: `{task_id: string}`.
+Fails if worker is not in `Running` state with an initialized session.
+
+### `mcp__pitboss__continue_worker`
+
+Continue a previously-paused worker. Spawns `claude --resume <id>`
+under the hood. Args: `{task_id: string, prompt?: string}` (default
+prompt "continue").
+
+### `mcp__pitboss__request_approval`
+
+Block the lead until the operator approves, rejects, or edits.
+Args: `{summary: string, timeout_secs?: number}`. Returns
+`{approved: bool, comment?: string, edited_summary?: string}`.
+Policy-gated: see `approval_policy` below.
+
 ---
 
 ## Error patterns
@@ -298,6 +317,28 @@ You're referring to a worker that was never spawned (or was typo'd).
 
 A worker never started — usually a git worktree prep failure (dirty tree,
 branch conflict, non-git directory). Check the stderr log.
+
+---
+
+## Operator keybindings (pitboss-tui, v0.4.0+)
+
+- `x` — confirm+cancel focused worker
+- `X` — confirm+cancel entire run
+- `p` — pause focused worker (requires initialized session)
+- `c` — continue paused worker
+- `r` — open reprompt textarea (Ctrl+Enter to submit, Esc to cancel)
+- During approval modal: `y` approve, `n` reject (with comment), `e`
+  edit (Ctrl+Enter to submit, Esc to cancel)
+
+## `[run].approval_policy`
+
+Controls handling of `request_approval` calls when no TUI is attached.
+
+- `block` (default) — queue until a TUI connects, or fail after
+  `lead_timeout_secs`.
+- `auto_approve` — immediate `{approved: true}`.
+- `auto_reject` — immediate `{approved: false, comment: "no operator
+  available"}`.
 
 ---
 

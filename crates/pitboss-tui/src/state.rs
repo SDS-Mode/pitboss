@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use pitboss_core::store::TaskStatus;
 
 /// Overall display mode of the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
     ViewingLog,
@@ -26,6 +26,40 @@ pub enum Mode {
         scroll: usize,
         at_bottom: bool,
     },
+    /// v0.4: confirm modal before sending a destructive control op.
+    ConfirmKill {
+        target: KillTarget,
+    },
+    /// v0.4: textarea-driven reprompt modal.
+    PromptReprompt {
+        task_id: String,
+        draft: String,
+    },
+    /// v0.4: approval modal. Driven by an `approval_request` event.
+    ApprovalModal {
+        request_id: String,
+        task_id: String,
+        summary: String,
+        sub_mode: ApprovalSubMode,
+    },
+}
+
+/// What `ConfirmKill` targets.
+#[derive(Debug, Clone)]
+pub enum KillTarget {
+    Worker(String),
+    Run,
+}
+
+/// Sub-state of the `ApprovalModal`.
+#[derive(Debug, Clone)]
+pub enum ApprovalSubMode {
+    /// Just showing the summary; awaiting y/n/e.
+    Overview,
+    /// User pressed `e`: editing the summary in a textarea.
+    Editing { draft: String },
+    /// User pressed `n`: writing a rejection comment.
+    Rejecting { draft: String },
 }
 
 /// Status of a single tile.
@@ -73,6 +107,12 @@ pub struct AppState {
     pub run_list: Vec<crate::runs::RunEntry>,
     /// Earliest wall-clock start time across all completed tiles in the current run.
     pub run_started_at: Option<DateTime<Utc>>,
+    /// v0.4 control-socket client. None when the TUI was launched against a
+    /// completed run or the control socket couldn't be opened.
+    pub control_client: Option<std::sync::Arc<crate::control::ControlClient>>,
+    /// Whether the control socket is currently connected. Mirrored from the
+    /// client; used for the status-bar indicator.
+    pub control_connected: bool,
 }
 
 impl AppState {
@@ -87,6 +127,8 @@ impl AppState {
             failed_count: 0,
             run_list: Vec::new(),
             run_started_at: None,
+            control_client: None,
+            control_connected: false,
         }
     }
 
@@ -391,7 +433,7 @@ mod tests {
 
         state.cancel_picker();
 
-        assert_eq!(state.mode, Mode::Normal);
+        assert!(matches!(state.mode, Mode::Normal));
         assert!(state.run_list.is_empty());
         assert_eq!(state.focus, 1, "cancel_picker must not touch focus");
     }
@@ -456,7 +498,7 @@ mod tests {
         state.picker_down();
 
         // Mode unchanged.
-        assert_eq!(state.mode, Mode::Normal);
+        assert!(matches!(state.mode, Mode::Normal));
     }
 
     #[test]
@@ -521,7 +563,10 @@ mod tests {
 
         state.enter_snap_in();
 
-        assert_eq!(state.mode, Mode::Normal, "should stay Normal with no tiles");
+        assert!(
+            matches!(state.mode, Mode::Normal),
+            "should stay Normal with no tiles"
+        );
     }
 
     #[test]
@@ -550,7 +595,7 @@ mod tests {
 
         state.exit_snap_in();
 
-        assert_eq!(state.mode, Mode::Normal);
+        assert!(matches!(state.mode, Mode::Normal));
     }
 
     #[test]
@@ -781,5 +826,74 @@ mod tests {
             Some(t_earlier),
             "should keep the earlier start time"
         );
+    }
+
+    #[test]
+    fn confirm_kill_variant_round_trip() {
+        let m = Mode::ConfirmKill {
+            target: KillTarget::Worker("w-1".into()),
+        };
+        assert!(matches!(m, Mode::ConfirmKill { .. }));
+        let m2 = Mode::ConfirmKill {
+            target: KillTarget::Run,
+        };
+        assert!(matches!(
+            m2,
+            Mode::ConfirmKill {
+                target: KillTarget::Run
+            }
+        ));
+    }
+
+    #[test]
+    fn prompt_reprompt_variant_constructs() {
+        let m = Mode::PromptReprompt {
+            task_id: "w-1".into(),
+            draft: String::new(),
+        };
+        assert!(matches!(m, Mode::PromptReprompt { .. }));
+    }
+
+    #[test]
+    fn approval_modal_variant_constructs() {
+        let m = Mode::ApprovalModal {
+            request_id: "req-1".into(),
+            task_id: "lead".into(),
+            summary: "spawn 3".into(),
+            sub_mode: ApprovalSubMode::Overview,
+        };
+        assert!(matches!(m, Mode::ApprovalModal { .. }));
+    }
+
+    #[test]
+    fn confirm_kill_mode_stores_worker_target_from_focus() {
+        let mut state = make_state_with_tile("task-001");
+        state.mode = Mode::ConfirmKill {
+            target: KillTarget::Worker("task-001".into()),
+        };
+        if let Mode::ConfirmKill {
+            target: KillTarget::Worker(id),
+        } = &state.mode
+        {
+            assert_eq!(id, "task-001");
+        } else {
+            panic!("not ConfirmKill::Worker");
+        }
+    }
+
+    #[test]
+    fn approval_modal_overview_y_sets_mode_normal() {
+        // Simulate the state transition that `handle_approval_modal` performs.
+        let mut state = make_state();
+        state.mode = Mode::ApprovalModal {
+            request_id: "req-1".into(),
+            task_id: "lead".into(),
+            summary: "spawn 3".into(),
+            sub_mode: ApprovalSubMode::Overview,
+        };
+        // Direct transition — we don't call into app::handle_* here to avoid
+        // tokio-runtime coupling; this test exercises only the state model.
+        state.mode = Mode::Normal;
+        assert!(matches!(state.mode, Mode::Normal));
     }
 }

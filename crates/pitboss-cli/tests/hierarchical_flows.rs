@@ -8,7 +8,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use fake_mcp_client::FakeMcpClient;
-use pitboss_cli::dispatch::state::DispatchState;
+use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState};
 use pitboss_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
 use pitboss_cli::manifest::schema::{Effort, WorktreeCleanup};
 use pitboss_cli::mcp::{socket_path_for_run, McpServer};
@@ -47,6 +47,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         max_workers: Some(4),
         budget_usd: Some(5.0),
         lead_timeout_secs: None,
+        approval_policy: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -67,6 +68,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         wt_mgr,
         CleanupPolicy::Never,
         run_subdir,
+        ApprovalPolicy::Block,
     ));
     (dir, state)
 }

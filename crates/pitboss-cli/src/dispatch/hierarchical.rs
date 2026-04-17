@@ -12,6 +12,7 @@ use pitboss_core::session::CancelToken;
 use pitboss_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore};
 use uuid::Uuid;
 
+use crate::control::{control_socket_path, server::start_control_server};
 use crate::dispatch::state::DispatchState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::{socket_path_for_run, McpServer};
@@ -95,8 +96,21 @@ pub async fn run_hierarchical(
         wt_mgr.clone(),
         cleanup_policy,
         run_subdir.clone(),
+        resolved.approval_policy.unwrap_or_default(),
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
+
+    // Bind the control socket for TUI ↔ dispatcher ops.
+    let control_sock = control_socket_path(run_id, &run_dir);
+    let _control = start_control_server(
+        control_sock,
+        env!("CARGO_PKG_VERSION").to_string(),
+        run_id.to_string(),
+        "hierarchical".into(),
+        state.clone(),
+    )
+    .await
+    .context("start control server")?;
 
     // 2. Build the --mcp-config file for the lead.
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
@@ -136,6 +150,7 @@ pub async fn run_hierarchical(
         lead.id.clone(),
         crate::dispatch::state::WorkerState::Running {
             started_at: Utc::now(),
+            session_id: None,
         },
     );
 
@@ -149,6 +164,13 @@ pub async fn run_hierarchical(
         .await;
 
     // Build lead TaskRecord
+    let lead_counters = state
+        .worker_counters
+        .read()
+        .await
+        .get(&state.lead_id)
+        .cloned()
+        .unwrap_or_default();
     let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
         status: match outcome.final_state {
@@ -183,6 +205,11 @@ pub async fn run_hierarchical(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: None, // lead has no parent
+        pause_count: lead_counters.pause_count,
+        reprompt_count: lead_counters.reprompt_count,
+        approvals_requested: lead_counters.approvals_requested,
+        approvals_approved: lead_counters.approvals_approved,
+        approvals_rejected: lead_counters.approvals_rejected,
     };
 
     // Cleanup worktree per policy
@@ -219,7 +246,8 @@ pub async fn run_hierarchical(
             .map(|(id, w)| match w {
                 crate::dispatch::state::WorkerState::Done(rec) => rec.clone(),
                 crate::dispatch::state::WorkerState::Pending
-                | crate::dispatch::state::WorkerState::Running { .. } => {
+                | crate::dispatch::state::WorkerState::Running { .. }
+                | crate::dispatch::state::WorkerState::Paused { .. } => {
                     let now = Utc::now();
                     pitboss_core::store::TaskRecord {
                         task_id: id.clone(),
@@ -234,6 +262,11 @@ pub async fn run_hierarchical(
                         claude_session_id: None,
                         final_message_preview: Some("cancelled when lead exited".into()),
                         parent_task_id: Some(lead.id.clone()),
+                        pause_count: 0,
+                        reprompt_count: 0,
+                        approvals_requested: 0,
+                        approvals_approved: 0,
+                        approvals_rejected: 0,
                     }
                 }
             })

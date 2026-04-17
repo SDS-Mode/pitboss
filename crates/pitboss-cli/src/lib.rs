@@ -5,6 +5,7 @@
 //! from this lib crate rather than re-declaring them.
 
 pub mod cli;
+pub mod control;
 pub mod diff;
 pub mod dispatch;
 pub mod manifest;

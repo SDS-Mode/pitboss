@@ -17,9 +17,10 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
-    handle_cancel_worker, handle_list_workers, handle_spawn_worker, handle_wait_for_any,
-    handle_wait_for_worker, handle_worker_status, SpawnWorkerArgs, TaskIdArgs, WaitForAnyArgs,
-    WaitForWorkerArgs,
+    handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
+    handle_request_approval, handle_spawn_worker, handle_wait_for_any, handle_wait_for_worker,
+    handle_worker_status, ContinueWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs, TaskIdArgs,
+    WaitForAnyArgs, WaitForWorkerArgs,
 };
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -126,6 +127,45 @@ impl PitbossHandler {
         Parameters(args): Parameters<TaskIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match handle_cancel_worker(&self.state, &args.task_id).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Pause a running worker. Snapshots its session id so continue_worker can resume."
+    )]
+    async fn pause_worker(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_pause_worker(&self.state, &args.task_id).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Continue a previously-paused worker. Spawns claude --resume under the hood."
+    )]
+    async fn continue_worker(
+        &self,
+        Parameters(args): Parameters<ContinueWorkerArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_continue_worker(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Request operator approval before proceeding. Blocks until operator responds or timeout."
+    )]
+    async fn request_approval(
+        &self,
+        Parameters(args): Parameters<RequestApprovalArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_request_approval(&self.state, args).await {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
@@ -293,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_starts_and_accepts_connection() {
-        use crate::dispatch::state::DispatchState;
+        use crate::dispatch::state::{ApprovalPolicy, DispatchState};
         use crate::manifest::resolve::ResolvedManifest;
         use crate::manifest::schema::WorktreeCleanup;
         use pitboss_core::process::{ProcessSpawner, TokioSpawner};
@@ -315,6 +355,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -332,6 +373,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ));
 
         let sock = dir.path().join("test.sock");
@@ -349,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_drops_cleanly_even_with_active_connection() {
-        use crate::dispatch::state::DispatchState;
+        use crate::dispatch::state::{ApprovalPolicy, DispatchState};
         use crate::manifest::resolve::ResolvedManifest;
         use crate::manifest::schema::WorktreeCleanup;
         use pitboss_core::process::{ProcessSpawner, TokioSpawner};
@@ -372,6 +414,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -389,6 +432,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ));
 
         let sock = dir.path().join("drop-test.sock");

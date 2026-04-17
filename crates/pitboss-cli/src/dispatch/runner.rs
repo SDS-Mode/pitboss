@@ -17,6 +17,14 @@ use uuid::Uuid;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
+fn cleanup_policy_from(w: crate::manifest::schema::WorktreeCleanup) -> CleanupPolicy {
+    match w {
+        crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
+        crate::manifest::schema::WorktreeCleanup::OnSuccess => CleanupPolicy::OnSuccess,
+        crate::manifest::schema::WorktreeCleanup::Never => CleanupPolicy::Never,
+    }
+}
+
 /// Public entry — main.rs calls this. Constructs production spawner + store.
 pub async fn run_dispatch_inner(
     resolved: ResolvedManifest,
@@ -100,6 +108,33 @@ pub async fn execute(
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
     let records: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Build a minimal DispatchState so the control server has something to bind
+    // against. Flat mode has no lead and no spawn_worker path, but cancel and
+    // list_workers still apply.
+    let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
+        run_id,
+        resolved.clone(),
+        store.clone(),
+        cancel.clone(),
+        "".into(),
+        spawner.clone(),
+        claude_binary.clone(),
+        wt_mgr.clone(),
+        cleanup_policy_from(resolved.worktree_cleanup),
+        run_subdir.clone(),
+        resolved.approval_policy.unwrap_or_default(),
+    ));
+    let control_sock = crate::control::control_socket_path(run_id, &run_dir);
+    let _control = crate::control::server::start_control_server(
+        control_sock,
+        env!("CARGO_PKG_VERSION").to_string(),
+        run_id.to_string(),
+        "flat".into(),
+        flat_state,
+    )
+    .await
+    .context("start control server")?;
 
     let mut handles = Vec::new();
 
@@ -238,6 +273,11 @@ async fn execute_task(
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     parent_task_id: None,
+                    pause_count: 0,
+                    reprompt_count: 0,
+                    approvals_requested: 0,
+                    approvals_approved: 0,
+                    approvals_rejected: 0,
                 };
             }
         }
@@ -289,6 +329,11 @@ async fn execute_task(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: None,
+        pause_count: 0,
+        reprompt_count: 0,
+        approvals_requested: 0,
+        approvals_approved: 0,
+        approvals_rejected: 0,
     }
 }
 
@@ -326,6 +371,9 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__wait_for_any",
     "mcp__pitboss__list_workers",
     "mcp__pitboss__cancel_worker",
+    "mcp__pitboss__pause_worker",
+    "mcp__pitboss__continue_worker",
+    "mcp__pitboss__request_approval",
 ];
 
 /// Builds the argv for spawning the lead subprocess, including the
@@ -449,6 +497,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -532,6 +581,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -628,6 +678,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
 
         let spawner = Arc::new(CyclingFake(

@@ -2,6 +2,7 @@
 //! worker Hobbits via structured tool calls. Bound to a single hierarchical
 //! run; started before the lead, shut down after the lead + workers drain.
 
+pub mod approval;
 pub mod bridge;
 pub mod server;
 pub mod tools;

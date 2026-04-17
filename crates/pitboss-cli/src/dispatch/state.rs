@@ -2,7 +2,7 @@
 //! between the dispatch runner (which writes TaskRecords) and the MCP server
 //! (which reads worker status, enforces caps, enqueues spawns).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use pitboss_core::process::ProcessSpawner;
 use pitboss_core::session::CancelToken;
 use pitboss_core::store::{SessionStore, TaskRecord};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::manifest::resolve::ResolvedManifest;
@@ -21,8 +21,58 @@ pub enum WorkerState {
     Pending,
     Running {
         started_at: chrono::DateTime<chrono::Utc>,
+        /// Populated once the worker's claude subprocess emits its
+        /// `{"type":"system","subtype":"init"}` event. `None` during the brief
+        /// window between spawn and first init event (≤ ~1s in practice);
+        /// pause/reprompt fail with `op_unknown_state{current_state:"spawning"}`
+        /// when None.
+        session_id: Option<String>,
+    },
+    Paused {
+        /// Captured from the Running variant at pause time.
+        session_id: String,
+        paused_at: chrono::DateTime<chrono::Utc>,
+        /// Snapshot of token usage at pause time, so continue's final
+        /// TaskRecord knows what the prior subprocess cost.
+        prior_token_usage: pitboss_core::parser::TokenUsage,
     },
     Done(TaskRecord),
+}
+
+/// Response returned to a lead that called `request_approval`.
+#[derive(Debug, Clone)]
+pub struct ApprovalResponse {
+    pub approved: bool,
+    pub comment: Option<String>,
+    pub edited_summary: Option<String>,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct WorkerCounters {
+    pub pause_count: u32,
+    pub reprompt_count: u32,
+    pub approvals_requested: u32,
+    pub approvals_approved: u32,
+    pub approvals_rejected: u32,
+}
+
+/// Policy for approval requests when no TUI is attached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    #[default]
+    Block,
+    AutoApprove,
+    AutoReject,
+}
+
+/// An approval request that arrived before a TUI attached. Block-mode runs
+/// queue these; they drain when the next TUI connects.
+pub struct QueuedApproval {
+    pub request_id: String,
+    pub task_id: String,
+    pub summary: String,
+    pub responder: oneshot::Sender<ApprovalResponse>,
 }
 
 pub struct DispatchState {
@@ -67,6 +117,21 @@ pub struct DispatchState {
     pub cleanup_policy: CleanupPolicy,
     /// The per-run subdirectory where worker logs/artifacts land (`run_dir/<run_id>/`).
     pub run_subdir: PathBuf,
+    /// Approval bridge: maps request_id → sender that completes when the
+    /// TUI responds to an approval request. Seeded by `ApprovalBridge::request`,
+    /// drained by the `approve` control op.
+    pub approval_bridge: Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>,
+    /// Queued approval requests waiting for a TUI to attach.
+    pub approval_queue: Mutex<VecDeque<QueuedApproval>>,
+    /// Approval policy from the manifest.
+    pub approval_policy: ApprovalPolicy,
+    /// Outbound control-socket event channel. Set when a TUI is connected; the
+    /// control server clears it on disconnect.
+    pub control_writer:
+        Mutex<Option<mpsc::UnboundedSender<crate::control::protocol::ControlEvent>>>,
+    /// Per-task event counters. Mutated by pause/continue/reprompt/approval
+    /// paths; read when building the final `TaskRecord`.
+    pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
 }
 
 impl DispatchState {
@@ -82,6 +147,7 @@ impl DispatchState {
         wt_mgr: Arc<WorktreeManager>,
         cleanup_policy: CleanupPolicy,
         run_subdir: PathBuf,
+        approval_policy: ApprovalPolicy,
     ) -> Self {
         let (done_tx, _) = broadcast::channel(64);
         Self {
@@ -103,6 +169,11 @@ impl DispatchState {
             wt_mgr,
             cleanup_policy,
             run_subdir,
+            approval_bridge: Mutex::new(HashMap::new()),
+            approval_queue: Mutex::new(VecDeque::new()),
+            approval_policy,
+            control_writer: Mutex::new(None),
+            worker_counters: RwLock::new(HashMap::new()),
         }
     }
 
@@ -111,7 +182,12 @@ impl DispatchState {
             .read()
             .await
             .values()
-            .filter(|w| matches!(w, WorkerState::Pending | WorkerState::Running { .. }))
+            .filter(|w| {
+                matches!(
+                    w,
+                    WorkerState::Pending | WorkerState::Running { .. } | WorkerState::Paused { .. }
+                )
+            })
             .count()
     }
 
@@ -144,6 +220,7 @@ mod tests {
             max_workers,
             budget_usd: budget,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -162,6 +239,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ));
         // Keep the TempDir alive for the test by leaking it — the state holds
         // PathBufs into it, and dropping `dir` at end of scope would invalidate
@@ -188,5 +266,49 @@ mod tests {
     async fn budget_remaining_is_none_when_uncapped() {
         let st = mk_state(None, None);
         assert_eq!(st.budget_remaining().await, None);
+    }
+
+    #[test]
+    fn running_worker_state_captures_session_id() {
+        let started_at = chrono::Utc::now();
+        let sid: Option<String> = Some("sess-abc".into());
+        let w = WorkerState::Running {
+            started_at,
+            session_id: sid.clone(),
+        };
+        match w {
+            WorkerState::Running {
+                session_id,
+                started_at: _,
+            } => {
+                assert_eq!(session_id, Some("sess-abc".to_string()));
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn state_initializes_new_v04_fields() {
+        let st = mk_state(None, None);
+        assert!(st.approval_bridge.lock().await.is_empty());
+        assert!(st.approval_queue.lock().await.is_empty());
+        assert!(matches!(
+            st.approval_policy,
+            crate::dispatch::state::ApprovalPolicy::Block
+        ));
+        assert!(st.control_writer.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn worker_counters_default_zero() {
+        let st = mk_state(None, None);
+        let c = st
+            .worker_counters
+            .read()
+            .await
+            .get("absent")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(c.pause_count, 0);
     }
 }

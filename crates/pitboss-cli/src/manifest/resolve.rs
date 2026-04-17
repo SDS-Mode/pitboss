@@ -58,6 +58,8 @@ pub struct ResolvedManifest {
     pub max_workers: Option<u32>,
     pub budget_usd: Option<f64>,
     pub lead_timeout_secs: Option<u64>,
+    // NEW in v0.4:
+    pub approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -108,6 +110,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         max_workers: manifest.run.max_workers,
         budget_usd: manifest.run.budget_usd,
         lead_timeout_secs: manifest.run.lead_timeout_secs,
+        approval_policy: manifest.run.approval_policy,
     })
 }
 
@@ -411,5 +414,35 @@ mod tests {
         "#);
         let r = resolve(m, None).unwrap();
         assert_eq!(r.lead.unwrap().timeout_secs, 7200);
+    }
+
+    #[test]
+    fn resolves_approval_policy_from_run() {
+        let m = man(r#"
+            [run]
+            approval_policy = "auto_reject"
+
+            [[lead]]
+            id = "triage"
+            directory = "/tmp"
+            prompt = "p"
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert_eq!(
+            r.approval_policy,
+            Some(crate::dispatch::state::ApprovalPolicy::AutoReject)
+        );
+    }
+
+    #[test]
+    fn resolves_missing_approval_policy_as_none() {
+        let m = man(r#"
+            [[task]]
+            id = "a"
+            directory = "/tmp"
+            prompt = "p"
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert!(r.approval_policy.is_none());
     }
 }

@@ -19,6 +19,7 @@ pub struct SessionHandle {
     cmd: SpawnCmd,
     log_path: Option<PathBuf>,
     stderr_log_path: Option<PathBuf>,
+    session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl SessionHandle {
@@ -33,6 +34,7 @@ impl SessionHandle {
             cmd,
             log_path: None,
             stderr_log_path: None,
+            session_id_tx: None,
         }
     }
 
@@ -45,6 +47,12 @@ impl SessionHandle {
     #[must_use]
     pub fn with_stderr_log_path(mut self, p: PathBuf) -> Self {
         self.stderr_log_path = Some(p);
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_id_tx(mut self, tx: tokio::sync::mpsc::Sender<String>) -> Self {
+        self.session_id_tx = Some(tx);
         self
     }
 
@@ -93,7 +101,12 @@ impl SessionHandle {
         let accum = Arc::new(Mutex::new(StreamAccum::default()));
         let accum_stream = accum.clone();
 
-        let stream_task = tokio::spawn(stream_loop(reader, log_writer, accum_stream));
+        let stream_task = tokio::spawn(stream_loop(
+            reader,
+            log_writer,
+            accum_stream,
+            self.session_id_tx.clone(),
+        ));
 
         // Drain stderr into a separate log file if requested. Many subprocess errors
         // (including claude's "--verbose required" rejection) only surface on stderr.
@@ -209,6 +222,7 @@ async fn stream_loop(
     mut reader: tokio::io::Lines<BufReader<Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>>,
     mut log: Option<tokio::fs::File>,
     accum: Arc<Mutex<StreamAccum>>,
+    session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) {
     loop {
         match reader.next_line().await {
@@ -239,6 +253,10 @@ async fn stream_loop(
                         ..
                     }) => {
                         let mut a = accum.lock().await;
+                        if let Some(tx) = &session_id_tx {
+                            // Best-effort: if receiver is closed or full, drop the send.
+                            let _ = tx.try_send(sid.clone());
+                        }
                         a.session_id = Some(sid);
                         a.usage.add(&u);
                         a.saw_result = true;
@@ -318,5 +336,40 @@ mod preview_tests {
         let out = truncate_preview(&s);
         assert!(!out.ends_with('…'));
         assert_eq!(out.chars().count(), 200);
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+    use crate::process::fake::{FakeScript, FakeSpawner};
+    use crate::process::ProcessSpawner;
+    use crate::session::CancelToken;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn session_id_fires_on_init_event() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-xyz"}"#)
+            .stdout_line(r#"{"type":"result","session_id":"sess-xyz","usage":{"input_tokens":1,"output_tokens":1}}"#)
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cmd = crate::process::SpawnCmd {
+            program: std::path::PathBuf::from("fake-claude"),
+            args: vec![],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: std::collections::HashMap::new(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+        let handle = SessionHandle::new("t", spawner, cmd).with_session_id_tx(tx);
+        let _outcome = handle
+            .run_to_completion(CancelToken::new(), Duration::from_secs(5))
+            .await;
+        let got = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("channel fires before deadline")
+            .expect("sender not dropped");
+        assert_eq!(got, "sess-xyz");
     }
 }

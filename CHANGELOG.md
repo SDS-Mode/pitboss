@@ -7,6 +7,50 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-17
+
+### Added
+- **Live control plane.** Per-run `control.sock` unix socket carrying
+  line-JSON operations from `pitboss-tui` to the dispatcher and push
+  events back. New TUI keybindings: `x` cancel focused worker (with
+  confirm modal), `X` cancel entire run, `p` pause, `c` continue, `r`
+  reprompt (textarea-driven).
+- **Three new MCP tools.** `mcp__pitboss__pause_worker`,
+  `mcp__pitboss__continue_worker`, `mcp__pitboss__request_approval` —
+  the last blocks the lead until the operator approves, rejects, or
+  edits, LangGraph-`interrupt()`-style.
+- **`approval_policy` manifest field** under `[run]`. Values: `block`
+  (default), `auto_approve`, `auto_reject`.
+- **Pause = cancel-with-resume.** Pause terminates the worker
+  subprocess but preserves `claude_session_id`; `continue_worker`
+  spawns `claude --resume <id>`.
+- **Per-task `events.jsonl`** audit file: pause, continue, reprompt,
+  approval_request, approval_response events.
+- **5 new `TaskRecord` counters.** `pause_count`, `reprompt_count`,
+  `approvals_requested`, `approvals_approved`, `approvals_rejected`.
+  Backfilled on disk via `#[serde(default)]` and in SQLite via the
+  idempotent `migrate_v04_event_counters` migration.
+- **`examples/v0.4-approval-demo.toml`** — minimal hierarchical
+  manifest that exercises `approval_policy = "block"` + a
+  `request_approval` interrupt + three tiny workers, for manual
+  smoke-testing of the new keybindings.
+
+### Changed
+- `WorkerState::Running` now carries an `Option<String> session_id`;
+  `WorkerState::Paused` is a new variant.
+- `DispatchState::new` gained an `ApprovalPolicy` parameter.
+- The lead's allowed MCP tool list now includes the three new tools.
+
+### Backward compatibility
+- v0.3.x manifests run unchanged; `approval_policy` defaults to
+  `block`.
+- v0.3.x runs on disk deserialize with counter fields defaulting to 0.
+- SQLite DBs auto-migrate on next open.
+- TUI pointed at a v0.3.x completed run enters observe-only mode when
+  `control.sock` is absent.
+
+## [0.3.4] — 2026-04-17
+
 ### Added
 - **`AGENTS.md`** — agent-facing entry point with decision tree, full
   manifest schema reference, invocation patterns, run-directory
@@ -211,7 +255,9 @@ This project uses [Semantic Versioning](https://semver.org/).
   SIGINT terminates.
 - Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
 
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/SDS-Mode/pitboss/compare/v0.3.4...v0.4.0
+[0.3.4]: https://github.com/SDS-Mode/pitboss/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/SDS-Mode/pitboss/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/SDS-Mode/pitboss/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/SDS-Mode/pitboss/compare/v0.3.0...v0.3.1

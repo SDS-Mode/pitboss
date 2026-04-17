@@ -530,6 +530,11 @@ mod tests {
             claude_session_id: None,
             final_message_preview: None,
             parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
         }
     }
 

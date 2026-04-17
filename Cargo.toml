@@ -6,6 +6,7 @@ members = [
     "crates/pitboss-tui",
     "tests-support/fake-claude",
     "tests-support/fake-mcp-client",
+    "tests-support/fake-control-client",
 ]
 
 [workspace.package]
@@ -39,3 +40,4 @@ crossterm          = "0.28"
 rusqlite           = { version = "0.32", features = ["bundled"] }
 rmcp               = { version = "0.8", features = ["server", "client", "transport-io", "macros"] }
 tokio-util         = { version = "0.7", features = ["rt"] }
+tui-textarea       = "0.7"

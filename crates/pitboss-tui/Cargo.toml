@@ -5,12 +5,17 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 
+[lib]
+name = "pitboss_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pitboss-tui"
 path = "src/main.rs"
 
 [dependencies]
 pitboss-core = { path = "../pitboss-core" }
+pitboss-cli  = { path = "../pitboss-cli" }
 ratatui      = { workspace = true }
 crossterm    = { workspace = true }
 anyhow       = { workspace = true }
@@ -21,6 +26,8 @@ serde_json   = { workspace = true }
 chrono       = { workspace = true }
 uuid         = { workspace = true }
 tracing      = { workspace = true }
+tui-textarea = { workspace = true }
+tokio        = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

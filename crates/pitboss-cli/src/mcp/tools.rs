@@ -90,6 +90,31 @@ pub struct WaitForAnyArgs {
     pub timeout_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContinueWorkerArgs {
+    pub task_id: String,
+    /// Optional prompt to send with --resume. Defaults to "continue".
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RequestApprovalArgs {
+    pub summary: String,
+    /// Optional per-request timeout override. Falls back to lead_timeout_secs.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalToolResponse {
+    pub approved: bool,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub edited_summary: Option<String>,
+}
+
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -300,6 +325,11 @@ async fn run_worker(
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     parent_task_id: Some(lead_id),
+                    pause_count: 0,
+                    reprompt_count: 0,
+                    approvals_requested: 0,
+                    approvals_approved: 0,
+                    approvals_rejected: 0,
                 };
                 let _ = state.store.append_record(state.run_id, &rec).await;
                 state
@@ -320,6 +350,7 @@ async fn run_worker(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
+            session_id: None,
         },
     );
 
@@ -330,11 +361,35 @@ async fn run_worker(
         env: Default::default(),
     };
 
-    let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
-        .with_log_path(log_path.clone())
-        .with_stderr_log_path(stderr_path)
-        .run_to_completion(cancel, Duration::from_secs(timeout_secs))
-        .await;
+    let outcome = {
+        let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
+        let session_state = Arc::clone(&state);
+        let task_id_for_rx = task_id.clone();
+        let promote_task = tokio::spawn(async move {
+            if let Some(sid) = session_id_rx.recv().await {
+                let mut workers = session_state.workers.write().await;
+                if let Some(WorkerState::Running { started_at, .. }) =
+                    workers.get(&task_id_for_rx).cloned()
+                {
+                    workers.insert(
+                        task_id_for_rx,
+                        WorkerState::Running {
+                            started_at,
+                            session_id: Some(sid),
+                        },
+                    );
+                }
+            }
+        });
+        let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
+            .with_log_path(log_path.clone())
+            .with_stderr_log_path(stderr_path)
+            .with_session_id_tx(session_id_tx)
+            .run_to_completion(cancel, Duration::from_secs(timeout_secs))
+            .await;
+        promote_task.abort();
+        outcome
+    };
 
     let status = match outcome.final_state {
         pitboss_core::session::SessionState::Completed => TaskStatus::Success,
@@ -352,6 +407,13 @@ async fn run_worker(
     }
 
     let worktree_path = if use_worktree { Some(cwd) } else { None };
+    let counters = state
+        .worker_counters
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_default();
     let rec = TaskRecord {
         task_id: task_id.clone(),
         status,
@@ -365,6 +427,11 @@ async fn run_worker(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: Some(lead_id),
+        pause_count: counters.pause_count,
+        reprompt_count: counters.reprompt_count,
+        approvals_requested: counters.approvals_requested,
+        approvals_approved: counters.approvals_approved,
+        approvals_rejected: counters.approvals_rejected,
     };
 
     // Persist record.
@@ -420,6 +487,132 @@ fn worker_spawn_args(prompt: &str, model: &str, tools: &[String]) -> Vec<String>
     args
 }
 
+/// Spawn a resume-subprocess for `task_id`, replacing the worker's current
+/// SessionHandle. Used by `pause_worker` → `continue_worker` and by
+/// `reprompt_worker`. Returns immediately after setting state to Running; the
+/// background task drives `run_to_completion` and the terminal TaskRecord.
+pub async fn spawn_resume_worker(
+    state: &Arc<DispatchState>,
+    task_id: String,
+    prompt: String,
+    session_id: String,
+) -> anyhow::Result<()> {
+    use chrono::Utc;
+    let model = state
+        .worker_models
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    let tools: Vec<String> = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.tools.clone())
+        .unwrap_or_default();
+    let timeout_secs = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.timeout_secs)
+        .unwrap_or(3600);
+    let cwd = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.directory.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let worker_cancel = pitboss_core::session::CancelToken::new();
+    state
+        .worker_cancels
+        .write()
+        .await
+        .insert(task_id.clone(), worker_cancel.clone());
+    state.workers.write().await.insert(
+        task_id.clone(),
+        WorkerState::Running {
+            started_at: Utc::now(),
+            session_id: Some(session_id.clone()),
+        },
+    );
+    let state_bg = Arc::clone(state);
+    let task_id_bg = task_id.clone();
+    let lead_id_bg = state.lead_id.clone();
+
+    // Build spawn args with --resume.
+    let mut spawn_args_v = worker_spawn_args(&prompt, &model, &tools);
+    spawn_args_v.insert(0, "--resume".into());
+    spawn_args_v.insert(1, session_id);
+
+    let cmd = pitboss_core::process::SpawnCmd {
+        program: state.claude_binary.clone(),
+        args: spawn_args_v,
+        cwd,
+        env: Default::default(),
+    };
+    let task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let _ = tokio::fs::create_dir_all(&task_dir).await;
+    let log_path = task_dir.join("stdout.log");
+    let stderr_path = task_dir.join("stderr.log");
+
+    tokio::spawn(async move {
+        use pitboss_core::store::{TaskRecord, TaskStatus};
+        let outcome = pitboss_core::session::SessionHandle::new(
+            task_id_bg.clone(),
+            Arc::clone(&state_bg.spawner),
+            cmd,
+        )
+        .with_log_path(log_path.clone())
+        .with_stderr_log_path(stderr_path)
+        .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
+        .await;
+        let status = match outcome.final_state {
+            pitboss_core::session::SessionState::Completed => TaskStatus::Success,
+            pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
+            pitboss_core::session::SessionState::TimedOut => TaskStatus::TimedOut,
+            pitboss_core::session::SessionState::Cancelled => TaskStatus::Cancelled,
+            pitboss_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
+            _ => TaskStatus::Failed,
+        };
+        let counters = state_bg
+            .worker_counters
+            .read()
+            .await
+            .get(&task_id_bg)
+            .cloned()
+            .unwrap_or_default();
+        let rec = TaskRecord {
+            task_id: task_id_bg.clone(),
+            status,
+            exit_code: outcome.exit_code,
+            started_at: outcome.started_at,
+            ended_at: outcome.ended_at,
+            duration_ms: outcome.duration_ms(),
+            worktree_path: None,
+            log_path,
+            token_usage: outcome.token_usage,
+            claude_session_id: outcome.claude_session_id,
+            final_message_preview: outcome.final_message_preview,
+            parent_task_id: Some(lead_id_bg),
+            pause_count: counters.pause_count,
+            reprompt_count: counters.reprompt_count,
+            approvals_requested: counters.approvals_requested,
+            approvals_approved: counters.approvals_approved,
+            approvals_rejected: counters.approvals_rejected,
+        };
+        let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
+        state_bg
+            .workers
+            .write()
+            .await
+            .insert(task_id_bg.clone(), WorkerState::Done(rec));
+        let _ = state_bg.done_tx.send(task_id_bg);
+    });
+
+    Ok(())
+}
+
 async fn estimate_new_worker_cost(state: &Arc<DispatchState>, intended_model: &str) -> f64 {
     use pitboss_core::prices::cost_usd;
     let workers = state.workers.read().await;
@@ -467,8 +660,11 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
         .map(|(id, w)| {
             let (state_str, started_at) = match w {
                 WorkerState::Pending => ("Pending".to_string(), None),
-                WorkerState::Running { started_at } => {
+                WorkerState::Running { started_at, .. } => {
                     ("Running".to_string(), Some(started_at.to_rfc3339()))
+                }
+                WorkerState::Paused { paused_at, .. } => {
+                    ("Paused".to_string(), Some(paused_at.to_rfc3339()))
                 }
                 WorkerState::Done(rec) => (
                     match rec.status {
@@ -508,10 +704,20 @@ pub async fn handle_worker_status(
             pitboss_core::parser::TokenUsage::default(),
             None,
         ),
-        WorkerState::Running { started_at } => (
+        WorkerState::Running { started_at, .. } => (
             "Running".to_string(),
             Some(started_at.to_rfc3339()),
             pitboss_core::parser::TokenUsage::default(),
+            None,
+        ),
+        WorkerState::Paused {
+            paused_at,
+            prior_token_usage,
+            ..
+        } => (
+            "Paused".to_string(),
+            Some(paused_at.to_rfc3339()),
+            *prior_token_usage,
             None,
         ),
         WorkerState::Done(rec) => (
@@ -554,6 +760,80 @@ pub async fn handle_cancel_worker(
     };
     token.terminate();
     Ok(CancelResult { ok: true })
+}
+
+pub async fn handle_pause_worker(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+) -> Result<CancelResult> {
+    let mut workers = state.workers.write().await;
+    let Some(entry) = workers.get(task_id).cloned() else {
+        anyhow::bail!("unknown task_id: {task_id}");
+    };
+    match entry {
+        WorkerState::Running {
+            session_id: Some(sid),
+            ..
+        } => {
+            let cancels = state.worker_cancels.read().await;
+            if let Some(tok) = cancels.get(task_id) {
+                tok.terminate();
+            }
+            workers.insert(
+                task_id.to_string(),
+                WorkerState::Paused {
+                    session_id: sid,
+                    paused_at: chrono::Utc::now(),
+                    prior_token_usage: Default::default(),
+                },
+            );
+            Ok(CancelResult { ok: true })
+        }
+        WorkerState::Running {
+            session_id: None, ..
+        } => anyhow::bail!("worker not yet initialized (no session_id)"),
+        WorkerState::Paused { .. } => anyhow::bail!("worker already paused"),
+        _ => anyhow::bail!("worker not in a pausable state"),
+    }
+}
+
+pub async fn handle_continue_worker(
+    state: &Arc<DispatchState>,
+    args: ContinueWorkerArgs,
+) -> Result<CancelResult> {
+    let current = state.workers.read().await.get(&args.task_id).cloned();
+    match current {
+        Some(WorkerState::Paused { session_id, .. }) => {
+            let prompt = args.prompt.unwrap_or_else(|| "continue".into());
+            spawn_resume_worker(state, args.task_id, prompt, session_id).await?;
+            Ok(CancelResult { ok: true })
+        }
+        Some(_) => anyhow::bail!("worker not paused"),
+        None => anyhow::bail!("unknown task_id: {}", args.task_id),
+    }
+}
+
+pub async fn handle_request_approval(
+    state: &Arc<DispatchState>,
+    args: RequestApprovalArgs,
+) -> Result<ApprovalToolResponse> {
+    let timeout = Duration::from_secs(
+        args.timeout_secs
+            .or(state.manifest.lead_timeout_secs)
+            .unwrap_or(3600),
+    );
+    let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
+    match bridge
+        .request(state.lead_id.clone(), args.summary, timeout)
+        .await
+    {
+        Ok(resp) => Ok(ApprovalToolResponse {
+            approved: resp.approved,
+            comment: resp.comment,
+            edited_summary: resp.edited_summary,
+        }),
+        Err(e) => anyhow::bail!("approval failed: {e}"),
+    }
 }
 
 pub async fn handle_wait_for_worker(
@@ -652,7 +932,7 @@ pub async fn handle_wait_for_any(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::state::{DispatchState, WorkerState};
+    use crate::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
     use std::sync::Arc;
 
     async fn test_state() -> Arc<DispatchState> {
@@ -698,6 +978,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(budget),
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -725,6 +1006,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ))
     }
 
@@ -745,6 +1027,7 @@ mod tests {
                 "w-2".into(),
                 WorkerState::Running {
                     started_at: chrono::Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -934,6 +1217,11 @@ mod tests {
                 claude_session_id: None,
                 final_message_preview: Some("ok".into()),
                 parent_task_id: Some("lead".into()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
             };
             let mut w = state_clone.workers.write().await;
             w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -1000,6 +1288,11 @@ mod tests {
                 claude_session_id: None,
                 final_message_preview: None,
                 parent_task_id: Some("lead".into()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
             };
             let mut w = state_clone.workers.write().await;
             w.insert("w-b".into(), WorkerState::Done(rec));
@@ -1054,6 +1347,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: budget,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1079,6 +1373,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ))
     }
 
@@ -1248,5 +1543,198 @@ mod tests {
         assert!((initial_estimate_for("claude-haiku-4-5-20251001") - 0.10).abs() < 1e-9);
         assert!((initial_estimate_for("claude-sonnet-4-6-20251001") - 0.50).abs() < 1e-9);
         assert!((initial_estimate_for("claude-opus-4-7-20251001") - 2.00).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn running_worker_state_gets_session_id_after_init() {
+        use std::time::Duration;
+
+        let state = completing_test_state().await;
+        let mut rx = state.done_tx.subscribe();
+        let args = SpawnWorkerArgs {
+            prompt: "analyze".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let spawn = handle_spawn_worker(&state, args).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("broadcast arrives")
+            .expect("broadcast open");
+
+        // Post-completion, the worker is in Done state. The session_id is
+        // preserved on TaskRecord via SessionOutcome. Assert it.
+        let workers = state.workers.read().await;
+        match workers.get(&spawn.task_id).unwrap() {
+            WorkerState::Done(rec) => {
+                assert_eq!(rec.claude_session_id.as_deref(), Some("sess_ok"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_worker_args_roundtrip() {
+        let a = ContinueWorkerArgs {
+            task_id: "w".into(),
+            prompt: Some("next step".into()),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: ContinueWorkerArgs = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.task_id, "w");
+        assert_eq!(back.prompt.as_deref(), Some("next step"));
+    }
+
+    #[test]
+    fn request_approval_args_roundtrip() {
+        let a = RequestApprovalArgs {
+            summary: "spawn 3 workers".into(),
+            timeout_secs: Some(60),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.summary, "spawn 3 workers");
+        assert_eq!(back.timeout_secs, Some(60));
+    }
+
+    #[tokio::test]
+    async fn handle_pause_worker_pauses_running_worker() {
+        let state = test_state().await;
+        let worker_token = pitboss_core::session::CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), worker_token.clone());
+        state.workers.write().await.insert(
+            "w-1".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess".into()),
+            },
+        );
+        let res = handle_pause_worker(&state, "w-1").await.unwrap();
+        assert!(res.ok);
+        assert!(worker_token.is_terminated());
+        let workers = state.workers.read().await;
+        assert!(matches!(
+            workers.get("w-1").unwrap(),
+            WorkerState::Paused { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_continue_worker_resumes_paused() {
+        let state = test_state().await;
+        state.workers.write().await.insert(
+            "w-1".into(),
+            WorkerState::Paused {
+                session_id: "sess".into(),
+                paused_at: chrono::Utc::now(),
+                prior_token_usage: Default::default(),
+            },
+        );
+        state
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-1".into(), "hi".into());
+        state
+            .worker_models
+            .write()
+            .await
+            .insert("w-1".into(), "claude-haiku-4-5".into());
+        let res = handle_continue_worker(
+            &state,
+            ContinueWorkerArgs {
+                task_id: "w-1".into(),
+                prompt: Some("resume please".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(res.ok);
+        let workers = state.workers.read().await;
+        assert!(matches!(
+            workers.get("w-1").unwrap(),
+            WorkerState::Running { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_request_approval_auto_approves() {
+        use crate::dispatch::state::ApprovalPolicy;
+        // Rebuild a state with AutoApprove.
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::process::ProcessSpawner;
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let lead = ResolvedLead {
+            id: "lead".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: Effort::High,
+            tools: vec![],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: None,
+            approval_policy: Some(ApprovalPolicy::AutoApprove),
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_id = Uuid::now_v7();
+        let run_subdir = dir.path().join(run_id.to_string());
+        std::mem::forget(dir);
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            ApprovalPolicy::AutoApprove,
+        ));
+        let resp = handle_request_approval(
+            &state,
+            RequestApprovalArgs {
+                summary: "spawn 3".into(),
+                timeout_secs: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(resp.approved);
     }
 }

@@ -188,10 +188,20 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_statusbar(frame, chunks[2], state);
 
     // Overlays (drawn last so they appear on top).
-    match state.mode {
+    match &state.mode {
         Mode::ViewingLog => render_log_overlay(frame, area, state),
         Mode::Help => render_help_overlay(frame, area),
-        Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, selected),
+        Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, *selected),
+        Mode::ConfirmKill { target } => render_confirm_kill(frame, area, target),
+        Mode::PromptReprompt { task_id, draft } => {
+            render_prompt_reprompt(frame, area, task_id, draft);
+        }
+        Mode::ApprovalModal {
+            request_id,
+            task_id,
+            summary,
+            sub_mode,
+        } => render_approval_modal(frame, area, request_id, task_id, summary, sub_mode),
         Mode::Normal | Mode::SnapIn { .. } => {}
     }
 }
@@ -652,6 +662,83 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
     frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
+fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::KillTarget) {
+    let msg = match target {
+        crate::state::KillTarget::Worker(id) => format!(" Cancel worker `{id}`? [y/N] "),
+        crate::state::KillTarget::Run => {
+            " Cancel the ENTIRE RUN? All workers terminate. [y/N] ".into()
+        }
+    };
+    let msg_w = u16::try_from(msg.len()).unwrap_or(u16::MAX);
+    let modal_w = msg_w.saturating_add(4).min(area.width);
+    let modal_h = 3u16;
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal = Rect::new(x, y, modal_w, modal_h);
+    frame.render_widget(Clear, modal);
+    let block = Block::default().borders(Borders::ALL).title(" Confirm ");
+    let para = Paragraph::new(msg)
+        .block(block)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Yellow));
+    frame.render_widget(para, modal);
+}
+
+// Forward decls filled in by Task 26 / Task 32.
+fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &str) {
+    let modal_w = (area.width * 3 / 4).min(80);
+    let modal_h = (area.height / 2).clamp(8, 20);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal = Rect::new(x, y, modal_w, modal_h);
+    frame.render_widget(Clear, modal);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " Reprompt `{task_id}` — Ctrl+Enter to send, Esc cancel "
+    ));
+    let para = Paragraph::new(draft)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(para, modal);
+}
+
+fn render_approval_modal(
+    frame: &mut Frame,
+    area: Rect,
+    _request_id: &str,
+    task_id: &str,
+    summary: &str,
+    sub_mode: &crate::state::ApprovalSubMode,
+) {
+    use crate::state::ApprovalSubMode;
+    let modal_w = (area.width * 3 / 4).min(90);
+    let modal_h = (area.height * 2 / 3).clamp(10, 24);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal = Rect::new(x, y, modal_w, modal_h);
+    frame.render_widget(Clear, modal);
+    let (title, body) = match sub_mode {
+        ApprovalSubMode::Overview => (
+            format!(" Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel "),
+            summary.to_string(),
+        ),
+        ApprovalSubMode::Editing { draft } => (
+            " Edit summary — Ctrl+Enter to submit  Esc cancel ".to_string(),
+            draft.clone(),
+        ),
+        ApprovalSubMode::Rejecting { draft } => (
+            " Rejection comment — Ctrl+Enter to send  Esc cancel ".to_string(),
+            draft.clone(),
+        ),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let para = Paragraph::new(body)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(para, modal);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -741,6 +828,8 @@ mod tests {
             failed_count: 0,
             run_list: Vec::new(),
             run_started_at: None,
+            control_client: None,
+            control_connected: false,
         }
     }
 

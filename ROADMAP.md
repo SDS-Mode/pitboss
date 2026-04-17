@@ -3,83 +3,18 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-## In progress
+## v0.4.1 — Attach (escape hatch)
 
-### v0.4.0 — Live control plane
-
-**Status:** design spec written, plan pending, build pending.
-
-Expanded from the original "TUI kill" roadmap item into a broader L4
-(human-in-the-loop) surface covering kill, pause, continue, reprompt,
-and approve/edit. Mechanism is a per-run unix control socket. See
-`docs/superpowers/specs/2026-04-17-pitboss-v0.4-live-control-design.md`
-for the full spec.
-
----
-
-## Deferred out of v0.4.0 (promoted from near-term to explicit deferrals)
-
-### `pitboss attach <run-id> <task-id>` — live TTY relay escape hatch
-
-**Status:** designed out of v0.4.0 core; layered on top as v0.4.1.
-
-Uses `portable-pty` crate to allocate a PTY for the worker subprocess;
-`pitboss attach` connects the operator's terminal stdio to that PTY for
-real-time keystroke passthrough. The only L3 feature that requires more
-than the `-p` + `--resume` model can give. Target: v0.4.1 once v0.4.0
-is stable and operator feedback indicates concrete need.
-
-### "Freeze" pause — true SIGSTOP/SIGCONT process freeze
-
-**Status:** future. Concept captured 2026-04-17 during v0.4.0 brainstorm.
-
-v0.4.0 ships pause via cancel-with-resume semantics: subprocess ends,
-session id preserved, continue spawns `claude --resume <id>`. The
-alternative "freeze" semantic — `SIGSTOP` the running process, keep
-it memory-resident, `SIGCONT` to thaw — is precise and fast (no
-subprocess re-spawn cost) but adds failure modes around:
-
-- Anthropic's HTTP stream timing out during the freeze.
-- Orphan stopped processes if pitboss itself dies while a worker is
-  frozen.
-- The question of whether `lead_timeout_secs` should also pause (it
-  currently doesn't, per the v0.4 design decision).
-
-Revisit when a concrete use case surfaces (probably: "pause for hours"
-or "pause for operator meeting" kind of scenarios).
-
-### Out-of-TUI notifications
-
-**Status:** future. Pitboss shouldn't require a TUI to be attached for
-operator awareness. Approval requests, run completion, budget-exceeded
-events, worker failures — all candidates for outbound channels:
-
-- **Webhooks** (HTTP POST to a configurable URL)
-- **Slack / Discord** integration
-- **Email** (SMTP / SES)
-- **Desktop notifications** (notify-send / osascript)
-
-Natural pairing with the `approval_policy` manifest field: a `notify`
-policy that pushes the request to a notification channel and waits
-for an asynchronous response. Requires designing a response mechanism
-(reply link? CLI tool that posts back?).
-
-### Structured plan editing for approval
-
-**Status:** YAGNI unless free-form editing proves insufficient.
-
-v0.4.0's `request_approval` takes a free-form string summary;
-operator `e`-edits it back as a string. If the lead wants structured
-plans (typed fields: workers_to_spawn, budget, rationale) with
-typed in-TUI editing, that's a bigger design: schema, typed UI,
-validation. Add if concrete pain shows up.
-
-### Reprompt via MCP tool
-
-**Status:** operator-only in v0.4.0. Lead can achieve similar via
-`cancel_worker` + `spawn_worker` with `--resume`. Promote to a
-first-class lead-facing `mcp__pitboss__reprompt_worker(task_id,
-prompt)` if friction emerges.
+- `pitboss attach <run-id> <task-id>` — live TTY relay using
+  `portable-pty`. Narrow-scope: no persistent sessions, no tmux
+  dependency. Sits on top of v0.4.0 control-socket primitives.
+- True SIGSTOP freeze-pause (alternative / addition to
+  cancel-with-resume).
+- Out-of-TUI notifications: webhooks / Slack / email for approval
+  requests and run completion.
+- Structured approval schema (JSON-in-TUI plan editing).
+- `mcp__pitboss__reprompt_worker` for lead-driven mid-flight
+  redirection.
 
 ---
 

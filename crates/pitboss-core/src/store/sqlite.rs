@@ -59,6 +59,7 @@ impl SqliteStore {
         migrate_rename_shire_version_to_pitboss_version(&conn)?;
         init_schema(&conn)?;
         migrate_parent_task_id(&conn)?;
+        migrate_v04_event_counters(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -88,6 +89,35 @@ fn migrate_parent_task_id(conn: &rusqlite::Connection) -> Result<(), StoreError>
             [],
         )
         .map_err(|e| StoreError::Incomplete(format!("migrate alter: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Idempotent migration: add v0.4 counter columns to `task_records` if missing.
+fn migrate_v04_event_counters(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    for col in [
+        "pause_count",
+        "reprompt_count",
+        "approvals_requested",
+        "approvals_approved",
+        "approvals_rejected",
+    ] {
+        let has = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('task_records') WHERE name = '{col}'"
+                ))
+                .map_err(|e| StoreError::Incomplete(format!("migrate v04 prepare: {e}")))?;
+            stmt.exists([])
+                .map_err(|e| StoreError::Incomplete(format!("migrate v04 exists: {e}")))?
+        };
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE task_records ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"),
+                [],
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate v04 alter {col}: {e}")))?;
+        }
     }
     Ok(())
 }
@@ -170,6 +200,11 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             claude_session_id     TEXT,
             final_message_preview TEXT,
             parent_task_id        TEXT NULL,
+            pause_count           INTEGER NOT NULL DEFAULT 0,
+            reprompt_count        INTEGER NOT NULL DEFAULT 0,
+            approvals_requested   INTEGER NOT NULL DEFAULT 0,
+            approvals_approved    INTEGER NOT NULL DEFAULT 0,
+            approvals_rejected    INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -263,6 +298,11 @@ struct TaskRow {
     claude_session_id: Option<String>,
     final_message_preview: Option<String>,
     parent_task_id: Option<String>,
+    pause_count: i64,
+    reprompt_count: i64,
+    approvals_requested: i64,
+    approvals_approved: i64,
+    approvals_rejected: i64,
 }
 
 impl TaskRow {
@@ -283,6 +323,11 @@ impl TaskRow {
             claude_session_id: row.get("claude_session_id")?,
             final_message_preview: row.get("final_message_preview")?,
             parent_task_id: row.get("parent_task_id")?,
+            pause_count: row.get("pause_count").unwrap_or(0),
+            reprompt_count: row.get("reprompt_count").unwrap_or(0),
+            approvals_requested: row.get("approvals_requested").unwrap_or(0),
+            approvals_approved: row.get("approvals_approved").unwrap_or(0),
+            approvals_rejected: row.get("approvals_rejected").unwrap_or(0),
         })
     }
 
@@ -309,6 +354,11 @@ impl TaskRow {
             claude_session_id: self.claude_session_id,
             final_message_preview: self.final_message_preview,
             parent_task_id: self.parent_task_id,
+            pause_count: self.pause_count.try_into().unwrap_or(0),
+            reprompt_count: self.reprompt_count.try_into().unwrap_or(0),
+            approvals_requested: self.approvals_requested.try_into().unwrap_or(0),
+            approvals_approved: self.approvals_approved.try_into().unwrap_or(0),
+            approvals_rejected: self.approvals_rejected.try_into().unwrap_or(0),
         })
     }
 }
@@ -344,7 +394,9 @@ fn fetch_task_records(
                   started_at, ended_at, duration_ms, \
                   worktree_path, log_path, \
                   token_input, token_output, token_cache_read, token_cache_creation, \
-                  claude_session_id, final_message_preview, parent_task_id \
+                  claude_session_id, final_message_preview, parent_task_id, \
+                  pause_count, reprompt_count, approvals_requested, \
+                  approvals_approved, approvals_rejected \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -460,8 +512,11 @@ impl SessionStore for SqliteStore {
                       started_at, ended_at, duration_ms, \
                       worktree_path, log_path, \
                       token_input, token_output, token_cache_read, token_cache_creation, \
-                      claude_session_id, final_message_preview, parent_task_id) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                      claude_session_id, final_message_preview, parent_task_id, \
+                      pause_count, reprompt_count, approvals_requested, \
+                      approvals_approved, approvals_rejected) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+                             ?17, ?18, ?19, ?20, ?21)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -482,6 +537,11 @@ impl SessionStore for SqliteStore {
                         record.claude_session_id,
                         record.final_message_preview,
                         record.parent_task_id.as_deref(),
+                        i64::from(record.pause_count),
+                        i64::from(record.reprompt_count),
+                        i64::from(record.approvals_requested),
+                        i64::from(record.approvals_approved),
+                        i64::from(record.approvals_rejected),
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -583,6 +643,11 @@ mod sqlite_tests {
             claude_session_id: None,
             final_message_preview: None,
             parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
         }
     }
 
@@ -832,5 +897,41 @@ mod sqlite_tests {
 
         // Re-opening is idempotent — must not attempt another rename.
         let _store2 = SqliteStore::new(db_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrates_old_db_missing_counter_columns() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("v03.db");
+        // Create a v0.3.3-shape DB by hand (no counter columns).
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (run_id TEXT PRIMARY KEY, manifest_path TEXT NOT NULL, \
+                 pitboss_version TEXT NOT NULL, claude_version TEXT, started_at TEXT NOT NULL, \
+                 ended_at TEXT, tasks_total INTEGER, tasks_failed INTEGER, was_interrupted INTEGER DEFAULT 0); \
+                 CREATE TABLE task_records (run_id TEXT NOT NULL, task_id TEXT NOT NULL, \
+                 status TEXT NOT NULL, exit_code INTEGER, started_at TEXT, ended_at TEXT, \
+                 duration_ms INTEGER, worktree_path TEXT, log_path TEXT, token_input INTEGER, \
+                 token_output INTEGER, token_cache_read INTEGER, token_cache_creation INTEGER, \
+                 claude_session_id TEXT, final_message_preview TEXT, parent_task_id TEXT NULL, \
+                 PRIMARY KEY (run_id, task_id));",
+            )
+            .unwrap();
+        }
+        // Open with the new store → migration should add all 5 counter columns.
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+        let mut rec = rec("t", TaskStatus::Success);
+        rec.pause_count = 2;
+        rec.approvals_approved = 1;
+        store.append_record(run_id, &rec).await.unwrap();
+        let back = store.load_run(run_id).await.unwrap();
+        assert_eq!(back.tasks[0].pause_count, 2);
+        assert_eq!(back.tasks[0].approvals_approved, 1);
+
+        // Re-open: must not ALTER again.
+        let _s2 = SqliteStore::new(db_path).unwrap();
     }
 }

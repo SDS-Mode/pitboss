@@ -39,6 +39,10 @@ pub struct RunConfig {
     pub budget_usd: Option<f64>,
     #[serde(default)]
     pub lead_timeout_secs: Option<u64>,
+
+    // NEW in v0.4 — approval policy for when no TUI is attached.
+    #[serde(default)]
+    pub approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
 }
 
 impl Default for RunConfig {
@@ -52,6 +56,7 @@ impl Default for RunConfig {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         }
     }
 }
@@ -251,5 +256,38 @@ mod tests {
         "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert_eq!(m.run.max_workers, Some(2));
+    }
+
+    #[test]
+    fn parses_approval_policy() {
+        let toml_src = r#"
+            [run]
+            approval_policy = "auto_approve"
+
+            [[lead]]
+            id = "triage"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.run.approval_policy,
+            Some(crate::dispatch::state::ApprovalPolicy::AutoApprove)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_approval_policy() {
+        let toml_src = r#"
+            [run]
+            approval_policy = "wibble"
+
+            [[lead]]
+            id = "triage"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let err: Result<Manifest, _> = toml::from_str(toml_src);
+        assert!(err.is_err());
     }
 }
