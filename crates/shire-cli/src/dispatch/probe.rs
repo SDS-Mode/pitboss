@@ -6,7 +6,6 @@ use tokio::process::Command;
 /// Probe the claude CLI for its version string. Returns `None` when the binary
 /// exists but the probe output is unparseable — a non-fatal degrade.
 /// Returns `Err` when the binary is not executable or not found (fatal).
-#[allow(dead_code)]
 pub async fn probe_claude(binary: &Path) -> Result<Option<String>> {
     let output = Command::new(binary).arg("--version").output().await;
     match output {

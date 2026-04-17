@@ -45,12 +45,24 @@ fn run_validate(manifest: &std::path::Path) -> Result<()> {
 
 fn run_dispatch(
     manifest: &std::path::Path,
-    _run_dir_override: Option<std::path::PathBuf>,
-    _dry_run: bool,
+    run_dir_override: Option<std::path::PathBuf>,
+    dry_run: bool,
 ) -> Result<()> {
     let env_mp = parse_env_max_parallel();
-    let _resolved = manifest::load_manifest(manifest, env_mp)?;
-    anyhow::bail!("dispatch not yet implemented — Task 30+");
+    let resolved = manifest::load_manifest(manifest, env_mp)?;
+    let claude_bin = std::env::var_os("SHIRE_CLAUDE_BINARY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("claude"));
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all().build()?;
+    rt.block_on(async {
+        if !dry_run {
+            let _ = dispatch::probe_claude(&claude_bin).await?;
+        }
+        let code = dispatch::run_dispatch_inner(resolved, claude_bin, run_dir_override, dry_run).await?;
+        std::process::exit(code);
+    })
 }
 
 fn parse_env_max_parallel() -> Option<u32> {

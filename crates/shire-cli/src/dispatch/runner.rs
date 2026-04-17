@@ -16,7 +16,6 @@ use uuid::Uuid;
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
 /// Public entry — main.rs calls this. Constructs production spawner + store.
-#[allow(dead_code)]
 pub async fn run_dispatch_inner(
     resolved: ResolvedManifest,
     claude_binary: PathBuf,
@@ -32,7 +31,6 @@ pub async fn run_dispatch_inner(
 }
 
 /// Inner workhorse — takes its dependencies injected for testability.
-#[allow(dead_code)]
 pub async fn execute(
     resolved: ResolvedManifest,
     claude_binary: PathBuf,
@@ -120,7 +118,7 @@ pub async fn execute(
     Ok(if tasks_failed > 0 { 1 } else { 0 })
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn execute_task(
     task: &ResolvedTask,
     claude: &Path,
@@ -208,7 +206,6 @@ async fn execute_task(
     }
 }
 
-#[allow(dead_code)]
 fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     let mut args = vec!["--output-format".into(), "stream-json".into()];
     if !task.tools.is_empty() {
