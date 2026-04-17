@@ -278,7 +278,12 @@ pub async fn handle_wait_for_worker(
                     }
                     bail!("internal: task_id marked done but record not present");
                 }
-                // Not our task — keep waiting.
+                // Defensive: our target may actually be Done now; re-check.
+                let workers = state.workers.read().await;
+                if let Some(WorkerState::Done(rec)) = workers.get(task_id) {
+                    return Ok(rec.clone());
+                }
+                // Not our task and target not yet done — keep waiting.
             }
         }
     }
@@ -312,10 +317,20 @@ pub async fn handle_wait_for_any(
             Err(_) => bail!("wait_for_any timed out"),
             Ok(Err(_)) => bail!("completion channel closed"),
             Ok(Ok(completed_id)) => {
+                // Primary path: our target completed.
                 if task_ids.iter().any(|id| id == &completed_id) {
                     let workers = state.workers.read().await;
                     if let Some(WorkerState::Done(rec)) = workers.get(&completed_id) {
                         return Ok((completed_id, rec.clone()));
+                    }
+                }
+                // Defensive re-scan: a prior broadcast we missed, or a write-ordering race,
+                // might mean one of our targets is actually Done now even though the recv'd
+                // id isn't in our set. Cheap to check; returns only if found.
+                let workers = state.workers.read().await;
+                for id in task_ids {
+                    if let Some(WorkerState::Done(rec)) = workers.get(id) {
+                        return Ok((id.clone(), rec.clone()));
                     }
                 }
             }
