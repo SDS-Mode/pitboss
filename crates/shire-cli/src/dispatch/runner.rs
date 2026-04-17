@@ -60,6 +60,7 @@ pub async fn execute(
 
     let semaphore = Arc::new(Semaphore::new(resolved.max_parallel as usize));
     let cancel = CancelToken::new();
+    crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
     let records: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
