@@ -7,6 +7,29 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`fake-claude` MCP-client mode.** When `PITBOSS_FAKE_MCP_SOCKET` is
+  set, the test-support `fake-claude` binary connects to a pitboss MCP
+  socket and can issue real tool calls from a new `mcp_call` script
+  action. Supports named bindings + whole-string template substitution
+  (`"$w1.task_id"`) for chaining tool calls — covers realistic lead
+  patterns in integration tests.
+- **`crates/pitboss-cli/tests/e2e_flows.rs`** — four new end-to-end
+  tests driving a real `fake-claude` subprocess through `SessionHandle`
+  + `TokioSpawner`: spawn+wait happy path, 3-worker fan-out with
+  wait_for_any, mid-flight cancel, and a full approval round-trip
+  exercising the MCP→bridge→control→control→bridge→MCP loop with
+  `fake-control-client`. Unlocks v0.4.1 feature development without
+  Anthropic API calls.
+
+### Fixed
+- Control-socket `approve` op now writes the `approval_response` event
+  to `events.jsonl` and increments `worker_counters.approvals_{approved,
+  rejected}` — matching `ApprovalBridge::respond`'s audit trail. The
+  v0.4.0 queue-drain path bypassed `respond`, so approvals drained on
+  TUI connect produced no response event and didn't bump counters.
+  Surfaced by the new e2e approval round-trip test.
+
 ## [0.4.0] — 2026-04-17
 
 ### Added
