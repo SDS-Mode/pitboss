@@ -784,6 +784,29 @@ pub async fn handle_continue_worker(
     }
 }
 
+pub async fn handle_request_approval(
+    state: &Arc<DispatchState>,
+    args: RequestApprovalArgs,
+) -> Result<ApprovalToolResponse> {
+    let timeout = Duration::from_secs(
+        args.timeout_secs
+            .or(state.manifest.lead_timeout_secs)
+            .unwrap_or(3600),
+    );
+    let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
+    match bridge
+        .request(state.lead_id.clone(), args.summary, timeout)
+        .await
+    {
+        Ok(resp) => Ok(ApprovalToolResponse {
+            approved: resp.approved,
+            comment: resp.comment,
+            edited_summary: resp.edited_summary,
+        }),
+        Err(e) => anyhow::bail!("approval failed: {e}"),
+    }
+}
+
 pub async fn handle_wait_for_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
@@ -1600,5 +1623,79 @@ mod tests {
             workers.get("w-1").unwrap(),
             WorkerState::Running { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_request_approval_auto_approves() {
+        use crate::dispatch::state::ApprovalPolicy;
+        // Rebuild a state with AutoApprove.
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::process::ProcessSpawner;
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let lead = ResolvedLead {
+            id: "lead".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: Effort::High,
+            tools: vec![],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: None,
+            approval_policy: Some(ApprovalPolicy::AutoApprove),
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_id = Uuid::now_v7();
+        let run_subdir = dir.path().join(run_id.to_string());
+        std::mem::forget(dir);
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            ApprovalPolicy::AutoApprove,
+        ));
+        let resp = handle_request_approval(
+            &state,
+            RequestApprovalArgs {
+                summary: "spawn 3".into(),
+                timeout_secs: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(resp.approved);
     }
 }

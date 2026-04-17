@@ -18,8 +18,9 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
     handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
-    handle_spawn_worker, handle_wait_for_any, handle_wait_for_worker, handle_worker_status,
-    ContinueWorkerArgs, SpawnWorkerArgs, TaskIdArgs, WaitForAnyArgs, WaitForWorkerArgs,
+    handle_request_approval, handle_spawn_worker, handle_wait_for_any, handle_wait_for_worker,
+    handle_worker_status, ContinueWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs, TaskIdArgs,
+    WaitForAnyArgs, WaitForWorkerArgs,
 };
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -152,6 +153,19 @@ impl PitbossHandler {
         Parameters(args): Parameters<ContinueWorkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match handle_continue_worker(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Request operator approval before proceeding. Blocks until operator responds or timeout."
+    )]
+    async fn request_approval(
+        &self,
+        Parameters(args): Parameters<RequestApprovalArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_request_approval(&self.state, args).await {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
