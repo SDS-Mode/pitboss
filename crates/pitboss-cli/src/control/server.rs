@@ -396,6 +396,58 @@ async fn dispatch_op(
                 },
             }
         }
+        ControlOp::ListWorkers => {
+            let workers = state.workers.read().await;
+            let prompts = state.worker_prompts.read().await;
+            let entries = workers
+                .iter()
+                .map(|(id, w)| {
+                    let (state_str, started_at, session_id) = match w {
+                        crate::dispatch::state::WorkerState::Pending => {
+                            ("pending".to_string(), None, None)
+                        }
+                        crate::dispatch::state::WorkerState::Running {
+                            started_at,
+                            session_id,
+                        } => (
+                            "running".to_string(),
+                            Some(started_at.to_rfc3339()),
+                            session_id.clone(),
+                        ),
+                        crate::dispatch::state::WorkerState::Paused {
+                            paused_at,
+                            session_id,
+                            ..
+                        } => (
+                            "paused".to_string(),
+                            Some(paused_at.to_rfc3339()),
+                            Some(session_id.clone()),
+                        ),
+                        crate::dispatch::state::WorkerState::Done(rec) => (
+                            match rec.status {
+                                pitboss_core::store::TaskStatus::Success => "done_success",
+                                pitboss_core::store::TaskStatus::Failed => "done_failed",
+                                pitboss_core::store::TaskStatus::TimedOut => "done_timed_out",
+                                pitboss_core::store::TaskStatus::Cancelled => "done_cancelled",
+                                pitboss_core::store::TaskStatus::SpawnFailed => "done_spawn_failed",
+                            }
+                            .to_string(),
+                            Some(rec.started_at.to_rfc3339()),
+                            rec.claude_session_id.clone(),
+                        ),
+                    };
+                    crate::control::protocol::WorkerSnapshotEntry {
+                        task_id: id.clone(),
+                        state: state_str,
+                        prompt_preview: prompts.get(id).cloned().unwrap_or_default(),
+                        started_at,
+                        parent_task_id: None,
+                        session_id,
+                    }
+                })
+                .collect();
+            ControlEvent::WorkersSnapshot { workers: entries }
+        }
         other => ControlEvent::OpUnknown {
             op: op_tag(&other).into(),
         },
@@ -513,7 +565,7 @@ mod tests {
             .await
             .unwrap();
         stream
-            .write_all(b"{\"op\":\"list_workers\"}\n")
+            .write_all(b"{\"op\":\"approve\",\"request_id\":\"r\",\"approved\":true}\n")
             .await
             .unwrap();
 
@@ -524,7 +576,7 @@ mod tests {
         let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
         assert!(matches!(
             reply,
-            ControlEvent::OpUnknown { op } if op == "list_workers"
+            ControlEvent::OpUnknown { op } if op == "approve"
         ));
         drop(handle);
     }
@@ -807,6 +859,62 @@ mod tests {
             ControlEvent::OpAcked { ref op, .. } if op == "reprompt_worker"
         ));
         assert!(worker_token.is_terminated());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn list_workers_op_returns_workers_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        state.workers.write().await.insert(
+            "w-1".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess".into()),
+            },
+        );
+        state
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-1".into(), "investigate bug".into());
+
+        let sock = dir.path().join("list.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "flat".into(),
+            state,
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"list_workers\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        match reply {
+            ControlEvent::WorkersSnapshot { workers } => {
+                assert_eq!(workers.len(), 1);
+                assert_eq!(workers[0].task_id, "w-1");
+                assert_eq!(workers[0].state, "running");
+                assert_eq!(workers[0].session_id.as_deref(), Some("sess"));
+            }
+            other => panic!("expected WorkersSnapshot, got {other:?}"),
+        }
         drop(handle);
     }
 }
