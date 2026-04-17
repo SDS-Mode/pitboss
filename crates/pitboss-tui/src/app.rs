@@ -170,10 +170,9 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
         Mode::Help => handle_help(state, code),
         Mode::PickingRun { .. } => handle_picking_run(state, code),
         Mode::SnapIn { .. } => handle_snap_in(state, code, modifiers),
+        Mode::ConfirmKill { .. } => handle_confirm_kill(state, code),
         // v0.4 modal states — keybindings wired in later tasks.
-        Mode::ConfirmKill { .. } | Mode::PromptReprompt { .. } | Mode::ApprovalModal { .. } => {
-            Action::Continue
-        }
+        Mode::PromptReprompt { .. } | Mode::ApprovalModal { .. } => Action::Continue,
     }
 }
 
@@ -199,6 +198,21 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
 
         // Snap-in: enter full-screen view for the focused tile.
         KeyCode::Enter => state.enter_snap_in(),
+
+        // v0.4 — cancel focused worker.
+        KeyCode::Char('x') => {
+            if let Some(tile) = state.focused_tile() {
+                state.mode = Mode::ConfirmKill {
+                    target: crate::state::KillTarget::Worker(tile.id.clone()),
+                };
+            }
+        }
+        // v0.4 — cancel entire run.
+        KeyCode::Char('X') => {
+            state.mode = Mode::ConfirmKill {
+                target: crate::state::KillTarget::Run,
+            };
+        }
 
         // Refresh — watcher already polls every 500ms; render at loop top
         // covers forced redraw. All other keys are intentionally ignored.
@@ -317,4 +331,45 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
         }
         _ => {}
     }
+}
+
+fn handle_confirm_kill(state: &mut AppState, code: KeyCode) -> Action {
+    let Mode::ConfirmKill { target } = state.mode.clone() else {
+        return Action::Continue;
+    };
+    match code {
+        KeyCode::Char('y' | 'Y') => {
+            if let Some(client) = state.control_client.clone() {
+                let op = match target {
+                    crate::state::KillTarget::Worker(id) => {
+                        pitboss_cli::control::protocol::ControlOp::CancelWorker { task_id: id }
+                    }
+                    crate::state::KillTarget::Run => {
+                        pitboss_cli::control::protocol::ControlOp::CancelRun
+                    }
+                };
+                // Best-effort async send. Detach via fire-and-forget.
+                let _ = futures_block_on(async move { client.send_op(op).await });
+            }
+            state.mode = Mode::Normal;
+        }
+        _ => state.mode = Mode::Normal,
+    }
+    Action::Continue
+}
+
+// The TUI event loop runs outside any tokio runtime context (crossterm polls
+// synchronously). For fire-and-forget control-socket sends we use a tiny
+// single-threaded runtime per call. The operation is short — one writeln —
+// so the overhead is acceptable. If it ever becomes hot, migrate to a
+// persistent runtime handle threaded through AppState.
+fn futures_block_on<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio rt")
+        .block_on(fut)
 }

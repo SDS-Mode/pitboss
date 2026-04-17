@@ -27,7 +27,6 @@ pub enum Mode {
         at_bottom: bool,
     },
     /// v0.4: confirm modal before sending a destructive control op.
-    #[allow(dead_code)]
     ConfirmKill {
         target: KillTarget,
     },
@@ -49,7 +48,6 @@ pub enum Mode {
 
 /// What `ConfirmKill` targets.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum KillTarget {
     Worker(String),
     Run,
@@ -868,5 +866,21 @@ mod tests {
             sub_mode: ApprovalSubMode::Overview,
         };
         assert!(matches!(m, Mode::ApprovalModal { .. }));
+    }
+
+    #[test]
+    fn confirm_kill_mode_stores_worker_target_from_focus() {
+        let mut state = make_state_with_tile("task-001");
+        state.mode = Mode::ConfirmKill {
+            target: KillTarget::Worker("task-001".into()),
+        };
+        if let Mode::ConfirmKill {
+            target: KillTarget::Worker(id),
+        } = &state.mode
+        {
+            assert_eq!(id, "task-001");
+        } else {
+            panic!("not ConfirmKill::Worker");
+        }
     }
 }

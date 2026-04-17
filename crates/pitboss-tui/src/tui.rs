@@ -188,17 +188,21 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_statusbar(frame, chunks[2], state);
 
     // Overlays (drawn last so they appear on top).
-    // v0.4 modal overlays (ConfirmKill / PromptReprompt / ApprovalModal) are
-    // no-ops here; rendering is wired in later tasks.
-    match state.mode {
+    match &state.mode {
         Mode::ViewingLog => render_log_overlay(frame, area, state),
         Mode::Help => render_help_overlay(frame, area),
-        Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, selected),
-        Mode::Normal
-        | Mode::SnapIn { .. }
-        | Mode::ConfirmKill { .. }
-        | Mode::PromptReprompt { .. }
-        | Mode::ApprovalModal { .. } => {}
+        Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, *selected),
+        Mode::ConfirmKill { target } => render_confirm_kill(frame, area, target),
+        Mode::PromptReprompt { task_id, draft } => {
+            render_prompt_reprompt(frame, area, task_id, draft);
+        }
+        Mode::ApprovalModal {
+            request_id,
+            task_id,
+            summary,
+            sub_mode,
+        } => render_approval_modal(frame, area, request_id, task_id, summary, sub_mode),
+        Mode::Normal | Mode::SnapIn { .. } => {}
     }
 }
 
@@ -656,6 +660,44 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
     list_state.select(Some(selected));
 
     frame.render_stateful_widget(list, inner, &mut list_state);
+}
+
+fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::KillTarget) {
+    let msg = match target {
+        crate::state::KillTarget::Worker(id) => format!(" Cancel worker `{id}`? [y/N] "),
+        crate::state::KillTarget::Run => {
+            " Cancel the ENTIRE RUN? All workers terminate. [y/N] ".into()
+        }
+    };
+    let msg_w = u16::try_from(msg.len()).unwrap_or(u16::MAX);
+    let modal_w = msg_w.saturating_add(4).min(area.width);
+    let modal_h = 3u16;
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal = Rect::new(x, y, modal_w, modal_h);
+    frame.render_widget(Clear, modal);
+    let block = Block::default().borders(Borders::ALL).title(" Confirm ");
+    let para = Paragraph::new(msg)
+        .block(block)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Yellow));
+    frame.render_widget(para, modal);
+}
+
+// Forward decls filled in by Task 26 / Task 32.
+fn render_prompt_reprompt(_frame: &mut Frame, _area: Rect, _task_id: &str, _draft: &str) {
+    // Covered in Task 26.
+}
+
+fn render_approval_modal(
+    _frame: &mut Frame,
+    _area: Rect,
+    _request_id: &str,
+    _task_id: &str,
+    _summary: &str,
+    _sub_mode: &crate::state::ApprovalSubMode,
+) {
+    // Covered in Task 32.
 }
 
 // ---------------------------------------------------------------------------
