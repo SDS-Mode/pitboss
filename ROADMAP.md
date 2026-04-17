@@ -3,46 +3,91 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-## Near-term (focused, shippable in ≤1 day)
+## In progress
 
-### TUI kill: cancel a worker or a whole run from `pitboss-tui`
+### v0.4.0 — Live control plane
 
-**Status:** designed, not built. Deferred out of v0.3.4.
+**Status:** design spec written, plan pending, build pending.
 
-The TUI is read-only today. Add two keybindings:
-- `x` on a focused tile → cancel that worker (hierarchical mode only).
-- `X` (or `Ctrl-K`) → cancel the whole run (equivalent to Ctrl-C in the
-  dispatch terminal).
+Expanded from the original "TUI kill" roadmap item into a broader L4
+(human-in-the-loop) surface covering kill, pause, continue, reprompt,
+and approve/edit. Mechanism is a per-run unix control socket. See
+`docs/superpowers/specs/2026-04-17-pitboss-v0.4-live-control-design.md`
+for the full spec.
 
-Both gated behind a confirmation modal.
+---
 
-**Mechanism — per-run control socket.** The dispatcher binds a second unix
-socket at `$XDG_RUNTIME_DIR/pitboss/<run-id>.control.sock` (alongside the
-existing MCP socket for hierarchical runs). TUI connects and sends a
-line-based protocol:
+## Deferred out of v0.4.0 (promoted from near-term to explicit deferrals)
 
-```
-cancel-run
-cancel-worker <task_id>
-```
+### `pitboss attach <run-id> <task-id>` — live TTY relay escape hatch
 
-Dispatcher receives → looks up the appropriate `CancelToken` → terminates.
-Reuses the same `CancelToken` plumbing we already have for Ctrl-C,
-lead-exit cleanup, and `mcp__pitboss__cancel_worker`.
+**Status:** designed out of v0.4.0 core; layered on top as v0.4.1.
 
-**Scope estimate:** ~380 lines across the dispatcher control server, TUI
-client, keybindings + modal, a `fake-control-client` test-support crate,
-and one integration test. Half a day.
+Uses `portable-pty` crate to allocate a PTY for the worker subprocess;
+`pitboss attach` connects the operator's terminal stdio to that PTY for
+real-time keystroke passthrough. The only L3 feature that requires more
+than the `-p` + `--resume` model can give. Target: v0.4.1 once v0.4.0
+is stable and operator feedback indicates concrete need.
 
-**Gotchas:**
-- Socket lifecycle tied to run lifecycle — if the TUI opens a completed
-  run, `x`/`X` should show "run finished, nothing to cancel" rather
-  than error.
-- `x` on the lead tile in hierarchical mode is semantically equivalent
-  to `X` — probably forbid `x` on the lead and require `X` for that
-  action.
-- `⊘ Cancelling...` intermediate state in the TUI while the worker
-  drains (up to `TERMINATE_GRACE` = 10 s).
+### "Freeze" pause — true SIGSTOP/SIGCONT process freeze
+
+**Status:** future. Concept captured 2026-04-17 during v0.4.0 brainstorm.
+
+v0.4.0 ships pause via cancel-with-resume semantics: subprocess ends,
+session id preserved, continue spawns `claude --resume <id>`. The
+alternative "freeze" semantic — `SIGSTOP` the running process, keep
+it memory-resident, `SIGCONT` to thaw — is precise and fast (no
+subprocess re-spawn cost) but adds failure modes around:
+
+- Anthropic's HTTP stream timing out during the freeze.
+- Orphan stopped processes if pitboss itself dies while a worker is
+  frozen.
+- The question of whether `lead_timeout_secs` should also pause (it
+  currently doesn't, per the v0.4 design decision).
+
+Revisit when a concrete use case surfaces (probably: "pause for hours"
+or "pause for operator meeting" kind of scenarios).
+
+### Out-of-TUI notifications
+
+**Status:** future. Pitboss shouldn't require a TUI to be attached for
+operator awareness. Approval requests, run completion, budget-exceeded
+events, worker failures — all candidates for outbound channels:
+
+- **Webhooks** (HTTP POST to a configurable URL)
+- **Slack / Discord** integration
+- **Email** (SMTP / SES)
+- **Desktop notifications** (notify-send / osascript)
+
+Natural pairing with the `approval_policy` manifest field: a `notify`
+policy that pushes the request to a notification channel and waits
+for an asynchronous response. Requires designing a response mechanism
+(reply link? CLI tool that posts back?).
+
+### Structured plan editing for approval
+
+**Status:** YAGNI unless free-form editing proves insufficient.
+
+v0.4.0's `request_approval` takes a free-form string summary;
+operator `e`-edits it back as a string. If the lead wants structured
+plans (typed fields: workers_to_spawn, budget, rationale) with
+typed in-TUI editing, that's a bigger design: schema, typed UI,
+validation. Add if concrete pain shows up.
+
+### Reprompt via MCP tool
+
+**Status:** operator-only in v0.4.0. Lead can achieve similar via
+`cancel_worker` + `spawn_worker` with `--resume`. Promote to a
+first-class lead-facing `mcp__pitboss__reprompt_worker(task_id,
+prompt)` if friction emerges.
+
+---
+
+## Near-term (small, shippable)
+
+The original "TUI kill" near-term item has been absorbed into the v0.4.0
+scope; this section is currently empty. Add items here as they're
+identified.
 
 ---
 
