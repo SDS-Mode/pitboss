@@ -18,13 +18,11 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          # macos-latest is Apple Silicon as of 2024-Q4.
+          # macos-latest is Apple Silicon. Intel Macs are EOL for new
+          # binaries — drop x86_64-apple-darwin; existing users can build
+          # from source or pull an older release tarball.
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: tar.gz
-          # macos-13 is the last Intel Mac runner image.
-          - os: macos-13
-            target: x86_64-apple-darwin
             archive: tar.gz
     steps:
       - uses: actions/checkout@v4
