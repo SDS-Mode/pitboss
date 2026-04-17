@@ -122,6 +122,13 @@ pub async fn handle_spawn_worker(
         workers.insert(task_id.clone(), WorkerState::Pending);
     }
 
+    let worker_cancel = mosaic_core::session::CancelToken::new();
+    state
+        .worker_cancels
+        .write()
+        .await
+        .insert(task_id.clone(), worker_cancel);
+
     let _ = args;
     Ok(SpawnWorkerResult {
         task_id,
@@ -231,17 +238,11 @@ pub async fn handle_cancel_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Result<CancelResult> {
-    // Look up the worker's own CancelToken and fire it. In v0.3 the worker's
-    // CancelToken is a *clone* of the run-level cancel; a per-worker signal
-    // would require additional plumbing in the hierarchical runner (Task 22).
-    // For now, issuing a run-level drain is the closest we can do without
-    // per-worker tokens. This is wired fully in the integration tests.
-    let workers = state.workers.read().await;
-    if !workers.contains_key(task_id) {
+    let cancels = state.worker_cancels.read().await;
+    let Some(token) = cancels.get(task_id) else {
         anyhow::bail!("unknown task_id: {task_id}");
-    }
-    // Actual SIGTERM signalling happens in Task 22 via state.cancel_worker_task_id().
-    state.cancel.drain(); // temporary; refined in Task 22
+    };
+    token.terminate();
     Ok(CancelResult { ok: true })
 }
 
@@ -583,6 +584,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn cancel_worker_unknown_id_errors() {
+        let state = test_state().await;
+        let err = handle_cancel_worker(&state, "never-existed")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown task_id"));
     }
 
     #[tokio::test]

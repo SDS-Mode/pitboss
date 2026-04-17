@@ -37,6 +37,9 @@ pub struct DispatchState {
     /// Broadcast channel that emits a `task_id` whenever a worker transitions
     /// to `Done`. Subscribed to by `wait_for_worker` handlers.
     pub done_tx: broadcast::Sender<String>,
+    /// Per-worker CancelToken, keyed by task_id. Registered on spawn,
+    /// terminated by `cancel_worker`.
+    pub worker_cancels: RwLock<HashMap<String, CancelToken>>,
 }
 
 impl DispatchState {
@@ -57,6 +60,7 @@ impl DispatchState {
             workers: RwLock::new(HashMap::new()),
             spent_usd: Mutex::new(0.0),
             done_tx,
+            worker_cancels: RwLock::new(HashMap::new()),
         }
     }
 
