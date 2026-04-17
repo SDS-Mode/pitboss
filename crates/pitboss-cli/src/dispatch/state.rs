@@ -207,6 +207,7 @@ mod tests {
             max_workers,
             budget_usd: budget,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();

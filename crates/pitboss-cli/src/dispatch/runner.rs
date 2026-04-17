@@ -487,6 +487,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -570,6 +571,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -666,6 +668,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
+            approval_policy: None,
         };
 
         let spawner = Arc::new(CyclingFake(

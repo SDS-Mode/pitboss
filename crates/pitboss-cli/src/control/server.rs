@@ -481,6 +481,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(1.0),
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

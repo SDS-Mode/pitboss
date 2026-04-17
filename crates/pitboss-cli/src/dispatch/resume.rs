@@ -394,6 +394,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
+            approval_policy: None,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
