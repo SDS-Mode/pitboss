@@ -7,6 +7,27 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-17
+
+### Added
+- GitHub Actions CI on every push/PR to `main`: `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test --workspace --features pitboss-core/test-support`, and
+  `scripts/smoke-part1.sh`. Cached with `Swatinem/rust-cache@v2`.
+- GitHub Actions release workflow triggered by `v*` tag push: builds
+  cross-platform binaries and attaches `pitboss-<version>-<target>.tar.gz`
+  archives to the GitHub release.
+- `pitboss completions <shell>` and `pitboss-tui completions <shell>`
+  subcommands generating shell completions for bash, zsh, fish, elvish,
+  and powershell via `clap_complete`.
+- `CHANGELOG.md` covering v0.1.0 through v0.3.1.
+
+### Fixed
+- Two clippy lints introduced in rustc 1.95 that the local 1.94 missed:
+  `unnecessary_sort_by` in `pitboss-tui/src/runs.rs` (switched to
+  `sort_by_key` + `cmp::Reverse`) and `map_unwrap_or` in
+  `pitboss-tui/src/watcher.rs` (switched to `Result::is_ok_and`).
+
 ## [0.3.0] — 2026-04-17
 
 ### Added
@@ -112,7 +133,8 @@ This project uses [Semantic Versioning](https://semver.org/).
   SIGINT terminates.
 - Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
 
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/SDS-Mode/pitboss/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/SDS-Mode/pitboss/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/SDS-Mode/pitboss/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/SDS-Mode/pitboss/compare/v0.2.0...v0.2.1
