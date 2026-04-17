@@ -7,6 +7,42 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-04-17
+
+### Added
+- `aarch64-apple-darwin` and `x86_64-apple-darwin` release targets alongside
+  the existing `x86_64-unknown-linux-gnu`. `pitboss-core` now enables
+  `git2`'s `vendored-libgit2` feature so cross-compilation on macOS
+  runners doesn't depend on a system libgit2.
+- `server_drops_cleanly_even_with_active_connection` regression test
+  asserting `McpServer::drop` completes within 500 ms even when a unix
+  socket session is still open.
+
+### Changed
+- **MCP session cleanup.** `McpServer` now tracks per-connection tasks
+  via `tokio_util::task::TaskTracker` and a `CancellationToken`. On
+  drop, the token is cancelled so in-flight sessions exit their select
+  arms immediately instead of running until their internal session
+  timeout (up to 3600 s). Closes the reviewer-flagged orphan-task
+  concern.
+- **SQLite row projection.** `fetch_task_records` and `fetch_run_row`
+  used to return 15- and 8-element positional tuples from
+  `rusqlite::Row::query_map`, coupling field order to SQL column order.
+  Replaced with `TaskRow` and `RunRow` structs that read by column name
+  via `row.get("column_name")`. Adding a new column no longer silently
+  re-maps existing fields. Two `#[allow(clippy::type_complexity)]`
+  suppressions removed.
+
+### Removed
+- Module-wide `#![allow(dead_code)]` suppressions from
+  `pitboss-cli/src/mcp/server.rs`, `mcp/tools.rs`, and
+  `dispatch/state.rs`. The suppressions were vestigial from early
+  development; every item is now wired up, so clippy runs clean
+  without them.
+- Unused `_store: Arc<dyn SessionStore>` parameter from
+  `dispatch/runner.rs::execute_task`. Was a "planned but never wired"
+  forward-reference.
+
 ## [0.3.2] — 2026-04-17
 
 ### Fixed
@@ -152,7 +188,8 @@ This project uses [Semantic Versioning](https://semver.org/).
   SIGINT terminates.
 - Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
 
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/SDS-Mode/pitboss/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/SDS-Mode/pitboss/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/SDS-Mode/pitboss/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/SDS-Mode/pitboss/compare/v0.2.2...v0.3.0
