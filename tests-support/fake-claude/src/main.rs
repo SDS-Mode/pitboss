@@ -50,9 +50,36 @@ fn main() {
             .build()
             .expect("build tokio runtime");
 
-        if let Err(e) = rt.block_on(script::execute_script(reader)) {
-            eprintln!("fake-claude: script error: {e:#}");
-            std::process::exit(5);
+        // Open an MCP client if the socket env var is set. Unset => None.
+        let client = match std::env::var("PITBOSS_FAKE_MCP_SOCKET") {
+            Ok(sock) => {
+                let path = std::path::PathBuf::from(sock);
+                match rt.block_on(mcp_client::McpClient::connect(&path)) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("fake-claude: mcp connect {}: {e:#}", path.display());
+                        std::process::exit(2);
+                    }
+                }
+            }
+            Err(_) => None,
+        };
+
+        if let Err(e) = rt.block_on(script::execute_script(reader, client)) {
+            let msg = format!("{e:#}");
+            eprintln!("fake-claude: script error: {msg}");
+            // Distinguish exit codes by error type (see spec §Error handling).
+            let code = if msg.contains("unknown binding")
+                || msg.contains("no path")
+                || msg.contains("substitute")
+            {
+                4
+            } else if msg.contains("requires PITBOSS_FAKE_MCP_SOCKET") {
+                3
+            } else {
+                5
+            };
+            std::process::exit(code);
         }
     }
 

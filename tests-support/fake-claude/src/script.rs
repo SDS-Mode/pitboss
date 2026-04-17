@@ -3,7 +3,8 @@
 //! Reads a JSONL script line-by-line from a `BufRead`, executing each
 //! action in order. Existing action types (stdout/stderr/sleep_ms/
 //! tool_use) preserve their pre-v0.4.1 behavior exactly. The new
-//! `mcp_call` action lands in Task 5.
+//! `mcp_call` action issues a real MCP tool call through an optionally-
+//! provided client.
 
 #![allow(dead_code)]
 
@@ -13,6 +14,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+
+use crate::bindings::{substitute, Bindings};
+use crate::mcp_client::McpClient;
 
 /// Monotonic counter used to generate unique tool_use ids within a process.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -24,9 +28,10 @@ fn random_id() -> u64 {
 /// Execute the script file, dispatching each action in order. Returns
 /// Ok(()) when the script completes without error.
 ///
-/// For v0.4.1: the only action that needs async is `mcp_call` (Task 5).
-/// Existing actions are sync; we call them directly from this async fn.
-pub async fn execute_script<R: BufRead>(reader: R) -> Result<()> {
+/// `client` is only required when the script contains `mcp_call`
+/// actions; if None, those actions return an error.
+pub async fn execute_script<R: BufRead>(reader: R, mut client: Option<McpClient>) -> Result<()> {
+    let mut bindings = Bindings::new();
     let stdout = io::stdout();
     let stderr = io::stderr();
 
@@ -67,6 +72,43 @@ pub async fn execute_script<R: BufRead>(reader: R) -> Result<()> {
             let mut out = stdout.lock();
             writeln!(out, "{}", serde_json::to_string(&wrapper)?)?;
             out.flush()?;
+        } else if let Some(call) = action.get("mcp_call") {
+            let name = call
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("mcp_call at line {line_no} missing 'name' string"))?
+                .to_string();
+            let mut args = call.get("args").cloned().unwrap_or(Value::Null);
+            let bind = call
+                .get("bind")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let allow_err = call
+                .get("allow_err")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            substitute(&mut args, &bindings)
+                .with_context(|| format!("substitute at line {line_no}"))?;
+
+            let Some(c) = client.as_mut() else {
+                anyhow::bail!("mcp_call at line {line_no} requires PITBOSS_FAKE_MCP_SOCKET");
+            };
+
+            match c.call_tool(&name, args).await {
+                Ok(result) => {
+                    if let Some(name) = bind {
+                        bindings.insert(name, result);
+                    }
+                }
+                Err(e) => {
+                    if allow_err {
+                        eprintln!("fake-claude: mcp_call {name} (line {line_no}): {e:#}");
+                    } else {
+                        return Err(e.context(format!("mcp_call {name} at line {line_no}")));
+                    }
+                }
+            }
         } else {
             eprintln!("fake-claude: unknown action at line {line_no}: {line}");
         }
