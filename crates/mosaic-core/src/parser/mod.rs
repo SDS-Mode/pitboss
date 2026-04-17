@@ -320,12 +320,17 @@ mod tests {
     fn unknown_fields_on_known_types_are_ignored() {
         let line = br#"{"type":"system","subtype":"init","future_field":42}"#;
         let ev = parse_line(line).unwrap();
-        assert_eq!(ev, Event::System { subtype: Some("init".into()) });
+        assert_eq!(
+            ev,
+            Event::System {
+                subtype: Some("init".into())
+            }
+        );
     }
 
     #[test]
     fn invalid_json_is_malformed() {
-        let line = br#"{not json"#;
+        let line = br"{not json";
         let err = parse_line(line).unwrap_err();
         assert!(matches!(err, ParseError::Malformed { .. }));
     }
