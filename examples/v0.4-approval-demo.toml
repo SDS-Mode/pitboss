@@ -1,0 +1,58 @@
+# v0.4 live-control demo: a hierarchical run that exercises every new
+# feature in v0.4.0 — approval_policy=block, request_approval interrupt,
+# and a lead/worker layout the operator can pause/continue/reprompt/cancel
+# from the TUI.
+#
+# Usage:
+#   mkdir -p /tmp/pitboss-v04-demo && cd /tmp/pitboss-v04-demo && git init -q
+#   pitboss dispatch examples/v0.4-approval-demo.toml
+#
+# In another terminal:
+#   pitboss-tui
+#
+# Keybindings to try while the lead is running:
+#   x  — confirm + cancel the focused worker
+#   X  — confirm + cancel the whole run
+#   p  — pause the focused worker (keeps its claude session)
+#   c  — continue a paused worker (spawns claude --resume)
+#   r  — reprompt (Ctrl-Enter to send, Esc to cancel)
+#   y / n / e  — when the approval modal is up: approve, reject, or edit
+
+[run]
+max_workers       = 3
+budget_usd        = 0.50
+lead_timeout_secs = 900
+worktree_cleanup  = "never"
+# v0.4 NEW: what happens when the lead calls request_approval and no TUI
+# is attached. "block" = queue until a TUI connects. Alternatives:
+# "auto_approve" (immediate yes), "auto_reject" (immediate no).
+approval_policy   = "block"
+
+[defaults]
+model        = "claude-haiku-4-5"
+use_worktree = false
+
+[[lead]]
+id        = "orchestrator"
+directory = "/tmp/pitboss-v04-demo"
+prompt    = """You are a small demo lead for pitboss v0.4.
+
+1. Briefly introduce yourself in one sentence.
+2. Before spawning any workers, call mcp__pitboss__request_approval
+   with summary = "About to spawn 3 tiny demo workers (write a haiku each)"
+   and timeout_secs = 120. Wait for the operator response.
+3. If approved: spawn three workers concurrently via mcp__pitboss__spawn_worker.
+   Each worker prompt: "Write a 3-line haiku about <topic>." Topics:
+   worker w-a -> "rust ownership"
+   worker w-b -> "unix sockets"
+   worker w-c -> "unfinished coffee"
+   Pass directory=/tmp/pitboss-v04-demo and model=claude-haiku-4-5 to each.
+4. Use mcp__pitboss__wait_for_any / wait_for_worker to collect the results.
+5. Print the three haikus and a one-sentence conclusion.
+
+If rejected: apologize briefly and exit. If the operator edits your
+summary before approving, use the edited summary as your guidance for
+what to do (may differ from the 3-haiku plan).
+"""
+tools        = ["Read", "Write", "Bash"]
+timeout_secs = 900

@@ -30,6 +30,10 @@ This project uses [Semantic Versioning](https://semver.org/).
   `approvals_requested`, `approvals_approved`, `approvals_rejected`.
   Backfilled on disk via `#[serde(default)]` and in SQLite via the
   idempotent `migrate_v04_event_counters` migration.
+- **`examples/v0.4-approval-demo.toml`** — minimal hierarchical
+  manifest that exercises `approval_policy = "block"` + a
+  `request_approval` interrupt + three tiny workers, for manual
+  smoke-testing of the new keybindings.
 
 ### Changed
 - `WorkerState::Running` now carries an `Option<String> session_id`;
