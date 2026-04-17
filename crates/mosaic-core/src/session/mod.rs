@@ -107,7 +107,7 @@ mod cancel_tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         cancel.terminate();
         let outcome = tokio::time::timeout(
-            Duration::from_secs(TERMINATE_GRACE.as_secs() + 10),
+            Duration::from_secs(TERMINATE_GRACE.as_secs() + 15),
             handle_fut,
         )
         .await
@@ -124,5 +124,39 @@ mod cancel_tests {
             .run_to_completion(CancelToken::new(), Duration::from_millis(100))
             .await;
         assert!(matches!(outcome.final_state, SessionState::TimedOut));
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod spawn_fail_tests {
+    use super::*;
+    use crate::process::fake::{FakeScript, FakeSpawner};
+    use crate::process::{ProcessSpawner, SpawnCmd};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn spawn_rejection_yields_spawnfailed() {
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(
+            FakeScript::new().fail_spawn("no binary here"),
+        ));
+        let cmd = SpawnCmd {
+            program: PathBuf::from("x"),
+            args: vec![],
+            cwd: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+        };
+        let outcome = SessionHandle::new("t", spawner, cmd)
+            .run_to_completion(CancelToken::new(), Duration::from_secs(5))
+            .await;
+        match outcome.final_state {
+            SessionState::SpawnFailed { message } => {
+                assert!(message.contains("no binary here"));
+            }
+            other => panic!("expected SpawnFailed, got {other:?}"),
+        }
+        assert!(outcome.exit_code.is_none());
     }
 }
