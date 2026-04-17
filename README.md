@@ -24,7 +24,29 @@ consistently usable output.
 
 ## Install
 
+### From release (recommended)
+
+Pre-built binaries are attached to every GitHub release.
+
 ```bash
+# x86_64 Linux
+mkdir -p ~/.local/bin
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.3.1-x86_64-unknown-linux-gnu.tar.gz \
+  | tar xz -C ~/.local/bin
+
+pitboss version
+pitboss-tui --version
+```
+
+The tarball contains both `pitboss` and `pitboss-tui`. Put them anywhere on
+`$PATH`. Swap `x86_64-unknown-linux-gnu` for your target when more builds
+land in the matrix.
+
+### From source
+
+```bash
+git clone https://github.com/SDS-Mode/pitboss.git
+cd pitboss
 cargo install --path crates/pitboss-cli
 cargo install --path crates/pitboss-tui
 ```
@@ -36,7 +58,23 @@ pitboss validate <manifest>       parse + resolve + validate, exit non-zero on e
 pitboss dispatch <manifest>       deal a run
 pitboss resume <run-id>           re-deal a prior run, reusing claude_session_id
 pitboss diff <run-a> <run-b>      compare two runs side-by-side
+pitboss completions <shell>       print shell completion script
 pitboss version                   print version
+```
+
+### Shell completions
+
+Both binaries emit completion scripts for bash, zsh, fish, elvish, and
+powershell:
+
+```bash
+# bash
+pitboss completions bash       > ~/.local/share/bash-completion/completions/pitboss
+pitboss-tui completions bash   > ~/.local/share/bash-completion/completions/pitboss-tui
+
+# zsh (adjust for your $fpath)
+pitboss completions zsh        > ~/.zsh/completions/_pitboss
+pitboss-tui completions zsh    > ~/.zsh/completions/_pitboss-tui
 ```
 
 ## Quick start — flat dispatch
@@ -178,12 +216,12 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-`v0.3.0-pre`. Crate + binary rebrand landed; hierarchical dispatch exercised
+`v0.3.1`. Crate + binary rebrand landed; hierarchical dispatch exercised
 end-to-end against real `claude` including a multi-worker self-documentation
 run and a budget-stress test that caught (and fixed) a spawn-burst TOCTOU in
-the budget guard. 217 tests pass under
-`cargo test --workspace --features pitboss-core/test-support`. See the
-`feat/v0.3` branch for the full history.
+the budget guard. 219 tests pass under
+`cargo test --workspace --features pitboss-core/test-support`. See
+[`CHANGELOG.md`](CHANGELOG.md) for the per-version history.
 
 ## Manual smoke testing
 
@@ -200,7 +238,7 @@ Requires `claude` authenticated via its normal subscription config (no
 
 ```bash
 cargo build --workspace
-cargo test --workspace --features pitboss-core/test-support    # 217 tests
+cargo test --workspace --features pitboss-core/test-support    # 219 tests
 cargo lint                                                     # clippy -D warnings
 cargo fmt --all -- --check
 ```
@@ -211,3 +249,28 @@ Automated smoke scripts (no API calls):
 scripts/smoke-part1.sh          # 10 offline flat-mode tests
 scripts/smoke-part3-tui.sh      # 7 non-interactive TUI tests
 ```
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push or PR to `main`:
+`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, and
+`scripts/smoke-part1.sh`. Commits that change only `CHANGELOG.md` or
+`README.md` skip CI.
+
+### Cutting a release
+
+1. Move `[Unreleased]` items in `CHANGELOG.md` into a new
+   `[X.Y.Z] — YYYY-MM-DD` section. Add the compare-link at the bottom.
+2. Commit to `main`.
+3. Tag and push:
+   ```bash
+   git tag -a vX.Y.Z -m "vX.Y.Z — <short summary>"
+   git push origin vX.Y.Z
+   ```
+
+The tag push triggers `.github/workflows/release.yml`, which builds release
+binaries for every target in the matrix, packages them as
+`pitboss-vX.Y.Z-<target>.tar.gz`, and attaches them to the auto-created
+GitHub release. Current matrix: `x86_64-unknown-linux-gnu`. Adding more
+targets (macOS, Windows, aarch64) is a matrix-entry addition in the
+workflow.
