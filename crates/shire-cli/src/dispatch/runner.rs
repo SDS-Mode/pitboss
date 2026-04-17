@@ -318,6 +318,30 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     args
 }
 
+/// Builds the argv for spawning the lead subprocess, including the
+/// `--mcp-config` pointer to the generated MCP server config file.
+pub fn lead_spawn_args(
+    lead: &crate::manifest::resolve::ResolvedLead,
+    mcp_config: &std::path::Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+    ];
+    if !lead.tools.is_empty() {
+        args.push("--allowedTools".into());
+        args.push(lead.tools.join(","));
+    }
+    args.push("--model".into());
+    args.push(lead.model.clone());
+    args.push("--mcp-config".into());
+    args.push(mcp_config.display().to_string());
+    args.push("-p".into());
+    args.push(lead.prompt.clone());
+    args
+}
+
 // Note: these tests use mosaic-core's FakeSpawner, which is gated by
 // mosaic-core's "test-support" feature. That feature is always enabled in
 // shire-cli's dev-dependencies, so the tests always compile in `cargo test`.
@@ -660,5 +684,29 @@ mod tests {
             !args.iter().any(|a| a == "--resume"),
             "expected no --resume in args: {args:?}"
         );
+    }
+
+    #[test]
+    fn lead_spawn_args_includes_mcp_config_and_verbose() {
+        use crate::manifest::resolve::ResolvedLead;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+        };
+        let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
+        assert!(args.iter().any(|a| a == "--verbose"));
+        assert!(args.iter().any(|a| a == "--mcp-config"));
+        assert!(args.iter().any(|a| a == "/tmp/cfg.json"));
+        assert!(args.iter().any(|a| a == "-p"));
+        assert!(args.iter().any(|a| a == "p"));
     }
 }

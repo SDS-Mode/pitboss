@@ -82,14 +82,124 @@ pub async fn run_hierarchical(
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
     write_mcp_config(&mcp_config_path, &socket).await?;
 
-    // 3. Spawn the lead.
-    //    (Actual spawn wiring in Task 20; for now we log and return Ok(0).)
-    let _ = (spawner, lead);
-    tracing::info!(run_id = %run_id, "hierarchical run scaffolded; lead spawn wired in Task 20");
+    // 3. Prepare lead worktree + spawn.
+    let wt_mgr = Arc::new(mosaic_core::worktree::WorktreeManager::new());
+    let mut lead_worktree_handle: Option<mosaic_core::worktree::Worktree> = None;
+    let lead_cwd = if lead.use_worktree {
+        let name = format!("shire-lead-{}-{}", lead.id, run_id);
+        match wt_mgr.prepare(&lead.directory, &name, lead.branch.as_deref()) {
+            Ok(wt) => {
+                let p = wt.path.clone();
+                lead_worktree_handle = Some(wt);
+                p
+            }
+            Err(e) => {
+                anyhow::bail!("lead worktree prepare failed: {e}");
+            }
+        }
+    } else {
+        lead.directory.clone()
+    };
+
+    let lead_task_dir = run_subdir.join("tasks").join(&lead.id);
+    tokio::fs::create_dir_all(&lead_task_dir).await.ok();
+    let lead_log_path = lead_task_dir.join("stdout.log");
+    let lead_stderr_path = lead_task_dir.join("stderr.log");
+
+    let spawn_cmd = mosaic_core::process::SpawnCmd {
+        program: claude_binary.clone(),
+        args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
+        cwd: lead_cwd.clone(),
+        env: lead.env.clone(),
+    };
+
+    state.workers.write().await.insert(
+        lead.id.clone(),
+        crate::dispatch::state::WorkerState::Running {
+            started_at: Utc::now(),
+        },
+    );
+
+    let outcome = mosaic_core::session::SessionHandle::new(lead.id.clone(), spawner, spawn_cmd)
+        .with_log_path(lead_log_path.clone())
+        .with_stderr_log_path(lead_stderr_path)
+        .run_to_completion(
+            cancel.clone(),
+            std::time::Duration::from_secs(lead.timeout_secs),
+        )
+        .await;
+
+    // Build lead TaskRecord
+    let lead_record = mosaic_core::store::TaskRecord {
+        task_id: lead.id.clone(),
+        status: match outcome.final_state {
+            mosaic_core::session::SessionState::Completed => {
+                mosaic_core::store::TaskStatus::Success
+            }
+            mosaic_core::session::SessionState::Failed { .. } => {
+                mosaic_core::store::TaskStatus::Failed
+            }
+            mosaic_core::session::SessionState::TimedOut => {
+                mosaic_core::store::TaskStatus::TimedOut
+            }
+            mosaic_core::session::SessionState::Cancelled => {
+                mosaic_core::store::TaskStatus::Cancelled
+            }
+            mosaic_core::session::SessionState::SpawnFailed { .. } => {
+                mosaic_core::store::TaskStatus::SpawnFailed
+            }
+            _ => mosaic_core::store::TaskStatus::Failed,
+        },
+        exit_code: outcome.exit_code,
+        started_at: outcome.started_at,
+        ended_at: outcome.ended_at,
+        duration_ms: outcome.duration_ms(),
+        worktree_path: if lead.use_worktree {
+            Some(lead_cwd)
+        } else {
+            None
+        },
+        log_path: lead_log_path,
+        token_usage: outcome.token_usage,
+        claude_session_id: outcome.claude_session_id,
+        final_message_preview: outcome.final_message_preview,
+        parent_task_id: None, // lead has no parent
+    };
+
+    // Cleanup worktree per policy
+    if let Some(wt) = lead_worktree_handle {
+        let succeeded = matches!(lead_record.status, mosaic_core::store::TaskStatus::Success);
+        let cleanup = match resolved.worktree_cleanup {
+            crate::manifest::schema::WorktreeCleanup::Always => {
+                mosaic_core::worktree::CleanupPolicy::Always
+            }
+            crate::manifest::schema::WorktreeCleanup::OnSuccess => {
+                mosaic_core::worktree::CleanupPolicy::OnSuccess
+            }
+            crate::manifest::schema::WorktreeCleanup::Never => {
+                mosaic_core::worktree::CleanupPolicy::Never
+            }
+        };
+        let _ = wt_mgr.cleanup(wt, cleanup, succeeded);
+    }
+
+    // Persist lead record
+    store.append_record(run_id, &lead_record).await?;
+    state.workers.write().await.insert(
+        lead.id.clone(),
+        crate::dispatch::state::WorkerState::Done(lead_record.clone()),
+    );
+    let _ = state.done_tx.send(lead.id.clone());
 
     // 4. Finalize.
+    let lead_failed = !matches!(lead_record.status, mosaic_core::store::TaskStatus::Success);
     let started_at = meta.started_at;
     let ended_at = Utc::now();
+    let tasks = vec![lead_record];
+    let tasks_failed = tasks
+        .iter()
+        .filter(|r| !matches!(r.status, mosaic_core::store::TaskStatus::Success))
+        .count();
     let summary = RunSummary {
         run_id,
         manifest_path,
@@ -98,13 +208,21 @@ pub async fn run_hierarchical(
         started_at,
         ended_at,
         total_duration_ms: (ended_at - started_at).num_milliseconds(),
-        tasks_total: 0,
-        tasks_failed: 0,
-        was_interrupted: false,
-        tasks: vec![],
+        tasks_total: tasks.len(),
+        tasks_failed,
+        was_interrupted: cancel.is_draining() || cancel.is_terminated(),
+        tasks,
     };
     store.finalize_run(&summary).await?;
-    Ok(0)
+
+    let rc = if cancel.is_terminated() {
+        130
+    } else if lead_failed {
+        1
+    } else {
+        0
+    };
+    Ok(rc)
 }
 
 async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> Result<()> {
