@@ -53,3 +53,4 @@ serde_json      = { workspace = true }
 libc            = { workspace = true }
 pitboss-core    = { path = "../pitboss-core", features = ["test-support"] }
 fake-mcp-client = { path = "../../tests-support/fake-mcp-client" }
+fake-control-client = { path = "../../tests-support/fake-control-client" }

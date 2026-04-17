@@ -285,6 +285,15 @@ async fn dispatch_op(
                             prior_token_usage: Default::default(),
                         },
                     );
+                    let _ = crate::dispatch::events::append_event(
+                        &state.run_subdir,
+                        &task_id,
+                        &crate::dispatch::events::TaskEvent::Pause {
+                            at: chrono::Utc::now(),
+                            reason: None,
+                        },
+                    )
+                    .await;
                     ControlEvent::OpAcked {
                         op: "pause_worker".into(),
                         task_id: Some(task_id),
@@ -321,6 +330,8 @@ async fn dispatch_op(
             match current {
                 Some(crate::dispatch::state::WorkerState::Paused { session_id, .. }) => {
                     let prompt_text = prompt.unwrap_or_else(|| "continue".into());
+                    let session_id_for_event = session_id.clone();
+                    let prompt_for_event = prompt_text.clone();
                     match crate::mcp::tools::spawn_resume_worker(
                         state,
                         task_id.clone(),
@@ -329,10 +340,22 @@ async fn dispatch_op(
                     )
                     .await
                     {
-                        Ok(()) => ControlEvent::OpAcked {
-                            op: "continue_worker".into(),
-                            task_id: Some(task_id),
-                        },
+                        Ok(()) => {
+                            let _ = crate::dispatch::events::append_event(
+                                &state.run_subdir,
+                                &task_id,
+                                &crate::dispatch::events::TaskEvent::Continue {
+                                    at: chrono::Utc::now(),
+                                    new_session_id: session_id_for_event,
+                                    prompt_preview: prompt_for_event.chars().take(80).collect(),
+                                },
+                            )
+                            .await;
+                            ControlEvent::OpAcked {
+                                op: "continue_worker".into(),
+                                task_id: Some(task_id),
+                            }
+                        }
                         Err(e) => ControlEvent::OpFailed {
                             op: "continue_worker".into(),
                             task_id: Some(task_id),
@@ -383,6 +406,16 @@ async fn dispatch_op(
                     }
                 }
             };
+            let _ = crate::dispatch::events::append_event(
+                &state.run_subdir,
+                &task_id,
+                &crate::dispatch::events::TaskEvent::Reprompt {
+                    at: chrono::Utc::now(),
+                    prompt_preview: prompt.chars().take(80).collect(),
+                    prior_session_id: session_id.clone(),
+                },
+            )
+            .await;
             match crate::mcp::tools::spawn_resume_worker(state, task_id.clone(), prompt, session_id)
                 .await
             {

@@ -41,6 +41,16 @@ impl ApprovalBridge {
         timeout: Duration,
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
+        let _ = crate::dispatch::events::append_event(
+            &self.state.run_subdir,
+            &self.state.lead_id,
+            &crate::dispatch::events::TaskEvent::ApprovalRequest {
+                at: chrono::Utc::now(),
+                request_id: request_id.clone(),
+                summary_preview: summary.chars().take(80).collect(),
+            },
+        )
+        .await;
         let (tx, rx) = oneshot::channel::<ApprovalResponse>();
 
         // Does a TUI have the control writer?
@@ -119,6 +129,17 @@ impl ApprovalBridge {
             .await
             .remove(request_id)
             .ok_or(ApprovalError::ControlDisconnected)?;
+        let _ = crate::dispatch::events::append_event(
+            &self.state.run_subdir,
+            &self.state.lead_id,
+            &crate::dispatch::events::TaskEvent::ApprovalResponse {
+                at: chrono::Utc::now(),
+                request_id: request_id.to_string(),
+                approved: resp.approved,
+                edited: resp.edited_summary.is_some(),
+            },
+        )
+        .await;
         tx.send(resp).map_err(|_| ApprovalError::Cancelled)?;
         Ok(())
     }
