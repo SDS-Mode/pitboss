@@ -258,6 +258,63 @@ async fn dispatch_op(
                 task_id: None,
             }
         }
+        ControlOp::PauseWorker { task_id } => {
+            let mut workers = state.workers.write().await;
+            let Some(entry) = workers.get(&task_id).cloned() else {
+                return ControlEvent::OpFailed {
+                    op: "pause_worker".into(),
+                    task_id: Some(task_id),
+                    error: "unknown task_id".into(),
+                };
+            };
+            match entry {
+                crate::dispatch::state::WorkerState::Running {
+                    session_id: Some(sid),
+                    ..
+                } => {
+                    let cancels = state.worker_cancels.read().await;
+                    if let Some(tok) = cancels.get(&task_id) {
+                        tok.terminate();
+                    }
+                    workers.insert(
+                        task_id.clone(),
+                        crate::dispatch::state::WorkerState::Paused {
+                            session_id: sid,
+                            paused_at: chrono::Utc::now(),
+                            prior_token_usage: Default::default(),
+                        },
+                    );
+                    ControlEvent::OpAcked {
+                        op: "pause_worker".into(),
+                        task_id: Some(task_id),
+                    }
+                }
+                crate::dispatch::state::WorkerState::Running {
+                    session_id: None, ..
+                } => ControlEvent::OpUnknownState {
+                    op: "pause_worker".into(),
+                    task_id,
+                    current_state: "spawning".into(),
+                },
+                crate::dispatch::state::WorkerState::Paused { .. } => {
+                    ControlEvent::OpUnknownState {
+                        op: "pause_worker".into(),
+                        task_id,
+                        current_state: "paused".into(),
+                    }
+                }
+                crate::dispatch::state::WorkerState::Pending => ControlEvent::OpUnknownState {
+                    op: "pause_worker".into(),
+                    task_id,
+                    current_state: "pending".into(),
+                },
+                crate::dispatch::state::WorkerState::Done(_) => ControlEvent::OpUnknownState {
+                    op: "pause_worker".into(),
+                    task_id,
+                    current_state: "done".into(),
+                },
+            }
+        }
         other => ControlEvent::OpUnknown {
             op: op_tag(&other).into(),
         },
@@ -481,6 +538,67 @@ mod tests {
             ControlEvent::OpAcked { ref op, .. } if op == "cancel_run"
         ));
         assert!(run_cancel.is_terminated());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn pause_worker_transitions_running_to_paused() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        let worker_token = CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), worker_token.clone());
+        state.workers.write().await.insert(
+            "w-1".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess-xyz".into()),
+            },
+        );
+
+        let sock = dir.path().join("pause.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"pause_worker\",\"task_id\":\"w-1\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "pause_worker"
+        ));
+        assert!(worker_token.is_terminated());
+        let workers = state.workers.read().await;
+        match workers.get("w-1").unwrap() {
+            crate::dispatch::state::WorkerState::Paused { session_id, .. } => {
+                assert_eq!(session_id, "sess-xyz");
+            }
+            other => panic!("expected Paused, got {other:?}"),
+        }
         drop(handle);
     }
 }
