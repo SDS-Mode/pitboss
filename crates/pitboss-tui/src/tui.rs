@@ -261,7 +261,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let title_text = format!(
-        " Mosaic — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part}{workers_part} "
+        " Pitboss TUI — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part}{workers_part} "
     );
 
     let para = Paragraph::new(title_text)
@@ -565,7 +565,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Help — Mosaic TUI v0.2-alpha ")
+        .title(" Help — Pitboss TUI ")
         .border_style(Style::default().fg(Color::Green));
 
     let inner = block.inner(overlay_area);
@@ -973,7 +973,7 @@ mod tests {
     #[test]
     fn render_tile_title_for_lead() {
         // The lead is the tile whose parent_task_id is None and whose id
-        // appears as a parent of at least one other tile. Mosaic renders
+        // appears as a parent of at least one other tile. Pitboss TUI renders
         // its title with [LEAD] prefix.
         let tiles = vec![
             tile("triage-lead", TileStatus::Running, None, 0, 0),
