@@ -32,6 +32,7 @@ pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
         }
         Some("assistant") => parse_assistant(&value, raw),
         Some("user") => parse_user(&value, raw),
+        Some("result") => parse_result(&value, raw),
         _ => Ok(Event::Unknown {
             raw: raw.to_string(),
         }),
@@ -105,6 +106,47 @@ fn parse_user(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError>
         "user content had no tool_result",
         raw,
     ))
+}
+
+fn parse_result(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError> {
+    let session_id = value
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ParseError::malformed("result missing session_id", raw))?
+        .to_string();
+
+    let usage_val = value
+        .get("usage")
+        .ok_or_else(|| ParseError::malformed("result missing usage", raw))?;
+
+    let usage = TokenUsage {
+        input: u64_field(usage_val, "input_tokens"),
+        output: u64_field(usage_val, "output_tokens"),
+        cache_read: u64_field(usage_val, "cache_read_input_tokens"),
+        cache_creation: u64_field(usage_val, "cache_creation_input_tokens"),
+    };
+
+    let subtype = value
+        .get("subtype")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let text = value
+        .get("result")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    Ok(Event::Result {
+        subtype,
+        session_id,
+        text,
+        usage,
+    })
+}
+
+fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
+    obj.get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -202,6 +244,64 @@ mod tests {
         let ev = parse_line(line).unwrap();
         match ev {
             Event::ToolResult { content_summary } => assert!(content_summary.contains("ok")),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_result_with_usage() {
+        let line = br#"{"type":"result","subtype":"success","session_id":"sess_abc","result":"done","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::Result {
+                session_id,
+                subtype,
+                text,
+                usage,
+            } => {
+                assert_eq!(session_id, "sess_abc");
+                assert_eq!(subtype.as_deref(), Some("success"));
+                assert_eq!(text.as_deref(), Some("done"));
+                assert_eq!(
+                    usage,
+                    TokenUsage {
+                        input: 10,
+                        output: 20,
+                        cache_read: 5,
+                        cache_creation: 2
+                    }
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_without_session_id_is_malformed() {
+        let line = br#"{"type":"result","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let err = parse_line(line).unwrap_err();
+        assert!(matches!(err, ParseError::Malformed { .. }));
+    }
+
+    #[test]
+    fn result_without_usage_is_malformed() {
+        let line = br#"{"type":"result","session_id":"s"}"#;
+        let err = parse_line(line).unwrap_err();
+        assert!(matches!(err, ParseError::Malformed { .. }));
+    }
+
+    #[test]
+    fn result_missing_optional_cache_fields_defaults_zero() {
+        let line =
+            br#"{"type":"result","session_id":"s","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::Result { usage, .. } => {
+                assert_eq!(usage.input, 1);
+                assert_eq!(usage.output, 2);
+                assert_eq!(usage.cache_read, 0);
+                assert_eq!(usage.cache_creation, 0);
+            }
             other => panic!("unexpected variant: {other:?}"),
         }
     }
