@@ -269,3 +269,104 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
 
     state.cancel.terminate();
 }
+
+#[tokio::test]
+async fn e2e_lead_cancels_worker_mid_flight() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+
+    // Custom state: worker script holds until signal so cancel has
+    // something to actually cancel.
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "lead prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(5.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let hold_script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(hold_script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+    ));
+
+    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+
+    // spawn_worker (worker hangs), sleep for slot fill, cancel_worker, list.
+    let script = dir.path().join("script.jsonl");
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"hi"},"bind":"w1"}}
+{"sleep_ms":200}
+{"mcp_call":{"name":"cancel_worker","args":{"task_id":"$w1.task_id"},"bind":"cancel_res"}}
+{"mcp_call":{"name":"list_workers","args":{},"bind":"snapshot"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(outcome.exit_code, Some(0), "exit non-zero: {outcome:?}");
+
+    // Give the backgrounded worker a moment to finalize as Cancelled after
+    // receiving the terminate signal from cancel_worker.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Worker should now be Cancelled.
+    let workers = state.workers.read().await;
+    let (_, w) = workers.iter().next().expect("at least one worker");
+    match w {
+        pitboss_cli::dispatch::state::WorkerState::Done(rec) => {
+            assert_eq!(
+                rec.status,
+                pitboss_core::store::TaskStatus::Cancelled,
+                "expected Cancelled status, got {:?}",
+                rec.status
+            );
+        }
+        other => panic!("expected Done(Cancelled), got {other:?}"),
+    }
+
+    state.cancel.terminate();
+}
