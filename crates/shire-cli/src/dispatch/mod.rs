@@ -1,3 +1,4 @@
+pub mod hierarchical;
 pub mod probe;
 pub mod resume;
 pub mod runner;

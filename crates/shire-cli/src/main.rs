@@ -110,6 +110,26 @@ fn run_dispatch(
                 }
             }
         };
+        if resolved.lead.is_some() {
+            // Hierarchical mode
+            return match dispatch::hierarchical::run_hierarchical(
+                resolved,
+                manifest_text,
+                manifest.to_path_buf(),
+                claude_bin,
+                claude_version,
+                run_dir_override,
+                dry_run,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("hierarchical dispatch: {e:#}");
+                    1
+                }
+            };
+        }
         match dispatch::run_dispatch_inner(
             resolved,
             manifest_text,
