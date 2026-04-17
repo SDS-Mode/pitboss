@@ -7,6 +7,7 @@ pub use manager::{CleanupPolicy, Worktree, WorktreeManager};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::WorktreeError;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -79,5 +80,16 @@ mod tests {
         let mgr = WorktreeManager::new();
         let wt = mgr.prepare(repo_dir.path(), "shire-task-exist", Some("existing")).unwrap();
         assert_eq!(wt.branch.as_deref(), Some("existing"));
+    }
+
+    #[test]
+    fn prepare_rejects_branch_already_checked_out_in_another_worktree() {
+        let repo_dir = TempDir::new().unwrap();
+        init_repo(repo_dir.path());
+
+        let mgr = WorktreeManager::new();
+        let _first = mgr.prepare(repo_dir.path(), "wt-a", Some("shared")).unwrap();
+        let err = mgr.prepare(repo_dir.path(), "wt-b", Some("shared")).unwrap_err();
+        assert!(matches!(err, WorktreeError::BranchConflict { .. }));
     }
 }

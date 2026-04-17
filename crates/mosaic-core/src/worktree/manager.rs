@@ -64,6 +64,20 @@ impl WorktreeManager {
             }
         }
 
+        if let Some(bname) = &branch_name {
+            for wt_name in repo.worktrees()?.iter().flatten() {
+                let wt = repo.find_worktree(wt_name)?;
+                let wt_repo = Repository::open(wt.path())?;
+                let checked_out = wt_repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.shorthand().map(str::to_string));
+                if checked_out.as_deref() == Some(bname.as_str()) {
+                    return Err(WorktreeError::BranchConflict { branch: bname.clone() });
+                }
+            }
+        }
+
         let mut opts = WorktreeAddOptions::new();
         let reference_holder;
         if let Some(bname) = &branch_name {
