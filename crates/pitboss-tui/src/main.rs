@@ -12,6 +12,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 mod app;
+mod control;
 mod runs;
 mod state;
 mod tui;
