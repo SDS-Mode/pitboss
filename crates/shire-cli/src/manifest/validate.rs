@@ -145,6 +145,7 @@ mod tests {
             timeout_secs: 60,
             use_worktree,
             env: Default::default(),
+            resume_session_id: None,
         }
     }
 

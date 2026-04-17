@@ -9,6 +9,9 @@ pub use traits::SessionStore;
 pub mod json_file;
 pub use json_file::JsonFileStore;
 
+pub mod sqlite;
+pub use sqlite::SqliteStore;
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;

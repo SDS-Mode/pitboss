@@ -33,6 +33,14 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Re-run a prior dispatch, reusing claude_session_id for each task.
+    Resume {
+        /// Run id (full UUID or unique prefix).
+        run_id: String,
+        /// Override run_dir, same semantics as Dispatch.
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+    },
     /// Print version information.
     Version,
 }

@@ -307,6 +307,10 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     }
     args.push("--model".into());
     args.push(task.model.clone());
+    if let Some(sess) = &task.resume_session_id {
+        args.push("--resume".into());
+        args.push(sess.clone());
+    }
     args.push("-p".into());
     args.push(task.prompt.clone());
     args
@@ -375,6 +379,7 @@ mod tests {
                     timeout_secs: 30,
                     use_worktree: false,
                     env: Default::default(),
+                    resume_session_id: None,
                 },
                 ResolvedTask {
                     id: "bad".into(),
@@ -387,6 +392,7 @@ mod tests {
                     timeout_secs: 30,
                     use_worktree: false,
                     env: Default::default(),
+                    resume_session_id: None,
                 },
             ],
         };
@@ -458,6 +464,7 @@ mod tests {
             timeout_secs: 30,
             use_worktree: false,
             env: Default::default(),
+            resume_session_id: None,
         };
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
@@ -543,6 +550,7 @@ mod tests {
                     timeout_secs: 30,
                     use_worktree: false,
                     env: Default::default(),
+                    resume_session_id: None,
                 },
                 ResolvedTask {
                     id: "two".into(),
@@ -555,6 +563,7 @@ mod tests {
                     timeout_secs: 30,
                     use_worktree: false,
                     env: Default::default(),
+                    resume_session_id: None,
                 },
             ],
         };
@@ -597,5 +606,45 @@ mod tests {
             let _: mosaic_core::store::TaskRecord =
                 serde_json::from_str(l).unwrap_or_else(|e| panic!("line does not parse: {e}: {l}"));
         }
+    }
+
+    fn make_test_task(id: &str, resume_session_id: Option<String>) -> ResolvedTask {
+        ResolvedTask {
+            id: id.into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "test prompt".into(),
+            branch: None,
+            model: "claude-test".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec![],
+            timeout_secs: 30,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_args_includes_resume_when_session_id_set() {
+        let task = make_test_task("t", Some("sess_abc".to_string()));
+        let args = spawn_args(&task);
+        assert!(
+            args.iter().any(|a| a == "--resume"),
+            "expected --resume in args: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "sess_abc"),
+            "expected sess_abc in args: {args:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_args_omits_resume_when_no_session_id() {
+        let task = make_test_task("t", None);
+        let args = spawn_args(&task);
+        assert!(
+            !args.iter().any(|a| a == "--resume"),
+            "expected no --resume in args: {args:?}"
+        );
     }
 }

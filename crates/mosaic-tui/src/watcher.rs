@@ -25,6 +25,8 @@ const RUNNING_FRESHNESS_SECS: u64 = 5;
 #[derive(Debug, Deserialize)]
 struct ResolvedTask {
     pub id: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,15 +73,21 @@ pub fn watch(
 // ---------------------------------------------------------------------------
 
 fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
-    // 1. Read resolved.json → get all task ids in order.
+    // 1. Read resolved.json → get all task ids and models in order.
     let resolved_path = run_dir.join("resolved.json");
-    let task_ids: Vec<String> = match std::fs::read(&resolved_path) {
+    let resolved_tasks: Vec<ResolvedTask> = match std::fs::read(&resolved_path) {
         Ok(bytes) => match serde_json::from_slice::<ResolvedManifest>(&bytes) {
-            Ok(m) => m.tasks.into_iter().map(|t| t.id).collect(),
+            Ok(m) => m.tasks,
             Err(_) => Vec::new(),
         },
         Err(_) => Vec::new(),
     };
+    // Build a map from task id → model for quick lookup below.
+    let model_map: std::collections::HashMap<String, Option<String>> = resolved_tasks
+        .iter()
+        .map(|t| (t.id.clone(), t.model.clone()))
+        .collect();
+    let task_ids: Vec<String> = resolved_tasks.into_iter().map(|t| t.id).collect();
 
     // 2. Gather completed task records. Prefer summary.json (written on clean
     //    finalize) since summary.jsonl may be empty or truncated after
@@ -96,13 +104,23 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
     let tasks_dir = run_dir.join("tasks");
     let mut tasks: Vec<TileState> = Vec::with_capacity(task_ids.len());
     let mut failed_count = 0usize;
+    let mut run_started_at: Option<chrono::DateTime<chrono::Utc>> = None;
 
     for id in &task_ids {
         let log_path = tasks_dir.join(id).join("stdout.log");
+        let model = model_map.get(id).and_then(Option::clone);
 
         if let Some(rec) = completed.get(id) {
             if !matches!(rec.status, TaskStatus::Success) {
                 failed_count += 1;
+            }
+            // Track earliest started_at across all completed tiles.
+            match run_started_at {
+                None => run_started_at = Some(rec.started_at),
+                Some(existing) if rec.started_at < existing => {
+                    run_started_at = Some(rec.started_at);
+                }
+                _ => {}
             }
             tasks.push(TileState {
                 id: id.clone(),
@@ -110,8 +128,11 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
                 duration_ms: Some(rec.duration_ms),
                 token_usage_input: rec.token_usage.input,
                 token_usage_output: rec.token_usage.output,
+                cache_read: rec.token_usage.cache_read,
+                cache_creation: rec.token_usage.cache_creation,
                 exit_code: rec.exit_code,
                 log_path,
+                model,
             });
         } else {
             // Decide between Pending and Running by checking log freshness.
@@ -129,8 +150,11 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
                 duration_ms: None,
                 token_usage_input: 0,
                 token_usage_output: 0,
+                cache_read: 0,
+                cache_creation: 0,
                 exit_code: None,
                 log_path,
+                model,
             });
         }
     }
@@ -153,6 +177,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
         tasks,
         focus_log,
         failed_count,
+        run_started_at,
     }
 }
 

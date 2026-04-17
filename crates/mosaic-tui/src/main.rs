@@ -12,13 +12,15 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 mod app;
+mod prices;
+mod runs;
 mod state;
 mod tui;
 mod watcher;
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 // ---------------------------------------------------------------------------
@@ -89,18 +91,10 @@ fn main() -> Result<()> {
 // Run discovery
 // ---------------------------------------------------------------------------
 
-fn runs_base_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/shire/runs")
-    } else {
-        PathBuf::from("./shire-runs")
-    }
-}
-
 /// Returns `(run_subdir, run_id_string)` for the most recently modified run
 /// directory under the base runs dir.
 fn find_most_recent_run() -> Result<(PathBuf, String)> {
-    let base = runs_base_dir();
+    let base = runs::runs_base_dir();
     if !base.exists() {
         bail!(
             "No shire runs directory found at {}.\n\
@@ -108,23 +102,8 @@ fn find_most_recent_run() -> Result<(PathBuf, String)> {
             base.display()
         );
     }
-    let mut entries: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
 
-    for entry in
-        std::fs::read_dir(&base).with_context(|| format!("reading runs dir {}", base.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        entries.push((path, mtime));
-    }
-
+    let entries = runs::collect_run_entries(&base);
     if entries.is_empty() {
         bail!(
             "No run directories found under {}.\n\
@@ -133,19 +112,14 @@ fn find_most_recent_run() -> Result<(PathBuf, String)> {
         );
     }
 
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
-    let (run_dir, _) = entries.remove(0);
-    let run_id = run_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    Ok((run_dir, run_id))
+    // collect_run_entries already returns newest-first.
+    let first = entries.into_iter().next().unwrap();
+    Ok((first.run_dir, first.run_id))
 }
 
 /// Locate a run by id/name. Accepts either an exact UUID string or a prefix.
 fn find_run_by_id(id: &str) -> Result<(PathBuf, String)> {
-    let base = runs_base_dir();
+    let base = runs::runs_base_dir();
     let candidate = base.join(id);
     if candidate.is_dir() {
         return Ok((candidate, id.to_string()));
@@ -168,40 +142,21 @@ fn find_run_by_id(id: &str) -> Result<(PathBuf, String)> {
 // `list` subcommand
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::unnecessary_wraps)]
 fn cmd_list() -> Result<()> {
-    let base = runs_base_dir();
+    let base = runs::runs_base_dir();
     if !base.exists() {
         println!("No runs directory found at {}.", base.display());
         println!("Run `shire` first to create a run.");
         return Ok(());
     }
 
-    let mut entries: Vec<RunEntry> = Vec::new();
-
-    for dir_entry in
-        std::fs::read_dir(&base).with_context(|| format!("reading {}", base.display()))?
-    {
-        let dir_entry = dir_entry?;
-        if !dir_entry.path().is_dir() {
-            continue;
-        }
-        let run_id = dir_entry.file_name().to_string_lossy().to_string();
-        let run_dir = dir_entry.path();
-        let mtime = dir_entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-        entries.push(collect_run_entry(&run_dir, run_id, mtime));
-    }
+    let entries = runs::collect_run_entries(&base);
 
     if entries.is_empty() {
         println!("No runs found under {}.", base.display());
         return Ok(());
     }
-
-    // Sort by mtime descending (newest first).
-    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
 
     // Print header.
     println!(
@@ -211,8 +166,8 @@ fn cmd_list() -> Result<()> {
     println!("{}", "─".repeat(80));
 
     for e in &entries {
-        let started = format_mtime(e.mtime);
-        let status = if e.has_summary_json {
+        let started = runs::format_mtime(e.mtime);
+        let status = if e.is_complete {
             "complete"
         } else {
             "in-progress"
@@ -224,68 +179,6 @@ fn cmd_list() -> Result<()> {
     }
 
     Ok(())
-}
-
-struct RunEntry {
-    run_id: String,
-    mtime: std::time::SystemTime,
-    tasks_total: usize,
-    tasks_failed: usize,
-    has_summary_json: bool,
-}
-
-fn collect_run_entry(
-    run_dir: &std::path::Path,
-    run_id: String,
-    mtime: std::time::SystemTime,
-) -> RunEntry {
-    // Try summary.json first (finalized run).
-    let summary_json = run_dir.join("summary.json");
-    if let Ok(bytes) = std::fs::read(&summary_json) {
-        if let Ok(s) = serde_json::from_slice::<mosaic_core::store::RunSummary>(&bytes) {
-            return RunEntry {
-                run_id,
-                mtime,
-                tasks_total: s.tasks_total,
-                tasks_failed: s.tasks_failed,
-                has_summary_json: true,
-            };
-        }
-    }
-
-    // Fall back: count lines in summary.jsonl.
-    let jsonl = run_dir.join("summary.jsonl");
-    let (total, failed) = count_jsonl_tasks(&jsonl);
-    RunEntry {
-        run_id,
-        mtime,
-        tasks_total: total,
-        tasks_failed: failed,
-        has_summary_json: false,
-    }
-}
-
-fn count_jsonl_tasks(path: &std::path::Path) -> (usize, usize) {
-    use std::io::BufRead;
-    let Ok(file) = std::fs::File::open(path) else {
-        return (0, 0);
-    };
-    let reader = std::io::BufReader::new(file);
-    let mut total = 0;
-    let mut failed = 0;
-    for line in reader.lines().map_while(Result::ok) {
-        let trimmed = line.trim().to_string();
-        if trimmed.is_empty() {
-            continue;
-        }
-        total += 1;
-        if let Ok(r) = serde_json::from_str::<mosaic_core::store::TaskRecord>(&trimmed) {
-            if !matches!(r.status, mosaic_core::store::TaskStatus::Success) {
-                failed += 1;
-            }
-        }
-    }
-    (total, failed)
 }
 
 // ---------------------------------------------------------------------------
@@ -334,17 +227,25 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
     #[derive(Deserialize)]
     struct ResTask {
         id: String,
+        #[serde(default)]
+        model: Option<String>,
     }
     #[derive(Deserialize)]
     struct Res {
         tasks: Vec<ResTask>,
     }
 
-    let task_ids: Vec<String> = std::fs::read(run_dir.join("resolved.json"))
+    let resolved_tasks: Vec<ResTask> = std::fs::read(run_dir.join("resolved.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Res>(&bytes).ok())
-        .map(|r| r.tasks.into_iter().map(|t| t.id).collect())
+        .map(|r| r.tasks)
         .unwrap_or_default();
+
+    let model_map: std::collections::HashMap<String, Option<String>> = resolved_tasks
+        .iter()
+        .map(|t| (t.id.clone(), t.model.clone()))
+        .collect();
+    let task_ids: Vec<String> = resolved_tasks.into_iter().map(|t| t.id).collect();
 
     let mut completed: std::collections::HashMap<String, TaskRecord> =
         std::collections::HashMap::new();
@@ -370,11 +271,20 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
     let tasks_dir = run_dir.join("tasks");
     let mut tiles: Vec<TileState> = Vec::new();
     let mut failed_count = 0usize;
+    let mut run_started_at: Option<chrono::DateTime<chrono::Utc>> = None;
     for id in &task_ids {
         let log_path = tasks_dir.join(id).join("stdout.log");
+        let model = model_map.get(id).and_then(Option::clone);
         if let Some(rec) = completed.get(id) {
             if !matches!(rec.status, TaskStatus::Success) {
                 failed_count += 1;
+            }
+            match run_started_at {
+                None => run_started_at = Some(rec.started_at),
+                Some(existing) if rec.started_at < existing => {
+                    run_started_at = Some(rec.started_at);
+                }
+                _ => {}
             }
             tiles.push(TileState {
                 id: id.clone(),
@@ -382,8 +292,11 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
                 duration_ms: Some(rec.duration_ms),
                 token_usage_input: rec.token_usage.input,
                 token_usage_output: rec.token_usage.output,
+                cache_read: rec.token_usage.cache_read,
+                cache_creation: rec.token_usage.cache_creation,
                 exit_code: rec.exit_code,
                 log_path,
+                model,
             });
         } else {
             tiles.push(TileState {
@@ -392,8 +305,11 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
                 duration_ms: None,
                 token_usage_input: 0,
                 token_usage_output: 0,
+                cache_read: 0,
+                cache_creation: 0,
                 exit_code: None,
                 log_path,
+                model,
             });
         }
     }
@@ -402,16 +318,6 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
         tasks: tiles,
         focus_log: Vec::new(),
         failed_count,
+        run_started_at,
     }
-}
-
-fn format_mtime(mtime: std::time::SystemTime) -> String {
-    use std::time::UNIX_EPOCH;
-    let secs = mtime
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    #[allow(clippy::cast_possible_wrap)]
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0).unwrap_or_default();
-    dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }

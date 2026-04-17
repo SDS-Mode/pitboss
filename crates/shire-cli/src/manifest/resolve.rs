@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::schema::{Defaults, Effort, Manifest, Task, Template, WorktreeCleanup};
 
 /// Fully resolved task ready for dispatch.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedTask {
     pub id: String,
     pub directory: PathBuf,
@@ -21,9 +21,12 @@ pub struct ResolvedTask {
     pub timeout_secs: u64,
     pub use_worktree: bool,
     pub env: HashMap<String, String>,
+    /// When set, pass `--resume <id>` to claude so it continues a prior session.
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedManifest {
     pub max_parallel: u32,
     pub halt_on_failure: bool,
@@ -117,6 +120,7 @@ fn resolve_task(
             .unwrap_or(DEFAULT_TIMEOUT_SECS),
         use_worktree: task.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
+        resume_session_id: None,
     })
 }
 
@@ -270,5 +274,20 @@ mod tests {
         "#);
         let r = resolve(m, None).unwrap();
         assert_eq!(r.tasks[0].prompt, "literal { and }");
+    }
+
+    #[test]
+    fn resume_session_id_defaults_to_none() {
+        let m = man(r#"
+            [[task]]
+            id = "a"
+            directory = "/tmp"
+            prompt = "p"
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert!(
+            r.tasks[0].resume_session_id.is_none(),
+            "resume_session_id should default to None"
+        );
     }
 }

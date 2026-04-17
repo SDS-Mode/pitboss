@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -22,18 +22,21 @@ use mosaic_core::store::TaskStatus;
 // Stats helpers
 // ---------------------------------------------------------------------------
 
-/// Aggregate token and duration stats across all tiles.
+/// Aggregate token, duration, and cost stats across all tiles.
 ///
 /// * `total_in` / `total_out` — summed from all tiles that have token data
 ///   (non-zero input means the record came from summary.jsonl).
 /// * `total_ms` — sum of `duration_ms` for every Done tile (parallel tasks
 ///   run concurrently so this is total CPU-time, not wall-clock).
 /// * `in_progress` — true if any tile is still Pending or Running.
-fn run_stats(state: &AppState) -> (u64, u64, i64, bool) {
+/// * `total_cost` — sum of estimated USD cost for tiles with known models
+///   (tiles with unknown models contribute 0 but don't suppress the total).
+fn run_stats(state: &AppState) -> (u64, u64, i64, bool, f64) {
     let mut total_in = 0u64;
     let mut total_out = 0u64;
     let mut total_ms = 0i64;
     let mut in_progress = false;
+    let mut total_cost = 0.0f64;
     for tile in &state.tasks {
         total_in += tile.token_usage_input;
         total_out += tile.token_usage_output;
@@ -43,8 +46,19 @@ fn run_stats(state: &AppState) -> (u64, u64, i64, bool) {
         if matches!(tile.status, TileStatus::Pending | TileStatus::Running) {
             in_progress = true;
         }
+        if let Some(model) = tile.model.as_deref() {
+            let usage = mosaic_core::parser::TokenUsage {
+                input: tile.token_usage_input,
+                output: tile.token_usage_output,
+                cache_read: tile.cache_read,
+                cache_creation: tile.cache_creation,
+            };
+            if let Some(c) = crate::prices::cost_usd(model, &usage) {
+                total_cost += c;
+            }
+        }
     }
-    (total_in, total_out, total_ms, in_progress)
+    (total_in, total_out, total_ms, in_progress, total_cost)
 }
 
 /// Format a token count as e.g. `"12.3k"` or `"456"`.
@@ -103,6 +117,17 @@ pub fn teardown(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Re
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
 
+    // SnapIn is a full-screen replacement — skip the normal grid entirely.
+    if let Mode::SnapIn {
+        ref task_id,
+        scroll,
+        ..
+    } = state.mode
+    {
+        render_snap_in(frame, area, state, task_id, scroll);
+        return;
+    }
+
     // Outer layout: title (1) | body (fill) | statusbar (1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -115,13 +140,14 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     render_title(frame, chunks[0], state);
     render_body(frame, chunks[1], state);
-    render_statusbar(frame, chunks[2]);
+    render_statusbar(frame, chunks[2], state);
 
     // Overlays (drawn last so they appear on top).
     match state.mode {
         Mode::ViewingLog => render_log_overlay(frame, area, state),
         Mode::Help => render_help_overlay(frame, area),
-        Mode::Normal => {}
+        Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, selected),
+        Mode::Normal | Mode::SnapIn { .. } => {}
     }
 }
 
@@ -144,7 +170,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
         .count();
     let failed = state.failed_count;
 
-    let (total_in, total_out, total_ms, in_progress) = run_stats(state);
+    let (total_in, total_out, total_ms, in_progress, total_cost) = run_stats(state);
 
     // Build the stats suffix only when there is something meaningful to show.
     let token_part = if total_in > 0 || total_out > 0 {
@@ -157,8 +183,25 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
         String::new()
     };
 
+    // Cost part: show when any tile has tokens (cost may be 0 if all models unknown).
+    let cost_part = if total_in > 0 || total_out > 0 {
+        format!(" — ${total_cost:.2} total")
+    } else {
+        String::new()
+    };
+
     let duration_part = if in_progress {
-        " — in progress".to_string()
+        // Show wall-clock elapsed time if we know when the run started.
+        if let Some(started) = state.run_started_at {
+            let elapsed = chrono::Utc::now() - started;
+            #[allow(clippy::cast_sign_loss)]
+            let secs = elapsed.num_seconds().max(0) as u64;
+            let m = secs / 60;
+            let s = secs % 60;
+            format!(" — live {m}m{s:02}s")
+        } else {
+            " — in progress".to_string()
+        }
     } else if total_ms > 0 {
         format!(" — {}", fmt_ms(total_ms))
     } else {
@@ -166,7 +209,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let title_text = format!(
-        " Mosaic — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{duration_part} "
+        " Mosaic — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part} "
     );
 
     let para = Paragraph::new(title_text)
@@ -265,11 +308,24 @@ fn render_tile(frame: &mut Frame, area: Rect, tile: &crate::state::TileState, fo
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Inner content: icon+status line, duration, tokens
+    // Inner content: icon+status line, duration, tokens, cost
     let status_label = status_label(&tile.status);
     let duration_str = tile.duration_ms.map_or_else(
-        || "—".to_string(),
+        || "\u{2014}".to_string(),
         |ms| format!("{:02}m{:02}s", ms / 60_000, (ms % 60_000) / 1000),
+    );
+
+    let cost_str = tile.model.as_deref().map_or_else(
+        || "\u{2014}".to_string(),
+        |model| {
+            let usage = mosaic_core::parser::TokenUsage {
+                input: tile.token_usage_input,
+                output: tile.token_usage_output,
+                cache_read: tile.cache_read,
+                cache_creation: tile.cache_creation,
+            };
+            crate::prices::fmt_cost(crate::prices::cost_usd(model, &usage))
+        },
     );
 
     let lines = vec![
@@ -286,6 +342,7 @@ fn render_tile(frame: &mut Frame, area: Rect, tile: &crate::state::TileState, fo
             ),
             Style::default().fg(Color::DarkGray),
         )),
+        Line::from(Span::styled(cost_str, Style::default().fg(Color::DarkGray))),
     ];
 
     let para = Paragraph::new(lines);
@@ -333,8 +390,12 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
 // Status bar
 // ---------------------------------------------------------------------------
 
-fn render_statusbar(frame: &mut Frame, area: Rect) {
-    let keys = " [h/j/k/l] nav  [L] log  [r] refresh  [?] help  [q] quit";
+fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
+    let keys = if matches!(state.mode, Mode::PickingRun { .. }) {
+        " [j/k] navigate  [Enter] open  [Esc] cancel"
+    } else {
+        " [h/j/k/l] nav  [L] log  [o] open run  [?] help  [q] quit"
+    };
     let para = Paragraph::new(keys).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(para, area);
 }
@@ -342,6 +403,67 @@ fn render_statusbar(frame: &mut Frame, area: Rect) {
 // ---------------------------------------------------------------------------
 // Overlays
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Snap-in full-screen view
+// ---------------------------------------------------------------------------
+
+fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str, scroll: usize) {
+    // Layout: title_bar (1) | log_body (fill) | status_bar (1)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let total_lines = state.focus_log.len();
+    let visible_rows = chunks[1].height as usize;
+
+    // N = last visible line index (1-based, capped at total).
+    let n = (scroll + visible_rows).min(total_lines);
+
+    // Status of the snapped tile (if it still exists).
+    let status_str = state
+        .tasks
+        .iter()
+        .find(|t| t.id == task_id)
+        .map_or("?", |t| status_label(&t.status));
+
+    // --- Title bar ---
+    let title_text = format!(" Snap-in: {task_id} ({status_str}) — line {n}/{total_lines} ");
+    let title_para = Paragraph::new(title_text).style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(title_para, chunks[0]);
+
+    // --- Log body ---
+    let log_slice = if state.focus_log.is_empty() {
+        &[][..]
+    } else {
+        let start = scroll.min(state.focus_log.len());
+        let end = (scroll + visible_rows).min(state.focus_log.len());
+        &state.focus_log[start..end]
+    };
+
+    let lines: Vec<Line> = log_slice
+        .iter()
+        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White))))
+        .collect();
+
+    let log_para = Paragraph::new(lines);
+    frame.render_widget(log_para, chunks[1]);
+
+    // --- Status bar ---
+    let hint = " [Esc] back  [j/k] scroll  [Ctrl-D/U] page  [G] bottom  [g] top  [q] quit";
+    let status_para = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status_para, chunks[2]);
+}
 
 fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
     let overlay_area = centered_rect(90, 85, area);
@@ -405,6 +527,61 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 
     let para = Paragraph::new(help_text);
     frame.render_widget(para, inner);
+}
+
+fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, selected: usize) {
+    let overlay_area = centered_rect(80, 75, area);
+    frame.render_widget(Clear, overlay_area);
+
+    // Split overlay: list (fill) | help hint (1 line inside the border)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Open Run  [j/k] navigate  [Enter] open  [Esc] cancel ")
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(overlay_area);
+    frame.render_widget(block, overlay_area);
+
+    if state.run_list.is_empty() {
+        let msg = Paragraph::new(" No runs found.").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(msg, inner);
+        return;
+    }
+
+    // Build list items.
+    let items: Vec<ListItem> = state
+        .run_list
+        .iter()
+        .map(|e| {
+            let started = crate::runs::format_mtime(e.mtime);
+            let status = if e.is_complete { "complete" } else { "running" };
+            // Format: "run-id  started  N tasks  N failed  status"
+            let short_id = if e.run_id.len() > 38 {
+                &e.run_id[..38]
+            } else {
+                &e.run_id
+            };
+            let text = format!(
+                "{:<38}  {:<22}  {:>5} tasks  {:>4} failed  {}",
+                short_id, started, e.tasks_total, e.tasks_failed, status
+            );
+            ListItem::new(text)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+
+    frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +653,11 @@ mod tests {
             duration_ms,
             token_usage_input: tin,
             token_usage_output: tout,
+            cache_read: 0,
+            cache_creation: 0,
             exit_code: None,
             log_path: PathBuf::from("/dev/null"),
+            model: None,
         }
     }
 
@@ -490,6 +670,8 @@ mod tests {
             mode: crate::state::Mode::Normal,
             focus_log: Vec::new(),
             failed_count: 0,
+            run_list: Vec::new(),
+            run_started_at: None,
         }
     }
 
@@ -526,7 +708,7 @@ mod tests {
     #[test]
     fn run_stats_empty() {
         let s = state(vec![]);
-        let (ti, to, ms, in_progress) = run_stats(&s);
+        let (ti, to, ms, in_progress, _cost) = run_stats(&s);
         assert_eq!((ti, to, ms), (0, 0, 0));
         assert!(!in_progress);
     }
@@ -549,7 +731,7 @@ mod tests {
                 40,
             ),
         ]);
-        let (ti, to, ms, in_progress) = run_stats(&s);
+        let (ti, to, ms, in_progress, _cost) = run_stats(&s);
         assert_eq!((ti, to, ms), (40, 60, 3000));
         assert!(!in_progress);
     }
@@ -566,14 +748,149 @@ mod tests {
             ),
             tile("b", TileStatus::Running, None, 0, 0),
         ]);
-        let (_, _, _, in_progress) = run_stats(&s);
+        let (_, _, _, in_progress, _) = run_stats(&s);
         assert!(in_progress);
     }
 
     #[test]
     fn run_stats_pending_counts_as_in_progress() {
         let s = state(vec![tile("a", TileStatus::Pending, None, 0, 0)]);
-        let (_, _, _, in_progress) = run_stats(&s);
+        let (_, _, _, in_progress, _) = run_stats(&s);
         assert!(in_progress);
+    }
+
+    // -----------------------------------------------------------------------
+    // SnapIn rendering test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn snap_in_render_contains_task_id_in_title() {
+        use crate::state::Mode;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "snap-task-42";
+
+        let mut s = state(vec![tile(task_id, TileStatus::Running, None, 0, 0)]);
+        s.focus_log = vec![
+            "line one".to_string(),
+            "line two".to_string(),
+            "line three".to_string(),
+        ];
+        s.mode = Mode::SnapIn {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+        };
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        // Collect the first rendered row (the title bar).
+        let buf = terminal.backend().buffer();
+        let first_row: String = (0..80)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            first_row.contains(task_id),
+            "title bar should contain task id; got: {first_row:?}"
+        );
+        assert!(
+            first_row.contains("Run"),
+            "title bar should contain status; got: {first_row:?}"
+        );
+    }
+
+    #[test]
+    fn snap_in_render_shows_log_lines() {
+        use crate::state::Mode;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "my-task";
+
+        let mut s = state(vec![tile(task_id, TileStatus::Running, None, 0, 0)]);
+        s.focus_log = vec![
+            "> first log line".to_string(),
+            "> second log line".to_string(),
+        ];
+        s.mode = Mode::SnapIn {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+        };
+
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        // Collect all rows as one string for searching.
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..10)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            rendered.contains("first log line"),
+            "rendered output should contain log content; got snippet: {:?}",
+            &rendered[..rendered.len().min(200)]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // prices module — fmt_cost formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_cost_handles_unknown() {
+        assert_eq!(crate::prices::fmt_cost(None), "\u{2014}");
+    }
+
+    #[test]
+    fn fmt_cost_two_decimal_places() {
+        assert_eq!(crate::prices::fmt_cost(Some(0.867)), "$0.87");
+        assert_eq!(crate::prices::fmt_cost(Some(1.00)), "$1.00");
+        assert_eq!(crate::prices::fmt_cost(Some(0.00)), "$0.00");
+    }
+
+    // -----------------------------------------------------------------------
+    // run_stats includes cost
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn run_stats_includes_cost_for_known_model() {
+        let mut t = tile(
+            "a",
+            TileStatus::Done(mosaic_core::store::TaskStatus::Success),
+            Some(1000),
+            1_000_000,
+            1_000_000,
+        );
+        t.model = Some("claude-haiku-4-5".to_string());
+        let s = state(vec![t]);
+        let (_, _, _, _, cost) = run_stats(&s);
+        // 1M input + 1M output on haiku = $4.80
+        assert!((cost - 4.80).abs() < 1e-4, "expected ~$4.80 got ${cost:.6}");
+    }
+
+    #[test]
+    fn run_stats_cost_zero_for_unknown_model() {
+        let mut t = tile(
+            "a",
+            TileStatus::Done(mosaic_core::store::TaskStatus::Success),
+            Some(1000),
+            500_000,
+            500_000,
+        );
+        t.model = Some("claude-unknown-x-y".to_string());
+        let s = state(vec![t]);
+        let (_, _, _, _, cost) = run_stats(&s);
+        assert!(
+            cost.abs() < 1e-10,
+            "unknown model should contribute 0 to total"
+        );
     }
 }

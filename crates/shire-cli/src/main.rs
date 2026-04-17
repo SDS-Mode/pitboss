@@ -25,6 +25,9 @@ fn main() -> Result<()> {
         } => {
             run_dispatch(&manifest, run_dir, dry_run);
         }
+        Command::Resume { run_id, run_dir } => {
+            run_resume(&run_id, run_dir);
+        }
     }
 }
 
@@ -127,4 +130,117 @@ fn parse_env_max_parallel() -> Option<u32> {
     std::env::var("ANTHROPIC_MAX_CONCURRENT")
         .ok()
         .and_then(|s| s.parse().ok())
+}
+
+/// Resolve a run id (full UUID or unique prefix) to an absolute run directory.
+///
+/// Searches `base_runs_dir` for subdirectory names whose string representation
+/// starts with `run_id_prefix`. Returns an error if zero or more than one match.
+fn resolve_run_dir(
+    base_runs_dir: &std::path::Path,
+    run_id_prefix: &str,
+) -> Result<std::path::PathBuf> {
+    let entries = match std::fs::read_dir(base_runs_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            anyhow::bail!(
+                "cannot read runs directory {}: {e}",
+                base_runs_dir.display()
+            );
+        }
+    };
+
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if entry.path().is_dir() && name_str.starts_with(run_id_prefix) {
+            matches.push(entry.path());
+        }
+    }
+
+    match matches.len() {
+        0 => anyhow::bail!(
+            "no run found matching prefix '{}' in {}",
+            run_id_prefix,
+            base_runs_dir.display()
+        ),
+        1 => Ok(matches.remove(0)),
+        n => anyhow::bail!(
+            "{n} runs match prefix '{}' — be more specific",
+            run_id_prefix
+        ),
+    }
+}
+
+fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>) -> ! {
+    // Determine the base runs directory (same default as dispatch).
+    let base_runs_dir = run_dir_override.clone().unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".local/share/shire/runs")
+    });
+
+    let run_subdir = match resolve_run_dir(&base_runs_dir, run_id_prefix) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("shire resume: {e:#}");
+            std::process::exit(2);
+        }
+    };
+
+    let resolved = match dispatch::build_resume_manifest(&run_subdir) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("shire resume: {e:#}");
+            std::process::exit(2);
+        }
+    };
+
+    let claude_bin = std::env::var_os("SHIRE_CLAUDE_BINARY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("claude"));
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("runtime: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let code = rt.block_on(async move {
+        let claude_version = match dispatch::probe_claude(&claude_bin).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        };
+        // Use the prior run's run_dir so artifacts land alongside the original.
+        // run_dir_override replaces both the base and the resolved manifest's run_dir.
+        let effective_run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
+        match dispatch::run_dispatch_inner(
+            resolved,
+            String::new(),
+            std::path::PathBuf::new(),
+            claude_bin,
+            claude_version,
+            Some(effective_run_dir),
+            false,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("dispatch: {e:#}");
+                1
+            }
+        }
+    });
+    std::process::exit(code);
 }
