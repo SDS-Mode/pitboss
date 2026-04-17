@@ -1,6 +1,7 @@
 mod cli;
 mod dispatch;
 mod manifest;
+mod tui_table;
 
 use anyhow::Result;
 use clap::Parser;
@@ -17,29 +18,38 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Validate { manifest } => run_validate(&manifest),
-        Command::Dispatch { manifest, run_dir, dry_run } => {
-            run_dispatch(&manifest, run_dir, dry_run)
-        }
+        Command::Dispatch {
+            manifest,
+            run_dir,
+            dry_run,
+        } => run_dispatch(&manifest, run_dir, dry_run),
     }
 }
 
 fn init_tracing(verbose: u8, quiet: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
     let level = match (quiet, verbose) {
-        (true, _)   => "warn",
-        (false, 0)  => "info",
-        (false, 1)  => "debug",
-        (false, _)  => "trace",
+        (true, _) => "warn",
+        (false, 0) => "info",
+        (false, 1) => "debug",
+        (false, _) => "trace",
     };
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("shire={level},mosaic_core={level}")));
-    fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn run_validate(manifest: &std::path::Path) -> Result<()> {
     let env_mp = parse_env_max_parallel();
     let r = manifest::load_manifest(manifest, env_mp)?;
-    println!("OK — {} tasks, max_parallel={}", r.tasks.len(), r.max_parallel);
+    println!(
+        "OK — {} tasks, max_parallel={}",
+        r.tasks.len(),
+        r.max_parallel
+    );
     Ok(())
 }
 
@@ -55,16 +65,20 @@ fn run_dispatch(
         .unwrap_or_else(|| std::path::PathBuf::from("claude"));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all().build()?;
+        .enable_all()
+        .build()?;
     rt.block_on(async {
         if !dry_run {
             let _ = dispatch::probe_claude(&claude_bin).await?;
         }
-        let code = dispatch::run_dispatch_inner(resolved, claude_bin, run_dir_override, dry_run).await?;
+        let code =
+            dispatch::run_dispatch_inner(resolved, claude_bin, run_dir_override, dry_run).await?;
         std::process::exit(code);
     })
 }
 
 fn parse_env_max_parallel() -> Option<u32> {
-    std::env::var("ANTHROPIC_MAX_CONCURRENT").ok().and_then(|s| s.parse().ok())
+    std::env::var("ANTHROPIC_MAX_CONCURRENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }

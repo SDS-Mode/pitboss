@@ -21,12 +21,12 @@ pub struct Manifest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
-    pub max_parallel:      Option<u32>,
+    pub max_parallel: Option<u32>,
     #[serde(default)]
-    pub halt_on_failure:   bool,
-    pub run_dir:           Option<PathBuf>,
+    pub halt_on_failure: bool,
+    pub run_dir: Option<PathBuf>,
     #[serde(default = "default_cleanup")]
-    pub worktree_cleanup:  WorktreeCleanup,
+    pub worktree_cleanup: WorktreeCleanup,
     #[serde(default)]
     pub emit_event_stream: bool,
 }
@@ -43,27 +43,39 @@ impl Default for RunConfig {
     }
 }
 
-fn default_cleanup() -> WorktreeCleanup { WorktreeCleanup::OnSuccess }
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorktreeCleanup { Always, OnSuccess, Never }
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Defaults {
-    pub model:        Option<String>,
-    pub effort:       Option<Effort>,
-    pub tools:        Option<Vec<String>>,
-    pub timeout_secs: Option<u64>,
-    pub use_worktree: Option<bool>,
-    #[serde(default)]
-    pub env:          HashMap<String, String>,
+fn default_cleanup() -> WorktreeCleanup {
+    WorktreeCleanup::OnSuccess
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Effort { Low, Medium, High, Xhigh, Max }
+pub enum WorktreeCleanup {
+    Always,
+    OnSuccess,
+    Never,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Defaults {
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub tools: Option<Vec<String>>,
+    pub timeout_secs: Option<u64>,
+    pub use_worktree: Option<bool>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

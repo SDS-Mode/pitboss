@@ -11,7 +11,9 @@ const SECOND_SIGINT_WINDOW: Duration = Duration::from_secs(5);
 pub fn install_ctrl_c_watcher(cancel: CancelToken) {
     tokio::spawn(async move {
         loop {
-            if tokio::signal::ctrl_c().await.is_err() { return; }
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
             cancel.drain();
             tracing::warn!("received Ctrl-C — draining; send another within 5s to terminate");
             match tokio::time::timeout(SECOND_SIGINT_WINDOW, tokio::signal::ctrl_c()).await {

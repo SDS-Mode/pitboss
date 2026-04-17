@@ -11,7 +11,11 @@ pub async fn probe_claude(binary: &Path) -> Result<Option<String>> {
     match output {
         Ok(o) if o.status.success() => {
             let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if text.is_empty() { Ok(None) } else { Ok(Some(text)) }
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
         }
         Ok(o) => {
             tracing::warn!(code = ?o.status.code(), "claude --version exited non-zero; proceeding without version");
@@ -31,7 +35,9 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_binary_is_fatal() {
-        let err = probe_claude(&PathBuf::from("/nope/claude")).await.unwrap_err();
+        let err = probe_claude(&PathBuf::from("/nope/claude"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 

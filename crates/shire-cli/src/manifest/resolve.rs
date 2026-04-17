@@ -37,30 +37,37 @@ const DEFAULT_EFFORT: Effort = Effort::High;
 const DEFAULT_TIMEOUT_SECS: u64 = 3600;
 const DEFAULT_MAX_PARALLEL: u32 = 4;
 fn default_tools() -> Vec<String> {
-    ["Read","Write","Edit","Bash","Glob","Grep"].iter().map(|s| s.to_string()).collect()
+    ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<ResolvedManifest> {
-    let templates: HashMap<String, &Template> =
-        manifest.templates.iter().map(|t| (t.id.clone(), t)).collect();
+    let templates: HashMap<String, &Template> = manifest
+        .templates
+        .iter()
+        .map(|t| (t.id.clone(), t))
+        .collect();
 
     let mut resolved = Vec::with_capacity(manifest.tasks.len());
     for task in &manifest.tasks {
         resolved.push(resolve_task(task, &manifest.defaults, &templates)?);
     }
 
-    let max_parallel = manifest.run.max_parallel
+    let max_parallel = manifest
+        .run
+        .max_parallel
         .or(env_max_parallel)
         .unwrap_or(DEFAULT_MAX_PARALLEL);
 
-    let run_dir = manifest.run.run_dir
-        .unwrap_or_else(default_run_dir);
+    let run_dir = manifest.run.run_dir.unwrap_or_else(default_run_dir);
 
     Ok(ResolvedManifest {
         max_parallel,
-        halt_on_failure:   manifest.run.halt_on_failure,
+        halt_on_failure: manifest.run.halt_on_failure,
         run_dir,
-        worktree_cleanup:  manifest.run.worktree_cleanup,
+        worktree_cleanup: manifest.run.worktree_cleanup,
         emit_event_stream: manifest.run.emit_event_stream,
         tasks: resolved,
     })
@@ -74,13 +81,14 @@ fn resolve_task(
     let prompt = match (&task.prompt, &task.template) {
         (Some(p), None) => p.clone(),
         (None, Some(tid)) => {
-            let tmpl = templates.get(tid)
-                .ok_or_else(|| anyhow!("task '{}' references unknown template '{}'", task.id, tid))?;
+            let tmpl = templates.get(tid).ok_or_else(|| {
+                anyhow!("task '{}' references unknown template '{}'", task.id, tid)
+            })?;
             substitute(&tmpl.prompt, &task.vars)
                 .with_context(|| format!("rendering template '{}' for task '{}'", tid, task.id))?
         }
         (Some(_), Some(_)) => bail!("task '{}' sets both prompt and template", task.id),
-        (None, None)       => bail!("task '{}' has no prompt and no template", task.id),
+        (None, None) => bail!("task '{}' has no prompt and no template", task.id),
     };
 
     let mut env = defaults.env.clone();
@@ -91,14 +99,21 @@ fn resolve_task(
         directory: task.directory.clone(),
         prompt,
         branch: task.branch.clone(),
-        model:  task.model.clone()
-                  .or_else(|| defaults.model.clone())
-                  .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        model: task
+            .model
+            .clone()
+            .or_else(|| defaults.model.clone())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
         effort: task.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
-        tools:  task.tools.clone()
-                  .or_else(|| defaults.tools.clone())
-                  .unwrap_or_else(default_tools),
-        timeout_secs: task.timeout_secs.or(defaults.timeout_secs).unwrap_or(DEFAULT_TIMEOUT_SECS),
+        tools: task
+            .tools
+            .clone()
+            .or_else(|| defaults.tools.clone())
+            .unwrap_or_else(default_tools),
+        timeout_secs: task
+            .timeout_secs
+            .or(defaults.timeout_secs)
+            .unwrap_or(DEFAULT_TIMEOUT_SECS),
         use_worktree: task.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
     })
@@ -120,7 +135,8 @@ fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> 
                 let mut name = String::new();
                 for nc in iter.by_ref() {
                     if nc == '}' {
-                        let value = vars.get(&name)
+                        let value = vars
+                            .get(&name)
                             .ok_or_else(|| anyhow!("undeclared var '{}' in template", name))?;
                         out.push_str(value);
                         break;
@@ -135,8 +151,11 @@ fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> 
 }
 
 fn default_run_dir() -> PathBuf {
-    if let Some(h) = dirs_home() { h.join(".local/share/shire/runs") }
-    else { PathBuf::from("./shire-runs") }
+    if let Some(h) = dirs_home() {
+        h.join(".local/share/shire/runs")
+    } else {
+        PathBuf::from("./shire-runs")
+    }
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -147,7 +166,9 @@ fn dirs_home() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn man(src: &str) -> Manifest { toml::from_str(src).unwrap() }
+    fn man(src: &str) -> Manifest {
+        toml::from_str(src).unwrap()
+    }
 
     #[test]
     fn resolves_inline_prompt() {

@@ -25,8 +25,15 @@ fn validate_ids(r: &ResolvedManifest) -> Result<()> {
         if t.id.is_empty() {
             bail!("empty task id");
         }
-        if !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            bail!("task id '{}' contains invalid characters (allowed: a-zA-Z0-9_-)", t.id);
+        if !t
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            bail!(
+                "task id '{}' contains invalid characters (allowed: a-zA-Z0-9_-)",
+                t.id
+            );
         }
     }
     Ok(())
@@ -35,12 +42,18 @@ fn validate_ids(r: &ResolvedManifest) -> Result<()> {
 fn validate_directories(r: &ResolvedManifest) -> Result<()> {
     for t in &r.tasks {
         if !t.directory.is_dir() {
-            bail!("task '{}' directory does not exist or is not a directory: {}",
-                  t.id, t.directory.display());
+            bail!(
+                "task '{}' directory does not exist or is not a directory: {}",
+                t.id,
+                t.directory.display()
+            );
         }
         if t.use_worktree && !is_in_git_repo(&t.directory) {
-            bail!("task '{}' has use_worktree=true but directory is not a git work-tree: {}",
-                  t.id, t.directory.display());
+            bail!(
+                "task '{}' has use_worktree=true but directory is not a git work-tree: {}",
+                t.id,
+                t.directory.display()
+            );
         }
     }
     Ok(())
@@ -49,10 +62,11 @@ fn validate_directories(r: &ResolvedManifest) -> Result<()> {
 fn validate_branch_conflicts(r: &ResolvedManifest) -> Result<()> {
     let mut seen: HashSet<(std::path::PathBuf, String)> = HashSet::new();
     for t in &r.tasks {
-        if !t.use_worktree { continue; }
+        if !t.use_worktree {
+            continue;
+        }
         if let Some(b) = &t.branch {
-            let canon = std::fs::canonicalize(&t.directory)
-                .unwrap_or_else(|_| t.directory.clone());
+            let canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
             if !seen.insert((canon, b.clone())) {
                 bail!("two tasks target the same directory + branch '{}'", b);
             }
@@ -79,9 +93,9 @@ fn is_in_git_repo(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::resolve::ResolvedTask;
     use super::super::schema::{Effort, WorktreeCleanup};
+    use super::*;
     use std::path::PathBuf;
     use std::process::Command;
     use tempfile::TempDir;
@@ -89,12 +103,32 @@ mod tests {
     fn with_tmp_repo(use_git: bool) -> TempDir {
         let d = TempDir::new().unwrap();
         if use_git {
-            Command::new("git").args(["init","-q"]).current_dir(d.path()).status().unwrap();
-            Command::new("git").args(["config","user.email","t@t.x"]).current_dir(d.path()).status().unwrap();
-            Command::new("git").args(["config","user.name","t"]).current_dir(d.path()).status().unwrap();
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(d.path())
+                .status()
+                .unwrap();
+            Command::new("git")
+                .args(["config", "user.email", "t@t.x"])
+                .current_dir(d.path())
+                .status()
+                .unwrap();
+            Command::new("git")
+                .args(["config", "user.name", "t"])
+                .current_dir(d.path())
+                .status()
+                .unwrap();
             std::fs::write(d.path().join("r"), "").unwrap();
-            Command::new("git").args(["add","."]).current_dir(d.path()).status().unwrap();
-            Command::new("git").args(["commit","-q","-m","i"]).current_dir(d.path()).status().unwrap();
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(d.path())
+                .status()
+                .unwrap();
+            Command::new("git")
+                .args(["commit", "-q", "-m", "i"])
+                .current_dir(d.path())
+                .status()
+                .unwrap();
         }
         d
     }

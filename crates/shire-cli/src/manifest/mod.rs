@@ -1,9 +1,9 @@
-pub mod schema;
-pub mod resolve;
-pub mod validate;
 pub mod load;
+pub mod resolve;
+pub mod schema;
+pub mod validate;
 
 #[allow(unused_imports)]
-pub use schema::{Manifest, RunConfig, Defaults, Task, Template};
-#[allow(unused_imports)]
 pub use load::load_manifest;
+#[allow(unused_imports)]
+pub use schema::{Defaults, Manifest, RunConfig, Task, Template};

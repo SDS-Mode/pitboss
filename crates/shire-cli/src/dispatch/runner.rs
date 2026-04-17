@@ -8,7 +8,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use mosaic_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
 use mosaic_core::session::{CancelToken, SessionHandle};
-use mosaic_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus};
+use mosaic_core::store::{
+    JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus,
+};
 use mosaic_core::worktree::{CleanupPolicy, WorktreeManager};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
@@ -51,11 +53,20 @@ pub async fn execute(
 
     if dry_run {
         for t in &resolved.tasks {
-            println!("DRY-RUN {}: {} {}", t.id,
-                     claude_binary.display(),
-                     spawn_args(t).join(" "));
+            println!(
+                "DRY-RUN {}: {} {}",
+                t.id,
+                claude_binary.display(),
+                spawn_args(t).join(" ")
+            );
         }
         return Ok(0);
+    }
+
+    let is_tty = atty::is(atty::Stream::Stdout);
+    let table = Arc::new(Mutex::new(crate::tui_table::ProgressTable::new(is_tty)));
+    for t in &resolved.tasks {
+        table.lock().await.register(&t.id);
     }
 
     let semaphore = Arc::new(Semaphore::new(resolved.max_parallel as usize));
@@ -67,10 +78,14 @@ pub async fn execute(
     let mut handles = Vec::new();
 
     for task in resolved.tasks.clone() {
-        if cancel.is_draining() { break; }
+        if cancel.is_draining() {
+            break;
+        }
         let permit = semaphore.clone().acquire_owned().await?;
         // Re-check after potentially blocking on the semaphore.
-        if cancel.is_draining() { break; }
+        if cancel.is_draining() {
+            break;
+        }
         let spawner = spawner.clone();
         let store = store.clone();
         let cancel = cancel.clone();
@@ -80,34 +95,57 @@ pub async fn execute(
         let halt_on_failure = resolved.halt_on_failure;
         let run_dir = resolved.run_dir.clone();
         let cleanup_policy = match resolved.worktree_cleanup {
-            crate::manifest::schema::WorktreeCleanup::Always    => CleanupPolicy::Always,
+            crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
             crate::manifest::schema::WorktreeCleanup::OnSuccess => CleanupPolicy::OnSuccess,
-            crate::manifest::schema::WorktreeCleanup::Never     => CleanupPolicy::Never,
+            crate::manifest::schema::WorktreeCleanup::Never => CleanupPolicy::Never,
         };
+        let table = table.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            let record = execute_task(&task, &claude, spawner, store.clone(),
-                                      cancel.clone(), wt_mgr, cleanup_policy, run_id, run_dir).await;
+            let record = execute_task(
+                &task,
+                &claude,
+                spawner,
+                store.clone(),
+                cancel.clone(),
+                wt_mgr,
+                cleanup_policy,
+                run_id,
+                run_dir,
+                table.clone(),
+            )
+            .await;
             let failed = !matches!(record.status, TaskStatus::Success);
+            table.lock().await.mark_done(&record);
             records.lock().await.push(record);
-            if failed && halt_on_failure { cancel.drain(); }
+            if failed && halt_on_failure {
+                cancel.drain();
+            }
         }));
     }
 
-    for h in handles { let _ = h.await; }
+    for h in handles {
+        let _ = h.await;
+    }
 
-    let records = Arc::try_unwrap(records).map_err(|_| anyhow::anyhow!("records locked"))?
+    let records = Arc::try_unwrap(records)
+        .map_err(|_| anyhow::anyhow!("records locked"))?
         .into_inner();
-    let tasks_failed = records.iter().filter(|r| !matches!(r.status, TaskStatus::Success)).count();
+    let tasks_failed = records
+        .iter()
+        .filter(|r| !matches!(r.status, TaskStatus::Success))
+        .count();
 
     let started_at = meta.started_at;
-    let ended_at   = Utc::now();
+    let ended_at = Utc::now();
     let summary = RunSummary {
-        run_id, manifest_path: PathBuf::new(),
+        run_id,
+        manifest_path: PathBuf::new(),
         shire_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version: None,
-        started_at, ended_at,
+        started_at,
+        ended_at,
         total_duration_ms: (ended_at - started_at).num_milliseconds(),
         tasks_total: records.len(),
         tasks_failed,
@@ -130,8 +168,12 @@ async fn execute_task(
     cleanup: CleanupPolicy,
     run_id: Uuid,
     run_dir: PathBuf,
+    table: Arc<Mutex<crate::tui_table::ProgressTable>>,
 ) -> TaskRecord {
-    let task_dir = run_dir.join(run_id.to_string()).join("tasks").join(&task.id);
+    let task_dir = run_dir
+        .join(run_id.to_string())
+        .join("tasks")
+        .join(&task.id);
     tokio::fs::create_dir_all(&task_dir).await.ok();
     let log_path = task_dir.join("stdout.log");
 
@@ -150,7 +192,8 @@ async fn execute_task(
                     task_id: task.id.clone(),
                     status: TaskStatus::SpawnFailed,
                     exit_code: None,
-                    started_at: Utc::now(), ended_at: Utc::now(),
+                    started_at: Utc::now(),
+                    ended_at: Utc::now(),
                     duration_ms: 0,
                     worktree_path: None,
                     log_path,
@@ -171,16 +214,18 @@ async fn execute_task(
         env: task.env.clone(),
     };
 
+    table.lock().await.mark_running(&task.id);
+
     let outcome = SessionHandle::new(task.id.clone(), spawner, cmd)
         .with_log_path(log_path.clone())
         .run_to_completion(cancel, Duration::from_secs(task.timeout_secs))
         .await;
 
     let status = match outcome.final_state {
-        mosaic_core::session::SessionState::Completed         => TaskStatus::Success,
-        mosaic_core::session::SessionState::Failed { .. }     => TaskStatus::Failed,
-        mosaic_core::session::SessionState::TimedOut          => TaskStatus::TimedOut,
-        mosaic_core::session::SessionState::Cancelled         => TaskStatus::Cancelled,
+        mosaic_core::session::SessionState::Completed => TaskStatus::Success,
+        mosaic_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
+        mosaic_core::session::SessionState::TimedOut => TaskStatus::TimedOut,
+        mosaic_core::session::SessionState::Cancelled => TaskStatus::Cancelled,
         mosaic_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
         _ => TaskStatus::Failed,
     };
@@ -228,12 +273,32 @@ mod tests {
     use tempfile::TempDir;
 
     fn init_repo(root: &std::path::Path) {
-        Command::new("git").args(["init","-q"]).current_dir(root).status().unwrap();
-        Command::new("git").args(["config","user.email","t@t.x"]).current_dir(root).status().unwrap();
-        Command::new("git").args(["config","user.name","t"]).current_dir(root).status().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "t@t.x"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(root)
+            .status()
+            .unwrap();
         std::fs::write(root.join("r"), "").unwrap();
-        Command::new("git").args(["add","."]).current_dir(root).status().unwrap();
-        Command::new("git").args(["commit","-q","-m","i"]).current_dir(root).status().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-q", "-m", "i"])
+            .current_dir(root)
+            .status()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -252,18 +317,26 @@ mod tests {
                 ResolvedTask {
                     id: "ok".into(),
                     directory: dir.path().to_path_buf(),
-                    prompt: "p".into(), branch: None,
-                    model: "m".into(), effort: crate::manifest::schema::Effort::High,
-                    tools: vec![], timeout_secs: 30,
-                    use_worktree: false, env: Default::default(),
+                    prompt: "p".into(),
+                    branch: None,
+                    model: "m".into(),
+                    effort: crate::manifest::schema::Effort::High,
+                    tools: vec![],
+                    timeout_secs: 30,
+                    use_worktree: false,
+                    env: Default::default(),
                 },
                 ResolvedTask {
                     id: "bad".into(),
                     directory: dir.path().to_path_buf(),
-                    prompt: "p".into(), branch: None,
-                    model: "m".into(), effort: crate::manifest::schema::Effort::High,
-                    tools: vec![], timeout_secs: 30,
-                    use_worktree: false, env: Default::default(),
+                    prompt: "p".into(),
+                    branch: None,
+                    model: "m".into(),
+                    effort: crate::manifest::schema::Effort::High,
+                    tools: vec![],
+                    timeout_secs: 30,
+                    use_worktree: false,
+                    env: Default::default(),
                 },
             ],
         };
@@ -283,8 +356,15 @@ mod tests {
         ));
 
         let store = Arc::new(JsonFileStore::new(run_dir.path().to_path_buf()));
-        let rc = execute(resolved, PathBuf::from("claude"), spawner, store.clone(), false)
-            .await.unwrap();
+        let rc = execute(
+            resolved,
+            PathBuf::from("claude"),
+            spawner,
+            store.clone(),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(rc, 1, "one failure → exit 1");
     }
 
@@ -292,8 +372,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProcessSpawner for CyclingFake {
-        async fn spawn(&self, cmd: SpawnCmd)
-            -> Result<Box<dyn mosaic_core::process::ChildProcess>, mosaic_core::error::SpawnError>
+        async fn spawn(
+            &self,
+            cmd: SpawnCmd,
+        ) -> Result<Box<dyn mosaic_core::process::ChildProcess>, mosaic_core::error::SpawnError>
         {
             let i = {
                 let mut lock = self.1.lock().unwrap();
@@ -315,14 +397,18 @@ mod tests {
         let make_task = |id: &str| ResolvedTask {
             id: id.into(),
             directory: dir.path().to_path_buf(),
-            prompt: "p".into(), branch: None,
-            model: "m".into(), effort: crate::manifest::schema::Effort::High,
-            tools: vec![], timeout_secs: 30,
-            use_worktree: false, env: Default::default(),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec![],
+            timeout_secs: 30,
+            use_worktree: false,
+            env: Default::default(),
         };
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
-            max_parallel: 1,    // serialize so ordering is deterministic
+            max_parallel: 1, // serialize so ordering is deterministic
             halt_on_failure: true,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
@@ -341,13 +427,21 @@ mod tests {
             std::sync::Mutex::new(0),
         ));
         let store = Arc::new(JsonFileStore::new(run_dir.path().to_path_buf()));
-        let rc = execute(resolved, PathBuf::from("claude"), spawner, store.clone(), false)
-            .await.unwrap();
+        let rc = execute(
+            resolved,
+            PathBuf::from("claude"),
+            spawner,
+            store.clone(),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(rc, 1);
 
         // Expect only task "a" recorded; others were skipped by the drain.
         // summary.json should exist with tasks.len() == 1.
-        let summary_path = run_dir.path()
+        let summary_path = run_dir
+            .path()
             .join(store_run_id_dir(run_dir.path()))
             .join("summary.json");
         let bytes = std::fs::read(&summary_path).unwrap();
@@ -359,7 +453,9 @@ mod tests {
         // Finds the single UUID-named subdir just created.
         for entry in std::fs::read_dir(root).unwrap() {
             let e = entry.unwrap();
-            if e.path().is_dir() { return e.file_name().to_string_lossy().to_string(); }
+            if e.path().is_dir() {
+                return e.file_name().to_string_lossy().to_string();
+            }
         }
         panic!("no run dir")
     }
