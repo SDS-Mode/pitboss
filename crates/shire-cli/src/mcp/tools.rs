@@ -49,7 +49,31 @@ pub struct CancelResult {
 
 use std::sync::Arc;
 
+use anyhow::Result;
+use uuid::Uuid;
+
 use crate::dispatch::state::{DispatchState, WorkerState};
+
+pub async fn handle_spawn_worker(
+    state: &Arc<DispatchState>,
+    args: SpawnWorkerArgs,
+) -> Result<SpawnWorkerResult> {
+    // Generate a unique, short-ish task_id.
+    let task_id = format!("worker-{}", Uuid::now_v7());
+
+    // Record as Pending. Actual subprocess spawn happens via a channel to
+    // the hierarchical dispatcher (wired in Task 20).
+    {
+        let mut workers = state.workers.write().await;
+        workers.insert(task_id.clone(), WorkerState::Pending);
+    }
+
+    let _ = args; // guards and real spawn land in Tasks 13-14.
+    Ok(SpawnWorkerResult {
+        task_id,
+        worktree_path: None,
+    })
+}
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
     let workers = state.workers.read().await;
@@ -148,5 +172,25 @@ mod tests {
         assert_eq!(result[0].state, "Pending");
         assert_eq!(result[1].task_id, "w-2");
         assert_eq!(result[1].state, "Running");
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_adds_entry_to_state() {
+        let state = test_state().await;
+        let args = SpawnWorkerArgs {
+            prompt: "investigate issue #1".into(),
+            directory: Some("/tmp".into()),
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let result = handle_spawn_worker(&state, args).await.unwrap();
+        assert!(result.task_id.starts_with("worker-"));
+
+        let workers = state.workers.read().await;
+        assert_eq!(workers.len(), 1);
+        let entry = workers.get(&result.task_id).unwrap();
+        assert!(matches!(entry, WorkerState::Pending));
     }
 }
