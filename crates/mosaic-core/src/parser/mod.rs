@@ -305,4 +305,35 @@ mod tests {
             other => panic!("unexpected variant: {other:?}"),
         }
     }
+
+    #[test]
+    fn unknown_top_level_type_is_unknown_not_error() {
+        let line = br#"{"type":"never_before_seen","foo":"bar"}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::Unknown { raw } => assert!(raw.contains("never_before_seen")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_fields_on_known_types_are_ignored() {
+        let line = br#"{"type":"system","subtype":"init","future_field":42}"#;
+        let ev = parse_line(line).unwrap();
+        assert_eq!(ev, Event::System { subtype: Some("init".into()) });
+    }
+
+    #[test]
+    fn invalid_json_is_malformed() {
+        let line = br#"{not json"#;
+        let err = parse_line(line).unwrap_err();
+        assert!(matches!(err, ParseError::Malformed { .. }));
+    }
+
+    #[test]
+    fn missing_type_field_is_unknown() {
+        let line = br#"{"message":"hi"}"#;
+        let ev = parse_line(line).unwrap();
+        assert!(matches!(ev, Event::Unknown { .. }));
+    }
 }
