@@ -1,21 +1,29 @@
 # Pitboss
 
-Rust toolkit for running and observing parallel Claude Code agent sessions.
-Ships two binaries:
+> You deal the cards; the pit watches the chips.
 
-- **`pitboss`** — headless dispatcher. Reads a `pitboss.toml` manifest, fans
-  out N `claude` subprocesses under a concurrency cap, writes structured
-  per-run artifacts. Supports flat task lists and hierarchical runs where a
-  *lead* claude dynamically spawns *worker* claudes via MCP.
-  [See `crates/pitboss-cli/`.](crates/pitboss-cli/)
-- **`pitboss-tui`** — terminal observer for in-progress or completed runs.
-  Tile grid of task state, live log tailing, read-only. Renders `[LEAD]`
-  prefixes and worker-to-lead arrows for hierarchical runs.
-  [See `crates/pitboss-tui/`.](crates/pitboss-tui/)
+Rust toolkit for running and observing parallel Claude Code sessions. A
+dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
+cap, captures structured artifacts per run, and — in hierarchical mode —
+lets a **lead** dynamically open new hands via MCP. The TUI (`pitboss-tui`)
+gives the floor view: tile grid, live log tailing, budget + token counters.
 
-Status: `v0.3.0-pre`. Exercised end-to-end against real `claude` including a
-real-world practical test that documented the workspace, reviewed commits, and
-surveyed neighboring projects with hierarchical fanout.
+Language models are stochastic. A well-run pit is not. Give the house a
+clear manifest, a budget, and a prompt — the pit turns variance into
+consistently usable output.
+
+## Vocabulary
+
+| Term | Meaning |
+|---|---|
+| **Pitboss** | The `pitboss` dispatcher binary. Runs manifests, manages worktrees, persists run state. |
+| **Dealer** | A `claude` subprocess executing a single task. Each `[[task]]` in flat mode spawns one dealer; a lead spawns them dynamically in hierarchical mode. |
+| **Lead** | The first dealer in a hierarchical run — receives the operator's prompt + MCP tools, decides how many additional dealers to deal in. |
+| **Run** | One invocation of `pitboss dispatch`. Produces `~/.local/share/pitboss/runs/<run-id>/` with manifest snapshot, resolved config, per-task logs, and a summary. |
+| **House rules** | The hierarchical-run guardrails: `max_workers`, `budget_usd`, `lead_timeout_secs`. |
+
+(MCP tool names like `spawn_worker` / `list_workers` keep the generic vocabulary
+since they're the on-the-wire protocol. In prose and on the floor, they're dealers.)
 
 ## Install
 
@@ -27,16 +35,17 @@ cargo install --path crates/pitboss-tui
 ## Subcommands
 
 ```
-pitboss validate <manifest>       # parse + resolve + validate, exit non-zero on error
-pitboss dispatch <manifest>       # execute a manifest
-pitboss resume <run-id>           # re-run a prior dispatch, reusing session ids
-pitboss diff <run-a> <run-b>      # compare two runs side-by-side
-pitboss version                   # print version
+pitboss validate <manifest>       parse + resolve + validate, exit non-zero on error
+pitboss dispatch <manifest>       deal a run
+pitboss resume <run-id>           re-deal a prior run, reusing claude_session_id
+pitboss diff <run-a> <run-b>      compare two runs side-by-side
+pitboss version                   print version
 ```
 
 ## Quick start — flat dispatch
 
-Create `pitboss.toml` in a directory that is inside a git repo:
+Deal N independent hands at once. Each `[[task]]` becomes a dealer; results
+land in `~/.local/share/pitboss/runs/<run-id>/`.
 
 ```toml
 [run]
@@ -49,33 +58,30 @@ prompt = "Say hello in a file called hello.txt"
 branch = "feat/hello"
 ```
 
-Then:
-
 ```bash
 pitboss validate pitboss.toml
 pitboss dispatch pitboss.toml
 ```
 
-Artifacts land in `~/.local/share/pitboss/runs/<run-id>/`:
-`manifest.snapshot.toml`, `resolved.json`, `meta.json`, `summary.json`,
-`summary.jsonl`, and per-task `tasks/<id>/{stdout.log,stderr.log}`.
+Each run produces: `manifest.snapshot.toml`, `resolved.json`, `meta.json`,
+`summary.json`, `summary.jsonl`, and per-task `tasks/<id>/{stdout.log,stderr.log}`.
 
-## Quick start — observe
+## Quick start — watch the floor
 
 ```bash
-pitboss-tui                # opens the most recent run (polls every 500ms)
+pitboss-tui                # open the most recent run (500ms polling)
 pitboss-tui list           # table of runs to stdout
-pitboss-tui 019d99         # opens a run by UUID prefix
+pitboss-tui 019d99         # open a run by UUID prefix
 ```
 
 See [`crates/pitboss-tui/README.md`](crates/pitboss-tui/README.md) for
 keybindings.
 
-## Quick start — hierarchical (v0.3)
+## Quick start — hierarchical
 
-Instead of a flat task list, declare a **lead** Hobbit that spawns workers on
-the fly via MCP. The lead decides how many workers to run, what each one does,
-and waits on results — all from inside the Claude session.
+Flat dispatch is fixed-seat blackjack: N tables, N hands, all at once.
+Hierarchical dispatch hands the lead a deck and a stake and says *deal as
+many hands as you need to finish the job, within house rules*.
 
 ```toml
 [run]
@@ -87,81 +93,111 @@ lead_timeout_secs = 900
 id = "triage"
 directory = "/path/to/repo"
 prompt = """
-Inspect recent PRs, spawn one worker per unique author, ask each worker to
-summarize that author's work in summary-<id>.md, then write a combined digest.
+Inspect recent PRs, spawn one worker per unique author, ask each to summarize
+that author's work in summary-<id>.md, then write a combined digest.
 """
 branch = "feat/triage-lead"
 ```
 
-Run it the same way:
-
 ```bash
-pitboss validate pitboss.toml    # prints a hierarchical summary when [[lead]] is used
+pitboss validate pitboss.toml    # prints a hierarchical summary when [[lead]] is set
 pitboss dispatch pitboss.toml
 ```
 
-The lead has access to these MCP tools, auto-allowed in `--allowedTools`:
+The lead has these MCP tools, auto-allowed in its `--allowedTools`:
 
 | Tool | Purpose |
 |---|---|
-| `mcp__pitboss__spawn_worker` | Spawn a new worker with a prompt + optional directory/model/tools |
-| `mcp__pitboss__worker_status` | Non-blocking peek at a worker's state |
-| `mcp__pitboss__wait_for_worker` | Block until a specific worker completes |
-| `mcp__pitboss__wait_for_any` | Block until any of a list of workers completes |
-| `mcp__pitboss__list_workers` | Snapshot of all workers (excludes the lead) |
-| `mcp__pitboss__cancel_worker` | Signal a per-worker `CancelToken` |
+| `mcp__pitboss__spawn_worker` | Deal a new dealer with a prompt + optional directory/model/tools |
+| `mcp__pitboss__worker_status` | Non-blocking peek at a dealer's state |
+| `mcp__pitboss__wait_for_worker` | Block until a specific dealer settles |
+| `mcp__pitboss__wait_for_any` | Block until any of a list of dealers settles |
+| `mcp__pitboss__list_workers` | Snapshot of active + completed dealers |
+| `mcp__pitboss__cancel_worker` | Signal a per-dealer `CancelToken` |
 
-### Guardrails
+### House rules
 
-- **`max_workers`** caps concurrent + queued workers (1–16, default unset).
-- **`budget_usd`** is a soft cap with reservation accounting. Each `spawn_worker`
-  call reserves a model-aware cost estimate up front; the reservation is
-  released + replaced by actual cost when the worker completes. Once
-  `spent + reserved + next_estimate` would exceed the budget, the next
-  `spawn_worker` returns `budget exceeded`. The lead can handle the error and
-  decide to continue with partial results or exit.
-- **`lead_timeout_secs`** bounds the lead's wall-clock runtime.
-- Depth is 1 (hub-and-spoke); workers have no MCP access and can't spawn
-  sub-workers.
+- **`max_workers`** — hard cap on concurrent + queued dealers (1–16, default unset).
+- **`budget_usd`** — the chip stack. Each spawn reserves a model-aware estimate
+  up front; the reservation releases and the actual cost books in when the
+  dealer settles. Once `spent + reserved + next_estimate` would exceed the
+  stack, `spawn_worker` returns `budget exceeded` and the lead decides what to
+  do with partial results.
+- **`lead_timeout_secs`** — wall-clock cap on the lead. The pit always clears.
+- Depth is 1. Dealers don't spawn sub-dealers; no re-raise, no chaining.
 
-### Plumbing
+### The bridge
 
-Pitboss generates a `--mcp-config` file that points the lead's claude
-subprocess at `pitboss mcp-bridge <socket>` — a small helper subcommand that
-proxies stdio to the pitboss MCP server's unix socket. The lead never invokes
-`mcp-bridge` directly; it's wired up automatically.
+Claude Code's MCP client only speaks stdio. The pitboss MCP server listens on
+a unix socket. Between them is `pitboss mcp-bridge <socket>` — a stdio↔socket
+proxy that pitboss auto-launches via the lead's generated `--mcp-config`. You
+never invoke it directly.
 
-In the Pitboss TUI, leads show a `[LEAD]` prefix and worker tiles display
-`← lead-id` so you can see who spawned what. The status bar shows
-`— N workers spawned`.
+### On the floor
+
+In the TUI, leads render with `[LEAD] <id>` in a cyan border; dealers show
+`← <lead-id>` on their bottom border. The status bar reads
+`— N workers spawned`. As dealers complete, their tiles mark done without
+clearing — full history stays visible for the run.
 
 ### Resume
 
-`pitboss resume <run-id>` works for both flat and hierarchical runs. For flat
-mode, each task respawns with its original `claude_session_id`. For
-hierarchical mode, only the **lead** is resumed — the lead's next decisions
-determine whether to spawn fresh workers. `resolved.json` in the new run
-records the `resume_session_id` so you can audit what was picked up.
+`pitboss resume <run-id>` re-deals any prior run.
+
+- **Flat**: each task respawns with its original `claude_session_id`.
+- **Hierarchical**: only the lead resumes (`--resume <session-id>`); the lead
+  decides whether to deal fresh dealers. `resolved.json` in the new run
+  records the `resume_session_id` for audit.
 
 ## Concurrency
 
-Default `max_parallel` is 4. Override hierarchy: manifest `[run].max_parallel`
-beats `ANTHROPIC_MAX_CONCURRENT` env beats the default.
+Default `max_parallel` is 4. Override priority: `[run].max_parallel` beats
+`ANTHROPIC_MAX_CONCURRENT` env beats the default.
 
-For hierarchical mode, `max_workers` is independent of `max_parallel` — it
-caps the lead's worker fanout, not the overall process count.
+In hierarchical mode, `max_workers` is independent of `max_parallel` — it
+caps the lead's fanout, not the overall process count.
+
+## Philosophy
+
+The model is stochastic. The pit is not.
+
+You cannot guarantee any single hand. You can guarantee:
+
+- **Isolation.** Every dealer runs in its own git worktree on its own branch.
+  One bad hand doesn't contaminate the next.
+- **Observability.** Every token, every cache hit, every session id is
+  persisted. When you want to know what happened, the artifacts are on the
+  table.
+- **Bounded risk.** Workers, budget, and timeouts are explicit. The house
+  knows its exposure before the first card is dealt.
+- **Determinism where it's free.** Stream-JSON parsing, cancellation protocol,
+  SQL schema migrations, UTF-8 boundary safety. If we can make it reliable
+  without sacrificing capability, we do.
+- **A visible floor.** The TUI never editorializes. It shows you what's
+  happening; you decide what it means.
+
+Play enough hands under these rules and the edge shows up. The pit does not
+guarantee any single hand — it guarantees you can inspect it.
+
+## Status
+
+`v0.3.0-pre`. Crate + binary rebrand landed; hierarchical dispatch exercised
+end-to-end against real `claude` including a multi-worker self-documentation
+run and a budget-stress test that caught (and fixed) a spawn-burst TOCTOU in
+the budget guard. 217 tests pass under
+`cargo test --workspace --features pitboss-core/test-support`. See the
+`feat/v0.3` branch for the full history.
 
 ## Manual smoke testing
 
-Automated offline scripts live in `scripts/` (see Development below). For
-live runs against real `claude`, exercise: schema validation, a real triage
-manifest with 2–4 workers, the TUI's `[LEAD]`/`← lead` annotations, budget
-enforcement with a tight `budget_usd`, Ctrl-C drain mid-run, and
-`pitboss resume <run-id>`. Budget roughly $0.50–$1.50 in Haiku API usage for
-a full sweep.
+Offline scripts are in `scripts/` (see Development below). For live
+verification against real `claude`: validate a hierarchical manifest,
+dispatch a 2–4 dealer triage, watch the TUI annotations, tighten `budget_usd`
+to force mid-run rejections, Ctrl-C a running dispatch, resume a completed
+run. Budget: ~$0.50–$1.50 on Haiku for a full sweep.
 
-Requires a working `claude` CLI authenticated via its normal subscription
-config (no `ANTHROPIC_API_KEY` needed on systems using Claude Code login).
+Requires `claude` authenticated via its normal subscription config (no
+`ANTHROPIC_API_KEY` needed on Claude Code login systems).
 
 ## Development
 
@@ -172,9 +208,9 @@ cargo lint                                                     # clippy -D warni
 cargo fmt --all -- --check
 ```
 
-Automated smoke scripts are in `scripts/`:
+Automated smoke scripts (no API calls):
 
 ```bash
-scripts/smoke-part1.sh          # 10 offline flat-mode tests (no API calls)
-scripts/smoke-part3-tui.sh      # 7 non-interactive TUI tests (no API calls)
+scripts/smoke-part1.sh          # 10 offline flat-mode tests
+scripts/smoke-part3-tui.sh      # 7 non-interactive TUI tests
 ```
