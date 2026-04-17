@@ -7,6 +7,29 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`AGENTS.md`** — agent-facing entry point with decision tree, full
+  manifest schema reference, invocation patterns, run-directory
+  interpretation guide, the 6 MCP tools, error patterns, and 4
+  canonical examples (including a ketchup refactor case study).
+- **`ROADMAP.md`** — deferred-work capture: near-term TUI kill
+  design, medium-term features (broadcast, depth > 1, peer messaging,
+  plan approval, full fake-claude E2E), explicitly retired items
+  (interactive snap-in), and non-goals.
+- **`examples/ketchup-refactor.toml`** — literal manifest used for the
+  canonical AGENTS.md case study. 4-worker hierarchical audit on
+  Haiku.
+- **`x86_64-apple-darwin` target retired** from release workflow matrix
+  (Intel Macs are EOL for new builds; Apple Silicon and Linux x86_64
+  remain).
+
+### Changed
+- `scripts/smoke-part1.sh` passes `--run-dir "$SCRATCH/runs"` to every
+  `pitboss dispatch` call so the script's trap cleanup sweeps test
+  run artifacts. Previously a few cases left orphan dirs under
+  `~/.local/share/pitboss/runs/`.
+- `README.md` gains a one-line pointer to AGENTS.md at the top.
+
 ## [0.3.3] — 2026-04-17
 
 ### Added
