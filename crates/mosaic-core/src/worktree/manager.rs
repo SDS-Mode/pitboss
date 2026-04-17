@@ -96,13 +96,30 @@ impl WorktreeManager {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)] // Worktree is consumed intentionally: taking ownership signals the caller has relinquished it.
     pub fn cleanup(
         &self,
-        _wt: Worktree,
-        _policy: CleanupPolicy,
-        _succeeded: bool,
+        wt: Worktree,
+        policy: CleanupPolicy,
+        succeeded: bool,
     ) -> Result<(), WorktreeError> {
-        unimplemented!("cleanup — Task 21")
+        let should_remove = match policy {
+            CleanupPolicy::Always    => true,
+            CleanupPolicy::OnSuccess => succeeded,
+            CleanupPolicy::Never     => false,
+        };
+        if !should_remove { return Ok(()); }
+
+        let repo = Repository::open(&wt.repo_root)?;
+        if let Ok(handle) = repo.find_worktree(&wt.name) {
+            let mut opts = git2::WorktreePruneOptions::new();
+            opts.valid(true).locked(true).working_tree(true);
+            let _ = handle.prune(Some(&mut opts));
+        }
+        if wt.path.exists() {
+            std::fs::remove_dir_all(&wt.path)?;
+        }
+        Ok(())
     }
 }
 

@@ -92,4 +92,48 @@ mod tests {
         let err = mgr.prepare(repo_dir.path(), "wt-b", Some("shared")).unwrap_err();
         assert!(matches!(err, WorktreeError::BranchConflict { .. }));
     }
+
+    #[test]
+    fn cleanup_always_removes_worktree_on_success() {
+        let repo_dir = TempDir::new().unwrap();
+        init_repo(repo_dir.path());
+        let mgr = WorktreeManager::new();
+        let wt = mgr.prepare(repo_dir.path(), "wt-ca", None).unwrap();
+        let path = wt.path.clone();
+        mgr.cleanup(wt, CleanupPolicy::Always, true).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_always_removes_worktree_on_failure() {
+        let repo_dir = TempDir::new().unwrap();
+        init_repo(repo_dir.path());
+        let mgr = WorktreeManager::new();
+        let wt = mgr.prepare(repo_dir.path(), "wt-cf", None).unwrap();
+        let path = wt.path.clone();
+        mgr.cleanup(wt, CleanupPolicy::Always, false).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_on_success_keeps_failed_worktree() {
+        let repo_dir = TempDir::new().unwrap();
+        init_repo(repo_dir.path());
+        let mgr = WorktreeManager::new();
+        let wt = mgr.prepare(repo_dir.path(), "wt-os", None).unwrap();
+        let path = wt.path.clone();
+        mgr.cleanup(wt, CleanupPolicy::OnSuccess, false).unwrap();
+        assert!(path.exists(), "failed worktree preserved for forensics");
+    }
+
+    #[test]
+    fn cleanup_never_always_keeps() {
+        let repo_dir = TempDir::new().unwrap();
+        init_repo(repo_dir.path());
+        let mgr = WorktreeManager::new();
+        let wt = mgr.prepare(repo_dir.path(), "wt-nev", None).unwrap();
+        let path = wt.path.clone();
+        mgr.cleanup(wt, CleanupPolicy::Never, true).unwrap();
+        assert!(path.exists());
+    }
 }
