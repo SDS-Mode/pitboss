@@ -11,12 +11,7 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
-mod app;
-mod control;
-mod runs;
-mod state;
-mod tui;
-mod watcher;
+use pitboss_tui::{app, runs, state, tui};
 
 use std::path::PathBuf;
 
@@ -207,14 +202,14 @@ fn cmd_screenshot(run: Option<&str>, cols: u16, rows: u16) -> Result<()> {
     };
 
     // Build a one-shot AppState from the run dir (no background thread).
-    let mut state = crate::state::AppState::new(run_dir.clone(), run_id);
+    let mut state = state::AppState::new(run_dir.clone(), run_id);
     let snapshot = build_one_shot_snapshot(&run_dir);
     state.apply_snapshot(snapshot);
 
     // Render into a ratatui TestBackend.
     let backend = TestBackend::new(cols, rows);
     let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|frame| crate::tui::render(frame, &state))?;
+    terminal.draw(|frame| tui::render(frame, &state))?;
 
     // Dump buffer as plain text, one line per row.
     let buf = terminal.backend().buffer();
@@ -230,9 +225,9 @@ fn cmd_screenshot(run: Option<&str>, cols: u16, rows: u16) -> Result<()> {
 }
 
 /// Same shape as `watcher::build_snapshot` but synchronous and self-contained.
-fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapshot {
-    use crate::state::{AppSnapshot, TileState, TileStatus};
+fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
     use pitboss_core::store::{TaskRecord, TaskStatus};
+    use pitboss_tui::state::{AppSnapshot, TileState, TileStatus};
     use serde::Deserialize;
     use std::io::BufRead;
 

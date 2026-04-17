@@ -5,6 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 
+[lib]
+name = "pitboss_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pitboss-tui"
 path = "src/main.rs"
