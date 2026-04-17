@@ -49,7 +49,7 @@ pub struct CancelResult {
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use uuid::Uuid;
 
 use crate::dispatch::state::{DispatchState, WorkerState};
@@ -58,21 +58,69 @@ pub async fn handle_spawn_worker(
     state: &Arc<DispatchState>,
     args: SpawnWorkerArgs,
 ) -> Result<SpawnWorkerResult> {
-    // Generate a unique, short-ish task_id.
-    let task_id = format!("worker-{}", Uuid::now_v7());
+    // Guard 1: draining
+    if state.cancel.is_draining() || state.cancel.is_terminated() {
+        bail!("run is draining: no new workers accepted");
+    }
 
-    // Record as Pending. Actual subprocess spawn happens via a channel to
-    // the hierarchical dispatcher (wired in Task 20).
+    // Guard 2: worker cap
+    if let Some(cap) = state.manifest.max_workers {
+        let active = state.active_worker_count().await;
+        if active >= cap as usize {
+            bail!("worker cap reached: {} active (max {})", active, cap);
+        }
+    }
+
+    // Guard 3: budget
+    if let (Some(budget), Some(_remaining)) =
+        (state.manifest.budget_usd, state.budget_remaining().await)
+    {
+        let spent = *state.spent_usd.lock().await;
+        // Estimate this worker's cost as median of prior workers or fallback.
+        let estimate = estimate_new_worker_cost(state).await;
+        if spent + estimate > budget {
+            bail!(
+                "budget exceeded: ${:.2} spent + ${:.2} estimated > ${:.2} budget",
+                spent,
+                estimate,
+                budget
+            );
+        }
+    }
+
+    let task_id = format!("worker-{}", Uuid::now_v7());
     {
         let mut workers = state.workers.write().await;
         workers.insert(task_id.clone(), WorkerState::Pending);
     }
 
-    let _ = args; // guards and real spawn land in Tasks 13-14.
+    let _ = args;
     Ok(SpawnWorkerResult {
         task_id,
         worktree_path: None,
     })
+}
+
+const INITIAL_WORKER_COST_EST: f64 = 0.10;
+
+async fn estimate_new_worker_cost(state: &Arc<DispatchState>) -> f64 {
+    use mosaic_core::prices::cost_usd;
+    let workers = state.workers.read().await;
+    let mut costs: Vec<f64> = Vec::new();
+    for w in workers.values() {
+        if let WorkerState::Done(rec) = w {
+            // Try to price using whatever model the worker used. If model isn't
+            // available at record-level, just sum tokens via a neutral rate.
+            if let Some(c) = cost_usd("claude-haiku-4-5", &rec.token_usage) {
+                costs.push(c);
+            }
+        }
+    }
+    if costs.is_empty() {
+        return INITIAL_WORKER_COST_EST;
+    }
+    costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    costs[costs.len() / 2]
 }
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
@@ -192,5 +240,65 @@ mod tests {
         assert_eq!(workers.len(), 1);
         let entry = workers.get(&result.task_id).unwrap();
         assert!(matches!(entry, WorkerState::Pending));
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_when_max_workers_reached() {
+        let state = test_state().await; // max_workers = 4
+                                        // Fill up to cap
+        for i in 0..4 {
+            let args = SpawnWorkerArgs {
+                prompt: format!("w{}", i),
+                directory: None,
+                branch: None,
+                tools: None,
+                timeout_secs: None,
+                model: None,
+            };
+            handle_spawn_worker(&state, args).await.unwrap();
+        }
+        // 5th call must fail
+        let args = SpawnWorkerArgs {
+            prompt: "overflow".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(err.to_string().contains("worker cap reached"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_when_budget_exceeded() {
+        let state = test_state().await; // budget_usd = 5.0
+        *state.spent_usd.lock().await = 5.0; // at cap
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(err.to_string().contains("budget exceeded"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_when_draining() {
+        let state = test_state().await;
+        state.cancel.drain();
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(err.to_string().contains("draining"), "err: {err}");
     }
 }
