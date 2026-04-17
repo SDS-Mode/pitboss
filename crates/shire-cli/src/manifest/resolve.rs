@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
 
 use super::schema::{Defaults, Effort, Manifest, Task, Template, WorktreeCleanup};
 
 /// Fully resolved task ready for dispatch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedTask {
     pub id: String,
     pub directory: PathBuf,
@@ -22,7 +23,7 @@ pub struct ResolvedTask {
     pub env: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedManifest {
     pub max_parallel: u32,
     pub halt_on_failure: bool,

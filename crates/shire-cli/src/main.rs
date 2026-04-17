@@ -22,7 +22,9 @@ fn main() -> Result<()> {
             manifest,
             run_dir,
             dry_run,
-        } => run_dispatch(&manifest, run_dir, dry_run),
+        } => {
+            run_dispatch(&manifest, run_dir, dry_run);
+        }
     }
 }
 
@@ -57,24 +59,68 @@ fn run_dispatch(
     manifest: &std::path::Path,
     run_dir_override: Option<std::path::PathBuf>,
     dry_run: bool,
-) -> Result<()> {
+) -> ! {
     let env_mp = parse_env_max_parallel();
-    let resolved = manifest::load_manifest(manifest, env_mp)?;
+    let manifest_text = match std::fs::read_to_string(manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("read manifest: {e}");
+            std::process::exit(2);
+        }
+    };
+    let resolved = match manifest::load_manifest(manifest, env_mp) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("validation failed: {e:#}");
+            std::process::exit(2);
+        }
+    };
     let claude_bin = std::env::var_os("SHIRE_CLAUDE_BINARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("claude"));
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?;
-    rt.block_on(async {
-        if !dry_run {
-            let _ = dispatch::probe_claude(&claude_bin).await?;
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("runtime: {e}");
+            std::process::exit(2);
         }
-        let code =
-            dispatch::run_dispatch_inner(resolved, claude_bin, run_dir_override, dry_run).await?;
-        std::process::exit(code);
-    })
+    };
+
+    let code = rt.block_on(async move {
+        let claude_version = if dry_run {
+            None
+        } else {
+            match dispatch::probe_claude(&claude_bin).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 2;
+                }
+            }
+        };
+        match dispatch::run_dispatch_inner(
+            resolved,
+            manifest_text,
+            manifest.to_path_buf(),
+            claude_bin,
+            claude_version,
+            run_dir_override,
+            dry_run,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("dispatch: {e:#}");
+                1
+            }
+        }
+    });
+    std::process::exit(code);
 }
 
 fn parse_env_max_parallel() -> Option<u32> {

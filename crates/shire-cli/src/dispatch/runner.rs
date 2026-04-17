@@ -20,7 +20,10 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 /// Public entry — main.rs calls this. Constructs production spawner + store.
 pub async fn run_dispatch_inner(
     resolved: ResolvedManifest,
+    manifest_text: String,
+    manifest_path: PathBuf,
     claude_binary: PathBuf,
+    claude_version: Option<String>,
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
 ) -> Result<i32> {
@@ -29,23 +32,46 @@ pub async fn run_dispatch_inner(
     tokio::fs::create_dir_all(&run_dir).await.ok();
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(run_dir.clone()));
 
-    execute(resolved, claude_binary, spawner, store, dry_run).await
+    execute(
+        resolved,
+        manifest_text,
+        manifest_path,
+        claude_binary,
+        claude_version,
+        spawner,
+        store,
+        dry_run,
+    )
+    .await
 }
 
 /// Inner workhorse — takes its dependencies injected for testability.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     resolved: ResolvedManifest,
+    manifest_text: String,
+    manifest_path: PathBuf,
     claude_binary: PathBuf,
+    claude_version: Option<String>,
     spawner: Arc<dyn ProcessSpawner>,
     store: Arc<dyn SessionStore>,
     dry_run: bool,
 ) -> Result<i32> {
     let run_id = Uuid::now_v7();
+
+    let run_dir = resolved.run_dir.clone();
+    let run_subdir = run_dir.join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.ok();
+    tokio::fs::write(run_subdir.join("manifest.snapshot.toml"), &manifest_text).await?;
+    if let Ok(b) = serde_json::to_vec_pretty(&resolved) {
+        tokio::fs::write(run_subdir.join("resolved.json"), b).await?;
+    }
+
     let meta = RunMeta {
         run_id,
-        manifest_path: PathBuf::new(),
+        manifest_path: manifest_path.clone(),
         shire_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version: None,
+        claude_version: claude_version.clone(),
         started_at: Utc::now(),
         env: Default::default(),
     };
@@ -141,9 +167,9 @@ pub async fn execute(
     let ended_at = Utc::now();
     let summary = RunSummary {
         run_id,
-        manifest_path: PathBuf::new(),
+        manifest_path: manifest_path.clone(),
         shire_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version: None,
+        claude_version: claude_version.clone(),
         started_at,
         ended_at,
         total_duration_ms: (ended_at - started_at).num_milliseconds(),
@@ -154,7 +180,14 @@ pub async fn execute(
     };
     store.finalize_run(&summary).await?;
 
-    Ok(if tasks_failed > 0 { 1 } else { 0 })
+    let rc = if cancel.is_terminated() {
+        130
+    } else if tasks_failed > 0 {
+        1
+    } else {
+        0
+    };
+    Ok(rc)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,7 +391,10 @@ mod tests {
         let store = Arc::new(JsonFileStore::new(run_dir.path().to_path_buf()));
         let rc = execute(
             resolved,
+            String::new(),
+            PathBuf::new(),
             PathBuf::from("claude"),
+            None,
             spawner,
             store.clone(),
             false,
@@ -429,7 +465,10 @@ mod tests {
         let store = Arc::new(JsonFileStore::new(run_dir.path().to_path_buf()));
         let rc = execute(
             resolved,
+            String::new(),
+            PathBuf::new(),
             PathBuf::from("claude"),
+            None,
             spawner,
             store.clone(),
             false,
