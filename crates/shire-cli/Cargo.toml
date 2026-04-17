@@ -9,6 +9,9 @@ license      = { workspace = true }
 name = "shire"
 path = "src/main.rs"
 
+[features]
+test-support = ["mosaic-core/test-support"]
+
 [dependencies]
 mosaic-core        = { path = "../mosaic-core" }
 git2               = { workspace = true }
@@ -24,6 +27,9 @@ shellexpand        = { workspace = true }
 atty               = { workspace = true }
 uuid               = { workspace = true }
 chrono             = { workspace = true }
+async-trait        = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+shire-cli   = { path = ".", features = ["test-support"] }
+tempfile    = { workspace = true }
+mosaic-core = { path = "../mosaic-core", features = ["test-support"] }
