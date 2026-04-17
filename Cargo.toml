@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/mosaic-core",
     "crates/shire-cli",
+    "tests-support/fake-claude",
 ]
 
 [workspace.package]

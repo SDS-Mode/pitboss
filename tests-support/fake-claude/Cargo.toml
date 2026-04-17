@@ -1,0 +1,13 @@
+[package]
+name         = "fake-claude"
+version      = "0.0.0"
+edition      = "2021"
+rust-version = "1.82"
+publish      = false
+
+[[bin]]
+name = "fake-claude"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
