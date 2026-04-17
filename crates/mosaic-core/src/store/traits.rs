@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::error::StoreError;
 use super::record::{RunMeta, RunSummary, TaskRecord};
+use crate::error::StoreError;
 
 #[async_trait]
 pub trait SessionStore: Send + Sync + 'static {
