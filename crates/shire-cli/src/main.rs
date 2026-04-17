@@ -50,11 +50,20 @@ fn init_tracing(verbose: u8, quiet: bool) {
 fn run_validate(manifest: &std::path::Path) -> Result<()> {
     let env_mp = parse_env_max_parallel();
     let r = manifest::load_manifest(manifest, env_mp)?;
-    println!(
-        "OK — {} tasks, max_parallel={}",
-        r.tasks.len(),
-        r.max_parallel
-    );
+    if let Some(lead) = &r.lead {
+        println!(
+            "OK (hierarchical) — lead='{}', max_workers={}, budget=${:.2}",
+            lead.id,
+            r.max_workers.unwrap_or(0),
+            r.budget_usd.unwrap_or(0.0)
+        );
+    } else {
+        println!(
+            "OK — {} tasks, max_parallel={}",
+            r.tasks.len(),
+            r.max_parallel
+        );
+    }
     Ok(())
 }
 
