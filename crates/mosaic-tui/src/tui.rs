@@ -90,6 +90,27 @@ const TILE_COLS: usize = 4;
 // Percentage of mid-area height for the focus log pane (roughly 40%).
 const LOG_PANE_PCT: u16 = 40;
 
+/// Format the title string for the tile at `idx` in `state.tasks`.
+///
+/// Returns `[LEAD] {id}` if the tile is the lead (no `parent_task_id` AND at
+/// least one other tile lists it as parent), otherwise just the id.
+pub fn format_tile_title(state: &crate::state::AppState, idx: usize) -> String {
+    let Some(tile) = state.tasks.get(idx) else {
+        return String::new();
+    };
+    let id = &tile.id;
+    let is_lead = tile.parent_task_id.is_none()
+        && state
+            .tasks
+            .iter()
+            .any(|t| t.parent_task_id.as_deref() == Some(id.as_str()));
+    if is_lead {
+        format!("[LEAD] {id}")
+    } else {
+        id.clone()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Init / teardown
 // ---------------------------------------------------------------------------
@@ -282,19 +303,26 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
             if tile_idx >= n {
                 break;
             }
-            let tile = &state.tasks[tile_idx];
             let focused = tile_idx == state.focus;
-            render_tile(frame, cols_layout[col], tile, focused);
+            render_tile(frame, cols_layout[col], state, tile_idx, focused);
         }
     }
 }
 
-fn render_tile(frame: &mut Frame, area: Rect, tile: &crate::state::TileState, focused: bool) {
+fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize, focused: bool) {
+    let tile = &state.tasks[tile_idx];
     let (icon, icon_color) = status_icon(&tile.status);
+
+    let tile_title = format_tile_title(state, tile_idx);
+    let is_lead = tile_title.starts_with("[LEAD]");
 
     let border_style = if focused {
         Style::default()
             .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if is_lead {
+        Style::default()
+            .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
@@ -302,7 +330,7 @@ fn render_tile(frame: &mut Frame, area: Rect, tile: &crate::state::TileState, fo
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" {} ", tile.id))
+        .title(format!(" {tile_title} "))
         .border_style(border_style);
 
     let inner = block.inner(area);
@@ -893,5 +921,31 @@ mod tests {
             cost.abs() < 1e-10,
             "unknown model should contribute 0 to total"
         );
+    }
+
+    // Helper variant — creates a tile with a specified parent_task_id.
+    fn tile_with_parent(id: &str, status: TileStatus, parent: Option<String>) -> TileState {
+        let mut t = tile(id, status, None, 0, 0);
+        t.parent_task_id = parent;
+        t
+    }
+
+    #[test]
+    fn render_tile_title_for_lead() {
+        // The lead is the tile whose parent_task_id is None and whose id
+        // appears as a parent of at least one other tile. Mosaic renders
+        // its title with [LEAD] prefix.
+        let tiles = vec![
+            tile("triage-lead", TileStatus::Running, None, 0, 0),
+            tile_with_parent("worker-1", TileStatus::Running, Some("triage-lead".into())),
+        ];
+        let s = state(tiles);
+        let title = crate::tui::format_tile_title(&s, 0);
+        assert!(title.contains("[LEAD]"));
+        assert!(title.contains("triage-lead"));
+
+        let worker_title = crate::tui::format_tile_title(&s, 1);
+        assert!(!worker_title.contains("[LEAD]"));
+        assert!(worker_title.contains("worker-1"));
     }
 }
