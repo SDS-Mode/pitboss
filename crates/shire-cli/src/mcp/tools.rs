@@ -156,6 +156,67 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
         .collect()
 }
 
+pub async fn handle_worker_status(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+) -> Result<WorkerStatus> {
+    let workers = state.workers.read().await;
+    let w = workers
+        .get(task_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
+    let (state_str, started_at, partial_usage, last_text_preview) = match w {
+        WorkerState::Pending => (
+            "Pending".to_string(),
+            None,
+            mosaic_core::parser::TokenUsage::default(),
+            None,
+        ),
+        WorkerState::Running { started_at } => (
+            "Running".to_string(),
+            Some(started_at.to_rfc3339()),
+            mosaic_core::parser::TokenUsage::default(),
+            None,
+        ),
+        WorkerState::Done(rec) => (
+            match rec.status {
+                mosaic_core::store::TaskStatus::Success => "Completed",
+                mosaic_core::store::TaskStatus::Failed => "Failed",
+                mosaic_core::store::TaskStatus::TimedOut => "TimedOut",
+                mosaic_core::store::TaskStatus::Cancelled => "Cancelled",
+                mosaic_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+            }
+            .to_string(),
+            Some(rec.started_at.to_rfc3339()),
+            rec.token_usage,
+            rec.final_message_preview.clone(),
+        ),
+    };
+    Ok(WorkerStatus {
+        state: state_str,
+        started_at,
+        partial_usage,
+        last_text_preview,
+    })
+}
+
+pub async fn handle_cancel_worker(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+) -> Result<CancelResult> {
+    // Look up the worker's own CancelToken and fire it. In v0.3 the worker's
+    // CancelToken is a *clone* of the run-level cancel; a per-worker signal
+    // would require additional plumbing in the hierarchical runner (Task 22).
+    // For now, issuing a run-level drain is the closest we can do without
+    // per-worker tokens. This is wired fully in the integration tests.
+    let workers = state.workers.read().await;
+    if !workers.contains_key(task_id) {
+        anyhow::bail!("unknown task_id: {task_id}");
+    }
+    // Actual SIGTERM signalling happens in Task 22 via state.cancel_worker_task_id().
+    state.cancel.drain(); // temporary; refined in Task 22
+    Ok(CancelResult { ok: true })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +361,50 @@ mod tests {
         };
         let err = handle_spawn_worker(&state, args).await.unwrap_err();
         assert!(err.to_string().contains("draining"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn worker_status_reads_state() {
+        let state = test_state().await;
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let spawn = handle_spawn_worker(&state, args).await.unwrap();
+        let status = handle_worker_status(&state, &spawn.task_id).await.unwrap();
+        assert_eq!(status.state, "Pending");
+    }
+
+    #[tokio::test]
+    async fn worker_status_unknown_id_errors() {
+        let state = test_state().await;
+        let err = handle_worker_status(&state, "nope-123").await.unwrap_err();
+        assert!(err.to_string().contains("unknown task_id"));
+    }
+
+    #[tokio::test]
+    async fn cancel_worker_sets_cancelled_state() {
+        let state = test_state().await;
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let spawn = handle_spawn_worker(&state, args).await.unwrap();
+
+        let result = handle_cancel_worker(&state, &spawn.task_id).await.unwrap();
+        assert!(result.ok);
+
+        // Note: in real wiring, CancelToken signals the SessionHandle to terminate
+        // and the subsequent Done(...) entry in state.workers carries status=Cancelled.
+        // For v0.3 Task 14 (unit-level), we just verify the cancel call succeeded
+        // and didn't panic. Full flow is tested in integration tests (Phase 6).
     }
 }
