@@ -172,8 +172,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
         Mode::SnapIn { .. } => handle_snap_in(state, code, modifiers),
         Mode::ConfirmKill { .. } => handle_confirm_kill(state, code),
         Mode::PromptReprompt { .. } => handle_prompt_reprompt(state, code, modifiers),
-        // v0.4 modal states — keybindings wired in later tasks.
-        Mode::ApprovalModal { .. } => Action::Continue,
+        Mode::ApprovalModal { .. } => handle_approval_modal(state, code, modifiers),
     }
 }
 
@@ -425,6 +424,139 @@ fn handle_prompt_reprompt(state: &mut AppState, code: KeyCode, modifiers: KeyMod
     }
     state.mode = Mode::PromptReprompt { task_id, draft };
     Action::Continue
+}
+
+/// Non-draft fields of `Mode::ApprovalModal`, shared across sub-mode handlers.
+struct ApprovalCtx {
+    request_id: String,
+    task_id: String,
+    summary: String,
+}
+
+fn handle_approval_modal(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
+    use crate::state::ApprovalSubMode;
+    let Mode::ApprovalModal {
+        request_id,
+        task_id,
+        summary,
+        sub_mode,
+    } = state.mode.clone()
+    else {
+        return Action::Continue;
+    };
+    let ctx = ApprovalCtx {
+        request_id,
+        task_id,
+        summary,
+    };
+
+    match sub_mode {
+        ApprovalSubMode::Overview => handle_approval_overview(state, code, ctx),
+        ApprovalSubMode::Editing { draft } => {
+            handle_approval_draft(state, code, modifiers, ctx, draft, true);
+        }
+        ApprovalSubMode::Rejecting { draft } => {
+            handle_approval_draft(state, code, modifiers, ctx, draft, false);
+        }
+    }
+    Action::Continue
+}
+
+fn handle_approval_overview(state: &mut AppState, code: KeyCode, ctx: ApprovalCtx) {
+    use crate::state::ApprovalSubMode;
+    match code {
+        KeyCode::Char('y') => {
+            send_approve(state, &ctx.request_id, true, None, None);
+            state.mode = Mode::Normal;
+        }
+        KeyCode::Char('n') => {
+            state.mode = Mode::ApprovalModal {
+                request_id: ctx.request_id,
+                task_id: ctx.task_id,
+                summary: ctx.summary,
+                sub_mode: ApprovalSubMode::Rejecting {
+                    draft: String::new(),
+                },
+            };
+        }
+        KeyCode::Char('e') => {
+            let draft = ctx.summary.clone();
+            state.mode = Mode::ApprovalModal {
+                request_id: ctx.request_id,
+                task_id: ctx.task_id,
+                summary: ctx.summary,
+                sub_mode: ApprovalSubMode::Editing { draft },
+            };
+        }
+        KeyCode::Esc => state.mode = Mode::Normal,
+        _ => {}
+    }
+}
+
+/// Shared draft-editing handler for both the `Editing` and `Rejecting`
+/// sub-modes. `editing` distinguishes which branch we're in: `true` means
+/// an edit-summary draft (Ctrl+Enter sends approve with `edited_summary`);
+/// `false` means a rejection-comment draft (Ctrl+Enter sends reject with
+/// `comment`).
+fn handle_approval_draft(
+    state: &mut AppState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    ctx: ApprovalCtx,
+    mut draft: String,
+    editing: bool,
+) {
+    use crate::state::ApprovalSubMode;
+    match code {
+        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+            if editing {
+                send_approve(state, &ctx.request_id, true, None, Some(draft));
+            } else {
+                send_approve(state, &ctx.request_id, false, Some(draft), None);
+            }
+            state.mode = Mode::Normal;
+            return;
+        }
+        KeyCode::Esc => {
+            state.mode = Mode::Normal;
+            return;
+        }
+        KeyCode::Char(c) => draft.push(c),
+        KeyCode::Backspace => {
+            draft.pop();
+        }
+        KeyCode::Enter => draft.push('\n'),
+        _ => return,
+    }
+    let sub_mode = if editing {
+        ApprovalSubMode::Editing { draft }
+    } else {
+        ApprovalSubMode::Rejecting { draft }
+    };
+    state.mode = Mode::ApprovalModal {
+        request_id: ctx.request_id,
+        task_id: ctx.task_id,
+        summary: ctx.summary,
+        sub_mode,
+    };
+}
+
+fn send_approve(
+    state: &mut AppState,
+    request_id: &str,
+    approved: bool,
+    comment: Option<String>,
+    edited_summary: Option<String>,
+) {
+    if let Some(client) = state.control_client.clone() {
+        let op = pitboss_cli::control::protocol::ControlOp::Approve {
+            request_id: request_id.to_string(),
+            approved,
+            comment,
+            edited_summary,
+        };
+        let _ = futures_block_on(async move { client.send_op(op).await });
+    }
 }
 
 // The TUI event loop runs outside any tokio runtime context (crossterm polls

@@ -703,14 +703,40 @@ fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &
 }
 
 fn render_approval_modal(
-    _frame: &mut Frame,
-    _area: Rect,
+    frame: &mut Frame,
+    area: Rect,
     _request_id: &str,
-    _task_id: &str,
-    _summary: &str,
-    _sub_mode: &crate::state::ApprovalSubMode,
+    task_id: &str,
+    summary: &str,
+    sub_mode: &crate::state::ApprovalSubMode,
 ) {
-    // Covered in Task 32.
+    use crate::state::ApprovalSubMode;
+    let modal_w = (area.width * 3 / 4).min(90);
+    let modal_h = (area.height * 2 / 3).clamp(10, 24);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal = Rect::new(x, y, modal_w, modal_h);
+    frame.render_widget(Clear, modal);
+    let (title, body) = match sub_mode {
+        ApprovalSubMode::Overview => (
+            format!(" Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel "),
+            summary.to_string(),
+        ),
+        ApprovalSubMode::Editing { draft } => (
+            " Edit summary — Ctrl+Enter to submit  Esc cancel ".to_string(),
+            draft.clone(),
+        ),
+        ApprovalSubMode::Rejecting { draft } => (
+            " Rejection comment — Ctrl+Enter to send  Esc cancel ".to_string(),
+            draft.clone(),
+        ),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let para = Paragraph::new(body)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(para, modal);
 }
 
 // ---------------------------------------------------------------------------
