@@ -554,11 +554,36 @@ async fn dispatch_op(
         } => {
             let tx = state.approval_bridge.lock().await.remove(&request_id);
             if let Some(tx) = tx {
+                let edited = edited_summary.is_some();
                 let _ = tx.send(crate::dispatch::state::ApprovalResponse {
                     approved,
                     comment,
                     edited_summary,
                 });
+                // Write an approval_response event + bump counters so the
+                // control-socket path produces the same audit trail as
+                // ApprovalBridge::respond would. Matters when the approval
+                // was drained from the queue (no TUI at request time).
+                let _ = crate::dispatch::events::append_event(
+                    &state.run_subdir,
+                    &state.lead_id,
+                    &crate::dispatch::events::TaskEvent::ApprovalResponse {
+                        at: chrono::Utc::now(),
+                        request_id: request_id.clone(),
+                        approved,
+                        edited,
+                    },
+                )
+                .await;
+                {
+                    let mut guard = state.worker_counters.write().await;
+                    let entry = guard.entry(state.lead_id.clone()).or_default();
+                    if approved {
+                        entry.approvals_approved += 1;
+                    } else {
+                        entry.approvals_rejected += 1;
+                    }
+                }
                 ControlEvent::OpAcked {
                     op: "approve".into(),
                     task_id: None,
