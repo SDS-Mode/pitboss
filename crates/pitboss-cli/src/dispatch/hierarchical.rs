@@ -12,6 +12,7 @@ use pitboss_core::session::CancelToken;
 use pitboss_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore};
 use uuid::Uuid;
 
+use crate::control::{control_socket_path, server::start_control_server};
 use crate::dispatch::state::{ApprovalPolicy, DispatchState};
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::{socket_path_for_run, McpServer};
@@ -98,6 +99,18 @@ pub async fn run_hierarchical(
         ApprovalPolicy::Block,
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
+
+    // Bind the control socket for TUI ↔ dispatcher ops.
+    let control_sock = control_socket_path(run_id, &run_dir);
+    let _control = start_control_server(
+        control_sock,
+        env!("CARGO_PKG_VERSION").to_string(),
+        run_id.to_string(),
+        "hierarchical".into(),
+        state.clone(),
+    )
+    .await
+    .context("start control server")?;
 
     // 2. Build the --mcp-config file for the lead.
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
