@@ -47,6 +47,21 @@ pub enum SessionError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("serialization: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("run not found: {0}")]
+    NotFound(uuid::Uuid),
+
+    #[error("incomplete run: {0}")]
+    Incomplete(String),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum WorktreeError {
     #[error("not inside a git work-tree: {path}")]
     NotInRepo { path: String },
