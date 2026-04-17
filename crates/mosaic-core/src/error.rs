@@ -35,3 +35,13 @@ pub enum SpawnError {
     #[error("spawn rejected: {reason}")]
     Rejected { reason: String },
 }
+
+#[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
+pub enum SessionError {
+    #[error("spawn failed: {0}")]
+    Spawn(#[from] SpawnError),
+
+    #[error("io during session: {0}")]
+    Io(#[from] std::io::Error),
+}
