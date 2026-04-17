@@ -2,6 +2,7 @@ mod cli;
 mod diff;
 mod dispatch;
 mod manifest;
+mod mcp;
 mod tui_table;
 
 use anyhow::Result;
