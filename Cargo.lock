@@ -1509,6 +1509,7 @@ dependencies = [
  "libc",
  "mosaic-core",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "shellexpand",

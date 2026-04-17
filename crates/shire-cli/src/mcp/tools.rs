@@ -3,9 +3,10 @@
 
 #![allow(dead_code)]
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SpawnWorkerArgs {
     pub prompt: String,
     #[serde(default)]
@@ -20,7 +21,7 @@ pub struct SpawnWorkerArgs {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SpawnWorkerResult {
     pub task_id: String,
     pub worktree_path: Option<String>,
@@ -34,7 +35,7 @@ pub struct WorkerStatus {
     pub last_text_preview: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkerSummary {
     pub task_id: String,
     pub state: String,
@@ -42,9 +43,34 @@ pub struct WorkerSummary {
     pub started_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CancelResult {
     pub ok: bool,
+}
+
+// ---- Tool arg wrappers (for tools that take primitive or multi-arg input) ----
+//
+// The rmcp tool macros use `Parameters<T>` where T: JsonSchema to deserialize
+// arguments from an incoming JSON object. We define small wrapper structs for
+// each tool whose args aren't already represented by one of the structs above.
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskIdArgs {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WaitForWorkerArgs {
+    pub task_id: String,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WaitForAnyArgs {
+    pub task_ids: Vec<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 use std::sync::Arc;
