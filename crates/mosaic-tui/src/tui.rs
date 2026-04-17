@@ -658,6 +658,7 @@ mod tests {
             exit_code: None,
             log_path: PathBuf::from("/dev/null"),
             model: None,
+            parent_task_id: None,
         }
     }
 

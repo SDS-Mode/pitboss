@@ -51,6 +51,9 @@ pub struct TileState {
     pub log_path: PathBuf,
     /// Model name from resolved.json (used for cost estimation).
     pub model: Option<String>,
+    /// Parent task id, if this tile represents a subagent task.
+    #[allow(dead_code)]
+    pub parent_task_id: Option<String>,
 }
 
 /// Full application state updated each poll cycle.
@@ -486,6 +489,7 @@ mod tests {
             exit_code: None,
             log_path: PathBuf::from("/dev/null"),
             model: None,
+            parent_task_id: None,
         }];
         state
     }

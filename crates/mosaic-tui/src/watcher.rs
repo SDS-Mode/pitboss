@@ -133,6 +133,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
                 exit_code: rec.exit_code,
                 log_path,
                 model,
+                parent_task_id: rec.parent_task_id.clone(),
             });
         } else {
             // Decide between Pending and Running by checking log freshness.
@@ -155,6 +156,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
                 exit_code: None,
                 log_path,
                 model,
+                parent_task_id: None,
             });
         }
     }

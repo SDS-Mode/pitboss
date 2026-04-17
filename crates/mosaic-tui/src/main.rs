@@ -296,6 +296,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
                 exit_code: rec.exit_code,
                 log_path,
                 model,
+                parent_task_id: rec.parent_task_id.clone(),
             });
         } else {
             tiles.push(TileState {
@@ -309,6 +310,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
                 exit_code: None,
                 log_path,
                 model,
+                parent_task_id: None,
             });
         }
     }
