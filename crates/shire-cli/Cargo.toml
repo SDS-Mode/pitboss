@@ -34,6 +34,7 @@ atty               = { workspace = true }
 uuid               = { workspace = true }
 chrono             = { workspace = true }
 async-trait        = { workspace = true }
+rmcp               = { workspace = true }
 
 [dev-dependencies]
 # Note: mosaic-core's test-support feature is pulled in directly here so
