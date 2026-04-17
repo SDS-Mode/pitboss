@@ -11,6 +11,8 @@
 //! If MOSAIC_FAKE_HOLD=1, blocks indefinitely after the script (for Ctrl-C tests).
 //! Special-cases --version to print "fake-claude 0.0.0".
 
+mod bindings;
+
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
