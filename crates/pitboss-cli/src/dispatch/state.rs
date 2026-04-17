@@ -21,6 +21,20 @@ pub enum WorkerState {
     Pending,
     Running {
         started_at: chrono::DateTime<chrono::Utc>,
+        /// Populated once the worker's claude subprocess emits its
+        /// `{"type":"system","subtype":"init"}` event. `None` during the brief
+        /// window between spawn and first init event (≤ ~1s in practice);
+        /// pause/reprompt fail with `op_unknown_state{current_state:"spawning"}`
+        /// when None.
+        session_id: Option<String>,
+    },
+    Paused {
+        /// Captured from the Running variant at pause time.
+        session_id: String,
+        paused_at: chrono::DateTime<chrono::Utc>,
+        /// Snapshot of token usage at pause time, so continue's final
+        /// TaskRecord knows what the prior subprocess cost.
+        prior_token_usage: pitboss_core::parser::TokenUsage,
     },
     Done(TaskRecord),
 }
@@ -111,7 +125,12 @@ impl DispatchState {
             .read()
             .await
             .values()
-            .filter(|w| matches!(w, WorkerState::Pending | WorkerState::Running { .. }))
+            .filter(|w| {
+                matches!(
+                    w,
+                    WorkerState::Pending | WorkerState::Running { .. } | WorkerState::Paused { .. }
+                )
+            })
             .count()
     }
 
@@ -188,5 +207,24 @@ mod tests {
     async fn budget_remaining_is_none_when_uncapped() {
         let st = mk_state(None, None);
         assert_eq!(st.budget_remaining().await, None);
+    }
+
+    #[test]
+    fn running_worker_state_captures_session_id() {
+        let started_at = chrono::Utc::now();
+        let sid: Option<String> = Some("sess-abc".into());
+        let w = WorkerState::Running {
+            started_at,
+            session_id: sid.clone(),
+        };
+        match w {
+            WorkerState::Running {
+                session_id,
+                started_at: _,
+            } => {
+                assert_eq!(session_id, Some("sess-abc".to_string()));
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
     }
 }

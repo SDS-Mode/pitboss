@@ -320,6 +320,7 @@ async fn run_worker(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
+            session_id: None,
         },
     );
 
@@ -467,8 +468,11 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
         .map(|(id, w)| {
             let (state_str, started_at) = match w {
                 WorkerState::Pending => ("Pending".to_string(), None),
-                WorkerState::Running { started_at } => {
+                WorkerState::Running { started_at, .. } => {
                     ("Running".to_string(), Some(started_at.to_rfc3339()))
+                }
+                WorkerState::Paused { paused_at, .. } => {
+                    ("Paused".to_string(), Some(paused_at.to_rfc3339()))
                 }
                 WorkerState::Done(rec) => (
                     match rec.status {
@@ -508,10 +512,20 @@ pub async fn handle_worker_status(
             pitboss_core::parser::TokenUsage::default(),
             None,
         ),
-        WorkerState::Running { started_at } => (
+        WorkerState::Running { started_at, .. } => (
             "Running".to_string(),
             Some(started_at.to_rfc3339()),
             pitboss_core::parser::TokenUsage::default(),
+            None,
+        ),
+        WorkerState::Paused {
+            paused_at,
+            prior_token_usage,
+            ..
+        } => (
+            "Paused".to_string(),
+            Some(paused_at.to_rfc3339()),
+            *prior_token_usage,
             None,
         ),
         WorkerState::Done(rec) => (
@@ -745,6 +759,7 @@ mod tests {
                 "w-2".into(),
                 WorkerState::Running {
                     started_at: chrono::Utc::now(),
+                    session_id: None,
                 },
             );
         }

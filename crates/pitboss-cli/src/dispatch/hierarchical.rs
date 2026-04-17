@@ -136,6 +136,7 @@ pub async fn run_hierarchical(
         lead.id.clone(),
         crate::dispatch::state::WorkerState::Running {
             started_at: Utc::now(),
+            session_id: None,
         },
     );
 
@@ -219,7 +220,8 @@ pub async fn run_hierarchical(
             .map(|(id, w)| match w {
                 crate::dispatch::state::WorkerState::Done(rec) => rec.clone(),
                 crate::dispatch::state::WorkerState::Pending
-                | crate::dispatch::state::WorkerState::Running { .. } => {
+                | crate::dispatch::state::WorkerState::Running { .. }
+                | crate::dispatch::state::WorkerState::Paused { .. } => {
                     let now = Utc::now();
                     pitboss_core::store::TaskRecord {
                         task_id: id.clone(),
