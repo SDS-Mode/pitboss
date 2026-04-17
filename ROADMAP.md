@@ -5,6 +5,12 @@ one when you're ready, or file issues to formalize priority.
 
 ## v0.4.1 — Attach (escape hatch)
 
+Remaining feature stages. Prerequisites (Stage 0.1 fake-claude MCP
+e2e, Stage 0.2 `mcp__pitboss__reprompt_worker`, Stage 0.3
+`lead_timeout_secs` decision) are all resolved — see
+`docs/superpowers/plans/2026-04-17-pitboss-v0.4.1-series.md` and
+the per-stage specs under `docs/superpowers/specs/`.
+
 - `pitboss attach <run-id> <task-id>` — live TTY relay using
   `portable-pty`. Narrow-scope: no persistent sessions, no tmux
   dependency. Sits on top of v0.4.0 control-socket primitives.
@@ -13,8 +19,6 @@ one when you're ready, or file issues to formalize priority.
 - Out-of-TUI notifications: webhooks / Slack / email for approval
   requests and run completion.
 - Structured approval schema (JSON-in-TUI plan editing).
-- `mcp__pitboss__reprompt_worker` for lead-driven mid-flight
-  redirection.
 
 ---
 
