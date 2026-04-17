@@ -12,6 +12,7 @@
 //! Special-cases --version to print "fake-claude 0.0.0".
 
 mod bindings;
+mod mcp_client;
 
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
