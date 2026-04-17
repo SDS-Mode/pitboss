@@ -8,6 +8,7 @@ pub mod error;
 pub mod parser;
 pub mod process;
 pub mod session;
+pub mod worktree;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
