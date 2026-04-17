@@ -89,6 +89,7 @@ pub async fn start_control_server(
                             let server_version = server_version.clone();
                             let run_id = run_id.clone();
                             let run_kind = run_kind.clone();
+                            let state_inner = state_outer.clone();
                             let workers_names: Vec<String> = {
                                 let guard = state_outer.workers.read().await;
                                 guard.keys().cloned().collect()
@@ -102,6 +103,7 @@ pub async fn start_control_server(
                                         run_id,
                                         run_kind,
                                         workers_names,
+                                        state_inner,
                                     ) => {},
                                 }
                             });
@@ -132,6 +134,7 @@ async fn serve_connection(
     run_id: String,
     run_kind: String,
     workers_names: Vec<String>,
+    state: Arc<crate::dispatch::state::DispatchState>,
 ) {
     let (read_half, write_half) = stream.into_split();
     let writer = Arc::new(Mutex::new(write_half));
@@ -185,9 +188,7 @@ async fn serve_connection(
     // Read subsequent ops; every one returns OpUnknown until Phase 2.
     while let Ok(Some(line)) = reader.next_line().await {
         let reply = match serde_json::from_str::<ControlOp>(&line) {
-            Ok(op) => ControlEvent::OpUnknown {
-                op: op_tag(&op).into(),
-            },
+            Ok(op) => dispatch_op(&state, op).await,
             Err(e) => ControlEvent::OpFailed {
                 op: "".into(),
                 task_id: None,
@@ -222,6 +223,37 @@ fn op_tag(op: &ControlOp) -> &'static str {
         ControlOp::RepromptWorker { .. } => "reprompt_worker",
         ControlOp::Approve { .. } => "approve",
         ControlOp::ListWorkers => "list_workers",
+    }
+}
+
+async fn dispatch_op(
+    state: &Arc<crate::dispatch::state::DispatchState>,
+    op: ControlOp,
+) -> ControlEvent {
+    match op {
+        ControlOp::Hello { .. } => ControlEvent::OpAcked {
+            op: "hello".into(),
+            task_id: None,
+        },
+        ControlOp::CancelWorker { task_id } => {
+            let cancels = state.worker_cancels.read().await;
+            if let Some(tok) = cancels.get(&task_id) {
+                tok.terminate();
+                ControlEvent::OpAcked {
+                    op: "cancel_worker".into(),
+                    task_id: Some(task_id),
+                }
+            } else {
+                ControlEvent::OpFailed {
+                    op: "cancel_worker".into(),
+                    task_id: Some(task_id.clone()),
+                    error: format!("unknown task_id: {task_id}"),
+                }
+            }
+        }
+        other => ControlEvent::OpUnknown {
+            op: op_tag(&other).into(),
+        },
     }
 }
 
@@ -336,7 +368,7 @@ mod tests {
             .await
             .unwrap();
         stream
-            .write_all(b"{\"op\":\"cancel_worker\",\"task_id\":\"w\"}\n")
+            .write_all(b"{\"op\":\"list_workers\"}\n")
             .await
             .unwrap();
 
@@ -347,8 +379,60 @@ mod tests {
         let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
         assert!(matches!(
             reply,
-            ControlEvent::OpUnknown { op } if op == "cancel_worker"
+            ControlEvent::OpUnknown { op } if op == "list_workers"
         ));
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn cancel_worker_op_terminates_worker_token() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        let worker_token = CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), worker_token.clone());
+        state
+            .workers
+            .write()
+            .await
+            .insert("w-1".into(), crate::dispatch::state::WorkerState::Pending);
+
+        let sock = dir.path().join("cancel.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "flat".into(),
+            state,
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"cancel_worker\",\"task_id\":\"w-1\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, task_id: Some(ref tid) }
+                if op == "cancel_worker" && tid == "w-1"
+        ));
+        assert!(worker_token.is_terminated());
         drop(handle);
     }
 }
