@@ -1,22 +1,41 @@
 //! Integration tests for v0.3 hierarchical orchestration. These drive the
 //! shire MCP server as if we were a lead claude subprocess, using fake-mcp-client.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
 
 use fake_mcp_client::FakeMcpClient;
+use mosaic_core::process::fake::{FakeScript, FakeSpawner};
+use mosaic_core::process::ProcessSpawner;
 use mosaic_core::session::CancelToken;
 use mosaic_core::store::{JsonFileStore, SessionStore};
+use mosaic_core::worktree::{CleanupPolicy, WorktreeManager};
 use shire_cli::dispatch::state::DispatchState;
-use shire_cli::manifest::resolve::ResolvedManifest;
-use shire_cli::manifest::schema::WorktreeCleanup;
+use shire_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
+use shire_cli::manifest::schema::{Effort, WorktreeCleanup};
 use shire_cli::mcp::{socket_path_for_run, McpServer};
 use uuid::Uuid;
 
 fn mk_state() -> (TempDir, Arc<DispatchState>) {
     let dir = TempDir::new().unwrap();
+    // Lead with use_worktree=false so background worker spawns don't require
+    // an actual git repo at state.manifest.lead.directory.
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "lead prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+    };
     let manifest = ResolvedManifest {
         max_parallel: 4,
         halt_on_failure: false,
@@ -24,19 +43,30 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
         tasks: vec![],
-        lead: None,
+        lead: Some(lead),
         max_workers: Some(4),
         budget_usd: Some(5.0),
         lead_timeout_secs: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
+    // FakeSpawner.hold_until_signal() keeps backgrounded workers Running so
+    // `active_worker_count()` stays deterministic across the test.
+    let script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
     let state = Arc::new(DispatchState::new(
         run_id,
         manifest,
         store,
         CancelToken::new(),
         "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
     ));
     (dir, state)
 }

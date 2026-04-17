@@ -33,6 +33,8 @@ pub struct WorkerStatus {
     pub started_at: Option<String>,
     pub partial_usage: mosaic_core::parser::TokenUsage,
     pub last_text_preview: Option<String>,
+    #[serde(default)]
+    pub prompt_preview: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -129,11 +131,236 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), worker_cancel);
 
-    let _ = args;
+    // Record the prompt preview before spawning the background task.
+    let prompt_preview: String = args.prompt.chars().take(80).collect();
+    state
+        .worker_prompts
+        .write()
+        .await
+        .insert(task_id.clone(), prompt_preview);
+
+    // Resolve the worker's directory: args override -> lead.directory fallback.
+    let worker_dir: std::path::PathBuf = args
+        .directory
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            state
+                .manifest
+                .lead
+                .as_ref()
+                .map(|l| l.directory.clone())
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        });
+
+    // Resolve model, tools, timeout: per-args override -> lead defaults -> fallback.
+    let lead = state.manifest.lead.as_ref();
+    let worker_model = args
+        .model
+        .clone()
+        .or_else(|| lead.map(|l| l.model.clone()))
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    let worker_tools = args
+        .tools
+        .clone()
+        .or_else(|| lead.map(|l| l.tools.clone()))
+        .unwrap_or_default();
+    let worker_timeout_secs = args
+        .timeout_secs
+        .or_else(|| lead.map(|l| l.timeout_secs))
+        .unwrap_or(3600);
+    let worker_branch = args.branch.clone();
+    let worker_use_worktree = lead.is_none_or(|l| l.use_worktree);
+
+    // Retrieve the per-worker cancel token we inserted above.
+    let worker_cancel_bg = state
+        .worker_cancels
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("internal: worker_cancel missing after insert"))?;
+
+    let state_bg = Arc::clone(state);
+    let task_id_bg = task_id.clone();
+    let lead_id_bg = state.lead_id.clone();
+    let prompt_bg = args.prompt.clone();
+
+    tokio::spawn(async move {
+        run_worker(
+            state_bg,
+            task_id_bg,
+            lead_id_bg,
+            prompt_bg,
+            worker_dir,
+            worker_branch,
+            worker_model,
+            worker_tools,
+            worker_timeout_secs,
+            worker_use_worktree,
+            worker_cancel_bg,
+        )
+        .await;
+    });
+
     Ok(SpawnWorkerResult {
         task_id,
+        // worktree_path is set later inside Done(rec); callers needing it
+        // should go through worker_status / wait_for_worker.
         worktree_path: None,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_worker(
+    state: Arc<DispatchState>,
+    task_id: String,
+    lead_id: String,
+    prompt: String,
+    directory: std::path::PathBuf,
+    branch: Option<String>,
+    model: String,
+    tools: Vec<String>,
+    timeout_secs: u64,
+    use_worktree: bool,
+    cancel: mosaic_core::session::CancelToken,
+) {
+    use chrono::Utc;
+    use mosaic_core::process::SpawnCmd;
+    use mosaic_core::session::SessionHandle;
+    use mosaic_core::store::TaskStatus;
+    use std::time::Duration;
+
+    let task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let _ = tokio::fs::create_dir_all(&task_dir).await;
+    let log_path = task_dir.join("stdout.log");
+    let stderr_path = task_dir.join("stderr.log");
+
+    // Optional worktree prep.
+    let mut worktree_handle: Option<mosaic_core::worktree::Worktree> = None;
+    let cwd = if use_worktree {
+        let name = format!("shire-worker-{}-{}", task_id, state.run_id);
+        match state.wt_mgr.prepare(&directory, &name, branch.as_deref()) {
+            Ok(wt) => {
+                let p = wt.path.clone();
+                worktree_handle = Some(wt);
+                p
+            }
+            Err(e) => {
+                // Record a SpawnFailed TaskRecord and broadcast done.
+                let now = Utc::now();
+                let rec = TaskRecord {
+                    task_id: task_id.clone(),
+                    status: TaskStatus::SpawnFailed,
+                    exit_code: None,
+                    started_at: now,
+                    ended_at: now,
+                    duration_ms: 0,
+                    worktree_path: None,
+                    log_path: log_path.clone(),
+                    token_usage: Default::default(),
+                    claude_session_id: None,
+                    final_message_preview: Some(format!("worktree error: {e}")),
+                    parent_task_id: Some(lead_id),
+                };
+                let _ = state.store.append_record(state.run_id, &rec).await;
+                state
+                    .workers
+                    .write()
+                    .await
+                    .insert(task_id.clone(), WorkerState::Done(rec));
+                let _ = state.done_tx.send(task_id);
+                return;
+            }
+        }
+    } else {
+        directory.clone()
+    };
+
+    // Transition Pending → Running.
+    state.workers.write().await.insert(
+        task_id.clone(),
+        WorkerState::Running {
+            started_at: Utc::now(),
+        },
+    );
+
+    let cmd = SpawnCmd {
+        program: state.claude_binary.clone(),
+        args: worker_spawn_args(&prompt, &model, &tools),
+        cwd: cwd.clone(),
+        env: Default::default(),
+    };
+
+    let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
+        .with_log_path(log_path.clone())
+        .with_stderr_log_path(stderr_path)
+        .run_to_completion(cancel, Duration::from_secs(timeout_secs))
+        .await;
+
+    let status = match outcome.final_state {
+        mosaic_core::session::SessionState::Completed => TaskStatus::Success,
+        mosaic_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
+        mosaic_core::session::SessionState::TimedOut => TaskStatus::TimedOut,
+        mosaic_core::session::SessionState::Cancelled => TaskStatus::Cancelled,
+        mosaic_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
+        _ => TaskStatus::Failed,
+    };
+
+    // Cleanup worktree per policy.
+    if let Some(wt) = worktree_handle {
+        let succeeded = matches!(status, TaskStatus::Success);
+        let _ = state.wt_mgr.cleanup(wt, state.cleanup_policy, succeeded);
+    }
+
+    let worktree_path = if use_worktree { Some(cwd) } else { None };
+    let rec = TaskRecord {
+        task_id: task_id.clone(),
+        status,
+        exit_code: outcome.exit_code,
+        started_at: outcome.started_at,
+        ended_at: outcome.ended_at,
+        duration_ms: outcome.duration_ms(),
+        worktree_path,
+        log_path,
+        token_usage: outcome.token_usage,
+        claude_session_id: outcome.claude_session_id,
+        final_message_preview: outcome.final_message_preview,
+        parent_task_id: Some(lead_id),
+    };
+
+    // Persist record.
+    let _ = state.store.append_record(state.run_id, &rec).await;
+
+    // Accumulate cost into spent_usd.
+    if let Some(cost) = mosaic_core::prices::cost_usd(&model, &rec.token_usage) {
+        *state.spent_usd.lock().await += cost;
+    }
+
+    // Transition to Done + broadcast.
+    state
+        .workers
+        .write()
+        .await
+        .insert(task_id.clone(), WorkerState::Done(rec));
+    let _ = state.done_tx.send(task_id);
+}
+
+fn worker_spawn_args(prompt: &str, model: &str, tools: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+    ];
+    if !tools.is_empty() {
+        args.push("--allowedTools".into());
+        args.push(tools.join(","));
+    }
+    args.push("--model".into());
+    args.push(model.to_string());
+    args.push("-p".into());
+    args.push(prompt.to_string());
+    args
 }
 
 const INITIAL_WORKER_COST_EST: f64 = 0.10;
@@ -160,6 +387,7 @@ async fn estimate_new_worker_cost(state: &Arc<DispatchState>) -> f64 {
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
     let workers = state.workers.read().await;
+    let prompts = state.worker_prompts.read().await;
     workers
         .iter()
         .filter(|(id, _)| *id != &state.lead_id)
@@ -181,10 +409,11 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
                     Some(rec.started_at.to_rfc3339()),
                 ),
             };
+            let prompt_preview = prompts.get(id).cloned().unwrap_or_default();
             WorkerSummary {
                 task_id: id.clone(),
                 state: state_str,
-                prompt_preview: String::new(), // populated by spawn_worker in Task 12
+                prompt_preview,
                 started_at,
             }
         })
@@ -226,11 +455,19 @@ pub async fn handle_worker_status(
             rec.final_message_preview.clone(),
         ),
     };
+    let prompt_preview = state
+        .worker_prompts
+        .read()
+        .await
+        .get(task_id)
+        .cloned()
+        .unwrap_or_default();
     Ok(WorkerStatus {
         state: state_str,
         started_at,
         partial_usage,
         last_text_preview,
+        prompt_preview,
     })
 }
 
@@ -346,14 +583,33 @@ mod tests {
     use std::sync::Arc;
 
     async fn test_state() -> Arc<DispatchState> {
-        use crate::manifest::resolve::ResolvedManifest;
-        use crate::manifest::schema::WorktreeCleanup;
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use mosaic_core::process::fake::{FakeScript, FakeSpawner};
+        use mosaic_core::process::ProcessSpawner;
         use mosaic_core::session::CancelToken;
         use mosaic_core::store::{JsonFileStore, SessionStore};
+        use mosaic_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
         use tempfile::TempDir;
         use uuid::Uuid;
 
         let dir = TempDir::new().unwrap();
+        // Minimal lead that turns off worktree prep so the background worker
+        // spawn path doesn't require a real git repo to run against.
+        let lead = ResolvedLead {
+            id: "lead".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "lead prompt".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: Effort::High,
+            tools: vec![],
+            timeout_secs: 3600,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
         let manifest = ResolvedManifest {
             max_parallel: 4,
             halt_on_failure: false,
@@ -361,18 +617,37 @@ mod tests {
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
             tasks: vec![],
-            lead: None,
+            lead: Some(lead),
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        // Use a FakeSpawner that holds its children open until terminated.
+        // This keeps spawned workers in the Running state throughout the test
+        // (rather than transitioning to Done quickly as TokioSpawner + /bin/true
+        // would), which keeps the `active_worker_count()` guard deterministic.
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
+        // Leak the TempDir — the state holds paths into it and the test
+        // may spawn background workers that write logs inside it.
+        let dir_path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        let _ = dir_path;
         Arc::new(DispatchState::new(
-            Uuid::now_v7(),
+            run_id,
             manifest,
             store,
             CancelToken::new(),
             "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
         ))
     }
 
@@ -419,10 +694,23 @@ mod tests {
         let result = handle_spawn_worker(&state, args).await.unwrap();
         assert!(result.task_id.starts_with("worker-"));
 
+        // The background task may have already transitioned the worker to
+        // Running or Done by the time we read, so we just assert the key
+        // exists and is in a valid state (Pending / Running / Done).
         let workers = state.workers.read().await;
         assert_eq!(workers.len(), 1);
         let entry = workers.get(&result.task_id).unwrap();
-        assert!(matches!(entry, WorkerState::Pending));
+        assert!(matches!(
+            entry,
+            WorkerState::Pending | WorkerState::Running { .. } | WorkerState::Done(_)
+        ));
+
+        // Verify prompt_preview was recorded.
+        let prompts = state.worker_prompts.read().await;
+        assert_eq!(
+            prompts.get(&result.task_id).unwrap(),
+            "investigate issue #1"
+        );
     }
 
     #[tokio::test]
@@ -489,7 +777,7 @@ mod tests {
     async fn worker_status_reads_state() {
         let state = test_state().await;
         let args = SpawnWorkerArgs {
-            prompt: "p".into(),
+            prompt: "investigate bug".into(),
             directory: None,
             branch: None,
             tools: None,
@@ -498,7 +786,16 @@ mod tests {
         };
         let spawn = handle_spawn_worker(&state, args).await.unwrap();
         let status = handle_worker_status(&state, &spawn.task_id).await.unwrap();
-        assert_eq!(status.state, "Pending");
+        // The background task may have already transitioned the worker to
+        // Running; we accept either state here. Done is not expected because
+        // the test FakeSpawner holds its children open until signalled.
+        assert!(
+            matches!(status.state.as_str(), "Pending" | "Running"),
+            "unexpected state: {}",
+            status.state
+        );
+        // prompt_preview is populated synchronously before the background task.
+        assert_eq!(status.prompt_preview, "investigate bug");
     }
 
     #[tokio::test]
@@ -634,5 +931,136 @@ mod tests {
 
         let (winner_id, _rec) = handle_wait_for_any(&state, &ids, Some(5)).await.unwrap();
         assert_eq!(winner_id, "w-b");
+    }
+
+    /// Build a test_state whose FakeSpawner produces a completed session
+    /// (with a result event carrying a known token_usage), so the
+    /// backgrounded worker actually transitions through the full spawn path.
+    async fn completing_test_state() -> Arc<DispatchState> {
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use mosaic_core::process::fake::{FakeScript, FakeSpawner};
+        use mosaic_core::process::ProcessSpawner;
+        use mosaic_core::session::CancelToken;
+        use mosaic_core::store::{JsonFileStore, SessionStore};
+        use mosaic_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let lead = ResolvedLead {
+            id: "lead".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "lead prompt".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: Effort::High,
+            tools: vec![],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: None,
+            lead_timeout_secs: None,
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        // Emit a single result event with known token usage, then exit 0.
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init"}"#)
+            .stdout_line(
+                r#"{"type":"result","session_id":"sess_ok","usage":{"input_tokens":1000,"output_tokens":2000}}"#,
+            )
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
+        std::mem::forget(dir);
+        Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+        ))
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
+        use mosaic_core::store::TaskStatus;
+        use std::time::Duration;
+
+        let state = completing_test_state().await;
+        let args = SpawnWorkerArgs {
+            prompt: "analyze bug #42".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None, // falls back to lead model (claude-haiku-4-5)
+        };
+
+        // Subscribe to done events BEFORE spawning.
+        let mut rx = state.done_tx.subscribe();
+        let spawn = handle_spawn_worker(&state, args).await.unwrap();
+
+        // Wait for the broadcast.
+        let id = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("broadcast arrives in time")
+            .expect("broadcast channel open");
+        assert_eq!(id, spawn.task_id, "broadcast id matches spawn id");
+
+        // Verify Done state + Success + parent_task_id.
+        let workers = state.workers.read().await;
+        let entry = workers.get(&spawn.task_id).expect("worker recorded");
+        match entry {
+            WorkerState::Done(rec) => {
+                assert!(
+                    matches!(rec.status, TaskStatus::Success),
+                    "status is Success"
+                );
+                assert_eq!(rec.parent_task_id.as_deref(), Some("lead"));
+                assert_eq!(rec.token_usage.input, 1000);
+                assert_eq!(rec.token_usage.output, 2000);
+                assert_eq!(rec.claude_session_id.as_deref(), Some("sess_ok"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        drop(workers);
+
+        // Verify cost accumulation. claude-haiku-4-5: input $0.80/1M, output $4.00/1M.
+        // 1000 input = $0.0008; 2000 output = $0.008; total = $0.0088.
+        let spent = *state.spent_usd.lock().await;
+        assert!(
+            (spent - 0.0088).abs() < 1e-6,
+            "expected spent_usd ≈ 0.0088, got {spent}"
+        );
+
+        // Verify prompt_preview is present.
+        let preview = state
+            .worker_prompts
+            .read()
+            .await
+            .get(&spawn.task_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(preview, "analyze bug #42");
     }
 }

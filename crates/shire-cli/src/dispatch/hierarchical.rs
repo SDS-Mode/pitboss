@@ -67,6 +67,21 @@ pub async fn run_hierarchical(
 
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
 
+    // Moved up from later: WorktreeManager and cleanup policy are now needed
+    // by DispatchState so the MCP spawn_worker handler can prepare worktrees.
+    let wt_mgr = Arc::new(mosaic_core::worktree::WorktreeManager::new());
+    let cleanup_policy = match resolved.worktree_cleanup {
+        crate::manifest::schema::WorktreeCleanup::Always => {
+            mosaic_core::worktree::CleanupPolicy::Always
+        }
+        crate::manifest::schema::WorktreeCleanup::OnSuccess => {
+            mosaic_core::worktree::CleanupPolicy::OnSuccess
+        }
+        crate::manifest::schema::WorktreeCleanup::Never => {
+            mosaic_core::worktree::CleanupPolicy::Never
+        }
+    };
+
     // 1. Start the MCP server.
     let socket = socket_path_for_run(run_id, &run_dir);
     let state = Arc::new(DispatchState::new(
@@ -75,6 +90,11 @@ pub async fn run_hierarchical(
         store.clone(),
         cancel.clone(),
         lead.id.clone(),
+        spawner.clone(),
+        claude_binary.clone(),
+        wt_mgr.clone(),
+        cleanup_policy,
+        run_subdir.clone(),
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
@@ -83,7 +103,6 @@ pub async fn run_hierarchical(
     write_mcp_config(&mcp_config_path, &socket).await?;
 
     // 3. Prepare lead worktree + spawn.
-    let wt_mgr = Arc::new(mosaic_core::worktree::WorktreeManager::new());
     let mut lead_worktree_handle: Option<mosaic_core::worktree::Worktree> = None;
     let lead_cwd = if lead.use_worktree {
         let name = format!("shire-lead-{}-{}", lead.id, run_id);
@@ -169,18 +188,7 @@ pub async fn run_hierarchical(
     // Cleanup worktree per policy
     if let Some(wt) = lead_worktree_handle {
         let succeeded = matches!(lead_record.status, mosaic_core::store::TaskStatus::Success);
-        let cleanup = match resolved.worktree_cleanup {
-            crate::manifest::schema::WorktreeCleanup::Always => {
-                mosaic_core::worktree::CleanupPolicy::Always
-            }
-            crate::manifest::schema::WorktreeCleanup::OnSuccess => {
-                mosaic_core::worktree::CleanupPolicy::OnSuccess
-            }
-            crate::manifest::schema::WorktreeCleanup::Never => {
-                mosaic_core::worktree::CleanupPolicy::Never
-            }
-        };
-        let _ = wt_mgr.cleanup(wt, cleanup, succeeded);
+        let _ = wt_mgr.cleanup(wt, cleanup_policy, succeeded);
     }
 
     // Persist lead record

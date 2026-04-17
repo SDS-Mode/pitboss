@@ -268,8 +268,11 @@ mod tests {
         use crate::dispatch::state::DispatchState;
         use crate::manifest::resolve::ResolvedManifest;
         use crate::manifest::schema::WorktreeCleanup;
+        use mosaic_core::process::{ProcessSpawner, TokioSpawner};
         use mosaic_core::session::CancelToken;
         use mosaic_core::store::{JsonFileStore, SessionStore};
+        use mosaic_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
         use std::sync::Arc;
 
         let dir = TempDir::new().unwrap();
@@ -286,12 +289,21 @@ mod tests {
             lead_timeout_secs: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
         let state = Arc::new(DispatchState::new(
-            Uuid::now_v7(),
+            run_id,
             manifest,
             store,
             CancelToken::new(),
             "lead".into(),
+            spawner,
+            PathBuf::from("/bin/true"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
         ));
 
         let sock = dir.path().join("test.sock");
