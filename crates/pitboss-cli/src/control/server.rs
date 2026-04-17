@@ -351,6 +351,51 @@ async fn dispatch_op(
                 },
             }
         }
+        ControlOp::RepromptWorker { task_id, prompt } => {
+            let current = state.workers.read().await.get(&task_id).cloned();
+            let session_id = match current {
+                Some(crate::dispatch::state::WorkerState::Running {
+                    session_id: Some(sid),
+                    ..
+                }) => {
+                    let cancels = state.worker_cancels.read().await;
+                    if let Some(tok) = cancels.get(&task_id) {
+                        tok.terminate();
+                    }
+                    // Brief grace so the prior subprocess exits.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    sid
+                }
+                Some(crate::dispatch::state::WorkerState::Paused { session_id, .. }) => session_id,
+                Some(_) => {
+                    return ControlEvent::OpUnknownState {
+                        op: "reprompt_worker".into(),
+                        task_id,
+                        current_state: "invalid".into(),
+                    }
+                }
+                None => {
+                    return ControlEvent::OpFailed {
+                        op: "reprompt_worker".into(),
+                        task_id: Some(task_id),
+                        error: "unknown task_id".into(),
+                    }
+                }
+            };
+            match crate::mcp::tools::spawn_resume_worker(state, task_id.clone(), prompt, session_id)
+                .await
+            {
+                Ok(()) => ControlEvent::OpAcked {
+                    op: "reprompt_worker".into(),
+                    task_id: Some(task_id),
+                },
+                Err(e) => ControlEvent::OpFailed {
+                    op: "reprompt_worker".into(),
+                    task_id: Some(task_id),
+                    error: e.to_string(),
+                },
+            }
+        }
         other => ControlEvent::OpUnknown {
             op: op_tag(&other).into(),
         },
@@ -697,6 +742,71 @@ mod tests {
             workers.get("w-1").unwrap(),
             crate::dispatch::state::WorkerState::Running { .. }
         ));
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn reprompt_worker_from_running_terminates_and_respawns() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        let worker_token = CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), worker_token.clone());
+        state.workers.write().await.insert(
+            "w-1".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess-xyz".into()),
+            },
+        );
+        state
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-1".into(), "hi".into());
+        state
+            .worker_models
+            .write()
+            .await
+            .insert("w-1".into(), "claude-haiku-4-5".into());
+
+        let sock = dir.path().join("reprompt.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"{\"op\":\"reprompt_worker\",\"task_id\":\"w-1\",\"prompt\":\"new plan\"}\n",
+            )
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "reprompt_worker"
+        ));
+        assert!(worker_token.is_terminated());
         drop(handle);
     }
 }
