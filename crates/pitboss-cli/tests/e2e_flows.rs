@@ -370,3 +370,136 @@ async fn e2e_lead_cancels_worker_mid_flight() {
 
     state.cancel.terminate();
 }
+
+#[tokio::test]
+async fn e2e_lead_request_approval_round_trip() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
+
+    // Ensure the run subdir exists so events.jsonl writes don't fail.
+    tokio::fs::create_dir_all(&state.run_subdir).await.unwrap();
+
+    // Start BOTH the MCP server (for the lead) and the Control server
+    // (for FakeControlClient).
+    let mcp_sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
+        .await
+        .unwrap();
+
+    let ctrl_sock = pitboss_cli::control::control_socket_path(run_id, &state.manifest.run_dir);
+    let _ctrl_server = pitboss_cli::control::server::start_control_server(
+        ctrl_sock.clone(),
+        "0.4.1".into(),
+        run_id.to_string(),
+        "hierarchical".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+
+    // Background task: poll until there's a queued approval so we don't race
+    // the lead. When queue non-empty, connect the FakeControlClient (which
+    // triggers the server-side drain + ApprovalRequest push). FCC responds
+    // with Approve{approved:true}.
+    let ctrl_sock_bg = ctrl_sock.clone();
+    let state_for_fcc = state.clone();
+    let fcc_task = tokio::spawn(async move {
+        // Poll up to 2s for the approval_queue to fill.
+        let poll_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if !state_for_fcc.approval_queue.lock().await.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= poll_deadline {
+                panic!("FCC timed out waiting for queued approval");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut client =
+            fake_control_client::FakeControlClient::connect(&ctrl_sock_bg, "0.4.1-fcc")
+                .await
+                .unwrap();
+        // First event should be the drained ApprovalRequest.
+        match client.recv_timeout(Duration::from_secs(5)).await.unwrap() {
+            Some(pitboss_cli::control::protocol::ControlEvent::ApprovalRequest {
+                request_id,
+                ..
+            }) => {
+                client
+                    .send(&pitboss_cli::control::protocol::ControlOp::Approve {
+                        request_id,
+                        approved: true,
+                        comment: None,
+                        edited_summary: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            Some(other) => panic!("expected ApprovalRequest first, got {other:?}"),
+            None => panic!("FakeControlClient timed out waiting for event"),
+        }
+    });
+
+    // Script: one request_approval call.
+    let script = dir.path().join("script.jsonl");
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"request_approval","args":{"summary":"spawn 3 workers","timeout_secs":10},"bind":"approval"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &mcp_sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    // Clean up the background FCC task (should have finished by now).
+    fcc_task.await.expect("FCC task panicked");
+
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "fake-claude exit non-zero: {outcome:?}"
+    );
+
+    // Check events.jsonl for both approval_request and approval_response.
+    let events_path = state
+        .run_subdir
+        .join("tasks")
+        .join("lead")
+        .join("events.jsonl");
+    let events = tokio::fs::read_to_string(&events_path)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("read {}: {e}", events_path.display());
+        });
+    assert!(
+        events.contains("\"kind\":\"approval_request\""),
+        "events.jsonl missing approval_request: {events}"
+    );
+    assert!(
+        events.contains("\"kind\":\"approval_response\""),
+        "events.jsonl missing approval_response: {events}"
+    );
+
+    // Counters should record one request + one approval.
+    let counters = state
+        .worker_counters
+        .read()
+        .await
+        .get("lead")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(counters.approvals_requested, 1);
+    assert_eq!(counters.approvals_approved, 1);
+    assert_eq!(counters.approvals_rejected, 0);
+
+    state.cancel.terminate();
+}
