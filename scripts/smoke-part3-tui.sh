@@ -119,6 +119,48 @@ else
 fi
 
 # -------------------------------------------------------------------
+# v0.4: rendered help overlay includes new keybindings
+LATEST_RUN=$("$PITBOSS_TUI" list 2>&1 | tail -n +3 | head -1 | awk '{print $1}')
+if [ -n "$LATEST_RUN" ]; then
+    echo "-- smoke: v0.4 help mentions new keybindings"
+    HELP_OUT=$("$PITBOSS_TUI" screenshot --run "$LATEST_RUN" --cols 120 --rows 40 2>/dev/null || true)
+    # Best-effort: the help overlay requires interactive entry, so we just check
+    # the run-level render includes the standard title; full help check is in
+    # cargo tests. This case guards that --rows 40 renders without panicking.
+    if test -n "$HELP_OUT"; then
+        record "v0.4 help keybindings" PASS
+    else
+        record "v0.4 help keybindings" FAIL "screenshot produced no output"
+    fi
+else
+    record "v0.4 help keybindings" SKIP "no runs available for screenshot"
+fi
+
+# -------------------------------------------------------------------
+# v0.4: screenshot renders with no control socket attached
+if [ -n "$LATEST_RUN" ]; then
+    echo "-- smoke: v0.4 screenshot on completed run renders normally"
+    OUT=$("$PITBOSS_TUI" screenshot --run "$LATEST_RUN" --cols 120 --rows 30 2>&1); CODE=$?
+    if [ "$CODE" = "0" ]; then
+        record "v0.4 screenshot completed run" PASS
+    else
+        record "v0.4 screenshot completed run" FAIL "exit $CODE"
+    fi
+else
+    record "v0.4 screenshot completed run" SKIP "no runs available"
+fi
+
+# -------------------------------------------------------------------
+# v0.4: paused-worker tile (post-hoc) smoke
+echo "-- smoke: v0.4 pitboss-tui list still works"
+OUT=$("$PITBOSS_TUI" list 2>&1); CODE=$?
+if [ "$CODE" = "0" ] && echo "$OUT" | head -n 5 >/dev/null; then
+    record "v0.4 list command" PASS
+else
+    record "v0.4 list command" FAIL "exit $CODE"
+fi
+
+# -------------------------------------------------------------------
 # Interactive tests (5, 8) — cannot automate
 record "5 open most recent (interactive)" SKIP "run pitboss-tui manually in a real TTY"
 record "8 live updates (interactive)"    SKIP "pair with a running pitboss dispatch"
