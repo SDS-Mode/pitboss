@@ -69,3 +69,112 @@ async fn mcp_spawn_and_list_round_trip() {
 
     client.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn mcp_spawn_over_max_workers_returns_error() {
+    let (_dir, state) = mk_state(); // max_workers = 4
+    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+
+    for i in 0..4 {
+        client
+            .call_tool(
+                "spawn_worker",
+                json!({
+                    "prompt": format!("w{}", i)
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let err = client
+        .call_tool("spawn_worker", json!({"prompt": "over"}))
+        .await;
+    match err {
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("worker cap reached"),
+                "expected 'worker cap reached' in error, got: {msg}"
+            );
+        }
+        Ok(v) => {
+            let s = v.to_string();
+            assert!(
+                s.contains("worker cap reached"),
+                "expected Err or result containing 'worker cap reached', got Ok: {s}"
+            );
+        }
+    }
+
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_spawn_over_budget_returns_error() {
+    let (_dir, state) = mk_state(); // budget_usd = 5.0
+    *state.spent_usd.lock().await = 5.0;
+    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+
+    let err = client
+        .call_tool("spawn_worker", json!({"prompt": "p"}))
+        .await;
+    match err {
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("budget exceeded"),
+                "expected 'budget exceeded' in error, got: {msg}"
+            );
+        }
+        Ok(v) => {
+            let s = v.to_string();
+            assert!(
+                s.contains("budget exceeded"),
+                "expected Err or result containing 'budget exceeded', got Ok: {s}"
+            );
+        }
+    }
+
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_spawn_while_draining_returns_error() {
+    let (_dir, state) = mk_state();
+    state.cancel.drain();
+    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+
+    let err = client
+        .call_tool("spawn_worker", json!({"prompt": "p"}))
+        .await;
+    match err {
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("draining"),
+                "expected 'draining' in error, got: {msg}"
+            );
+        }
+        Ok(v) => {
+            let s = v.to_string();
+            assert!(
+                s.contains("draining"),
+                "expected Err or result containing 'draining', got Ok: {s}"
+            );
+        }
+    }
+
+    client.close().await.unwrap();
+}
