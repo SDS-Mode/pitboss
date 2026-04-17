@@ -5,6 +5,7 @@ members = [
     "crates/shire-cli",
     "crates/mosaic-tui",
     "tests-support/fake-claude",
+    "tests-support/fake-mcp-client",
 ]
 
 [workspace.package]
@@ -35,4 +36,4 @@ libc               = "0.2"
 ratatui            = "0.29"
 crossterm          = "0.28"
 rusqlite           = { version = "0.32", features = ["bundled"] }
-rmcp               = { version = "0.8", features = ["server", "transport-io", "macros"] }
+rmcp               = { version = "0.8", features = ["server", "client", "transport-io", "macros"] }
