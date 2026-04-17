@@ -17,6 +17,14 @@ use uuid::Uuid;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
+fn cleanup_policy_from(w: crate::manifest::schema::WorktreeCleanup) -> CleanupPolicy {
+    match w {
+        crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
+        crate::manifest::schema::WorktreeCleanup::OnSuccess => CleanupPolicy::OnSuccess,
+        crate::manifest::schema::WorktreeCleanup::Never => CleanupPolicy::Never,
+    }
+}
+
 /// Public entry — main.rs calls this. Constructs production spawner + store.
 pub async fn run_dispatch_inner(
     resolved: ResolvedManifest,
@@ -100,6 +108,33 @@ pub async fn execute(
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
     let records: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Build a minimal DispatchState so the control server has something to bind
+    // against. Flat mode has no lead and no spawn_worker path, but cancel and
+    // list_workers still apply.
+    let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
+        run_id,
+        resolved.clone(),
+        store.clone(),
+        cancel.clone(),
+        "".into(),
+        spawner.clone(),
+        claude_binary.clone(),
+        wt_mgr.clone(),
+        cleanup_policy_from(resolved.worktree_cleanup),
+        run_subdir.clone(),
+        crate::dispatch::state::ApprovalPolicy::Block,
+    ));
+    let control_sock = crate::control::control_socket_path(run_id, &run_dir);
+    let _control = crate::control::server::start_control_server(
+        control_sock,
+        env!("CARGO_PKG_VERSION").to_string(),
+        run_id.to_string(),
+        "flat".into(),
+        flat_state,
+    )
+    .await
+    .context("start control server")?;
 
     let mut handles = Vec::new();
 
