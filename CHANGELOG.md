@@ -7,6 +7,25 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-17
+
+### Fixed
+- TUI worker-switch latency. `pitboss-tui`'s watcher now wakes immediately
+  on a focus change (`focus_rx.recv_timeout` replaces a 500 ms
+  `thread::sleep`), dropping perceived switch latency from up-to-half-a-
+  second to just the rebuild cost.
+- `tail_log` seeks to the last 256 KiB of the log file instead of reading
+  and parsing the entire file every poll. Per-poll work is now
+  O(constant) regardless of log size; previously a 2 MB log meant
+  10–30 ms of redundant parse work twice per second.
+
+### Added
+- README: `Install` section leads with pre-built tarball install; `Shell
+  completions` subsection; `Continuous integration` + `Cutting a release`
+  docs under Development.
+- Three `tail_log` regression tests covering small files, >256 KiB files
+  with mid-seek partial-line drop, and missing files.
+
 ## [0.3.1] — 2026-04-17
 
 ### Added
@@ -133,7 +152,8 @@ This project uses [Semantic Versioning](https://semver.org/).
   SIGINT terminates.
 - Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
 
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/SDS-Mode/pitboss/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/SDS-Mode/pitboss/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/SDS-Mode/pitboss/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/SDS-Mode/pitboss/compare/v0.2.1...v0.2.2
