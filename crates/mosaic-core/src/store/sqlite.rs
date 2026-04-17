@@ -46,10 +46,38 @@ impl SqliteStore {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| StoreError::Incomplete(format!("sqlite open: {e}")))?;
         init_schema(&conn)?;
+        migrate_parent_task_id(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
     }
+}
+
+/// Idempotent migration: if an older DB lacks `parent_task_id`, add it.
+///
+/// Uses `PRAGMA table_info(task_records)` to detect whether the column is
+/// already present before issuing `ALTER TABLE ... ADD COLUMN`. This avoids
+/// the error `SQLite` raises when attempting to add a column that already
+/// exists, and keeps this safe to call on every open.
+fn migrate_parent_task_id(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let has_parent = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('task_records') \
+                 WHERE name = 'parent_task_id'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate pragma prepare: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate pragma exists: {e}")))?
+    };
+    if !has_parent {
+        conn.execute(
+            "ALTER TABLE task_records ADD COLUMN parent_task_id TEXT NULL",
+            [],
+        )
+        .map_err(|e| StoreError::Incomplete(format!("migrate alter: {e}")))?;
+    }
+    Ok(())
 }
 
 fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
@@ -82,6 +110,7 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             token_cache_creation  INTEGER,
             claude_session_id     TEXT,
             final_message_preview TEXT,
+            parent_task_id        TEXT NULL,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -179,7 +208,7 @@ fn fetch_task_records(
                   started_at, ended_at, duration_ms, \
                   worktree_path, log_path, \
                   token_input, token_output, token_cache_read, token_cache_creation, \
-                  claude_session_id, final_message_preview \
+                  claude_session_id, final_message_preview, parent_task_id \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -201,6 +230,7 @@ fn fetch_task_records(
                 row.get::<_, Option<i64>>(11)?,    // token_cache_creation
                 row.get::<_, Option<String>>(12)?, // claude_session_id
                 row.get::<_, Option<String>>(13)?, // final_message_preview
+                row.get::<_, Option<String>>(14)?, // parent_task_id
             ))
         })
         .map_err(|e| StoreError::Incomplete(format!("task query: {e}")))?;
@@ -222,6 +252,7 @@ fn fetch_task_records(
             token_cache_creation,
             claude_session_id,
             final_message_preview,
+            parent_task_id,
         ) = row.map_err(|e| StoreError::Incomplete(format!("task row read: {e}")))?;
 
         out.push(TaskRecord {
@@ -241,7 +272,7 @@ fn fetch_task_records(
             },
             claude_session_id,
             final_message_preview,
-            parent_task_id: None,
+            parent_task_id,
         });
     }
     Ok(out)
@@ -355,8 +386,8 @@ impl SessionStore for SqliteStore {
                       started_at, ended_at, duration_ms, \
                       worktree_path, log_path, \
                       token_input, token_output, token_cache_read, token_cache_creation, \
-                      claude_session_id, final_message_preview) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                      claude_session_id, final_message_preview, parent_task_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -376,6 +407,7 @@ impl SessionStore for SqliteStore {
                         i64::try_from(record.token_usage.cache_creation).unwrap_or(i64::MAX),
                         record.claude_session_id,
                         record.final_message_preview,
+                        record.parent_task_id.as_deref(),
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -444,17 +476,17 @@ mod sqlite_tests {
     use crate::store::record::TaskStatus;
     use chrono::Utc;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn make_store(dir: &TempDir) -> SqliteStore {
         SqliteStore::new(dir.path().join("test.db")).expect("SqliteStore::new")
     }
 
-    fn meta(run_id: Uuid, dir: &TempDir) -> RunMeta {
+    fn meta(run_id: Uuid, dir: &Path) -> RunMeta {
         RunMeta {
             run_id,
-            manifest_path: dir.path().join("shire.toml"),
+            manifest_path: dir.join("shire.toml"),
             shire_version: "0.1.0".into(),
             claude_version: Some("1.0.0".into()),
             started_at: Utc::now(),
@@ -487,7 +519,7 @@ mod sqlite_tests {
         let store = make_store(&dir);
         let run_id = Uuid::now_v7();
 
-        store.init_run(&meta(run_id, &dir)).await.unwrap();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
         store
             .append_record(run_id, &rec("a", TaskStatus::Success))
             .await
@@ -537,7 +569,7 @@ mod sqlite_tests {
         let store = make_store(&dir);
         let run_id = Uuid::now_v7();
 
-        store.init_run(&meta(run_id, &dir)).await.unwrap();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
         store
             .append_record(run_id, &rec("only", TaskStatus::Success))
             .await
@@ -557,7 +589,7 @@ mod sqlite_tests {
         let store = make_store(&dir);
         let run_id = Uuid::now_v7();
 
-        store.init_run(&meta(run_id, &dir)).await.unwrap();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
         store
             .append_record(run_id, &rec("dup", TaskStatus::Success))
             .await
@@ -576,5 +608,69 @@ mod sqlite_tests {
         );
         // Second append (Failed) wins since it was an OR REPLACE.
         assert!(matches!(loaded.tasks[0].status, TaskStatus::Failed));
+    }
+
+    #[tokio::test]
+    async fn sqlite_stores_parent_task_id() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("runs.db");
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+
+        let mut rec = rec("worker-1", TaskStatus::Success);
+        rec.parent_task_id = Some("lead-abc".to_string());
+        store.append_record(run_id, &rec).await.unwrap();
+
+        let summary = RunSummary {
+            run_id,
+            manifest_path: PathBuf::new(),
+            shire_version: "0.3.0".into(),
+            claude_version: None,
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            total_duration_ms: 0,
+            tasks_total: 1,
+            tasks_failed: 0,
+            was_interrupted: false,
+            tasks: vec![rec.clone()],
+        };
+        store.finalize_run(&summary).await.unwrap();
+
+        let back = store.load_run(run_id).await.unwrap();
+        assert_eq!(back.tasks[0].parent_task_id.as_deref(), Some("lead-abc"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrates_old_db_missing_parent_column() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("old.db");
+
+        // Create a DB manually without the parent_task_id column.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (run_id TEXT PRIMARY KEY, manifest_path TEXT NOT NULL, \
+                 shire_version TEXT NOT NULL, claude_version TEXT, started_at TEXT NOT NULL, \
+                 ended_at TEXT, tasks_total INTEGER, tasks_failed INTEGER, was_interrupted INTEGER DEFAULT 0); \
+                 CREATE TABLE task_records (run_id TEXT NOT NULL, task_id TEXT NOT NULL, \
+                 status TEXT NOT NULL, exit_code INTEGER, started_at TEXT, ended_at TEXT, \
+                 duration_ms INTEGER, worktree_path TEXT, log_path TEXT, token_input INTEGER, \
+                 token_output INTEGER, token_cache_read INTEGER, token_cache_creation INTEGER, \
+                 claude_session_id TEXT, final_message_preview TEXT, \
+                 PRIMARY KEY (run_id, task_id));",
+            )
+            .unwrap();
+        }
+
+        // Opening with the new store must add the missing column idempotently.
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+        let mut rec = rec("t1", TaskStatus::Success);
+        rec.parent_task_id = Some("parent-x".into());
+        store.append_record(run_id, &rec).await.unwrap();
+        // No panic, no error — column migration worked.
     }
 }
