@@ -86,7 +86,7 @@ expect_contains() {
 }
 
 # --------------------------------------------------------------------
-echo "=== Agent Shire v0.1 — Part 1 offline tests ==="
+echo "=== Pitboss v0.1 — Part 1 offline tests ==="
 echo "binary:  $("$PITBOSS" version 2>/dev/null || echo '?')"
 echo "scratch: $SCRATCH"
 echo
@@ -195,7 +195,7 @@ fi
 
 # --------------------------------------------------------------------
 # 1.9 Missing claude binary — probe should fail with exit 2
-SHIRE_CLAUDE_BINARY=/nope/claude "$PITBOSS" dispatch "$SCRATCH/happy.toml" >/dev/null 2>&1; CODE=$?
+PITBOSS_CLAUDE_BINARY=/nope/claude "$PITBOSS" dispatch "$SCRATCH/happy.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.9 missing claude binary"
 
 # --------------------------------------------------------------------

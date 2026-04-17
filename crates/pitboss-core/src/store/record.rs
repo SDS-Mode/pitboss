@@ -39,7 +39,7 @@ pub struct TaskRecord {
 pub struct RunMeta {
     pub run_id: Uuid,
     pub manifest_path: PathBuf,
-    pub shire_version: String,
+    pub pitboss_version: String,
     pub claude_version: Option<String>,
     pub started_at: DateTime<Utc>,
     pub env: HashMap<String, String>,
@@ -49,7 +49,7 @@ pub struct RunMeta {
 pub struct RunSummary {
     pub run_id: Uuid,
     pub manifest_path: PathBuf,
-    pub shire_version: String,
+    pub pitboss_version: String,
     pub claude_version: Option<String>,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,

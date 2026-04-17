@@ -1,4 +1,4 @@
-//! Application state types for the Mosaic TUI.
+//! Application state types for the Pitboss TUI.
 
 use std::path::PathBuf;
 
@@ -357,7 +357,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// `enter_picker` sets mode to `PickingRun` and populates `run_list`.
-    /// We inject the run list directly to avoid needing a real shire runs dir.
+    /// We inject the run list directly to avoid needing a real pitboss runs dir.
     #[test]
     fn enter_picker_sets_mode_and_populates_list() {
         let mut state = make_state();

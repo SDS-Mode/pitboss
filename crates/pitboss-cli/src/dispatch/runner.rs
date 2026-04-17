@@ -70,7 +70,7 @@ pub async fn execute(
     let meta = RunMeta {
         run_id,
         manifest_path: manifest_path.clone(),
-        shire_version: env!("CARGO_PKG_VERSION").to_string(),
+        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version: claude_version.clone(),
         started_at: Utc::now(),
         env: Default::default(),
@@ -173,7 +173,7 @@ pub async fn execute(
     let summary = RunSummary {
         run_id,
         manifest_path: manifest_path.clone(),
-        shire_version: env!("CARGO_PKG_VERSION").to_string(),
+        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version: claude_version.clone(),
         started_at,
         ended_at,
@@ -219,7 +219,7 @@ async fn execute_task(
     // Worktree preparation (optional).
     let mut worktree_handle = None;
     let cwd = if task.use_worktree {
-        let name = format!("shire-{}-{}", task.id, run_id);
+        let name = format!("pitboss-{}-{}", task.id, run_id);
         match wt_mgr.prepare(&task.directory, &name, task.branch.as_deref()) {
             Ok(wt) => {
                 let p = wt.path.clone();
@@ -319,15 +319,15 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
 }
 
 /// The six MCP tool names the lead needs permission to call.
-/// Format: `mcp__<server-name>__<tool>`, where `shire` is the server name
+/// Format: `mcp__<server-name>__<tool>`, where `pitboss` is the server name
 /// we emit in `write_mcp_config`.
-pub const SHIRE_MCP_TOOLS: &[&str] = &[
-    "mcp__shire__spawn_worker",
-    "mcp__shire__worker_status",
-    "mcp__shire__wait_for_worker",
-    "mcp__shire__wait_for_any",
-    "mcp__shire__list_workers",
-    "mcp__shire__cancel_worker",
+pub const PITBOSS_MCP_TOOLS: &[&str] = &[
+    "mcp__pitboss__spawn_worker",
+    "mcp__pitboss__worker_status",
+    "mcp__pitboss__wait_for_worker",
+    "mcp__pitboss__wait_for_any",
+    "mcp__pitboss__list_workers",
+    "mcp__pitboss__cancel_worker",
 ];
 
 /// Builds the argv for spawning the lead subprocess, including the
@@ -335,7 +335,7 @@ pub const SHIRE_MCP_TOOLS: &[&str] = &[
 ///
 /// Claude Code gates MCP tool use behind a permission prompt that can't be
 /// answered in `-p` (non-interactive) mode, so we always pre-allow the six
-/// shire MCP tools here. User-specified `tools` (from defaults / per-lead)
+/// pitboss MCP tools here. User-specified `tools` (from defaults / per-lead)
 /// are merged in alongside the MCP set.
 pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
@@ -347,9 +347,9 @@ pub fn lead_spawn_args(
         "--verbose".into(),
     ];
 
-    // Build the allowed-tools set: user tools + shire MCP tools.
+    // Build the allowed-tools set: user tools + pitboss MCP tools.
     let mut allowed: Vec<String> = lead.tools.clone();
-    for t in SHIRE_MCP_TOOLS {
+    for t in PITBOSS_MCP_TOOLS {
         allowed.push((*t).to_string());
     }
     args.push("--allowedTools".into());
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn lead_spawn_args_auto_allows_shire_mcp_tools() {
+    fn lead_spawn_args_auto_allows_pitboss_mcp_tools() {
         use crate::manifest::resolve::ResolvedLead;
         use std::path::PathBuf;
         let lead = ResolvedLead {
@@ -759,8 +759,8 @@ mod tests {
         let list = &args[idx + 1];
         // User-declared tool preserved
         assert!(list.contains("Read"), "expected user tool, got {list}");
-        // All six shire MCP tools present under the `mcp__shire__` prefix.
-        for t in SHIRE_MCP_TOOLS {
+        // All six pitboss MCP tools present under the `mcp__pitboss__` prefix.
+        for t in PITBOSS_MCP_TOOLS {
             assert!(
                 list.contains(t),
                 "expected {t} in allowedTools, got: {list}"

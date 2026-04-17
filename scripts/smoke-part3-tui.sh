@@ -75,7 +75,7 @@ fi
 
 # -------------------------------------------------------------------
 # 4 — No-runs message via HOME override
-OUT=$(HOME=/tmp/definitely-no-shire-runs-here "$PITBOSS_TUI" list 2>&1); CODE=$?
+OUT=$(HOME=/tmp/definitely-no-pitboss-runs-here "$PITBOSS_TUI" list 2>&1); CODE=$?
 if [ "$CODE" = "0" ] && echo "$OUT" | grep -qi "No runs"; then
     record "4 no-runs message" PASS
 else

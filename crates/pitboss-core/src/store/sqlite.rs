@@ -51,6 +51,12 @@ impl SqliteStore {
     pub fn new(path: PathBuf) -> Result<Self, StoreError> {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| StoreError::Incomplete(format!("sqlite open: {e}")))?;
+        // Migration order matters: rename the legacy `shire_version` column
+        // BEFORE init_schema runs its CREATE TABLE IF NOT EXISTS, otherwise
+        // the pragma check below would still see the old column name for an
+        // existing DB. For a fresh DB init_schema creates the table with the
+        // new column name and the rename is a no-op.
+        migrate_rename_shire_version_to_pitboss_version(&conn)?;
         init_schema(&conn)?;
         migrate_parent_task_id(&conn)?;
         Ok(Self {
@@ -86,13 +92,60 @@ fn migrate_parent_task_id(conn: &rusqlite::Connection) -> Result<(), StoreError>
     Ok(())
 }
 
+/// Idempotent migration: pre-v0.3.0 DBs had a `shire_version` column on the
+/// `runs` table. During the pitboss rebrand we renamed it to
+/// `pitboss_version`. This check runs before `init_schema` so:
+///   - fresh DBs skip it (the `runs` table doesn't exist yet)
+///   - DBs with the old column get an `ALTER TABLE ... RENAME COLUMN`
+///   - DBs with the new column (or no column at all) are a no-op
+///
+/// Requires `SQLite` >= 3.25 for `RENAME COLUMN` — rusqlite with the
+/// `bundled` feature ships a modern build so this is fine.
+fn migrate_rename_shire_version_to_pitboss_version(
+    conn: &rusqlite::Connection,
+) -> Result<(), StoreError> {
+    // If the runs table doesn't exist yet (fresh DB), nothing to do.
+    let runs_exists = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'runs'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate check runs: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate check runs exists: {e}")))?
+    };
+    if !runs_exists {
+        return Ok(());
+    }
+
+    let has_shire = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('runs') \
+                 WHERE name = 'shire_version'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate rename pragma prepare: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate rename pragma exists: {e}")))?
+    };
+    if has_shire {
+        conn.execute(
+            "ALTER TABLE runs RENAME COLUMN shire_version TO pitboss_version",
+            [],
+        )
+        .map_err(|e| StoreError::Incomplete(format!("migrate rename alter: {e}")))?;
+    }
+    Ok(())
+}
+
 fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS runs (
             run_id           TEXT PRIMARY KEY,
             manifest_path    TEXT NOT NULL,
-            shire_version    TEXT NOT NULL,
+            pitboss_version  TEXT NOT NULL,
             claude_version   TEXT,
             started_at       TEXT NOT NULL,
             ended_at         TEXT,
@@ -179,7 +232,7 @@ fn fetch_run_row(
 > {
     let mut stmt = guard
         .prepare(
-            "SELECT manifest_path, shire_version, claude_version, \
+            "SELECT manifest_path, pitboss_version, claude_version, \
                  started_at, ended_at, tasks_total, tasks_failed, was_interrupted \
              FROM runs WHERE run_id = ?1",
         )
@@ -290,7 +343,7 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
 
     let (
         manifest_path_str,
-        shire_version,
+        pitboss_version,
         claude_version,
         started_at_str,
         ended_at_opt,
@@ -330,7 +383,7 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
     Ok(RunSummary {
         run_id,
         manifest_path,
-        shire_version,
+        pitboss_version,
         claude_version,
         started_at,
         ended_at,
@@ -350,7 +403,7 @@ impl SessionStore for SqliteStore {
         let conn = Arc::clone(&self.inner);
         let run_id = meta.run_id.to_string();
         let manifest_path = meta.manifest_path.to_string_lossy().into_owned();
-        let shire_version = meta.shire_version.clone();
+        let pitboss_version = meta.pitboss_version.clone();
         let claude_version = meta.claude_version.clone();
         let started_at = meta.started_at.to_rfc3339();
 
@@ -359,12 +412,12 @@ impl SessionStore for SqliteStore {
             guard
                 .execute(
                     "INSERT OR REPLACE INTO runs \
-                     (run_id, manifest_path, shire_version, claude_version, started_at) \
+                     (run_id, manifest_path, pitboss_version, claude_version, started_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![
                         run_id,
                         manifest_path,
-                        shire_version,
+                        pitboss_version,
                         claude_version,
                         started_at
                     ],
@@ -492,8 +545,8 @@ mod sqlite_tests {
     fn meta(run_id: Uuid, dir: &Path) -> RunMeta {
         RunMeta {
             run_id,
-            manifest_path: dir.join("shire.toml"),
-            shire_version: "0.1.0".into(),
+            manifest_path: dir.join("pitboss.toml"),
+            pitboss_version: "0.1.0".into(),
             claude_version: Some("1.0.0".into()),
             started_at: Utc::now(),
             env: HashMap::new(),
@@ -537,8 +590,8 @@ mod sqlite_tests {
 
         let summary = RunSummary {
             run_id,
-            manifest_path: dir.path().join("shire.toml"),
-            shire_version: "0.1.0".into(),
+            manifest_path: dir.path().join("pitboss.toml"),
+            pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: Utc::now(),
             ended_at: Utc::now(),
@@ -632,7 +685,7 @@ mod sqlite_tests {
         let summary = RunSummary {
             run_id,
             manifest_path: PathBuf::new(),
-            shire_version: "0.3.0".into(),
+            pitboss_version: "0.3.0".into(),
             claude_version: None,
             started_at: Utc::now(),
             ended_at: Utc::now(),
@@ -684,5 +737,85 @@ mod sqlite_tests {
 
         // Re-open: must not attempt ALTER TABLE again (column now exists).
         let _store2 = SqliteStore::new(db_path.clone()).unwrap();
+    }
+
+    /// Covers the v0.3 pitboss rebrand migration: pre-existing DBs had a
+    /// `shire_version` column on `runs`. Opening such a DB with the current
+    /// `SqliteStore` must rename the column to `pitboss_version` idempotently.
+    #[tokio::test]
+    async fn sqlite_migrates_old_db_with_shire_version_column() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("legacy.db");
+
+        // Build a pre-rebrand schema by hand (column named `shire_version`).
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (run_id TEXT PRIMARY KEY, manifest_path TEXT NOT NULL, \
+                 shire_version TEXT NOT NULL, claude_version TEXT, started_at TEXT NOT NULL, \
+                 ended_at TEXT, tasks_total INTEGER, tasks_failed INTEGER, was_interrupted INTEGER DEFAULT 0); \
+                 CREATE TABLE task_records (run_id TEXT NOT NULL, task_id TEXT NOT NULL, \
+                 status TEXT NOT NULL, exit_code INTEGER, started_at TEXT, ended_at TEXT, \
+                 duration_ms INTEGER, worktree_path TEXT, log_path TEXT, token_input INTEGER, \
+                 token_output INTEGER, token_cache_read INTEGER, token_cache_creation INTEGER, \
+                 claude_session_id TEXT, final_message_preview TEXT, parent_task_id TEXT NULL, \
+                 PRIMARY KEY (run_id, task_id));",
+            )
+            .unwrap();
+        }
+
+        // Opening with the new store must rename the column.
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+
+        // Writing and reading a record must round-trip through the renamed column.
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+        let rec = rec("t1", TaskStatus::Success);
+        store.append_record(run_id, &rec).await.unwrap();
+
+        let summary = RunSummary {
+            run_id,
+            manifest_path: dir.path().join("pitboss.toml"),
+            pitboss_version: "0.1.0".into(),
+            claude_version: None,
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            total_duration_ms: 0,
+            tasks_total: 1,
+            tasks_failed: 0,
+            was_interrupted: false,
+            tasks: vec![rec.clone()],
+        };
+        store.finalize_run(&summary).await.unwrap();
+        let back = store.load_run(run_id).await.unwrap();
+        // The version stored came from `meta()` via `init_run`; finalize_run
+        // doesn't touch the column. What matters is that the read path
+        // succeeds under the renamed column.
+        assert_eq!(back.pitboss_version, "0.1.0");
+
+        // Directly inspect pragma_table_info: the column must be named
+        // `pitboss_version` now, and NOT `shire_version`.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let has_pitboss = conn
+            .prepare("SELECT 1 FROM pragma_table_info('runs') WHERE name = 'pitboss_version'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        let has_shire = conn
+            .prepare("SELECT 1 FROM pragma_table_info('runs') WHERE name = 'shire_version'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(
+            has_pitboss,
+            "pitboss_version column must exist after migration"
+        );
+        assert!(
+            !has_shire,
+            "shire_version column must be gone after migration"
+        );
+
+        // Re-opening is idempotent — must not attempt another rename.
+        let _store2 = SqliteStore::new(db_path).unwrap();
     }
 }

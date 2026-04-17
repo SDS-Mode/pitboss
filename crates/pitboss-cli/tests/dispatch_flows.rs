@@ -19,7 +19,7 @@ fn three_task_mixed_outcomes_produce_summary() {
     init_git_repo(repo.path());
     let run_dir = TempDir::new().unwrap();
 
-    let manifest_path = repo.path().join("shire.toml");
+    let manifest_path = repo.path().join("pitboss.toml");
     std::fs::write(
         &manifest_path,
         format!(
@@ -55,7 +55,7 @@ prompt = "p"
 
     let mut cmd = Command::new(pitboss_binary());
     cmd.arg("dispatch").arg(&manifest_path);
-    cmd.env("SHIRE_CLAUDE_BINARY", fake_claude_path());
+    cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
     cmd.env("MOSAIC_FAKE_SCRIPT", fixture("success.jsonl"));
     cmd.env("MOSAIC_FAKE_EXIT_CODE", "0");
     let out = cmd.output().unwrap();
@@ -87,7 +87,7 @@ fn halt_on_failure_stops_remaining_tasks() {
 
     // 5 tasks, max_parallel=1 so ordering is deterministic, halt_on_failure=true.
     // All tasks use exit2.jsonl + exit code 2 so the first failure triggers cascade.
-    let manifest_path = repo.path().join("shire.toml");
+    let manifest_path = repo.path().join("pitboss.toml");
     let exit2_script = fixture("exit2.jsonl");
     std::fs::write(
         &manifest_path,
@@ -135,12 +135,12 @@ prompt = "p"
 
     let mut cmd = Command::new(pitboss_binary());
     cmd.arg("dispatch").arg(&manifest_path);
-    cmd.env("SHIRE_CLAUDE_BINARY", fake_claude_path());
+    cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
     cmd.env("MOSAIC_FAKE_SCRIPT", &exit2_script);
     cmd.env("MOSAIC_FAKE_EXIT_CODE", "2");
     let out = cmd.output().unwrap();
 
-    // shire should exit non-zero due to failures
+    // pitboss should exit non-zero due to failures
     assert!(
         !out.status.success(),
         "expected non-zero exit, stdout={} stderr={}",
@@ -178,7 +178,7 @@ fn ctrl_c_twice_terminates_running_tasks() {
     init_git_repo(repo.path());
     let run_dir = TempDir::new().unwrap();
 
-    let manifest_path = repo.path().join("shire.toml");
+    let manifest_path = repo.path().join("pitboss.toml");
     std::fs::write(
         &manifest_path,
         format!(
@@ -208,7 +208,7 @@ env = {{ MOSAIC_FAKE_SCRIPT = "{hold}", MOSAIC_FAKE_HOLD = "1" }}
     let mut child = std::process::Command::new(pitboss_binary())
         .arg("dispatch")
         .arg(&manifest_path)
-        .env("SHIRE_CLAUDE_BINARY", fake_claude_path())
+        .env("PITBOSS_CLAUDE_BINARY", fake_claude_path())
         .spawn()
         .unwrap();
 
@@ -223,10 +223,10 @@ env = {{ MOSAIC_FAKE_SCRIPT = "{hold}", MOSAIC_FAKE_HOLD = "1" }}
         libc::kill(pid, libc::SIGINT);
     }
 
-    // Wait for shire to exit. Bound by a timeout so a bug doesn't hang the test.
+    // Wait for pitboss to exit. Bound by a timeout so a bug doesn't hang the test.
     let child_result = std::thread::spawn(move || child.wait());
     let status = child_result.join().expect("thread joins").expect("wait ok");
-    // After two SIGINTs, shire should exit non-zero.
+    // After two SIGINTs, pitboss should exit non-zero.
     assert!(!status.success());
 }
 
@@ -240,7 +240,7 @@ fn validation_failure_exits_two() {
     let out = std::process::Command::new(pitboss_binary())
         .arg("dispatch")
         .arg(&manifest_path)
-        .env("SHIRE_CLAUDE_BINARY", fake_claude_path())
+        .env("PITBOSS_CLAUDE_BINARY", fake_claude_path())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));

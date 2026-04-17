@@ -1,4 +1,4 @@
-# Agent Shire v0.1 — Design
+# Pitboss v0.1 — Design
 
 **Status:** Approved design, pre-implementation
 **Date:** 2026-04-16
@@ -10,14 +10,14 @@
 
 ## 1. Overview
 
-Agent Shire is a Rust CLI that dispatches many concurrent Claude Code agent sessions
+Pitboss is a Rust CLI that dispatches many concurrent Claude Code agent sessions
 ("Hobbits") from a single declarative manifest. v0.1 is **headless**: no TUI, no
 interactive snap-in, no cross-run persistence. It exists to prove the core runtime —
 subprocess lifecycle, stream-json parsing, git-worktree isolation, and summary
 reporting — on a substrate that the eventual Mosaic TUI will share.
 
-The binary is `pitboss`. It reads `shire.toml`, validates, fans out N tasks under a
-concurrency cap, and writes structured artifacts to `~/.local/share/shire/runs/<run-id>/`.
+The binary is `pitboss`. It reads `pitboss.toml`, validates, fans out N tasks under a
+concurrency cap, and writes structured artifacts to `~/.local/share/pitboss/runs/<run-id>/`.
 It is a drop-in tool for scripts, CI, cron, and local experimentation.
 
 ## 2. Goals and Non-Goals
@@ -38,7 +38,7 @@ It is a drop-in tool for scripts, CI, cron, and local experimentation.
 - **No prompt files, secrets files, or on_failure hooks.**
 - **No pre-run token estimation.** We only report what `claude` tells us post-hoc.
 - **No broadcast mode** (same input → multiple sessions).
-- **No `shire gc`** for orphaned worktrees. The user owns cleanup when
+- **No `pitboss gc`** for orphaned worktrees. The user owns cleanup when
   `worktree_cleanup = "never"`.
 
 ## 3. Workspace Topology
@@ -82,7 +82,7 @@ agentshire/
 │       └── src/
 │           ├── main.rs           # arg parsing, runtime init, signal handling
 │           ├── cli.rs            # clap command definitions
-│           ├── manifest/         # shire.toml load, validate, resolve
+│           ├── manifest/         # pitboss.toml load, validate, resolve
 │           │   ├── mod.rs
 │           │   ├── schema.rs     # serde types
 │           │   ├── resolve.rs    # template/var/defaults merge
@@ -107,7 +107,7 @@ agentshire/
 No stubbed `pitboss-tui` crate — it is added when TUI work begins. The workspace
 structure above is the only organizational commitment made now.
 
-## 4. Manifest Schema (`shire.toml`)
+## 4. Manifest Schema (`pitboss.toml`)
 
 ### 4.1 Full example
 
@@ -116,7 +116,7 @@ structure above is the only organizational commitment made now.
 # Optional; all have defaults listed below.
 max_parallel      = 4                            # manifest wins; see precedence in §4.3
 halt_on_failure   = false
-run_dir           = "~/.local/share/shire/runs"
+run_dir           = "~/.local/share/pitboss/runs"
 worktree_cleanup  = "on_success"                 # always | on_success | never
 emit_event_stream = false                        # if true, write events.jsonl per task
 
@@ -159,12 +159,12 @@ branch    = "chore/npm-sweep"
 |-----|-------|---------|-------|
 | `run.max_parallel` | run | 4 | Semaphore on concurrent tasks. See §4.3 precedence. |
 | `run.halt_on_failure` | run | `false` | On first task failure, dispatcher stops granting new permits and broadcasts `CancelToken::drain()`. |
-| `run.run_dir` | run | `~/.local/share/shire/runs` | Artifact root; created if missing. |
+| `run.run_dir` | run | `~/.local/share/pitboss/runs` | Artifact root; created if missing. |
 | `run.worktree_cleanup` | run | `"on_success"` | See §7.3. |
 | `run.emit_event_stream` | run | `false` | If `true`, writes parsed `events.jsonl` per task in addition to raw `stdout.log`. |
 | `defaults.*` | run | (see above) | Overridden by per-task fields. |
 | `task.id` | task | — | **Required.** Drives log path, summary key, worktree name. Unique per manifest. `[a-zA-Z0-9_-]+`. |
-| `task.directory` | task | — | **Required.** Path expansion: leading `~` → `$HOME`; `$VAR` and `${VAR}` expanded from shire's env. Must exist and be a directory at validation time. |
+| `task.directory` | task | — | **Required.** Path expansion: leading `~` → `$HOME`; `$VAR` and `${VAR}` expanded from pitboss's env. Must exist and be a directory at validation time. |
 | `task.prompt` | task | — | Required unless `task.template` set and template supplies a prompt. |
 | `task.template` | task | — | References `[[template]].id`. Template prompt is the final prompt after `{var}` substitution. |
 | `task.vars` | task | `{}` | Values substituted into template `{var}` placeholders. Undeclared vars → validation error. |
@@ -370,7 +370,7 @@ Parser contract: pure function `parse_line(&[u8]) -> Result<Event, ParseError>`,
 no I/O, fully fixture-testable. Tolerance policy, in layers:
 
 1. **Unknown top-level `type`** → emit `Event::Unknown { raw }`, do not fail. Lets
-   Claude Code add event kinds without breaking shire.
+   Claude Code add event kinds without breaking pitboss.
 2. **Unknown fields on known event types** → ignored (serde default, no
    `deny_unknown_fields` on parser wire structs — opposite of the manifest structs).
 3. **Structurally invalid known event** (e.g., `{"type":"result"}` with no
@@ -413,7 +413,7 @@ a partial transcript on disk.
 ### 6.1 Run directory layout
 
 ```
-~/.local/share/shire/runs/<run-id>/            # run-id = UUIDv7, sortable by time
+~/.local/share/pitboss/runs/<run-id>/          # run-id = UUIDv7, sortable by time
 ├── manifest.snapshot.toml                     # literal copy of input manifest
 ├── resolved.json                              # post-template/defaults resolved manifest
 ├── summary.jsonl                              # append-only TaskRecord entries (fsync)
@@ -437,8 +437,8 @@ a partial transcript on disk.
   "started_at": "2026-04-16T18:40:00Z",
   "ended_at":   "2026-04-16T18:52:31Z",
   "duration_ms": 751000,
-  "worktree_path": "/home/dan/projects/myapp-shire-auth-refactor-01HX...",
-  "log_path": "~/.local/share/shire/runs/01HX.../tasks/auth-refactor/stdout.log",
+  "worktree_path": "/home/dan/projects/myapp-pitboss-auth-refactor-01HX...",
+  "log_path": "~/.local/share/pitboss/runs/01HX.../tasks/auth-refactor/stdout.log",
   "token_usage": {
     "input": 4321,
     "output": 8765,
@@ -458,8 +458,8 @@ a partial transcript on disk.
 ```json
 {
   "run_id": "01HX...",
-  "manifest_path": "/abs/path/to/shire.toml",
-  "shire_version": "0.1.0",
+  "manifest_path": "/abs/path/to/pitboss.toml",
+  "pitboss_version": "0.1.0",
   "claude_version": "1.0.123",
   "started_at": "2026-04-16T18:40:00Z",
   "ended_at":   "2026-04-16T19:02:11Z",
@@ -477,7 +477,7 @@ cached into the summary. **Failure modes:**
   a configuration error; no tasks spawn).
 - Binary exits non-zero or produces unparseable output → log a warning, set
   `claude_version = null` in the summary, continue. The binary clearly exists;
-  the probe's format is not load-bearing for shire itself.
+  the probe's format is not load-bearing for pitboss itself.
 
 ### 6.3 Stdout UX
 
@@ -498,11 +498,11 @@ Redraws in place on a TTY; emits append-only lines otherwise (detected via
 
 ### 7.1 Worktree physical location
 
-Git-native: the worktree's metadata lives at `<repo>/.git/worktrees/shire-<task-id>-<run-id>/`,
+Git-native: the worktree's metadata lives at `<repo>/.git/worktrees/pitboss-<task-id>-<run-id>/`,
 and the working copy sits in a sibling directory named
-`<repo-dir>-shire-<task-id>-<run-id>/`. This is exactly what `git worktree add`
+`<repo-dir>-pitboss-<task-id>-<run-id>/`. This is exactly what `git worktree add`
 does by default and ensures tools that scan `.git/worktrees/` (editors, IDE
-plugins) see shire's worktrees as first-class citizens.
+plugins) see pitboss's worktrees as first-class citizens.
 
 ### 7.2 Branch policy
 
@@ -511,7 +511,7 @@ plugins) see shire's worktrees as first-class citizens.
     (If the repo's `HEAD` moves while tasks are running, this is fine — each task
     captured its base at worktree-creation time.)
   - Branch exists → worktree checks it out. If the branch is already checked out
-    in another worktree (including another concurrent shire task), validation
+    in another worktree (including another concurrent pitboss task), validation
     fails before any task spawns.
 - If `task.branch` is not set: worktree is created in detached-HEAD state from
   `HEAD`. The Hobbit operates freely without a named branch.
@@ -550,10 +550,10 @@ set `use_worktree = false` explicitly at task or defaults level.
   - `0` — all tasks `Success`, no interruption.
   - `1` — one or more tasks ended with `Failed`, `TimedOut`, or `SpawnFailed`.
   - `2` — validation failure (no tasks ran).
-  - `130` — interrupted (Ctrl-C, SIGTERM to shire itself).
+  - `130` — interrupted (Ctrl-C, SIGTERM to pitboss itself).
 - Stderr carries human-readable diagnostics; stdout carries the progress table
   and, when `-q/--quiet` is set, nothing.
-- `tracing` with `EnvFilter`: default `RUST_LOG=shire=info,pitboss_core=info`,
+- `tracing` with `EnvFilter`: default `RUST_LOG=pitboss=info,pitboss_core=info`,
   pretty output to stderr. `-v` / `-vv` bump verbosity.
 
 ## 9. Testing Strategy
@@ -647,7 +647,7 @@ deferred, not missed:
 - Task dependency DAG (`depends_on`).
 - `prompt_file`, `secrets_file`, `on_failure` hooks.
 - Pre-run token usage estimation.
-- `shire gc` for orphaned worktrees from `worktree_cleanup = "never"` runs.
+- `pitboss gc` for orphaned worktrees from `worktree_cleanup = "never"` runs.
 - Broadcast mode.
 - Multi-machine distribution.
 

@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 }
 
 /// Proxy stdio <-> unix-socket so claude's MCP client (which speaks stdio)
-/// can talk to the shire MCP server (which listens on a unix socket). A
+/// can talk to the pitboss MCP server (which listens on a unix socket). A
 /// single-threaded runtime is plenty for a simple byte-pipe — no need for
 /// work-stealing.
 fn run_mcp_bridge(socket: &std::path::Path) -> ! {
@@ -115,7 +115,7 @@ fn run_dispatch(
             std::process::exit(2);
         }
     };
-    let claude_bin = std::env::var_os("SHIRE_CLAUDE_BINARY")
+    let claude_bin = std::env::var_os("PITBOSS_CLAUDE_BINARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("claude"));
 
@@ -287,7 +287,7 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".local/share/shire/runs")
+            .join(".local/share/pitboss/runs")
     });
 
     let run_subdir = match resolve_run_dir(&base_runs_dir, run_id_prefix) {
@@ -327,7 +327,7 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         }
     };
 
-    let claude_bin = std::env::var_os("SHIRE_CLAUDE_BINARY")
+    let claude_bin = std::env::var_os("PITBOSS_CLAUDE_BINARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("claude"));
 

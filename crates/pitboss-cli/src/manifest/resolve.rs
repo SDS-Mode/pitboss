@@ -225,9 +225,9 @@ fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> 
 
 fn default_run_dir() -> PathBuf {
     if let Some(h) = dirs_home() {
-        h.join(".local/share/shire/runs")
+        h.join(".local/share/pitboss/runs")
     } else {
-        PathBuf::from("./shire-runs")
+        PathBuf::from("./pitboss-runs")
     }
 }
 

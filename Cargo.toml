@@ -13,7 +13,7 @@ version     = "0.1.0"
 edition     = "2021"
 rust-version = "1.82"
 license     = "MIT OR Apache-2.0"
-authors     = ["Agent Shire contributors"]
+authors     = ["Pitboss contributors"]
 
 [workspace.dependencies]
 tokio              = { version = "1", features = ["rt-multi-thread","process","io-util","sync","time","signal","macros","fs","net"] }

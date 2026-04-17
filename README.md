@@ -1,9 +1,9 @@
-# Agent Shire
+# Pitboss
 
 Rust toolkit for running and observing parallel Claude Code agent sessions.
 Ships two binaries:
 
-- **`pitboss`** — headless dispatcher. Reads a `shire.toml` manifest, fans out N
+- **`pitboss`** — headless dispatcher. Reads a `pitboss.toml` manifest, fans out N
   `claude` subprocesses under a concurrency cap, writes structured per-run
   artifacts. [See `crates/pitboss-cli/`.](crates/pitboss-cli/)
 - **`pitboss-tui`** — terminal observer for in-progress or completed runs (v0.2-alpha).
@@ -18,7 +18,7 @@ cargo install --path crates/pitboss-tui
 
 ## Quick start — dispatch
 
-Create `shire.toml` in a directory that is inside a git repo:
+Create `pitboss.toml` in a directory that is inside a git repo:
 
 ```toml
 [run]
@@ -34,11 +34,11 @@ branch = "feat/hello"
 Then:
 
 ```
-pitboss validate shire.toml
-pitboss dispatch shire.toml
+pitboss validate pitboss.toml
+pitboss dispatch pitboss.toml
 ```
 
-Artifacts land in `~/.local/share/shire/runs/<run-id>/`.
+Artifacts land in `~/.local/share/pitboss/runs/<run-id>/`.
 
 ## Quick start — observe
 
@@ -72,17 +72,17 @@ branch = "feat/triage-lead"
 Run it the same way:
 
 ```
-pitboss validate shire.toml   # prints a hierarchical summary when [[lead]] is used
-pitboss dispatch shire.toml
+pitboss validate pitboss.toml   # prints a hierarchical summary when [[lead]] is used
+pitboss dispatch pitboss.toml
 ```
 
-The lead has access to these MCP tools: `shire__spawn_worker`,
-`shire__worker_status`, `shire__wait_for_worker`, `shire__wait_for_any`,
-`shire__list_workers`, `shire__cancel_worker`.
+The lead has access to these MCP tools: `pitboss__spawn_worker`,
+`pitboss__worker_status`, `pitboss__wait_for_worker`, `pitboss__wait_for_any`,
+`pitboss__list_workers`, `pitboss__cancel_worker`.
 
 Under the hood, pitboss generates a `--mcp-config` file that points the lead's
 claude subprocess at `pitboss mcp-bridge <socket>` — a small helper subcommand
-that proxies stdio to the shire MCP server's unix socket. The lead never
+that proxies stdio to the pitboss MCP server's unix socket. The lead never
 invokes `mcp-bridge` directly; it's wired up automatically for every
 hierarchical run.
 
@@ -122,4 +122,4 @@ cargo lint
 cargo tidy
 ```
 
-See `docs/superpowers/specs/2026-04-16-agent-shire-design.md` for design.
+See `docs/superpowers/specs/2026-04-16-pitboss-design.md` for design.

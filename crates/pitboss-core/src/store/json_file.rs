@@ -98,7 +98,7 @@ impl SessionStore for JsonFileStore {
         Ok(RunSummary {
             run_id: meta.run_id,
             manifest_path: meta.manifest_path,
-            shire_version: meta.shire_version,
+            pitboss_version: meta.pitboss_version,
             claude_version: meta.claude_version,
             started_at: started,
             ended_at: ended,

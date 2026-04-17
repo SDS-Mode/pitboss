@@ -14,7 +14,7 @@ use serde::Serialize;
 // Public resolver helpers
 // ---------------------------------------------------------------------------
 
-/// Locate a run directory by UUID prefix under `~/.local/share/shire/runs/`.
+/// Locate a run directory by UUID prefix under `~/.local/share/pitboss/runs/`.
 ///
 /// Returns an error when zero or more than one directory matches the prefix.
 pub fn resolve_run(id_or_prefix: &str) -> Result<PathBuf> {
@@ -26,7 +26,7 @@ fn runs_base_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".local/share/shire/runs")
+        .join(".local/share/pitboss/runs")
 }
 
 fn resolve_run_under(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
@@ -114,7 +114,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
     Ok(RunSummary {
         run_id: meta.run_id,
         manifest_path: meta.manifest_path,
-        shire_version: meta.shire_version,
+        pitboss_version: meta.pitboss_version,
         claude_version: meta.claude_version,
         started_at: started,
         ended_at: ended,
@@ -543,7 +543,7 @@ mod tests {
         RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::from("/tmp/test.toml"),
-            shire_version: "0.1.0".to_string(),
+            pitboss_version: "0.1.0".to_string(),
             claude_version: None,
             started_at: now,
             ended_at: now + chrono::Duration::seconds(60),
@@ -627,7 +627,7 @@ mod tests {
         let meta = pitboss_core::store::RunMeta {
             run_id,
             manifest_path: PathBuf::from("/tmp/test.toml"),
-            shire_version: "0.1.0".to_string(),
+            pitboss_version: "0.1.0".to_string(),
             claude_version: None,
             started_at,
             env: HashMap::new(),

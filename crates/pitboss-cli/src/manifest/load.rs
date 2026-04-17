@@ -73,7 +73,7 @@ mod tests {
             .status()
             .unwrap();
 
-        let manifest = dir.path().join("shire.toml");
+        let manifest = dir.path().join("pitboss.toml");
         std::fs::write(
             &manifest,
             format!(

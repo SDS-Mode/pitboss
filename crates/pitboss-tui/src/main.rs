@@ -30,7 +30,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "pitboss-tui",
     version,
-    about = "Pitboss TUI — observe Agent Shire runs",
+    about = "Pitboss TUI — observe Pitboss runs",
     long_about = None,
 )]
 struct Cli {
@@ -96,7 +96,7 @@ fn find_most_recent_run() -> Result<(PathBuf, String)> {
     let base = runs::runs_base_dir();
     if !base.exists() {
         bail!(
-            "No shire runs directory found at {}.\n\
+            "No pitboss runs directory found at {}.\n\
              Run `pitboss` first to create a run.",
             base.display()
         );

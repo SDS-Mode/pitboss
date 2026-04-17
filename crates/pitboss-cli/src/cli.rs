@@ -57,7 +57,7 @@ pub enum Command {
     /// Launched automatically by the `--mcp-config` file that pitboss generates
     /// for hierarchical runs. Not intended for direct human use.
     McpBridge {
-        /// Path to the shire MCP unix socket to bridge stdio to.
+        /// Path to the pitboss MCP unix socket to bridge stdio to.
         socket: PathBuf,
     },
 }

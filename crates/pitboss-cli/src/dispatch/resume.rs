@@ -8,7 +8,7 @@ use pitboss_core::store::RunSummary;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
-/// Given a prior run directory (e.g. `~/.local/share/shire/runs/<run-id>/`),
+/// Given a prior run directory (e.g. `~/.local/share/pitboss/runs/<run-id>/`),
 /// read `resolved.json` and `summary.json` and build a fresh `ResolvedManifest`
 /// whose tasks have `resume_session_id` populated from the prior run's
 /// `claude_session_id` fields.
@@ -220,8 +220,8 @@ mod tests {
 
         let summary = RunSummary {
             run_id,
-            manifest_path: std::path::PathBuf::from("/tmp/shire.toml"),
-            shire_version: "0.1.0".into(),
+            manifest_path: std::path::PathBuf::from("/tmp/pitboss.toml"),
+            pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: now,
             ended_at: now,
@@ -419,7 +419,7 @@ mod tests {
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::new(),
-            shire_version: "0.3.0".into(),
+            pitboss_version: "0.3.0".into(),
             claude_version: None,
             started_at: chrono::Utc::now(),
             ended_at: chrono::Utc::now(),

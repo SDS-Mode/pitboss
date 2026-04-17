@@ -1,4 +1,4 @@
-# Agent Shire v0.3 — Hierarchical Orchestration (Design)
+# Pitboss v0.3 — Hierarchical Orchestration (Design)
 
 **Status:** approved design, pre-implementation
 **Date:** 2026-04-17
@@ -66,18 +66,18 @@ outright ("Teammates cannot spawn their own teams"). Claude Code subagents say
 the same. Depth = 1 is the near-universal safe default.
 
 The Rust MCP SDK (`rmcp`, 4.7M downloads) provides server scaffolding with
-`#[tool]`-annotated functions auto-generating JSON schemas; standing up a shire
+`#[tool]`-annotated functions auto-generating JSON schemas; standing up a pitboss
 MCP server is ~1 day of work, not a new protocol implementation.
 
 We explicitly considered and rejected:
 
 - **Using Claude Code Agent Teams directly.** Built-in, free. But Agent Teams
-  provides no worktree isolation — teammates share the repo. That's shire's
+  provides no worktree isolation — teammates share the repo. That's pitboss's
   headline v0.1 feature; we'd throw it away. Also depends on an experimental
   feature flag and an API that may change.
 - **Prompt-string parsing.** Ship a magic string the lead emits. Fragile: claude
   rewrites and summarizes its own output; no major framework uses this.
-- **Shell-CLI spawning.** Lead calls `shire spawn-worker ...` via Bash. Works,
+- **Shell-CLI spawning.** Lead calls `pitboss spawn-worker ...` via Bash. Works,
   but claude is trained to call tools, not memorize CLI syntax. Unreliable.
 
 ## 3. Manifest
@@ -94,7 +94,7 @@ validation error.
 # existing fields (all v0.1/v0.2):
 max_parallel     = 5
 halt_on_failure  = false
-run_dir          = "~/.local/share/shire/runs"
+run_dir          = "~/.local/share/pitboss/runs"
 worktree_cleanup = "on_success"
 
 # NEW in v0.3, only meaningful in hierarchical mode:
@@ -123,8 +123,8 @@ directory = "~/projects/foo"       # required; lead's working directory (same ru
 branch    = "feat/v2-triage"       # optional; worktree branch for the lead itself
 prompt    = """
 Review all open issues labeled 'v2.0'. Triage by complexity.
-Use shire__spawn_worker to delegate investigation of complex ones.
-Use shire__wait_for_any to collect results as they arrive.
+Use pitboss__spawn_worker to delegate investigation of complex ones.
+Use pitboss__wait_for_any to collect results as they arrive.
 When done, summarize your findings.
 """
 
@@ -153,7 +153,7 @@ Validation rules beyond task parity:
 
 ## 4. MCP Server
 
-Shire runs a local MCP server on a unix socket for the duration of the
+Pitboss runs a local MCP server on a unix socket for the duration of the
 hierarchical run. The lead's `claude` subprocess is launched with
 `--mcp-config <path-to-config.json>` where the config file describes a single
 server pointing at the socket. Workers get no MCP config — they're one-shot
@@ -162,7 +162,7 @@ structurally (workers literally cannot call these tools).
 
 ### 4.1 Transport and lifecycle
 
-- **Socket location:** `$XDG_RUNTIME_DIR/shire/<run-id>.sock`, falling back to
+- **Socket location:** `$XDG_RUNTIME_DIR/pitboss/<run-id>.sock`, falling back to
   `<run_dir>/<run-id>/mcp.sock` if `$XDG_RUNTIME_DIR` is unset or non-writable.
 - **Start:** before the lead's `SessionHandle::spawn` call. The MCP server must
   be listening when claude's MCP client connects.
@@ -174,8 +174,8 @@ structurally (workers literally cannot call these tools).
 
 ### 4.2 Tool surface
 
-Six tools, all namespaced `shire__*` in the MCP manifest (the prefix is
-configurable in `--mcp-config` if conflicts arise; default matches shire's
+Six tools, all namespaced `pitboss__*` in the MCP manifest (the prefix is
+configurable in `--mcp-config` if conflicts arise; default matches pitboss's
 name):
 
 ```rust
@@ -350,7 +350,7 @@ ALTER TABLE task_records ADD COLUMN parent_task_id TEXT NULL;
 ```
 
 Migration: `CREATE TABLE IF NOT EXISTS` path handles new DBs; existing DBs get
-the column added the first time a v0.3 shire opens them (simple ALTER TABLE
+the column added the first time a v0.3 pitboss opens them (simple ALTER TABLE
 idempotent via `PRAGMA table_info` check).
 
 ### 6.4 `ResolvedManifest`
@@ -411,7 +411,7 @@ No new modes. Tile grid shows lead + all workers as tiles. Small UX touches:
   `<done>/<total>` counter. For a hierarchical run, "total" equals lead (1) +
   spawned workers; grows as the lead spawns.
 - **Focus pane for lead:** when the lead tile is focused, tool_use events for
-  `shire__spawn_worker` and friends render specially — `> spawn_worker →
+  `pitboss__spawn_worker` and friends render specially — `> spawn_worker →
   worker-ab12` with the target task_id highlighted and clickable-in-spirit
   (press `G` then worker id in a future version; v0.3 just shows the mapping).
 - **Run picker:** unchanged. Hierarchical runs look like other runs with an
@@ -460,12 +460,12 @@ v0.3.1.
   need it. **Implementation risk:** claude's real MCP client does stateful
   handshaking (init / tools/list / tools/call). The fake binary either (a)
   links against `rmcp` as a client to do the handshake for real against
-  shire's server, or (b) emits a pre-baked transcript that mocks the real
+  pitboss's server, or (b) emits a pre-baked transcript that mocks the real
   conversation. (a) is cleaner; (b) is simpler. Plan tasks should pick one
   explicitly before starting integration test work.
 - `tests-support/fake-mcp-client` (new): a small helper crate that speaks
   MCP-over-unix-socket and lets an integration test act as a fake lead. Invokes
-  tools on the shire MCP server and asserts on results.
+  tools on the pitboss MCP server and asserts on results.
 - Integration tests:
   - End-to-end hierarchical run with one lead spawning two workers, all fake.
   - `max_workers` cascade: lead tries to spawn 3rd worker, gets cap error,
@@ -495,7 +495,7 @@ crates/
 │                         # EXT: src/main.rs — dispatch mode detection
 ├── tests-support/
 │   ├── fake-claude/      # Extended to emit tool_use events
-│   └── fake-mcp-client/  # NEW — lets integration tests drive the shire MCP
+│   └── fake-mcp-client/  # NEW — lets integration tests drive the pitboss MCP
 ```
 
 New workspace dependency: `rmcp = "0.8"` with `server`, `transport-io`, and
@@ -570,8 +570,8 @@ branch    = "feat/v2-triage"
 model     = "claude-sonnet-4-6"
 prompt    = """
 Review all open issues in this repo labeled 'v2.0'. For each complex
-issue, spawn a worker using shire__spawn_worker with a focused
-investigation prompt. Use shire__wait_for_any to gather results as
+issue, spawn a worker using pitboss__spawn_worker with a focused
+investigation prompt. Use pitboss__wait_for_any to gather results as
 workers finish. When all complex issues have been investigated,
 produce a triage summary at TRIAGE.md ranking them by complexity
 and effort estimate.
@@ -584,36 +584,36 @@ workers total.
 ## Appendix B — Example MCP tool transcript (abbreviated)
 
 ```
-lead → shire__spawn_worker(
+lead → pitboss__spawn_worker(
     prompt = "Investigate issue #142 about websocket reconnect. Summarize root cause, affected files, complexity estimate.",
     directory = "~/projects/myapp",
     branch = "investigate/142",
     timeout_secs = 300
 )
-shire → {task_id: "worker-019d9b...", worktree_path: "/home/dan/projects/myapp-shire-worker-019d9b..."}
+pitboss → {task_id: "worker-019d9b...", worktree_path: "/home/dan/projects/myapp-pitboss-worker-019d9b..."}
 
-lead → shire__spawn_worker(prompt = "Investigate issue #187 about memory leak.", ...)
-shire → {task_id: "worker-019d9c...", worktree_path: "..."}
+lead → pitboss__spawn_worker(prompt = "Investigate issue #187 about memory leak.", ...)
+pitboss → {task_id: "worker-019d9c...", worktree_path: "..."}
 
-lead → shire__spawn_worker(prompt = "Investigate issue #201 about auth edge case.", ...)
-shire → {task_id: "worker-019d9d...", worktree_path: "..."}
+lead → pitboss__spawn_worker(prompt = "Investigate issue #201 about auth edge case.", ...)
+pitboss → {task_id: "worker-019d9d...", worktree_path: "..."}
 
-lead → shire__wait_for_any(
+lead → pitboss__wait_for_any(
     task_ids = ["worker-019d9b...", "worker-019d9c...", "worker-019d9d..."],
     timeout_secs = 600
 )
-shire → {task_id: "worker-019d9c...", outcome: {
+pitboss → {task_id: "worker-019d9c...", outcome: {
     status: "Completed",
     exit_code: 0,
     token_usage: {input: 32, output: 1204, cache_read: 18, cache_creation: 84129},
     final_message_preview: "Root cause: event listener never removed when component unmounts..."
 }}
 
-lead → shire__wait_for_any(task_ids = ["worker-019d9b...", "worker-019d9d..."])
-shire → {task_id: "worker-019d9b...", outcome: {...}}
+lead → pitboss__wait_for_any(task_ids = ["worker-019d9b...", "worker-019d9d..."])
+pitboss → {task_id: "worker-019d9b...", outcome: {...}}
 
-lead → shire__wait_for_any(task_ids = ["worker-019d9d..."])
-shire → {task_id: "worker-019d9d...", outcome: {...}}
+lead → pitboss__wait_for_any(task_ids = ["worker-019d9d..."])
+pitboss → {task_id: "worker-019d9d...", outcome: {...}}
 
 lead writes TRIAGE.md synthesizing the three findings.
 lead → result event, exits.

@@ -256,7 +256,7 @@ async fn run_worker(
     // Optional worktree prep.
     let mut worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
     let cwd = if use_worktree {
-        let name = format!("shire-worker-{}-{}", task_id, state.run_id);
+        let name = format!("pitboss-worker-{}-{}", task_id, state.run_id);
         match state.wt_mgr.prepare(&directory, &name, branch.as_deref()) {
             Ok(wt) => {
                 let p = wt.path.clone();

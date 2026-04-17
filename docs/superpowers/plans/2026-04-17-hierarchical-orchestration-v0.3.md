@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add hierarchical mode to Agent Shire where one lead Hobbit dynamically spawns worker Hobbits via MCP tool calls, per `docs/superpowers/specs/2026-04-17-hierarchical-orchestration-design.md`.
+**Goal:** Add hierarchical mode to Pitboss where one lead Hobbit dynamically spawns worker Hobbits via MCP tool calls, per `docs/superpowers/specs/2026-04-17-hierarchical-orchestration-design.md`.
 
-**Architecture:** New `[[lead]]` manifest section, a local `rmcp`-based MCP server on a unix socket, six tools (`shire__spawn_worker`, `worker_status`, `wait_for_worker`, `wait_for_any`, `list_workers`, `cancel_worker`), hard caps on worker count and cost. Depth = 1, hub-and-spoke, workers get no MCP channel. Reuses existing `SessionHandle`, `WorktreeManager`, `SessionStore`, Mosaic observation, and dispatch runner unchanged.
+**Architecture:** New `[[lead]]` manifest section, a local `rmcp`-based MCP server on a unix socket, six tools (`pitboss__spawn_worker`, `worker_status`, `wait_for_worker`, `wait_for_any`, `list_workers`, `cancel_worker`), hard caps on worker count and cost. Depth = 1, hub-and-spoke, workers get no MCP channel. Reuses existing `SessionHandle`, `WorktreeManager`, `SessionStore`, Pitboss TUI observation, and dispatch runner unchanged.
 
 **Tech Stack:** Rust stable, existing workspace (tokio, serde, clap, git2, rusqlite, ratatui); new dep `rmcp = "0.8"` with `server`, `transport-io`, `macros` features.
 
@@ -2959,7 +2959,7 @@ git commit -m "mcp: per-worker CancelToken in DispatchState; cancel_worker targe
 
 ## Phase 6 — Integration tests
 
-Integration tests live in `crates/pitboss-cli/tests/hierarchical_flows.rs` and use `fake-mcp-client` to drive the shire MCP server as a simulated lead.
+Integration tests live in `crates/pitboss-cli/tests/hierarchical_flows.rs` and use `fake-mcp-client` to drive the pitboss MCP server as a simulated lead.
 
 ### Task 23: Implement `fake-mcp-client::connect` + `call_tool`
 

@@ -55,7 +55,7 @@ pub async fn run_hierarchical(
     let meta = RunMeta {
         run_id,
         manifest_path: manifest_path.clone(),
-        shire_version: env!("CARGO_PKG_VERSION").to_string(),
+        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version: claude_version.clone(),
         started_at: Utc::now(),
         env: Default::default(),
@@ -105,7 +105,7 @@ pub async fn run_hierarchical(
     // 3. Prepare lead worktree + spawn.
     let mut lead_worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
     let lead_cwd = if lead.use_worktree {
-        let name = format!("shire-lead-{}-{}", lead.id, run_id);
+        let name = format!("pitboss-lead-{}-{}", lead.id, run_id);
         match wt_mgr.prepare(&lead.directory, &name, lead.branch.as_deref()) {
             Ok(wt) => {
                 let p = wt.path.clone();
@@ -257,7 +257,7 @@ pub async fn run_hierarchical(
     let summary = RunSummary {
         run_id,
         manifest_path,
-        shire_version: env!("CARGO_PKG_VERSION").to_string(),
+        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version,
         started_at: meta.started_at,
         ended_at,
@@ -283,7 +283,7 @@ pub async fn run_hierarchical(
 /// Emit a `--mcp-config` file that tells claude to launch our own pitboss
 /// binary as a stdio MCP server, passing the socket path as an argument.
 /// `pitboss mcp-bridge <socket>` then proxies bytes between claude's stdio
-/// pair and the shire MCP server's unix socket.
+/// pair and the pitboss MCP server's unix socket.
 ///
 /// This avoids relying on a non-standard `transport: { type: "unix", ... }`
 /// field that claude's MCP client may not honor. The generated config uses
@@ -296,7 +296,7 @@ async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> R
 
     let cfg = serde_json::json!({
         "mcpServers": {
-            "shire": {
+            "pitboss": {
                 "command": pitboss_exe.to_string_lossy(),
                 "args": ["mcp-bridge", socket.to_string_lossy()],
             }

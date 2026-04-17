@@ -1,6 +1,6 @@
 //! Stdio <-> unix-socket bridge. When the lead Hobbit launches
 //! `pitboss mcp-bridge <socket>`, this process reads MCP-over-stdio from
-//! claude and forwards it to the shire MCP server listening on the
+//! claude and forwards it to the pitboss MCP server listening on the
 //! unix socket.
 //!
 //! The Claude Code CLI's `--mcp-config` expects MCP servers described with a
@@ -14,13 +14,13 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-/// Connect to the shire MCP server on `socket` and bidirectionally copy
+/// Connect to the pitboss MCP server on `socket` and bidirectionally copy
 /// bytes between claude's stdio pair and that unix socket. Returns when
 /// either direction closes.
 pub async fn run_bridge(socket: &Path) -> Result<i32> {
     let mut stream = UnixStream::connect(socket)
         .await
-        .with_context(|| format!("connect to shire mcp socket at {}", socket.display()))?;
+        .with_context(|| format!("connect to pitboss mcp socket at {}", socket.display()))?;
     let (mut sr, mut sw) = stream.split();
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();

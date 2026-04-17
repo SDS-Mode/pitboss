@@ -47,7 +47,7 @@ mod tests {
 
         let mgr = WorktreeManager::new();
         let wt = mgr
-            .prepare(repo_dir.path(), "shire-task-test-1", None)
+            .prepare(repo_dir.path(), "pitboss-task-test-1", None)
             .unwrap();
         assert!(wt.path.exists(), "worktree path exists");
         assert!(wt.path.join("README.md").exists(), "checkout present");
@@ -61,7 +61,7 @@ mod tests {
 
         let mgr = WorktreeManager::new();
         let wt = mgr
-            .prepare(repo_dir.path(), "shire-task-new-branch", Some("feat/new"))
+            .prepare(repo_dir.path(), "pitboss-task-new-branch", Some("feat/new"))
             .unwrap();
         assert_eq!(wt.branch.as_deref(), Some("feat/new"));
 
@@ -85,7 +85,7 @@ mod tests {
 
         let mgr = WorktreeManager::new();
         let wt = mgr
-            .prepare(repo_dir.path(), "shire-task-exist", Some("existing"))
+            .prepare(repo_dir.path(), "pitboss-task-exist", Some("existing"))
             .unwrap();
         assert_eq!(wt.branch.as_deref(), Some("existing"));
     }

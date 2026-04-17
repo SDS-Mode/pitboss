@@ -18,9 +18,9 @@ pub struct RunEntry {
 /// Returns the base directory that holds all run sub-directories.
 pub fn runs_base_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/shire/runs")
+        PathBuf::from(home).join(".local/share/pitboss/runs")
     } else {
-        PathBuf::from("./shire-runs")
+        PathBuf::from("./pitboss-runs")
     }
 }
 

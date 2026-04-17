@@ -4,9 +4,9 @@
 # Usage:
 #   scripts/smoke-part2.sh
 #   PITBOSS=/path/to/pitboss scripts/smoke-part2.sh
-#   SHIRE_SMOKE_DIR=/tmp/foo scripts/smoke-part2.sh
-#   SHIRE_SKIP_CTRL_C=1 scripts/smoke-part2.sh       # skip the interactive-ish test
-#   SHIRE_MODEL=claude-sonnet-4-6 scripts/smoke-part2.sh  # default: claude-haiku-4-5
+#   PITBOSS_SMOKE_DIR=/tmp/foo scripts/smoke-part2.sh
+#   PITBOSS_SKIP_CTRL_C=1 scripts/smoke-part2.sh       # skip the interactive-ish test
+#   PITBOSS_MODEL=claude-sonnet-4-6 scripts/smoke-part2.sh  # default: claude-haiku-4-5
 #
 # Exercises real `claude` subprocesses. Costs a few cents per test on Haiku.
 # Total runtime roughly 10-25 minutes; total cost roughly $0.30-$1.00.
@@ -14,15 +14,15 @@
 # Prerequisite: claude CLI already authenticated via subscription. We do a
 # sanity check below before spending any real money.
 #
-# Artifacts land in ~/.local/share/shire/runs/ and are NOT cleaned up — you
+# Artifacts land in ~/.local/share/pitboss/runs/ and are NOT cleaned up — you
 # can inspect them after the run.
 
 set -u
 
 PITBOSS="${PITBOSS:-pitboss}"
-MODEL="${SHIRE_MODEL:-claude-haiku-4-5}"
-SKIP_CTRL_C="${SHIRE_SKIP_CTRL_C:-0}"
-SKIP_HALT_ON_FAIL="${SHIRE_SKIP_HALT_ON_FAIL:-1}"  # skip by default; see 2.7 note
+MODEL="${PITBOSS_MODEL:-claude-haiku-4-5}"
+SKIP_CTRL_C="${PITBOSS_SKIP_CTRL_C:-0}"
+SKIP_HALT_ON_FAIL="${PITBOSS_SKIP_HALT_ON_FAIL:-1}"  # skip by default; see 2.7 note
 
 if ! command -v "$PITBOSS" >/dev/null 2>&1 && [ ! -x "$PITBOSS" ]; then
     echo "ERROR: pitboss binary not found (tried: $PITBOSS)" >&2
@@ -59,7 +59,7 @@ esac
 
 # -------------------------------------------------------------------
 # Bootstrap: two git repos + scratch dir
-SCRATCH="${SHIRE_SMOKE_DIR:-$(mktemp -d -t shire-online-XXXXXX)}"
+SCRATCH="${PITBOSS_SMOKE_DIR:-$(mktemp -d -t pitboss-online-XXXXXX)}"
 mkdir -p "$SCRATCH"
 REPO_A="$SCRATCH/repo-a"
 REPO_B="$SCRATCH/repo-b"
@@ -97,7 +97,7 @@ record() {
 }
 
 latest_run_dir() {
-    ls -td ~/.local/share/shire/runs/*/ 2>/dev/null | head -1
+    ls -td ~/.local/share/pitboss/runs/*/ 2>/dev/null | head -1
 }
 
 # -------------------------------------------------------------------
@@ -163,7 +163,7 @@ if "$PITBOSS" dispatch "$SCRATCH/t1.toml"; then
         fi
 
         # Worktree cleaned up (policy=always)?
-        if ! ls "$SCRATCH"/repo-a-shire-write-hi-* >/dev/null 2>&1; then
+        if ! ls "$SCRATCH"/repo-a-pitboss-write-hi-* >/dev/null 2>&1; then
             record "2.1c worktree cleanup" PASS
         else
             record "2.1c worktree cleanup" FAIL "sibling worktree persists"
@@ -334,7 +334,7 @@ echo
 # -------------------------------------------------------------------
 # 2.9 Ctrl-C two-phase
 if [ "$SKIP_CTRL_C" = "1" ]; then
-    record "2.9 two-phase Ctrl-C" SKIP "SHIRE_SKIP_CTRL_C=1"
+    record "2.9 two-phase Ctrl-C" SKIP "PITBOSS_SKIP_CTRL_C=1"
 else
     cat > "$SCRATCH/t6.toml" <<EOF
 [defaults]
@@ -372,7 +372,7 @@ EOF
     PITBOSS_EXIT=$?
 
     if grep -q "draining" "$LOG" && grep -q "terminating" "$LOG"; then
-        # Exit code should be 130 per spec, but shire may bail with another code
+        # Exit code should be 130 per spec, but pitboss may bail with another code
         if [ "$PITBOSS_EXIT" = "130" ] || [ "$PITBOSS_EXIT" -gt 0 ]; then
             RD=$(latest_run_dir)
             if [ -f "$RD/summary.json" ]; then
@@ -417,7 +417,7 @@ branch = "$BR"
 EOF
     "$PITBOSS" dispatch "$TOML" >/dev/null 2>&1
     EXIT_CODE=$?
-    SIBLING="$SCRATCH"/repo-a-shire-wt-$POLICY-*
+    SIBLING="$SCRATCH"/repo-a-pitboss-wt-$POLICY-*
     if ls $SIBLING >/dev/null 2>&1; then
         EXISTS=yes
     else
@@ -504,12 +504,12 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
         fi
     done
     echo
-    echo "Inspect artifacts at: ~/.local/share/shire/runs/"
+    echo "Inspect artifacts at: ~/.local/share/pitboss/runs/"
     exit 1
 fi
 
 echo
 echo "Part 2 green."
-echo "Artifacts at: ~/.local/share/shire/runs/"
+echo "Artifacts at: ~/.local/share/pitboss/runs/"
 echo "Scratch at:   $SCRATCH"
 exit 0

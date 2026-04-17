@@ -1,4 +1,4 @@
-//! Minimal MCP client library used by integration tests to drive the shire
+//! Minimal MCP client library used by integration tests to drive the pitboss
 //! MCP server as if we were a lead claude subprocess. Connects over unix
 //! socket, handles init handshake, and exposes a `call_tool` helper.
 
@@ -19,7 +19,7 @@ pub struct FakeMcpClient {
 }
 
 impl FakeMcpClient {
-    /// Connect to a shire MCP server on a unix socket and complete the MCP
+    /// Connect to a pitboss MCP server on a unix socket and complete the MCP
     /// initialization handshake.
     pub async fn connect(socket: &Path) -> Result<Self> {
         let stream = tokio::net::UnixStream::connect(socket)
@@ -34,7 +34,7 @@ impl FakeMcpClient {
 
     /// Call a tool and return the tool's structured content as JSON.
     ///
-    /// Shire tools always populate `CallToolResult::structured_content` via
+    /// Pitboss tools always populate `CallToolResult::structured_content` via
     /// `CallToolResult::structured(...)` on the server side, so we prefer that
     /// field. If it's missing (e.g. a tool returned only text content), we
     /// fall back to serializing the full `CallToolResult` as JSON so callers

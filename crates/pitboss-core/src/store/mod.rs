@@ -24,8 +24,8 @@ mod integration_tests {
     fn meta(run_id: Uuid, root: &Path) -> RunMeta {
         RunMeta {
             run_id,
-            manifest_path: root.join("shire.toml"),
-            shire_version: "0.1.0".into(),
+            manifest_path: root.join("pitboss.toml"),
+            pitboss_version: "0.1.0".into(),
             claude_version: Some("1.0.0".into()),
             started_at: Utc::now(),
             env: HashMap::new(),
@@ -67,8 +67,8 @@ mod integration_tests {
 
         let summary = RunSummary {
             run_id,
-            manifest_path: dir.path().join("shire.toml"),
-            shire_version: "0.1.0".into(),
+            manifest_path: dir.path().join("pitboss.toml"),
+            pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: Utc::now(),
             ended_at: Utc::now(),

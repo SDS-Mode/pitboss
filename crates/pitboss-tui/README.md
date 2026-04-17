@@ -1,6 +1,6 @@
 # Pitboss TUI
 
-Terminal observer for Agent Shire runs. v0.2-alpha — read-only tile grid.
+Terminal observer for Pitboss runs. v0.2-alpha — read-only tile grid.
 
 ## Quick start
 
@@ -74,7 +74,7 @@ the focused tile doesn't jump when new tasks complete.
 ## Troubleshooting
 
 **"No runs directory found"** — You haven't run `pitboss dispatch` yet. The runs
-directory is `~/.local/share/shire/runs/` unless overridden by a manifest's
+directory is `~/.local/share/pitboss/runs/` unless overridden by a manifest's
 `[run] run_dir` or the `--run-dir` flag.
 
 **TUI renders garbage or hangs on input** — Your terminal may not support the

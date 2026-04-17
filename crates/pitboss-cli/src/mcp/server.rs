@@ -1,4 +1,4 @@
-//! Lifecycle of the shire MCP server (unix socket transport).
+//! Lifecycle of the pitboss MCP server (unix socket transport).
 
 #![allow(dead_code)]
 
@@ -26,7 +26,7 @@ use crate::mcp::tools::{
 /// $XDG_RUNTIME_DIR is unset or non-writable.
 pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
-        let p = PathBuf::from(xdg).join("shire");
+        let p = PathBuf::from(xdg).join("pitboss");
         if std::fs::create_dir_all(&p).is_ok() {
             return p.join(format!("{}.sock", run_id));
         }
@@ -43,15 +43,15 @@ pub struct McpServer {
     join_handle: Option<JoinHandle<()>>,
 }
 
-/// The rmcp `ServerHandler` that exposes the six shire tools to the lead
+/// The rmcp `ServerHandler` that exposes the six pitboss tools to the lead
 /// Hobbit via a per-connection MCP session.
 #[derive(Clone)]
-pub struct ShireHandler {
+pub struct PitbossHandler {
     state: Arc<DispatchState>,
     tool_router: ToolRouter<Self>,
 }
 
-impl ShireHandler {
+impl PitbossHandler {
     pub fn new(state: Arc<DispatchState>) -> Self {
         Self {
             state,
@@ -61,7 +61,7 @@ impl ShireHandler {
 }
 
 #[tool_router]
-impl ShireHandler {
+impl PitbossHandler {
     #[tool(description = "Spawn a worker Hobbit. Returns {task_id, worktree_path}.")]
     async fn spawn_worker(
         &self,
@@ -131,19 +131,19 @@ impl ShireHandler {
 }
 
 #[tool_handler]
-impl ServerHandler for ShireHandler {
+impl ServerHandler for PitbossHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
-                name: "shire".into(),
+                name: "pitboss".into(),
                 title: None,
                 version: env!("CARGO_PKG_VERSION").into(),
                 icons: None,
                 website_url: None,
             },
             instructions: Some(
-                "Shire MCP server: coordinate worker Hobbits via six structured tools.".into(),
+                "Pitboss MCP server: coordinate worker Hobbits via six structured tools.".into(),
             ),
             ..Default::default()
         }
@@ -164,7 +164,7 @@ impl McpServer {
     /// spawns an accept loop in a dedicated tokio task, returns a handle.
     ///
     /// Each accepted connection gets its own rmcp `ServiceExt::serve` session
-    /// backed by a cloned `ShireHandler`. The shared `DispatchState` is held
+    /// backed by a cloned `PitbossHandler`. The shared `DispatchState` is held
     /// behind `Arc` so all sessions see the same run.
     pub async fn start(socket_path: PathBuf, state: Arc<DispatchState>) -> Result<Self> {
         // If the socket file already exists (stale), remove it.
@@ -173,7 +173,7 @@ impl McpServer {
         }
         let listener = tokio::net::UnixListener::bind(&socket_path)?;
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
-        let handler = ShireHandler::new(state);
+        let handler = PitbossHandler::new(state);
 
         let join_handle = tokio::spawn(async move {
             loop {
