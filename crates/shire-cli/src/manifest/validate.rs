@@ -157,6 +157,10 @@ mod tests {
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
             tasks,
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
         }
     }
 

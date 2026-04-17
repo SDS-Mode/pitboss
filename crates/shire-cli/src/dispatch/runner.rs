@@ -397,6 +397,10 @@ mod tests {
                     resume_session_id: None,
                 },
             ],
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -476,6 +480,10 @@ mod tests {
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
             tasks: vec![make_task("a"), make_task("b"), make_task("c")],
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -568,6 +576,10 @@ mod tests {
                     resume_session_id: None,
                 },
             ],
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
         };
 
         let spawner = Arc::new(CyclingFake(
