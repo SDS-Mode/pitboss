@@ -1,12 +1,7 @@
-mod cli;
-mod diff;
-mod dispatch;
-mod manifest;
-mod mcp;
-mod tui_table;
-
 use anyhow::Result;
 use clap::Parser;
+
+use shire_cli::{cli, diff, dispatch, manifest};
 
 use cli::{Cli, Command};
 

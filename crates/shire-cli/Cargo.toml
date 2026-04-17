@@ -5,6 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 
+[lib]
+name = "shire_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "shire"
 path = "src/main.rs"
@@ -40,9 +44,9 @@ schemars           = "1"
 [dev-dependencies]
 # Note: mosaic-core's test-support feature is pulled in directly here so
 # shire-cli's own tests can use FakeSpawner without requiring the caller to
-# pass --features. shire-cli itself has no library target, so we don't use
-# a self-dependency to enable its own test-support feature.
-tempfile    = { workspace = true }
-serde_json  = { workspace = true }
-libc        = { workspace = true }
-mosaic-core = { path = "../mosaic-core", features = ["test-support"] }
+# pass --features.
+tempfile        = { workspace = true }
+serde_json      = { workspace = true }
+libc            = { workspace = true }
+mosaic-core     = { path = "../mosaic-core", features = ["test-support"] }
+fake-mcp-client = { path = "../../tests-support/fake-mcp-client" }
