@@ -280,13 +280,25 @@ pub async fn run_hierarchical(
     Ok(rc)
 }
 
+/// Emit a `--mcp-config` file that tells claude to launch our own shire
+/// binary as a stdio MCP server, passing the socket path as an argument.
+/// `shire mcp-bridge <socket>` then proxies bytes between claude's stdio
+/// pair and the shire MCP server's unix socket.
+///
+/// This avoids relying on a non-standard `transport: { type: "unix", ... }`
+/// field that claude's MCP client may not honor. The generated config uses
+/// only the documented `command` + `args` (stdio transport) shape.
 async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> Result<()> {
+    // Find the shire binary path (the one running us now) so the lead can
+    // re-exec the same build for the bridge subcommand.
+    let shire_exe =
+        std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
+
     let cfg = serde_json::json!({
         "mcpServers": {
             "shire": {
-                "command": "shire-mcp-stub",
-                "args": [],
-                "transport": { "type": "unix", "path": socket.to_string_lossy() }
+                "command": shire_exe.to_string_lossy(),
+                "args": ["mcp-bridge", socket.to_string_lossy()],
             }
         }
     });

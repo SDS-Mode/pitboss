@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use shire_cli::{cli, diff, dispatch, manifest};
+use shire_cli::{cli, diff, dispatch, manifest, mcp};
 
 use cli::{Cli, Command};
 
@@ -28,7 +28,35 @@ fn main() -> Result<()> {
         Command::Diff { run_a, run_b, json } => {
             run_diff(&run_a, &run_b, json);
         }
+        Command::McpBridge { socket } => {
+            run_mcp_bridge(&socket);
+        }
     }
+}
+
+/// Proxy stdio <-> unix-socket so claude's MCP client (which speaks stdio)
+/// can talk to the shire MCP server (which listens on a unix socket). A
+/// single-threaded runtime is plenty for a simple byte-pipe — no need for
+/// work-stealing.
+fn run_mcp_bridge(socket: &std::path::Path) -> ! {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("mcp-bridge: runtime: {e}");
+            std::process::exit(2);
+        }
+    };
+    let code = match rt.block_on(mcp::run_bridge(socket)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("mcp-bridge: {e:#}");
+            1
+        }
+    };
+    std::process::exit(code);
 }
 
 fn init_tracing(verbose: u8, quiet: bool) {

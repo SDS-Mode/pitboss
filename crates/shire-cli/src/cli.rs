@@ -53,4 +53,11 @@ pub enum Command {
     },
     /// Print version information.
     Version,
+    /// Internal: proxy stdio <-> unix-socket for the lead Hobbit's MCP client.
+    /// Launched automatically by the `--mcp-config` file that shire generates
+    /// for hierarchical runs. Not intended for direct human use.
+    McpBridge {
+        /// Path to the shire MCP unix socket to bridge stdio to.
+        socket: PathBuf,
+    },
 }

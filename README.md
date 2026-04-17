@@ -80,6 +80,12 @@ The lead has access to these MCP tools: `shire__spawn_worker`,
 `shire__worker_status`, `shire__wait_for_worker`, `shire__wait_for_any`,
 `shire__list_workers`, `shire__cancel_worker`.
 
+Under the hood, shire generates a `--mcp-config` file that points the lead's
+claude subprocess at `shire mcp-bridge <socket>` — a small helper subcommand
+that proxies stdio to the shire MCP server's unix socket. The lead never
+invokes `mcp-bridge` directly; it's wired up automatically for every
+hierarchical run.
+
 In Mosaic, leads show a `[LEAD]` prefix and worker tiles display `← lead-id`
 so you can see who spawned what. `shire resume <run-id>` works for
 hierarchical runs too — it re-invokes the lead with `--resume` and the session
