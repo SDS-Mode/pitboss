@@ -768,6 +768,22 @@ pub async fn handle_pause_worker(
     }
 }
 
+pub async fn handle_continue_worker(
+    state: &Arc<DispatchState>,
+    args: ContinueWorkerArgs,
+) -> Result<CancelResult> {
+    let current = state.workers.read().await.get(&args.task_id).cloned();
+    match current {
+        Some(WorkerState::Paused { session_id, .. }) => {
+            let prompt = args.prompt.unwrap_or_else(|| "continue".into());
+            spawn_resume_worker(state, args.task_id, prompt, session_id).await?;
+            Ok(CancelResult { ok: true })
+        }
+        Some(_) => anyhow::bail!("worker not paused"),
+        None => anyhow::bail!("unknown task_id: {}", args.task_id),
+    }
+}
+
 pub async fn handle_wait_for_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
@@ -1543,6 +1559,44 @@ mod tests {
         assert!(matches!(
             workers.get("w-1").unwrap(),
             WorkerState::Paused { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_continue_worker_resumes_paused() {
+        let state = test_state().await;
+        state.workers.write().await.insert(
+            "w-1".into(),
+            WorkerState::Paused {
+                session_id: "sess".into(),
+                paused_at: chrono::Utc::now(),
+                prior_token_usage: Default::default(),
+            },
+        );
+        state
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-1".into(), "hi".into());
+        state
+            .worker_models
+            .write()
+            .await
+            .insert("w-1".into(), "claude-haiku-4-5".into());
+        let res = handle_continue_worker(
+            &state,
+            ContinueWorkerArgs {
+                task_id: "w-1".into(),
+                prompt: Some("resume please".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(res.ok);
+        let workers = state.workers.read().await;
+        assert!(matches!(
+            workers.get("w-1").unwrap(),
+            WorkerState::Running { .. }
         ));
     }
 }
