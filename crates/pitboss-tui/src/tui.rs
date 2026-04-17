@@ -685,8 +685,21 @@ fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::Kil
 }
 
 // Forward decls filled in by Task 26 / Task 32.
-fn render_prompt_reprompt(_frame: &mut Frame, _area: Rect, _task_id: &str, _draft: &str) {
-    // Covered in Task 26.
+fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &str) {
+    let modal_w = (area.width * 3 / 4).min(80);
+    let modal_h = (area.height / 2).clamp(8, 20);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal = Rect::new(x, y, modal_w, modal_h);
+    frame.render_widget(Clear, modal);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " Reprompt `{task_id}` — Ctrl+Enter to send, Esc cancel "
+    ));
+    let para = Paragraph::new(draft)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(para, modal);
 }
 
 fn render_approval_modal(

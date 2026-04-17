@@ -31,7 +31,6 @@ pub enum Mode {
         target: KillTarget,
     },
     /// v0.4: textarea-driven reprompt modal.
-    #[allow(dead_code)]
     PromptReprompt {
         task_id: String,
         draft: String,

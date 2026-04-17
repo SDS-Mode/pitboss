@@ -171,8 +171,9 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
         Mode::PickingRun { .. } => handle_picking_run(state, code),
         Mode::SnapIn { .. } => handle_snap_in(state, code, modifiers),
         Mode::ConfirmKill { .. } => handle_confirm_kill(state, code),
+        Mode::PromptReprompt { .. } => handle_prompt_reprompt(state, code, modifiers),
         // v0.4 modal states — keybindings wired in later tasks.
-        Mode::PromptReprompt { .. } | Mode::ApprovalModal { .. } => Action::Continue,
+        Mode::ApprovalModal { .. } => Action::Continue,
     }
 }
 
@@ -234,6 +235,16 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
                     prompt: None,
                 };
                 let _ = futures_block_on(async move { client.send_op(op).await });
+            }
+        }
+
+        // v0.4 — reprompt focused worker.
+        KeyCode::Char('r') => {
+            if let Some(tile) = state.focused_tile().cloned() {
+                state.mode = Mode::PromptReprompt {
+                    task_id: tile.id,
+                    draft: String::new(),
+                };
             }
         }
 
@@ -378,6 +389,41 @@ fn handle_confirm_kill(state: &mut AppState, code: KeyCode) -> Action {
         }
         _ => state.mode = Mode::Normal,
     }
+    Action::Continue
+}
+
+fn handle_prompt_reprompt(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
+    let Mode::PromptReprompt { task_id, draft } = state.mode.clone() else {
+        return Action::Continue;
+    };
+    let mut draft = draft;
+    match code {
+        KeyCode::Esc => {
+            state.mode = Mode::Normal;
+            return Action::Continue;
+        }
+        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+Enter: submit.
+            if !draft.is_empty() {
+                if let Some(client) = state.control_client.clone() {
+                    let op = pitboss_cli::control::protocol::ControlOp::RepromptWorker {
+                        task_id: task_id.clone(),
+                        prompt: draft.clone(),
+                    };
+                    let _ = futures_block_on(async move { client.send_op(op).await });
+                }
+            }
+            state.mode = Mode::Normal;
+            return Action::Continue;
+        }
+        KeyCode::Char(c) => draft.push(c),
+        KeyCode::Backspace => {
+            draft.pop();
+        }
+        KeyCode::Enter => draft.push('\n'),
+        _ => {}
+    }
+    state.mode = Mode::PromptReprompt { task_id, draft };
     Action::Continue
 }
 
