@@ -5,7 +5,7 @@
 //! **This is operator-facing; keep the lookup robust to unknown model names
 //! (returns $0.00 rather than panicking) and keep the table readable.**
 
-use mosaic_core::parser::TokenUsage;
+use crate::parser::TokenUsage;
 
 struct Rates {
     input: f64,
@@ -45,6 +45,7 @@ fn rates_for(model: &str) -> Option<Rates> {
 
 /// Returns estimated USD cost for a single tile's usage. Returns `None` if
 /// the model isn't in the price table (caller renders "—" or similar).
+#[must_use]
 pub fn cost_usd(model: &str, usage: &TokenUsage) -> Option<f64> {
     let r = rates_for(model)?;
     #[allow(clippy::cast_precision_loss)]
@@ -58,6 +59,7 @@ pub fn cost_usd(model: &str, usage: &TokenUsage) -> Option<f64> {
 }
 
 /// Format a dollar amount as `"$0.02"` (always two decimals). Returns "—" for None.
+#[must_use]
 pub fn fmt_cost(cents_opt: Option<f64>) -> String {
     match cents_opt {
         Some(v) => format!("${v:.2}"),
@@ -68,7 +70,7 @@ pub fn fmt_cost(cents_opt: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mosaic_core::parser::TokenUsage;
+    use crate::parser::TokenUsage;
 
     fn usage(i: u64, o: u64) -> TokenUsage {
         TokenUsage {

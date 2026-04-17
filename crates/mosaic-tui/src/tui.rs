@@ -53,7 +53,7 @@ fn run_stats(state: &AppState) -> (u64, u64, i64, bool, f64) {
                 cache_read: tile.cache_read,
                 cache_creation: tile.cache_creation,
             };
-            if let Some(c) = crate::prices::cost_usd(model, &usage) {
+            if let Some(c) = mosaic_core::prices::cost_usd(model, &usage) {
                 total_cost += c;
             }
         }
@@ -324,7 +324,7 @@ fn render_tile(frame: &mut Frame, area: Rect, tile: &crate::state::TileState, fo
                 cache_read: tile.cache_read,
                 cache_creation: tile.cache_creation,
             };
-            crate::prices::fmt_cost(crate::prices::cost_usd(model, &usage))
+            mosaic_core::prices::fmt_cost(mosaic_core::prices::cost_usd(model, &usage))
         },
     );
 
@@ -846,14 +846,14 @@ mod tests {
 
     #[test]
     fn fmt_cost_handles_unknown() {
-        assert_eq!(crate::prices::fmt_cost(None), "\u{2014}");
+        assert_eq!(mosaic_core::prices::fmt_cost(None), "\u{2014}");
     }
 
     #[test]
     fn fmt_cost_two_decimal_places() {
-        assert_eq!(crate::prices::fmt_cost(Some(0.867)), "$0.87");
-        assert_eq!(crate::prices::fmt_cost(Some(1.00)), "$1.00");
-        assert_eq!(crate::prices::fmt_cost(Some(0.00)), "$0.00");
+        assert_eq!(mosaic_core::prices::fmt_cost(Some(0.867)), "$0.87");
+        assert_eq!(mosaic_core::prices::fmt_cost(Some(1.00)), "$1.00");
+        assert_eq!(mosaic_core::prices::fmt_cost(Some(0.00)), "$0.00");
     }
 
     // -----------------------------------------------------------------------

@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod parser;
+pub mod prices;
 pub mod process;
 pub mod session;
 pub mod store;

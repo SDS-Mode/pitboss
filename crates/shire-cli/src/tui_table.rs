@@ -41,14 +41,20 @@ impl ProgressTable {
             tokens_cache: 0,
             exit_code: None,
         });
-        self.render();
+        if self.is_tty {
+            self.render_tty();
+        }
+        // Non-TTY: silent on register. See `render_non_tty_done`.
     }
 
     pub fn mark_running(&mut self, task_id: &str) {
         if let Some(r) = self.find_mut(task_id) {
             r.status = Status::Running;
         }
-        self.render();
+        if self.is_tty {
+            self.render_tty();
+        }
+        // Non-TTY: silent on running transition. Noise in CI logs otherwise.
     }
 
     pub fn mark_done(&mut self, rec: &TaskRecord) {
@@ -60,31 +66,41 @@ impl ProgressTable {
             r.tokens_cache = rec.token_usage.cache_read;
             r.exit_code = rec.exit_code;
         }
-        self.render();
+        if self.is_tty {
+            self.render_tty();
+        } else {
+            // Non-TTY: emit exactly one line for the completed task.
+            if let Some(line) = self.done_row_line(&rec.task_id) {
+                println!("{line}");
+            }
+        }
     }
 
     fn find_mut(&mut self, id: &str) -> Option<&mut Row> {
         self.rows.iter_mut().find(|r| r.task_id == id)
     }
 
-    fn render(&mut self) {
-        if self.is_tty {
-            // Move cursor up by rendered_lines, clear, rewrite.
-            if self.rendered_lines > 0 {
-                print!("\x1b[{}A\x1b[J", self.rendered_lines);
-            }
-            let header = self.format_header();
-            println!("{header}");
-            for r in &self.rows {
-                println!("{}", self.format_row(r));
-            }
-            self.rendered_lines = self.rows.len() + 1;
-        } else {
-            // Append-only: only render on state change of the last row.
-            if let Some(last) = self.rows.last() {
-                println!("{}", self.format_row(last));
-            }
+    fn find(&self, id: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.task_id == id)
+    }
+
+    /// Returns the formatted line for a specific task (used in non-TTY mode
+    /// and in unit tests). `None` if no such task is registered.
+    pub(crate) fn done_row_line(&self, task_id: &str) -> Option<String> {
+        self.find(task_id).map(|r| self.format_row(r))
+    }
+
+    fn render_tty(&mut self) {
+        // Move cursor up by rendered_lines, clear, rewrite the full table.
+        if self.rendered_lines > 0 {
+            print!("\x1b[{}A\x1b[J", self.rendered_lines);
         }
+        let header = self.format_header();
+        println!("{header}");
+        for r in &self.rows {
+            println!("{}", self.format_row(r));
+        }
+        self.rendered_lines = self.rows.len() + 1;
     }
 
     #[allow(clippy::unused_self)]
@@ -125,5 +141,79 @@ impl ProgressTable {
             "{:<20} {:<12} {:>8} {:<22} {:>4}",
             r.task_id, status, time, tokens, exit
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mosaic_core::parser::TokenUsage;
+
+    fn rec(id: &str, status: TaskStatus, dur_ms: i64) -> TaskRecord {
+        use chrono::Utc;
+        use std::path::PathBuf;
+        TaskRecord {
+            task_id: id.into(),
+            status,
+            exit_code: Some(0),
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            duration_ms: dur_ms,
+            worktree_path: None,
+            log_path: PathBuf::new(),
+            token_usage: TokenUsage {
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_creation: 4,
+            },
+            claude_session_id: None,
+            final_message_preview: None,
+        }
+    }
+
+    #[test]
+    fn non_tty_done_row_shows_the_completed_task_not_the_last() {
+        // Regression: non-TTY mode used to print `rows.last()` regardless of
+        // which task completed, so stdout showed the last-registered task's
+        // row repeatedly instead of the real completing task's row.
+        let mut table = ProgressTable::new(false);
+        table.register("alpha");
+        table.register("beta");
+        table.register("gamma");
+
+        let alpha_line = table.done_row_line("alpha").unwrap();
+        let beta_line = table.done_row_line("beta").unwrap();
+        let gamma_line = table.done_row_line("gamma").unwrap();
+        assert!(alpha_line.starts_with("alpha"), "alpha row: {alpha_line}");
+        assert!(beta_line.starts_with("beta"), "beta row: {beta_line}");
+        assert!(gamma_line.starts_with("gamma"), "gamma row: {gamma_line}");
+        assert_ne!(alpha_line, gamma_line);
+    }
+
+    #[test]
+    fn mark_done_updates_correct_row_by_id() {
+        let mut table = ProgressTable::new(false);
+        table.register("alpha");
+        table.register("beta");
+
+        table.mark_done(&rec("beta", TaskStatus::Success, 5000));
+
+        let beta_after = table.done_row_line("beta").unwrap();
+        assert!(
+            beta_after.contains("Success"),
+            "beta marked done: {beta_after}"
+        );
+        let alpha_after = table.done_row_line("alpha").unwrap();
+        assert!(
+            alpha_after.contains("Pending"),
+            "alpha untouched: {alpha_after}"
+        );
+    }
+
+    #[test]
+    fn done_row_line_none_for_unknown_task() {
+        let table = ProgressTable::new(false);
+        assert!(table.done_row_line("nope").is_none());
     }
 }

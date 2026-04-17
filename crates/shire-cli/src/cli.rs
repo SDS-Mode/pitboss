@@ -41,6 +41,16 @@ pub enum Command {
         #[arg(long)]
         run_dir: Option<PathBuf>,
     },
+    /// Compare two prior runs side-by-side.
+    Diff {
+        /// First run id (prefix OK).
+        run_a: String,
+        /// Second run id (prefix OK).
+        run_b: String,
+        /// Emit machine-readable JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print version information.
     Version,
 }

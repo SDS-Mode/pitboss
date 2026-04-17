@@ -1,4 +1,5 @@
 mod cli;
+mod diff;
 mod dispatch;
 mod manifest;
 mod tui_table;
@@ -27,6 +28,9 @@ fn main() -> Result<()> {
         }
         Command::Resume { run_id, run_dir } => {
             run_resume(&run_id, run_dir);
+        }
+        Command::Diff { run_a, run_b, json } => {
+            run_diff(&run_a, &run_b, json);
         }
     }
 }
@@ -130,6 +134,57 @@ fn parse_env_max_parallel() -> Option<u32> {
     std::env::var("ANTHROPIC_MAX_CONCURRENT")
         .ok()
         .and_then(|s| s.parse().ok())
+}
+
+fn run_diff(run_a: &str, run_b: &str, json: bool) -> ! {
+    let dir_a = match diff::resolve_run(run_a) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("shire diff: run A: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    let dir_b = match diff::resolve_run(run_b) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("shire diff: run B: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let summary_a = match diff::load_summary(&dir_a) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("shire diff: load run A: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    let summary_b = match diff::load_summary(&dir_b) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("shire diff: load run B: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let models_a = diff::load_model_map(&dir_a);
+    let models_b = diff::load_model_map(&dir_b);
+
+    let report = diff::build_report(&summary_a, &models_a, &summary_b, &models_b);
+
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("shire diff: JSON serialization: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        print!("{}", diff::render_human(&report));
+    }
+
+    std::process::exit(0);
 }
 
 /// Resolve a run id (full UUID or unique prefix) to an absolute run directory.

@@ -12,7 +12,6 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 mod app;
-mod prices;
 mod runs;
 mod state;
 mod tui;
