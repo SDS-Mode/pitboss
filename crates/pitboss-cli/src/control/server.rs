@@ -228,7 +228,7 @@ fn op_tag(op: &ControlOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::state::DispatchState;
+    use crate::dispatch::state::{ApprovalPolicy, DispatchState};
     use crate::manifest::resolve::ResolvedManifest;
     use crate::manifest::schema::WorktreeCleanup;
     use pitboss_core::process::{ProcessSpawner, TokioSpawner};
@@ -267,6 +267,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             dir.join(run_id.to_string()),
+            ApprovalPolicy::Block,
         ))
     }
 

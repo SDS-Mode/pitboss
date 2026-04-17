@@ -293,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_starts_and_accepts_connection() {
-        use crate::dispatch::state::DispatchState;
+        use crate::dispatch::state::{ApprovalPolicy, DispatchState};
         use crate::manifest::resolve::ResolvedManifest;
         use crate::manifest::schema::WorktreeCleanup;
         use pitboss_core::process::{ProcessSpawner, TokioSpawner};
@@ -332,6 +332,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ));
 
         let sock = dir.path().join("test.sock");
@@ -349,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_drops_cleanly_even_with_active_connection() {
-        use crate::dispatch::state::DispatchState;
+        use crate::dispatch::state::{ApprovalPolicy, DispatchState};
         use crate::manifest::resolve::ResolvedManifest;
         use crate::manifest::schema::WorktreeCleanup;
         use pitboss_core::process::{ProcessSpawner, TokioSpawner};
@@ -389,6 +390,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ));
 
         let sock = dir.path().join("drop-test.sock");

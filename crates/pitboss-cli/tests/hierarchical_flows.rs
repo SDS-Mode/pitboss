@@ -8,7 +8,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use fake_mcp_client::FakeMcpClient;
-use pitboss_cli::dispatch::state::DispatchState;
+use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState};
 use pitboss_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
 use pitboss_cli::manifest::schema::{Effort, WorktreeCleanup};
 use pitboss_cli::mcp::{socket_path_for_run, McpServer};
@@ -67,6 +67,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         wt_mgr,
         CleanupPolicy::Never,
         run_subdir,
+        ApprovalPolicy::Block,
     ));
     (dir, state)
 }

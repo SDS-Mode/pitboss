@@ -690,7 +690,7 @@ pub async fn handle_wait_for_any(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::state::{DispatchState, WorkerState};
+    use crate::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
     use std::sync::Arc;
 
     async fn test_state() -> Arc<DispatchState> {
@@ -763,6 +763,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ))
     }
 
@@ -1118,6 +1119,7 @@ mod tests {
             wt_mgr,
             CleanupPolicy::Never,
             run_subdir,
+            ApprovalPolicy::Block,
         ))
     }
 
