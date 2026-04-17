@@ -212,24 +212,112 @@ fn parse_ts(s: &str) -> Result<DateTime<Utc>, StoreError> {
 // load_run helpers — extracted so the impl block stays under the line limit.
 // ---------------------------------------------------------------------------
 
-/// Raw fields fetched from the `runs` table.
-#[allow(clippy::type_complexity)]
+/// Strongly-typed row projection for the `runs` table. Confined to this module
+/// so schema evolution lives in one place: add a column, extend this struct,
+/// update `from_row`, done. Reads use column-name lookup (`row.get("name")`)
+/// so column reordering in DDL is harmless.
+struct RunRow {
+    manifest_path: String,
+    pitboss_version: String,
+    claude_version: Option<String>,
+    started_at: String,
+    ended_at: Option<String>,
+    tasks_total: Option<i64>,
+    tasks_failed: Option<i64>,
+    was_interrupted: i64,
+}
+
+impl RunRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            manifest_path: row.get("manifest_path")?,
+            pitboss_version: row.get("pitboss_version")?,
+            claude_version: row.get("claude_version")?,
+            started_at: row.get("started_at")?,
+            ended_at: row.get("ended_at")?,
+            tasks_total: row.get("tasks_total")?,
+            tasks_failed: row.get("tasks_failed")?,
+            was_interrupted: row.get("was_interrupted")?,
+        })
+    }
+}
+
+/// Strongly-typed row projection for `task_records`. Same rationale as
+/// `RunRow`: fields align with columns by name, so a SQL SELECT reorder is
+/// harmless and a column rename turns into a compile-free runtime error at
+/// exactly one call site — which is much easier to track than a silent
+/// mismap across 15 positional getters.
+struct TaskRow {
+    task_id: String,
+    status: String,
+    exit_code: Option<i32>,
+    started_at: String,
+    ended_at: String,
+    duration_ms: i64,
+    worktree_path: Option<String>,
+    log_path: String,
+    token_input: Option<i64>,
+    token_output: Option<i64>,
+    token_cache_read: Option<i64>,
+    token_cache_creation: Option<i64>,
+    claude_session_id: Option<String>,
+    final_message_preview: Option<String>,
+    parent_task_id: Option<String>,
+}
+
+impl TaskRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            task_id: row.get("task_id")?,
+            status: row.get("status")?,
+            exit_code: row.get("exit_code")?,
+            started_at: row.get("started_at")?,
+            ended_at: row.get("ended_at")?,
+            duration_ms: row.get("duration_ms")?,
+            worktree_path: row.get("worktree_path")?,
+            log_path: row.get("log_path")?,
+            token_input: row.get("token_input")?,
+            token_output: row.get("token_output")?,
+            token_cache_read: row.get("token_cache_read")?,
+            token_cache_creation: row.get("token_cache_creation")?,
+            claude_session_id: row.get("claude_session_id")?,
+            final_message_preview: row.get("final_message_preview")?,
+            parent_task_id: row.get("parent_task_id")?,
+        })
+    }
+
+    fn into_task_record(self) -> Result<TaskRecord, StoreError> {
+        Ok(TaskRecord {
+            task_id: self.task_id,
+            status: status_from_str(&self.status)?,
+            exit_code: self.exit_code,
+            started_at: parse_ts(&self.started_at)?,
+            ended_at: parse_ts(&self.ended_at)?,
+            duration_ms: self.duration_ms,
+            worktree_path: self.worktree_path.map(PathBuf::from),
+            log_path: PathBuf::from(self.log_path),
+            token_usage: TokenUsage {
+                input: self.token_input.unwrap_or(0).try_into().unwrap_or(0),
+                output: self.token_output.unwrap_or(0).try_into().unwrap_or(0),
+                cache_read: self.token_cache_read.unwrap_or(0).try_into().unwrap_or(0),
+                cache_creation: self
+                    .token_cache_creation
+                    .unwrap_or(0)
+                    .try_into()
+                    .unwrap_or(0),
+            },
+            claude_session_id: self.claude_session_id,
+            final_message_preview: self.final_message_preview,
+            parent_task_id: self.parent_task_id,
+        })
+    }
+}
+
+/// Fetch the `runs` row for `run_id_str` as a typed projection.
 fn fetch_run_row(
     guard: &rusqlite::Connection,
     run_id_str: &str,
-) -> Result<
-    Option<(
-        String,
-        String,
-        Option<String>,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-        i64,
-    )>,
-    StoreError,
-> {
+) -> Result<Option<RunRow>, StoreError> {
     let mut stmt = guard
         .prepare(
             "SELECT manifest_path, pitboss_version, claude_version, \
@@ -238,18 +326,7 @@ fn fetch_run_row(
         )
         .map_err(|e| StoreError::Incomplete(format!("load_run prepare: {e}")))?;
     let mut rows = stmt
-        .query_map(rusqlite::params![run_id_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, i64>(7)?,
-            ))
-        })
+        .query_map(rusqlite::params![run_id_str], RunRow::from_row)
         .map_err(|e| StoreError::Incomplete(format!("load_run query: {e}")))?;
     rows.next()
         .transpose()
@@ -273,66 +350,13 @@ fn fetch_task_records(
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
 
     let rows = stmt
-        .query_map(rusqlite::params![run_id_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,          // task_id
-                row.get::<_, String>(1)?,          // status
-                row.get::<_, Option<i32>>(2)?,     // exit_code
-                row.get::<_, String>(3)?,          // started_at
-                row.get::<_, String>(4)?,          // ended_at
-                row.get::<_, i64>(5)?,             // duration_ms
-                row.get::<_, Option<String>>(6)?,  // worktree_path
-                row.get::<_, String>(7)?,          // log_path
-                row.get::<_, Option<i64>>(8)?,     // token_input
-                row.get::<_, Option<i64>>(9)?,     // token_output
-                row.get::<_, Option<i64>>(10)?,    // token_cache_read
-                row.get::<_, Option<i64>>(11)?,    // token_cache_creation
-                row.get::<_, Option<String>>(12)?, // claude_session_id
-                row.get::<_, Option<String>>(13)?, // final_message_preview
-                row.get::<_, Option<String>>(14)?, // parent_task_id
-            ))
-        })
+        .query_map(rusqlite::params![run_id_str], TaskRow::from_row)
         .map_err(|e| StoreError::Incomplete(format!("task query: {e}")))?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (
-            task_id,
-            status_str,
-            exit_code,
-            ts_started,
-            ts_ended,
-            duration_ms,
-            worktree_path_str,
-            log_path_str,
-            token_input,
-            token_output,
-            token_cache_read,
-            token_cache_creation,
-            claude_session_id,
-            final_message_preview,
-            parent_task_id,
-        ) = row.map_err(|e| StoreError::Incomplete(format!("task row read: {e}")))?;
-
-        out.push(TaskRecord {
-            task_id,
-            status: status_from_str(&status_str)?,
-            exit_code,
-            started_at: parse_ts(&ts_started)?,
-            ended_at: parse_ts(&ts_ended)?,
-            duration_ms,
-            worktree_path: worktree_path_str.map(PathBuf::from),
-            log_path: PathBuf::from(log_path_str),
-            token_usage: TokenUsage {
-                input: token_input.unwrap_or(0).try_into().unwrap_or(0),
-                output: token_output.unwrap_or(0).try_into().unwrap_or(0),
-                cache_read: token_cache_read.unwrap_or(0).try_into().unwrap_or(0),
-                cache_creation: token_cache_creation.unwrap_or(0).try_into().unwrap_or(0),
-            },
-            claude_session_id,
-            final_message_preview,
-            parent_task_id,
-        });
+        let task_row = row.map_err(|e| StoreError::Incomplete(format!("task row read: {e}")))?;
+        out.push(task_row.into_task_record()?);
     }
     Ok(out)
 }
@@ -341,24 +365,15 @@ fn fetch_task_records(
 fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSummary, StoreError> {
     let run_id_str = run_id.to_string();
 
-    let (
-        manifest_path_str,
-        pitboss_version,
-        claude_version,
-        started_at_str,
-        ended_at_opt,
-        tasks_total_stored,
-        tasks_failed_stored,
-        was_interrupted_stored,
-    ) = fetch_run_row(guard, &run_id_str)?.ok_or(StoreError::NotFound(run_id))?;
+    let run = fetch_run_row(guard, &run_id_str)?.ok_or(StoreError::NotFound(run_id))?;
 
-    let manifest_path = PathBuf::from(manifest_path_str);
-    let started_at = parse_ts(&started_at_str)?;
+    let manifest_path = PathBuf::from(run.manifest_path);
+    let started_at = parse_ts(&run.started_at)?;
     let tasks = fetch_task_records(guard, &run_id_str)?;
 
     // If ended_at is NULL the run was never finalised — treat as interrupted.
-    let (ended_at, was_interrupted) = if let Some(ref ts) = ended_at_opt {
-        (parse_ts(ts)?, was_interrupted_stored != 0)
+    let (ended_at, was_interrupted) = if let Some(ref ts) = run.ended_at {
+        (parse_ts(ts)?, run.was_interrupted != 0)
     } else {
         let fallback = tasks.last().map_or_else(Utc::now, |t| t.ended_at);
         (fallback, true)
@@ -366,16 +381,16 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
 
     // Prefer stored aggregates when the run was finalised; recompute from
     // tasks when it was not (orphan / interrupted run).
-    let tasks_failed = if ended_at_opt.is_some() {
-        usize::try_from(tasks_failed_stored.unwrap_or(0)).unwrap_or(0)
+    let tasks_failed = if run.ended_at.is_some() {
+        usize::try_from(run.tasks_failed.unwrap_or(0)).unwrap_or(0)
     } else {
         tasks
             .iter()
             .filter(|t| !matches!(t.status, TaskStatus::Success))
             .count()
     };
-    let tasks_total = if ended_at_opt.is_some() {
-        usize::try_from(tasks_total_stored.unwrap_or(0)).unwrap_or(0)
+    let tasks_total = if run.ended_at.is_some() {
+        usize::try_from(run.tasks_total.unwrap_or(0)).unwrap_or(0)
     } else {
         tasks.len()
     };
@@ -383,8 +398,8 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
     Ok(RunSummary {
         run_id,
         manifest_path,
-        pitboss_version,
-        claude_version,
+        pitboss_version: run.pitboss_version,
+        claude_version: run.claude_version,
         started_at,
         ended_at,
         total_duration_ms: (ended_at - started_at).num_milliseconds(),

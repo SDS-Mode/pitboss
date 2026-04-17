@@ -18,8 +18,14 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          # Add macos-latest / aarch64-apple-darwin / x86_64-apple-darwin
-          # when ready. For now Linux x86_64 is the floor.
+          # macos-latest is Apple Silicon as of 2024-Q4.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          # macos-13 is the last Intel Mac runner image.
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
     steps:
       - uses: actions/checkout@v4
 

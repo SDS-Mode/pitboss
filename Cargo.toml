@@ -22,7 +22,7 @@ serde_json         = "1"
 toml               = "0.8"
 uuid               = { version = "1", features = ["v7","serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
-git2               = "0.19"
+git2               = { version = "0.19", features = ["vendored-libgit2"] }
 thiserror          = "1"
 anyhow             = "1"
 tracing            = "0.1"
@@ -38,3 +38,4 @@ ratatui            = "0.29"
 crossterm          = "0.28"
 rusqlite           = { version = "0.32", features = ["bundled"] }
 rmcp               = { version = "0.8", features = ["server", "client", "transport-io", "macros"] }
+tokio-util         = { version = "0.7", features = ["rt"] }

@@ -2,8 +2,6 @@
 //! between the dispatch runner (which writes TaskRecords) and the MCP server
 //! (which reads worker status, enforces caps, enqueues spawns).
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

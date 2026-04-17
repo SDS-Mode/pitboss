@@ -1,8 +1,6 @@
 //! The six MCP tool handlers exposed to the lead. Real implementations
 //! land in Tasks 10-16; this file establishes the types + signatures.
 
-#![allow(dead_code)]
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

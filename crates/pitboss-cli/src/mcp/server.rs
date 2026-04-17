@@ -1,12 +1,12 @@
 //! Lifecycle of the pitboss MCP server (unix socket transport).
 
-#![allow(dead_code)]
-
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -41,6 +41,8 @@ pub struct McpServer {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
+    tracker: TaskTracker,
+    cancel: CancellationToken,
 }
 
 /// The rmcp `ServerHandler` that exposes the six pitboss tools to the lead
@@ -175,25 +177,40 @@ impl McpServer {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let handler = PitbossHandler::new(state);
 
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+
+        let tracker_outer = tracker.clone();
+        let cancel_outer = cancel.clone();
+
         let join_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => break,
+                    _ = cancel_outer.cancelled() => break,
                     accept = listener.accept() => {
                         match accept {
                             Ok((stream, _addr)) => {
                                 let h = handler.clone();
-                                tokio::spawn(async move {
-                                    match h.serve(stream).await {
-                                        Ok(running) => {
-                                            if let Err(e) = running.waiting().await {
-                                                tracing::debug!("mcp session join error: {e}");
+                                let cancel_inner = cancel_outer.clone();
+                                // Track the spawned session task so Drop can signal cancellation
+                                // to per-connection tasks without waiting for MCP session timeouts.
+                                tracker_outer.spawn(async move {
+                                    tokio::select! {
+                                        _ = cancel_inner.cancelled() => {}
+                                        _ = async {
+                                            match h.serve(stream).await {
+                                                Ok(running) => {
+                                                    if let Err(e) = running.waiting().await {
+                                                        tracing::debug!("mcp session join error: {e}");
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!("mcp session init error: {e}");
+                                                }
                                             }
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!("mcp session init error: {e}");
-                                        }
+                                        } => {}
                                     }
                                 });
                             }
@@ -210,6 +227,8 @@ impl McpServer {
             socket_path,
             shutdown_tx: Some(shutdown_tx),
             join_handle: Some(join_handle),
+            tracker,
+            cancel,
         })
     }
 
@@ -220,12 +239,21 @@ impl McpServer {
 
 impl Drop for McpServer {
     fn drop(&mut self) {
+        // Signal shutdown to the accept loop.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        // Signal cancel to all per-connection tasks; they exit their select!
+        // arms immediately rather than waiting for MCP session close / timeout.
+        self.cancel.cancel();
+        self.tracker.close();
         if let Some(h) = self.join_handle.take() {
             h.abort();
         }
+        // Note: we can't `.await` tracker.wait() from a sync Drop. The
+        // CancellationToken fires above let per-connection tasks exit quickly
+        // without us blocking here. If a future async shutdown() method is
+        // added, that would be the place to await the tracker.
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
@@ -317,5 +345,74 @@ mod tests {
 
         drop(server);
         // Socket is cleaned up on drop.
+    }
+
+    #[tokio::test]
+    async fn server_drops_cleanly_even_with_active_connection() {
+        use crate::dispatch::state::DispatchState;
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("/bin/true"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+        ));
+
+        let sock = dir.path().join("drop-test.sock");
+        let server = McpServer::start(sock.clone(), state).await.unwrap();
+
+        // Open a raw connection and hold it; the accept task will spawn a
+        // tracked per-connection task to serve it.
+        let _stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+
+        // Give the server a moment to accept and spawn the session task so the
+        // tracker is non-empty before we drop.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drop the server while the connection is still open. Should complete
+        // near-instantly via the cancellation token, not wait for MCP session
+        // timeout (which can be up to an hour for wait_for_worker).
+        let dropped_at = std::time::Instant::now();
+        drop(server);
+        let elapsed = dropped_at.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Drop took too long: {:?}",
+            elapsed
+        );
+        assert!(!sock.exists(), "socket file should be removed on drop");
     }
 }
