@@ -747,6 +747,8 @@ mod tests {
             failed_count: 0,
             run_list: Vec::new(),
             run_started_at: None,
+            control_client: None,
+            control_connected: false,
         }
     }
 

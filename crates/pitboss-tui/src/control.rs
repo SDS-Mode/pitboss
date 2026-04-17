@@ -14,6 +14,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 
+#[derive(Debug)]
 pub struct ControlClient {
     writer: Arc<Mutex<Option<OwnedWriteHalf>>>,
     connected: Arc<std::sync::atomic::AtomicBool>,

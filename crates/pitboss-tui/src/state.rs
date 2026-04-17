@@ -112,6 +112,12 @@ pub struct AppState {
     pub run_list: Vec<crate::runs::RunEntry>,
     /// Earliest wall-clock start time across all completed tiles in the current run.
     pub run_started_at: Option<DateTime<Utc>>,
+    /// v0.4 control-socket client. None when the TUI was launched against a
+    /// completed run or the control socket couldn't be opened.
+    pub control_client: Option<std::sync::Arc<crate::control::ControlClient>>,
+    /// Whether the control socket is currently connected. Mirrored from the
+    /// client; used for the status-bar indicator.
+    pub control_connected: bool,
 }
 
 impl AppState {
@@ -126,6 +132,8 @@ impl AppState {
             failed_count: 0,
             run_list: Vec::new(),
             run_started_at: None,
+            control_client: None,
+            control_connected: false,
         }
     }
 
