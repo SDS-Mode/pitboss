@@ -1,4 +1,5 @@
 mod cli;
+mod dispatch;
 mod manifest;
 
 use anyhow::Result;
