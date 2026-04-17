@@ -214,6 +214,29 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
             };
         }
 
+        // v0.4 — pause focused worker.
+        KeyCode::Char('p') => {
+            if let (Some(client), Some(tile)) =
+                (state.control_client.clone(), state.focused_tile().cloned())
+            {
+                let op =
+                    pitboss_cli::control::protocol::ControlOp::PauseWorker { task_id: tile.id };
+                let _ = futures_block_on(async move { client.send_op(op).await });
+            }
+        }
+        // v0.4 — continue focused worker (if paused).
+        KeyCode::Char('c') => {
+            if let (Some(client), Some(tile)) =
+                (state.control_client.clone(), state.focused_tile().cloned())
+            {
+                let op = pitboss_cli::control::protocol::ControlOp::ContinueWorker {
+                    task_id: tile.id,
+                    prompt: None,
+                };
+                let _ = futures_block_on(async move { client.send_op(op).await });
+            }
+        }
+
         // Refresh — watcher already polls every 500ms; render at loop top
         // covers forced redraw. All other keys are intentionally ignored.
         _ => {}
