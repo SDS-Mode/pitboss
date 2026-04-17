@@ -23,3 +23,15 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
         format!("{}…", &s[..n])
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnError {
+    #[error("binary not found: {path}")]
+    BinaryNotFound { path: String },
+
+    #[error("io error during spawn: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("spawn rejected: {reason}")]
+    Rejected { reason: String },
+}
