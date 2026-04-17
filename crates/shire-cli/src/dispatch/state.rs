@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use mosaic_core::session::CancelToken;
 use mosaic_core::store::{SessionStore, TaskRecord};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::manifest::resolve::ResolvedManifest;
@@ -34,6 +34,9 @@ pub struct DispatchState {
     pub workers: RwLock<HashMap<String, WorkerState>>,
     /// Total USD cost spent so far (updated after each worker completes).
     pub spent_usd: Mutex<f64>,
+    /// Broadcast channel that emits a `task_id` whenever a worker transitions
+    /// to `Done`. Subscribed to by `wait_for_worker` handlers.
+    pub done_tx: broadcast::Sender<String>,
 }
 
 impl DispatchState {
@@ -44,6 +47,7 @@ impl DispatchState {
         cancel: CancelToken,
         lead_id: String,
     ) -> Self {
+        let (done_tx, _) = broadcast::channel(64);
         Self {
             run_id,
             manifest,
@@ -52,6 +56,7 @@ impl DispatchState {
             lead_id,
             workers: RwLock::new(HashMap::new()),
             spent_usd: Mutex::new(0.0),
+            done_tx,
         }
     }
 

@@ -50,6 +50,8 @@ pub struct CancelResult {
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use mosaic_core::store::TaskRecord;
+use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::dispatch::state::{DispatchState, WorkerState};
@@ -215,6 +217,45 @@ pub async fn handle_cancel_worker(
     // Actual SIGTERM signalling happens in Task 22 via state.cancel_worker_task_id().
     state.cancel.drain(); // temporary; refined in Task 22
     Ok(CancelResult { ok: true })
+}
+
+pub async fn handle_wait_for_worker(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+    timeout_secs: Option<u64>,
+) -> Result<TaskRecord> {
+    // Fast path: already Done.
+    {
+        let workers = state.workers.read().await;
+        if let Some(WorkerState::Done(rec)) = workers.get(task_id) {
+            return Ok(rec.clone());
+        }
+        if !workers.contains_key(task_id) {
+            bail!("unknown task_id: {task_id}");
+        }
+    }
+
+    // Subscribe to done events and wait.
+    let mut rx = state.done_tx.subscribe();
+    let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
+
+    loop {
+        let result = tokio::time::timeout(wait_duration, rx.recv()).await;
+        match result {
+            Err(_) => bail!("wait_for_worker timed out for {task_id}"),
+            Ok(Err(_)) => bail!("completion channel closed"),
+            Ok(Ok(completed_id)) => {
+                if completed_id == task_id {
+                    let workers = state.workers.read().await;
+                    if let Some(WorkerState::Done(rec)) = workers.get(task_id) {
+                        return Ok(rec.clone());
+                    }
+                    bail!("internal: task_id marked done but record not present");
+                }
+                // Not our task — keep waiting.
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -406,5 +447,61 @@ mod tests {
         // and the subsequent Done(...) entry in state.workers carries status=Cancelled.
         // For v0.3 Task 14 (unit-level), we just verify the cancel call succeeded
         // and didn't panic. Full flow is tested in integration tests (Phase 6).
+    }
+
+    #[tokio::test]
+    async fn wait_for_worker_returns_outcome_on_completion() {
+        use mosaic_core::store::{TaskRecord, TaskStatus};
+        use std::time::Duration;
+
+        let state = test_state().await;
+        let task_id = "worker-test-1".to_string();
+        {
+            let mut w = state.workers.write().await;
+            w.insert(task_id.clone(), WorkerState::Pending);
+        }
+
+        // Spawn a task that marks the worker Done after 50 ms.
+        let state_clone = state.clone();
+        let task_id_clone = task_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let rec = TaskRecord {
+                task_id: task_id_clone.clone(),
+                status: TaskStatus::Success,
+                exit_code: Some(0),
+                started_at: chrono::Utc::now(),
+                ended_at: chrono::Utc::now(),
+                duration_ms: 42,
+                worktree_path: None,
+                log_path: std::path::PathBuf::new(),
+                token_usage: Default::default(),
+                claude_session_id: None,
+                final_message_preview: Some("ok".into()),
+                parent_task_id: Some("lead".into()),
+            };
+            let mut w = state_clone.workers.write().await;
+            w.insert(task_id_clone.clone(), WorkerState::Done(rec));
+            let _ = state_clone.done_tx.send(task_id_clone);
+        });
+
+        let outcome = handle_wait_for_worker(&state, &task_id, Some(5))
+            .await
+            .unwrap();
+        assert!(matches!(outcome.status, TaskStatus::Success));
+    }
+
+    #[tokio::test]
+    async fn wait_for_worker_times_out() {
+        let state = test_state().await;
+        let task_id = "worker-stuck".to_string();
+        {
+            let mut w = state.workers.write().await;
+            w.insert(task_id.clone(), WorkerState::Pending);
+        }
+        let err = handle_wait_for_worker(&state, &task_id, Some(0))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "err: {err}");
     }
 }
