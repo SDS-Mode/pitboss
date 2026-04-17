@@ -206,3 +206,92 @@ async fn block_policy_queue_drains_on_tui_connect() {
         .unwrap();
     assert!(resp.approved);
 }
+
+#[tokio::test]
+async fn auto_approve_policy_responds_without_tui() {
+    use std::time::Duration;
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::AutoApprove),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::AutoApprove,
+    ));
+    let bridge = ApprovalBridge::new(state);
+    let resp = bridge
+        .request("lead".into(), "spawn".into(), Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(resp.approved);
+}
+
+#[tokio::test]
+async fn auto_reject_policy_responds_without_tui() {
+    use std::time::Duration;
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::AutoReject),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::AutoReject,
+    ));
+    let bridge = ApprovalBridge::new(state);
+    let resp = bridge
+        .request("lead".into(), "spawn".into(), Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(!resp.approved);
+    assert_eq!(resp.comment.as_deref(), Some("no operator available"));
+}
