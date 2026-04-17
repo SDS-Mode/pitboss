@@ -325,6 +325,11 @@ async fn run_worker(
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     parent_task_id: Some(lead_id),
+                    pause_count: 0,
+                    reprompt_count: 0,
+                    approvals_requested: 0,
+                    approvals_approved: 0,
+                    approvals_rejected: 0,
                 };
                 let _ = state.store.append_record(state.run_id, &rec).await;
                 state
@@ -415,6 +420,11 @@ async fn run_worker(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: Some(lead_id),
+        pause_count: 0,
+        reprompt_count: 0,
+        approvals_requested: 0,
+        approvals_approved: 0,
+        approvals_rejected: 0,
     };
 
     // Persist record.
@@ -571,6 +581,11 @@ pub async fn spawn_resume_worker(
             claude_session_id: outcome.claude_session_id,
             final_message_preview: outcome.final_message_preview,
             parent_task_id: Some(lead_id_bg),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
         state_bg
@@ -1188,6 +1203,11 @@ mod tests {
                 claude_session_id: None,
                 final_message_preview: Some("ok".into()),
                 parent_task_id: Some("lead".into()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
             };
             let mut w = state_clone.workers.write().await;
             w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -1254,6 +1274,11 @@ mod tests {
                 claude_session_id: None,
                 final_message_preview: None,
                 parent_task_id: Some("lead".into()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
             };
             let mut w = state_clone.workers.write().await;
             w.insert("w-b".into(), WorkerState::Done(rec));

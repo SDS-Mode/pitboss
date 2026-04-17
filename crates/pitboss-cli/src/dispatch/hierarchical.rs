@@ -198,6 +198,11 @@ pub async fn run_hierarchical(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: None, // lead has no parent
+        pause_count: 0,
+        reprompt_count: 0,
+        approvals_requested: 0,
+        approvals_approved: 0,
+        approvals_rejected: 0,
     };
 
     // Cleanup worktree per policy
@@ -250,6 +255,11 @@ pub async fn run_hierarchical(
                         claude_session_id: None,
                         final_message_preview: Some("cancelled when lead exited".into()),
                         parent_task_id: Some(lead.id.clone()),
+                        pause_count: 0,
+                        reprompt_count: 0,
+                        approvals_requested: 0,
+                        approvals_approved: 0,
+                        approvals_rejected: 0,
                     }
                 }
             })

@@ -215,6 +215,11 @@ mod tests {
                 claude_session_id: session_id.map(str::to_string),
                 final_message_preview: None,
                 parent_task_id: None,
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
             })
             .collect();
 
@@ -416,6 +421,11 @@ mod tests {
             claude_session_id: Some("session-abc-123".into()),
             final_message_preview: None,
             parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),

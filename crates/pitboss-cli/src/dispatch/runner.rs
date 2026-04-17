@@ -273,6 +273,11 @@ async fn execute_task(
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     parent_task_id: None,
+                    pause_count: 0,
+                    reprompt_count: 0,
+                    approvals_requested: 0,
+                    approvals_approved: 0,
+                    approvals_rejected: 0,
                 };
             }
         }
@@ -324,6 +329,11 @@ async fn execute_task(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: None,
+        pause_count: 0,
+        reprompt_count: 0,
+        approvals_requested: 0,
+        approvals_approved: 0,
+        approvals_rejected: 0,
     }
 }
 
