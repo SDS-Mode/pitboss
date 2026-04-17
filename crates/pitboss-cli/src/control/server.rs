@@ -251,6 +251,13 @@ async fn dispatch_op(
                 }
             }
         }
+        ControlOp::CancelRun => {
+            state.cancel.terminate();
+            ControlEvent::OpAcked {
+                op: "cancel_run".into(),
+                task_id: None,
+            }
+        }
         other => ControlEvent::OpUnknown {
             op: op_tag(&other).into(),
         },
@@ -433,6 +440,47 @@ mod tests {
                 if op == "cancel_worker" && tid == "w-1"
         ));
         assert!(worker_token.is_terminated());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn cancel_run_op_terminates_run_cancel_token() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        let run_cancel = state.cancel.clone();
+
+        let sock = dir.path().join("cancel-run.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "flat".into(),
+            state,
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"cancel_run\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "cancel_run"
+        ));
+        assert!(run_cancel.is_terminated());
         drop(handle);
     }
 }
