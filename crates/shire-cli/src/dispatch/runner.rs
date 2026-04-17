@@ -286,7 +286,14 @@ async fn execute_task(
 }
 
 fn spawn_args(task: &ResolvedTask) -> Vec<String> {
-    let mut args = vec!["--output-format".into(), "stream-json".into()];
+    // claude CLI requires --verbose when combining -p (print mode) with
+    // --output-format stream-json. Without it, claude rejects the invocation
+    // with "When using --print, --output-format=stream-json requires --verbose".
+    let mut args = vec![
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+    ];
     if !task.tools.is_empty() {
         args.push("--allowedTools".into());
         args.push(task.tools.join(","));
