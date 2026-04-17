@@ -210,3 +210,62 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
     // Explicit cleanup: cancel the run token so any stray tasks exit.
     state.cancel.terminate();
 }
+
+#[tokio::test]
+async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
+
+    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+
+    // Three spawn_workers then one wait_for_any. Workers complete quickly
+    // under the FakeSpawner so wait_for_any resolves once the first exits.
+    let script = dir.path().join("script.jsonl");
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"a"},"bind":"w1"}}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"b"},"bind":"w2"}}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"c"},"bind":"w3"}}
+{"mcp_call":{"name":"wait_for_any","args":{"task_ids":["$w1.task_id","$w2.task_id","$w3.task_id"]},"bind":"first"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(outcome.exit_code, Some(0), "exit non-zero: {outcome:?}");
+    assert!(matches!(
+        outcome.final_state,
+        pitboss_core::session::SessionState::Completed
+    ));
+
+    // All 3 workers should be registered (at least 1 Done; the rest can be
+    // Done or Running depending on timing).
+    let workers = state.workers.read().await;
+    assert_eq!(
+        workers.len(),
+        3,
+        "expected 3 workers, got {}",
+        workers.len()
+    );
+
+    let done_count = workers
+        .values()
+        .filter(|w| matches!(w, pitboss_cli::dispatch::state::WorkerState::Done(_)))
+        .count();
+    assert!(
+        done_count >= 1,
+        "expected at least one Done worker after wait_for_any, got {done_count}"
+    );
+
+    state.cancel.terminate();
+}
