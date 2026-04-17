@@ -214,7 +214,7 @@ fn collect_dynamic_ids(
         .collect();
     if let Ok(entries) = std::fs::read_dir(tasks_dir) {
         for entry in entries.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 if let Some(name) = entry.file_name().to_str() {
                     let name = name.to_string();
                     if !static_ids.iter().any(|s| s == &name) && !ids.iter().any(|s| s == &name) {
