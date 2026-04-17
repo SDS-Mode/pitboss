@@ -4,6 +4,8 @@
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -23,19 +25,59 @@ pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
 
 pub struct McpServer {
     socket_path: PathBuf,
-    // TODO: fields populated in Task 9
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl McpServer {
-    /// Start serving on the given socket path. Returns a handle you can drop
-    /// to shut down.
+    /// Start serving on the given socket path. Binds to the unix socket,
+    /// spawns an accept loop in a dedicated tokio task, returns a handle.
     pub async fn start(socket_path: PathBuf) -> Result<Self> {
-        let _ = socket_path;
-        unimplemented!("covered in Task 9")
+        // If the socket file already exists (stale), remove it.
+        if socket_path.exists() {
+            let _ = std::fs::remove_file(&socket_path);
+        }
+        let listener = tokio::net::UnixListener::bind(&socket_path)?;
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+        let join_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break,
+                    accept = listener.accept() => {
+                        if let Ok((_stream, _addr)) = accept {
+                            // Real tool dispatch comes in Task 10+.
+                            // For now, dropping the stream is fine: the
+                            // skeleton exists so we can test connect()
+                            // succeeds without hanging.
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            socket_path,
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: Some(join_handle),
+        })
     }
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(h) = self.join_handle.take() {
+            h.abort();
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
@@ -70,5 +112,21 @@ mod tests {
         let run_id = Uuid::now_v7();
         let p = socket_path_for_run(run_id, dir.path());
         assert!(p.starts_with(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn server_starts_and_accepts_connection() {
+        let dir = TempDir::new().unwrap();
+        let sock = dir.path().join("test.sock");
+        let server = McpServer::start(sock.clone()).await.unwrap();
+        assert!(sock.exists(), "socket file should exist after start");
+        assert_eq!(server.socket_path(), sock.as_path());
+
+        // Connect a raw unix stream to verify the server is listening.
+        let stream = tokio::net::UnixStream::connect(&sock).await;
+        assert!(stream.is_ok(), "server should accept connections");
+
+        drop(server);
+        // Socket is cleaned up on drop.
     }
 }
