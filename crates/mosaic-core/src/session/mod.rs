@@ -70,3 +70,59 @@ mod happy_path_tests {
         assert!(matches!(outcome.final_state, SessionState::Failed { .. }));
     }
 }
+
+#[cfg(all(test, feature = "test-support"))]
+mod cancel_tests {
+    use super::*;
+    use crate::process::fake::{FakeScript, FakeSpawner};
+    use crate::process::{ProcessSpawner, SpawnCmd};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn cmd() -> SpawnCmd {
+        SpawnCmd {
+            program: PathBuf::from("claude"),
+            args: vec![],
+            cwd: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminate_produces_cancelled_state() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init"}"#)
+            .hold_until_signal();
+
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cancel = CancelToken::new();
+        let c2 = cancel.clone();
+        let handle_fut = tokio::spawn(async move {
+            SessionHandle::new("t", spawner, cmd())
+                .run_to_completion(c2, Duration::from_secs(60))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.terminate();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(TERMINATE_GRACE.as_secs() + 10),
+            handle_fut,
+        )
+        .await
+        .expect("finishes within grace")
+        .unwrap();
+        assert!(matches!(outcome.final_state, SessionState::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn timeout_produces_timed_out_state() {
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let outcome = SessionHandle::new("t", spawner, cmd())
+            .run_to_completion(CancelToken::new(), Duration::from_millis(100))
+            .await;
+        assert!(matches!(outcome.final_state, SessionState::TimedOut));
+    }
+}
