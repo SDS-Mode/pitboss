@@ -21,6 +21,12 @@ This project uses [Semantic Versioning](https://semver.org/).
   exercising the MCP→bridge→control→control→bridge→MCP loop with
   `fake-control-client`. Unlocks v0.4.1 feature development without
   Anthropic API calls.
+- **`mcp__pitboss__reprompt_worker` MCP tool.** Lead-facing counterpart
+  to the v0.4.0 operator-only `RepromptWorker` control-socket op. Lets
+  a lead correct a wandering worker mid-flight with a new prompt while
+  preserving the worker's claude session via `--resume`. Matches the
+  control-socket op's state machine, event writes, and counter semantics
+  exactly; prompt is required (not optional like `ContinueWorkerArgs`).
 
 ### Fixed
 - Control-socket `approve` op now writes the `approval_response` event
