@@ -178,3 +178,19 @@ async fn mcp_spawn_while_draining_returns_error() {
 
     client.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn hierarchical_run_with_one_worker_end_to_end() {
+    // This test doesn't spin up a real claude; it uses fake-claude as both
+    // the lead and the worker. The fake lead emits a shire__spawn_worker
+    // tool_use, waits for the result, then exits. The dispatcher wires the
+    // MCP tool_result back to the fake lead via a scripted transcript.
+
+    // FIXME: The full round-trip requires the fake-claude binary to
+    // interact with the shire MCP server through the MCP protocol. Since
+    // fake-claude doesn't speak MCP, this end-to-end case is deferred to
+    // the manual smoke test until a full MCP-aware fake lead is built.
+    //
+    // Task 26 keeps the placeholder here so the plan records the intent.
+    // Implementation of the full loop comes in v0.3.1 hardening.
+}
