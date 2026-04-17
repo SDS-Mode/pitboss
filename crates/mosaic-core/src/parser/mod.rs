@@ -30,10 +30,53 @@ pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
                 .map(str::to_string);
             Ok(Event::System { subtype })
         }
+        Some("assistant") => parse_assistant(&value, raw),
         _ => Ok(Event::Unknown {
             raw: raw.to_string(),
         }),
     }
+}
+
+fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError> {
+    let content = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| ParseError::malformed("assistant missing message.content", raw))?;
+
+    for block in content {
+        let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match btype {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    return Ok(Event::AssistantText {
+                        text: text.to_string(),
+                    });
+                }
+            }
+            "tool_use" => {
+                let tool_name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input_summary = block
+                    .get("input")
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                return Ok(Event::AssistantToolUse {
+                    tool_name,
+                    input_summary,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Err(ParseError::malformed(
+        "assistant content had no text or tool_use block",
+        raw,
+    ))
 }
 
 #[cfg(test)]
@@ -63,5 +106,53 @@ mod tests {
         let line = br#"{"type":"system"}"#;
         let ev = parse_line(line).unwrap();
         assert_eq!(ev, Event::System { subtype: None });
+    }
+
+    #[test]
+    fn parses_assistant_text() {
+        let line =
+            br#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        let ev = parse_line(line).unwrap();
+        assert_eq!(
+            ev,
+            Event::AssistantText {
+                text: "hello world".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_assistant_tool_use() {
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"x.rs"}}]}}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::AssistantToolUse {
+                tool_name,
+                input_summary,
+            } => {
+                assert_eq!(tool_name, "Write");
+                assert!(input_summary.contains("file_path"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_assistant_text_takes_first_text_block() {
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}"#;
+        let ev = parse_line(line).unwrap();
+        assert_eq!(
+            ev,
+            Event::AssistantText {
+                text: "first".into()
+            }
+        );
+    }
+
+    #[test]
+    fn assistant_without_content_is_malformed() {
+        let line = br#"{"type":"assistant","message":{}}"#;
+        let err = parse_line(line).unwrap_err();
+        assert!(matches!(err, ParseError::Malformed { .. }));
     }
 }
