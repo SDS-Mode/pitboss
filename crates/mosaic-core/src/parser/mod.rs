@@ -31,6 +31,7 @@ pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
             Ok(Event::System { subtype })
         }
         Some("assistant") => parse_assistant(&value, raw),
+        Some("user") => parse_user(&value, raw),
         _ => Ok(Event::Unknown {
             raw: raw.to_string(),
         }),
@@ -75,6 +76,33 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Event, ParseE
 
     Err(ParseError::malformed(
         "assistant content had no text or tool_use block",
+        raw,
+    ))
+}
+
+fn parse_user(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError> {
+    let content = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| ParseError::malformed("user missing message.content", raw))?;
+
+    for block in content {
+        if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+            let c = block
+                .get("content")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let content_summary = match c {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => c.to_string(),
+                other => other.to_string(),
+            };
+            return Ok(Event::ToolResult { content_summary });
+        }
+    }
+    Err(ParseError::malformed(
+        "user content had no tool_result",
         raw,
     ))
 }
@@ -154,5 +182,27 @@ mod tests {
         let line = br#"{"type":"assistant","message":{}}"#;
         let err = parse_line(line).unwrap_err();
         assert!(matches!(err, ParseError::Malformed { .. }));
+    }
+
+    #[test]
+    fn parses_user_tool_result_string() {
+        let line = br#"{"type":"user","message":{"content":[{"type":"tool_result","content":"file written"}]}}"#;
+        let ev = parse_line(line).unwrap();
+        assert_eq!(
+            ev,
+            Event::ToolResult {
+                content_summary: "file written".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_user_tool_result_array() {
+        let line = br#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"ok"}]}]}}"#;
+        let ev = parse_line(line).unwrap();
+        match ev {
+            Event::ToolResult { content_summary } => assert!(content_summary.contains("ok")),
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }
