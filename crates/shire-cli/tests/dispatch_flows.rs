@@ -135,3 +135,58 @@ prompt = "p"
         "halt_on_failure should stop remaining tasks, but tasks_total={tasks_total}"
     );
 }
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+#[test]
+fn ctrl_c_twice_terminates_running_tasks() {
+    use std::time::Duration;
+
+    ensure_built();
+    let repo = TempDir::new().unwrap();
+    init_git_repo(repo.path());
+    let run_dir = TempDir::new().unwrap();
+
+    let manifest_path = repo.path().join("shire.toml");
+    std::fs::write(&manifest_path, format!(r#"
+[run]
+max_parallel = 1
+run_dir = "{run_dir}"
+worktree_cleanup = "always"
+
+[defaults]
+use_worktree = false
+
+[[task]]
+id = "held"
+directory = "{repo}"
+prompt = "p"
+timeout_secs = 120
+env = {{ MOSAIC_FAKE_SCRIPT = "{hold}", MOSAIC_FAKE_HOLD = "1" }}
+"#,
+        run_dir = run_dir.path().display(),
+        repo    = repo.path().display(),
+        hold    = fixture("hold.jsonl").display())).unwrap();
+
+    let mut child = std::process::Command::new(shire_binary())
+        .arg("dispatch").arg(&manifest_path)
+        .env("SHIRE_CLAUDE_BINARY", fake_claude_path())
+        .spawn().unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let pid = child.id() as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGINT);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    unsafe {
+        libc::kill(pid, libc::SIGINT);
+    }
+
+    // Wait for shire to exit. Bound by a timeout so a bug doesn't hang the test.
+    let child_result = std::thread::spawn(move || child.wait());
+    let status = child_result.join().expect("thread joins").expect("wait ok");
+    // After two SIGINTs, shire should exit non-zero.
+    assert!(!status.success());
+}

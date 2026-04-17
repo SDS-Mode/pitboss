@@ -33,4 +33,5 @@ async-trait        = { workspace = true }
 shire-cli   = { path = ".", features = ["test-support"] }
 tempfile    = { workspace = true }
 serde_json  = { workspace = true }
+libc        = { workspace = true }
 mosaic-core = { path = "../mosaic-core", features = ["test-support"] }
