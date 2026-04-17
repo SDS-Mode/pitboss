@@ -41,6 +41,7 @@ chrono             = { workspace = true }
 async-trait        = { workspace = true }
 rmcp               = { workspace = true }
 tokio-util         = { workspace = true }
+thiserror          = { workspace = true }
 schemars           = "1"
 
 [dev-dependencies]
