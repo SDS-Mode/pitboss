@@ -188,11 +188,17 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_statusbar(frame, chunks[2], state);
 
     // Overlays (drawn last so they appear on top).
+    // v0.4 modal overlays (ConfirmKill / PromptReprompt / ApprovalModal) are
+    // no-ops here; rendering is wired in later tasks.
     match state.mode {
         Mode::ViewingLog => render_log_overlay(frame, area, state),
         Mode::Help => render_help_overlay(frame, area),
         Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, selected),
-        Mode::Normal | Mode::SnapIn { .. } => {}
+        Mode::Normal
+        | Mode::SnapIn { .. }
+        | Mode::ConfirmKill { .. }
+        | Mode::PromptReprompt { .. }
+        | Mode::ApprovalModal { .. } => {}
     }
 }
 

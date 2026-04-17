@@ -120,6 +120,10 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
         Mode::Help => handle_help(state, code),
         Mode::PickingRun { .. } => handle_picking_run(state, code),
         Mode::SnapIn { .. } => handle_snap_in(state, code, modifiers),
+        // v0.4 modal states — keybindings wired in later tasks.
+        Mode::ConfirmKill { .. } | Mode::PromptReprompt { .. } | Mode::ApprovalModal { .. } => {
+            Action::Continue
+        }
     }
 }
 

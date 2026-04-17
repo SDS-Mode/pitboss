@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use pitboss_core::store::TaskStatus;
 
 /// Overall display mode of the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
     ViewingLog,
@@ -26,6 +26,45 @@ pub enum Mode {
         scroll: usize,
         at_bottom: bool,
     },
+    /// v0.4: confirm modal before sending a destructive control op.
+    #[allow(dead_code)]
+    ConfirmKill {
+        target: KillTarget,
+    },
+    /// v0.4: textarea-driven reprompt modal.
+    #[allow(dead_code)]
+    PromptReprompt {
+        task_id: String,
+        draft: String,
+    },
+    /// v0.4: approval modal. Driven by an `approval_request` event.
+    #[allow(dead_code)]
+    ApprovalModal {
+        request_id: String,
+        task_id: String,
+        summary: String,
+        sub_mode: ApprovalSubMode,
+    },
+}
+
+/// What `ConfirmKill` targets.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum KillTarget {
+    Worker(String),
+    Run,
+}
+
+/// Sub-state of the `ApprovalModal`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum ApprovalSubMode {
+    /// Just showing the summary; awaiting y/n/e.
+    Overview,
+    /// User pressed `e`: editing the summary in a textarea.
+    Editing { draft: String },
+    /// User pressed `n`: writing a rejection comment.
+    Rejecting { draft: String },
 }
 
 /// Status of a single tile.
@@ -391,7 +430,7 @@ mod tests {
 
         state.cancel_picker();
 
-        assert_eq!(state.mode, Mode::Normal);
+        assert!(matches!(state.mode, Mode::Normal));
         assert!(state.run_list.is_empty());
         assert_eq!(state.focus, 1, "cancel_picker must not touch focus");
     }
@@ -456,7 +495,7 @@ mod tests {
         state.picker_down();
 
         // Mode unchanged.
-        assert_eq!(state.mode, Mode::Normal);
+        assert!(matches!(state.mode, Mode::Normal));
     }
 
     #[test]
@@ -521,7 +560,10 @@ mod tests {
 
         state.enter_snap_in();
 
-        assert_eq!(state.mode, Mode::Normal, "should stay Normal with no tiles");
+        assert!(
+            matches!(state.mode, Mode::Normal),
+            "should stay Normal with no tiles"
+        );
     }
 
     #[test]
@@ -550,7 +592,7 @@ mod tests {
 
         state.exit_snap_in();
 
-        assert_eq!(state.mode, Mode::Normal);
+        assert!(matches!(state.mode, Mode::Normal));
     }
 
     #[test]
@@ -781,5 +823,42 @@ mod tests {
             Some(t_earlier),
             "should keep the earlier start time"
         );
+    }
+
+    #[test]
+    fn confirm_kill_variant_round_trip() {
+        let m = Mode::ConfirmKill {
+            target: KillTarget::Worker("w-1".into()),
+        };
+        assert!(matches!(m, Mode::ConfirmKill { .. }));
+        let m2 = Mode::ConfirmKill {
+            target: KillTarget::Run,
+        };
+        assert!(matches!(
+            m2,
+            Mode::ConfirmKill {
+                target: KillTarget::Run
+            }
+        ));
+    }
+
+    #[test]
+    fn prompt_reprompt_variant_constructs() {
+        let m = Mode::PromptReprompt {
+            task_id: "w-1".into(),
+            draft: String::new(),
+        };
+        assert!(matches!(m, Mode::PromptReprompt { .. }));
+    }
+
+    #[test]
+    fn approval_modal_variant_constructs() {
+        let m = Mode::ApprovalModal {
+            request_id: "req-1".into(),
+            task_id: "lead".into(),
+            summary: "spawn 3".into(),
+            sub_mode: ApprovalSubMode::Overview,
+        };
+        assert!(matches!(m, Mode::ApprovalModal { .. }));
     }
 }
