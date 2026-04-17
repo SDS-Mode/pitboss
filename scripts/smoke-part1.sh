@@ -141,7 +141,7 @@ id = "x"
 directory = "$REPO"
 prompt = "p"
 EOF
-"$PITBOSS" dispatch "$SCRATCH/bad-key.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch --run-dir "$SCRATCH/runs" "$SCRATCH/bad-key.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.4 validate unknown field" "must reject at parse"
 
 # --------------------------------------------------------------------
@@ -152,7 +152,7 @@ id = "x"
 directory = "/absolutely/does/not/exist"
 prompt = "p"
 EOF
-"$PITBOSS" dispatch "$SCRATCH/bad-dir.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch --run-dir "$SCRATCH/runs" "$SCRATCH/bad-dir.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.5 missing directory"
 
 # --------------------------------------------------------------------
@@ -163,7 +163,7 @@ id = "x"
 directory = "$NOT_GIT"
 prompt = "p"
 EOF
-"$PITBOSS" dispatch "$SCRATCH/bad-nongit.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch --run-dir "$SCRATCH/runs" "$SCRATCH/bad-nongit.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.6 non-git dir"
 
 # --------------------------------------------------------------------
@@ -179,12 +179,12 @@ id = "same"
 directory = "$REPO"
 prompt = "b"
 EOF
-"$PITBOSS" dispatch "$SCRATCH/bad-dups.toml" >/dev/null 2>&1; CODE=$?
+"$PITBOSS" dispatch --run-dir "$SCRATCH/runs" "$SCRATCH/bad-dups.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.7 duplicate task ids"
 
 # --------------------------------------------------------------------
 # 1.8 Dry-run
-OUT=$("$PITBOSS" dispatch --dry-run "$SCRATCH/happy.toml" 2>&1); CODE=$?
+OUT=$("$PITBOSS" dispatch --run-dir "$SCRATCH/runs" --dry-run "$SCRATCH/happy.toml" 2>&1); CODE=$?
 if [ "$CODE" = "0" ] && echo "$OUT" | grep -q "DRY-RUN"; then
     say PASS "1.8 dry-run"
     record "1.8 dry-run" PASS ""
@@ -195,7 +195,7 @@ fi
 
 # --------------------------------------------------------------------
 # 1.9 Missing claude binary — probe should fail with exit 2
-PITBOSS_CLAUDE_BINARY=/nope/claude "$PITBOSS" dispatch "$SCRATCH/happy.toml" >/dev/null 2>&1; CODE=$?
+PITBOSS_CLAUDE_BINARY=/nope/claude "$PITBOSS" dispatch --run-dir "$SCRATCH/runs" "$SCRATCH/happy.toml" >/dev/null 2>&1; CODE=$?
 expect_exit 2 "$CODE" "1.9 missing claude binary"
 
 # --------------------------------------------------------------------
