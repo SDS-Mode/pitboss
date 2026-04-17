@@ -55,18 +55,28 @@ impl WorktreeManager {
         })?;
 
         let wt_path = sibling_path(repo_root, name);
-        let opts = WorktreeAddOptions::new();
+        let branch_name = branch.map(str::to_string);
 
-        if branch.is_some() {
-            // Branch path handled in Task 19.
-            unimplemented!("branch path not yet wired — covered in Task 19");
+        if let Some(bname) = &branch_name {
+            if repo.find_branch(bname, git2::BranchType::Local).is_err() {
+                let head_commit = repo.head()?.peel_to_commit()?;
+                repo.branch(bname, &head_commit, false)?;
+            }
+        }
+
+        let mut opts = WorktreeAddOptions::new();
+        let reference_holder;
+        if let Some(bname) = &branch_name {
+            let rname = format!("refs/heads/{bname}");
+            reference_holder = repo.find_reference(&rname)?;
+            opts.reference(Some(&reference_holder));
         }
 
         let _wt = repo.worktree(name, &wt_path, Some(&opts))?;
 
         Ok(Worktree {
             path: wt_path,
-            branch: None,
+            branch: branch_name,
             name: name.to_string(),
             repo_root: repo_root.to_path_buf(),
         })
