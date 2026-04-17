@@ -105,6 +105,14 @@ impl ApprovalBridge {
             }
         }
 
+        self.state
+            .worker_counters
+            .write()
+            .await
+            .entry(self.state.lead_id.clone())
+            .or_default()
+            .approvals_requested += 1;
+
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
@@ -140,7 +148,17 @@ impl ApprovalBridge {
             },
         )
         .await;
+        let approved = resp.approved;
         tx.send(resp).map_err(|_| ApprovalError::Cancelled)?;
+        {
+            let mut guard = self.state.worker_counters.write().await;
+            let entry = guard.entry(self.state.lead_id.clone()).or_default();
+            if approved {
+                entry.approvals_approved += 1;
+            } else {
+                entry.approvals_rejected += 1;
+            }
+        }
         Ok(())
     }
 }

@@ -47,6 +47,15 @@ pub struct ApprovalResponse {
     pub edited_summary: Option<String>,
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct WorkerCounters {
+    pub pause_count: u32,
+    pub reprompt_count: u32,
+    pub approvals_requested: u32,
+    pub approvals_approved: u32,
+    pub approvals_rejected: u32,
+}
+
 /// Policy for approval requests when no TUI is attached.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +129,9 @@ pub struct DispatchState {
     /// control server clears it on disconnect.
     pub control_writer:
         Mutex<Option<mpsc::UnboundedSender<crate::control::protocol::ControlEvent>>>,
+    /// Per-task event counters. Mutated by pause/continue/reprompt/approval
+    /// paths; read when building the final `TaskRecord`.
+    pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
 }
 
 impl DispatchState {
@@ -161,6 +173,7 @@ impl DispatchState {
             approval_queue: Mutex::new(VecDeque::new()),
             approval_policy,
             control_writer: Mutex::new(None),
+            worker_counters: RwLock::new(HashMap::new()),
         }
     }
 
@@ -284,5 +297,18 @@ mod tests {
             crate::dispatch::state::ApprovalPolicy::Block
         ));
         assert!(st.control_writer.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn worker_counters_default_zero() {
+        let st = mk_state(None, None);
+        let c = st
+            .worker_counters
+            .read()
+            .await
+            .get("absent")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(c.pause_count, 0);
     }
 }

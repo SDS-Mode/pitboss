@@ -164,6 +164,13 @@ pub async fn run_hierarchical(
         .await;
 
     // Build lead TaskRecord
+    let lead_counters = state
+        .worker_counters
+        .read()
+        .await
+        .get(&state.lead_id)
+        .cloned()
+        .unwrap_or_default();
     let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
         status: match outcome.final_state {
@@ -198,11 +205,11 @@ pub async fn run_hierarchical(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: None, // lead has no parent
-        pause_count: 0,
-        reprompt_count: 0,
-        approvals_requested: 0,
-        approvals_approved: 0,
-        approvals_rejected: 0,
+        pause_count: lead_counters.pause_count,
+        reprompt_count: lead_counters.reprompt_count,
+        approvals_requested: lead_counters.approvals_requested,
+        approvals_approved: lead_counters.approvals_approved,
+        approvals_rejected: lead_counters.approvals_rejected,
     };
 
     // Cleanup worktree per policy

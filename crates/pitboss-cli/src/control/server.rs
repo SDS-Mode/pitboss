@@ -294,6 +294,13 @@ async fn dispatch_op(
                         },
                     )
                     .await;
+                    state
+                        .worker_counters
+                        .write()
+                        .await
+                        .entry(task_id.clone())
+                        .or_default()
+                        .pause_count += 1;
                     ControlEvent::OpAcked {
                         op: "pause_worker".into(),
                         task_id: Some(task_id),
@@ -419,10 +426,19 @@ async fn dispatch_op(
             match crate::mcp::tools::spawn_resume_worker(state, task_id.clone(), prompt, session_id)
                 .await
             {
-                Ok(()) => ControlEvent::OpAcked {
-                    op: "reprompt_worker".into(),
-                    task_id: Some(task_id),
-                },
+                Ok(()) => {
+                    state
+                        .worker_counters
+                        .write()
+                        .await
+                        .entry(task_id.clone())
+                        .or_default()
+                        .reprompt_count += 1;
+                    ControlEvent::OpAcked {
+                        op: "reprompt_worker".into(),
+                        task_id: Some(task_id),
+                    }
+                }
                 Err(e) => ControlEvent::OpFailed {
                     op: "reprompt_worker".into(),
                     task_id: Some(task_id),

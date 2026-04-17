@@ -407,6 +407,13 @@ async fn run_worker(
     }
 
     let worktree_path = if use_worktree { Some(cwd) } else { None };
+    let counters = state
+        .worker_counters
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_default();
     let rec = TaskRecord {
         task_id: task_id.clone(),
         status,
@@ -420,11 +427,11 @@ async fn run_worker(
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         parent_task_id: Some(lead_id),
-        pause_count: 0,
-        reprompt_count: 0,
-        approvals_requested: 0,
-        approvals_approved: 0,
-        approvals_rejected: 0,
+        pause_count: counters.pause_count,
+        reprompt_count: counters.reprompt_count,
+        approvals_requested: counters.approvals_requested,
+        approvals_approved: counters.approvals_approved,
+        approvals_rejected: counters.approvals_rejected,
     };
 
     // Persist record.
@@ -568,6 +575,13 @@ pub async fn spawn_resume_worker(
             pitboss_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
             _ => TaskStatus::Failed,
         };
+        let counters = state_bg
+            .worker_counters
+            .read()
+            .await
+            .get(&task_id_bg)
+            .cloned()
+            .unwrap_or_default();
         let rec = TaskRecord {
             task_id: task_id_bg.clone(),
             status,
@@ -581,11 +595,11 @@ pub async fn spawn_resume_worker(
             claude_session_id: outcome.claude_session_id,
             final_message_preview: outcome.final_message_preview,
             parent_task_id: Some(lead_id_bg),
-            pause_count: 0,
-            reprompt_count: 0,
-            approvals_requested: 0,
-            approvals_approved: 0,
-            approvals_rejected: 0,
+            pause_count: counters.pause_count,
+            reprompt_count: counters.reprompt_count,
+            approvals_requested: counters.approvals_requested,
+            approvals_approved: counters.approvals_approved,
+            approvals_rejected: counters.approvals_rejected,
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
         state_bg
