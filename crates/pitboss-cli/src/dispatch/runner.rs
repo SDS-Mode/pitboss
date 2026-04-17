@@ -374,6 +374,7 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__pause_worker",
     "mcp__pitboss__continue_worker",
     "mcp__pitboss__request_approval",
+    "mcp__pitboss__reprompt_worker",
 ];
 
 /// Builds the argv for spawning the lead subprocess, including the

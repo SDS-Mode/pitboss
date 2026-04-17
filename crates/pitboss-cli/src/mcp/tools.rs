@@ -99,6 +99,15 @@ pub struct ContinueWorkerArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepromptWorkerArgs {
+    pub task_id: String,
+    /// New prompt to send via `claude --resume`. Required — unlike
+    /// `ContinueWorkerArgs::prompt`, reprompt semantically *is* a new
+    /// prompt; defaulting to "continue" would conflate the operations.
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RequestApprovalArgs {
     pub summary: String,
     /// Optional per-request timeout override. Falls back to lead_timeout_secs.
@@ -811,6 +820,62 @@ pub async fn handle_continue_worker(
         Some(_) => anyhow::bail!("worker not paused"),
         None => anyhow::bail!("unknown task_id: {}", args.task_id),
     }
+}
+
+pub async fn handle_reprompt_worker(
+    state: &Arc<DispatchState>,
+    args: RepromptWorkerArgs,
+) -> Result<CancelResult> {
+    let current = state.workers.read().await.get(&args.task_id).cloned();
+    let session_id = match current {
+        Some(WorkerState::Running {
+            session_id: Some(sid),
+            ..
+        }) => {
+            let cancels = state.worker_cancels.read().await;
+            if let Some(tok) = cancels.get(&args.task_id) {
+                tok.terminate();
+            }
+            // Brief grace so the prior subprocess exits before spawn_resume
+            // starts the new one. Matches the control-socket op.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sid
+        }
+        Some(WorkerState::Paused { session_id, .. }) => session_id,
+        Some(WorkerState::Running {
+            session_id: None, ..
+        }) => anyhow::bail!("worker not yet initialized (no session_id)"),
+        Some(WorkerState::Pending) => anyhow::bail!("worker is still pending"),
+        Some(WorkerState::Done(_)) => anyhow::bail!("worker already completed"),
+        None => anyhow::bail!("unknown task_id: {}", args.task_id),
+    };
+
+    // Unconditionally record the reprompt attempt — audit trail even if
+    // the subsequent spawn fails.
+    let _ = crate::dispatch::events::append_event(
+        &state.run_subdir,
+        &args.task_id,
+        &crate::dispatch::events::TaskEvent::Reprompt {
+            at: chrono::Utc::now(),
+            prompt_preview: args.prompt.chars().take(80).collect(),
+            prior_session_id: session_id.clone(),
+        },
+    )
+    .await;
+
+    spawn_resume_worker(state, args.task_id.clone(), args.prompt, session_id).await?;
+
+    // Counter bump is conditional on spawn success so a failed spawn
+    // doesn't falsely inflate the reprompt count.
+    state
+        .worker_counters
+        .write()
+        .await
+        .entry(args.task_id)
+        .or_default()
+        .reprompt_count += 1;
+
+    Ok(CancelResult { ok: true })
 }
 
 pub async fn handle_request_approval(
@@ -1589,6 +1654,18 @@ mod tests {
     }
 
     #[test]
+    fn reprompt_worker_args_roundtrip() {
+        let a = RepromptWorkerArgs {
+            task_id: "w-1".into(),
+            prompt: "new plan".into(),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: RepromptWorkerArgs = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.task_id, "w-1");
+        assert_eq!(back.prompt, "new plan");
+    }
+
+    #[test]
     fn request_approval_args_roundtrip() {
         let a = RequestApprovalArgs {
             summary: "spawn 3 workers".into(),
@@ -1662,6 +1739,117 @@ mod tests {
             workers.get("w-1").unwrap(),
             WorkerState::Running { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_reprompt_worker_from_running() {
+        let state = test_state().await;
+        let worker_token = pitboss_core::session::CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), worker_token.clone());
+        state.workers.write().await.insert(
+            "w-1".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess-abc".into()),
+            },
+        );
+        state
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-1".into(), "original".into());
+        state
+            .worker_models
+            .write()
+            .await
+            .insert("w-1".into(), "claude-haiku-4-5".into());
+
+        let res = handle_reprompt_worker(
+            &state,
+            RepromptWorkerArgs {
+                task_id: "w-1".into(),
+                prompt: "new plan".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(res.ok);
+        // Counter bumps on success.
+        let counters = state
+            .worker_counters
+            .read()
+            .await
+            .get("w-1")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(counters.reprompt_count, 1);
+        // events.jsonl records the reprompt.
+        let events_path = state
+            .run_subdir
+            .join("tasks")
+            .join("w-1")
+            .join("events.jsonl");
+        let events = tokio::fs::read_to_string(&events_path).await.unwrap();
+        assert!(
+            events.contains("\"kind\":\"reprompt\""),
+            "events.jsonl missing reprompt: {events}"
+        );
+        // Worker transitioned back to Running via spawn_resume_worker.
+        let workers = state.workers.read().await;
+        assert!(matches!(
+            workers.get("w-1").unwrap(),
+            WorkerState::Running { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_reprompt_worker_from_done_errors() {
+        let state = test_state().await;
+        // Insert a Done worker — terminal state, no reprompt allowed.
+        let rec = pitboss_core::store::TaskRecord {
+            task_id: "w-done".into(),
+            status: pitboss_core::store::TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: std::path::PathBuf::from("/tmp/x"),
+            token_usage: Default::default(),
+            claude_session_id: Some("sess-done".into()),
+            final_message_preview: None,
+            parent_task_id: Some("lead".into()),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+        };
+        state
+            .workers
+            .write()
+            .await
+            .insert("w-done".into(), WorkerState::Done(rec));
+
+        let err = handle_reprompt_worker(
+            &state,
+            RepromptWorkerArgs {
+                task_id: "w-done".into(),
+                prompt: "retry".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("already completed"),
+            "expected 'already completed' in error, got: {err}"
+        );
     }
 
     #[tokio::test]
