@@ -99,6 +99,15 @@ pub struct ContinueWorkerArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepromptWorkerArgs {
+    pub task_id: String,
+    /// New prompt to send via `claude --resume`. Required — unlike
+    /// `ContinueWorkerArgs::prompt`, reprompt semantically *is* a new
+    /// prompt; defaulting to "continue" would conflate the operations.
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RequestApprovalArgs {
     pub summary: String,
     /// Optional per-request timeout override. Falls back to lead_timeout_secs.
@@ -1586,6 +1595,18 @@ mod tests {
         let back: ContinueWorkerArgs = serde_json::from_str(&s).unwrap();
         assert_eq!(back.task_id, "w");
         assert_eq!(back.prompt.as_deref(), Some("next step"));
+    }
+
+    #[test]
+    fn reprompt_worker_args_roundtrip() {
+        let a = RepromptWorkerArgs {
+            task_id: "w-1".into(),
+            prompt: "new plan".into(),
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        let back: RepromptWorkerArgs = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.task_id, "w-1");
+        assert_eq!(back.prompt, "new plan");
     }
 
     #[test]
