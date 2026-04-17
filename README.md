@@ -6,6 +6,10 @@
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
 
+**v0.4.0** ships a live control plane: cancel/pause/continue/reprompt
+and operator-approval interrupts. See CHANGELOG + AGENTS.md for
+keybindings and the three new MCP tools.
+
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
 cap, captures structured artifacts per run, and — in hierarchical mode —
