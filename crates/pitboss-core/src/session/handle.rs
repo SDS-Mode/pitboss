@@ -269,12 +269,54 @@ async fn stderr_drain(
 }
 
 fn truncate_preview(s: &str) -> String {
-    const MAX: usize = 200;
-    if s.len() <= MAX {
-        s.to_string()
-    } else {
-        let mut out = s[..MAX].to_string();
+    // Truncate by character (not byte) to avoid panicking on multi-byte
+    // boundaries — claude's output routinely contains emoji.
+    const MAX_CHARS: usize = 200;
+    let mut chars = s.chars();
+    let prefix: String = (&mut chars).take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        let mut out = prefix;
         out.push('…');
         out
+    } else {
+        prefix
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::truncate_preview;
+
+    #[test]
+    fn short_ascii_passes_through() {
+        assert_eq!(truncate_preview("hello"), "hello");
+    }
+
+    #[test]
+    fn long_ascii_truncates_with_ellipsis() {
+        let s = "a".repeat(250);
+        let out = truncate_preview(&s);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 201); // 200 chars + ellipsis
+    }
+
+    #[test]
+    fn emoji_at_boundary_does_not_panic() {
+        // 198 chars of 'a', then 4 emoji (each 4 bytes), then more content —
+        // byte index 200 lands in the middle of an emoji. Old impl panicked.
+        let mut s = "a".repeat(198);
+        s.push_str("🦀🦀🦀🦀 tail");
+        let out = truncate_preview(&s);
+        assert!(out.ends_with('…'));
+        // First 200 chars, then ellipsis.
+        assert_eq!(out.chars().count(), 201);
+    }
+
+    #[test]
+    fn exactly_max_chars_no_ellipsis() {
+        let s = "🦀".repeat(200);
+        let out = truncate_preview(&s);
+        assert!(!out.ends_with('…'));
+        assert_eq!(out.chars().count(), 200);
     }
 }
