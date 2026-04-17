@@ -143,3 +143,70 @@ async fn fake_claude_smoke_prints_version_stderr() {
         "expected --version output to mention fake-claude, got: {stdout:?}"
     );
 }
+
+#[tokio::test]
+async fn e2e_lead_spawns_worker_via_real_subprocess() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
+
+    // Start the MCP server so fake-claude's mcp_call can land somewhere.
+    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+
+    // Write the script. spawn_worker returns {task_id: "worker-..."},
+    // stored under "w1"; wait_for_worker then consumes $w1.task_id.
+    let script = dir.path().join("script.jsonl");
+    // Lead emits init + result stream-json so SessionHandle sees a clean
+    // Completed outcome (saw_result=true). The mcp_call actions between
+    // them exercise the actual MCP flow.
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"hi"},"bind":"w1"}}
+{"mcp_call":{"name":"wait_for_worker","args":{"task_id":"$w1.task_id"},"bind":"rec"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    // Run fake-claude as the lead. A real TokioSpawner subprocess, not the
+    // FakeSpawner in state.spawner (which backs the workers it spawns).
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    // Subprocess must have exited cleanly.
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "fake-claude exited non-zero: outcome={outcome:?}"
+    );
+    assert!(matches!(
+        outcome.final_state,
+        pitboss_core::session::SessionState::Completed
+    ));
+
+    // Worker state should be Done with a captured session_id.
+    let workers = state.workers.read().await;
+    assert_eq!(
+        workers.len(),
+        1,
+        "expected exactly one worker, got {}",
+        workers.len()
+    );
+    let (task_id, w) = workers.iter().next().unwrap();
+    match w {
+        pitboss_cli::dispatch::state::WorkerState::Done(rec) => {
+            assert_eq!(&rec.task_id, task_id);
+            assert!(rec.claude_session_id.is_some(), "session_id not captured");
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
+
+    // Explicit cleanup: cancel the run token so any stray tasks exit.
+    state.cancel.terminate();
+}
