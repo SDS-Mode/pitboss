@@ -192,32 +192,79 @@ pub async fn run_hierarchical(
     let _ = state.done_tx.send(lead.id.clone());
 
     // 4. Finalize.
-    let lead_failed = !matches!(lead_record.status, mosaic_core::store::TaskStatus::Success);
-    let started_at = meta.started_at;
-    let ended_at = Utc::now();
-    let tasks = vec![lead_record];
-    let tasks_failed = tasks
+    // Capture the ORIGINAL cancel state BEFORE we call terminate() below.
+    // This preserves the distinction between user Ctrl-C (real interruption)
+    // and our internal cleanup termination signal to drain workers.
+    let was_interrupted = cancel.is_draining() || cancel.is_terminated();
+
+    // Any in-flight workers get cancelled, their TaskRecord synthesized.
+    // `cancel.terminate()` signals all in-flight SessionHandles.
+    cancel.terminate();
+    // Give them up to TERMINATE_GRACE to drain.
+    tokio::time::sleep(mosaic_core::session::TERMINATE_GRACE).await;
+
+    let worker_records: Vec<mosaic_core::store::TaskRecord> = {
+        let workers = state.workers.read().await;
+        workers
+            .iter()
+            .filter(|(id, _)| *id != &lead.id) // don't double-count the lead
+            .map(|(id, w)| match w {
+                crate::dispatch::state::WorkerState::Done(rec) => rec.clone(),
+                crate::dispatch::state::WorkerState::Pending
+                | crate::dispatch::state::WorkerState::Running { .. } => {
+                    let now = Utc::now();
+                    mosaic_core::store::TaskRecord {
+                        task_id: id.clone(),
+                        status: mosaic_core::store::TaskStatus::Cancelled,
+                        exit_code: None,
+                        started_at: now,
+                        ended_at: now,
+                        duration_ms: 0,
+                        worktree_path: None,
+                        log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
+                        token_usage: Default::default(),
+                        claude_session_id: None,
+                        final_message_preview: Some("cancelled when lead exited".into()),
+                        parent_task_id: Some(lead.id.clone()),
+                    }
+                }
+            })
+            .collect()
+    };
+
+    for rec in &worker_records {
+        store.append_record(run_id, rec).await?;
+    }
+
+    // Assemble final summary with lead + workers.
+    let mut all_records = vec![lead_record.clone()];
+    all_records.extend(worker_records);
+
+    let tasks_failed = all_records
         .iter()
         .filter(|r| !matches!(r.status, mosaic_core::store::TaskStatus::Success))
         .count();
+
+    let ended_at = Utc::now();
     let summary = RunSummary {
         run_id,
         manifest_path,
         shire_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version,
-        started_at,
+        started_at: meta.started_at,
         ended_at,
-        total_duration_ms: (ended_at - started_at).num_milliseconds(),
-        tasks_total: tasks.len(),
+        total_duration_ms: (ended_at - meta.started_at).num_milliseconds(),
+        tasks_total: all_records.len(),
         tasks_failed,
-        was_interrupted: cancel.is_draining() || cancel.is_terminated(),
-        tasks,
+        was_interrupted,
+        tasks: all_records,
     };
     store.finalize_run(&summary).await?;
 
-    let rc = if cancel.is_terminated() {
+    // Exit code same as flat dispatch
+    let rc = if was_interrupted {
         130
-    } else if lead_failed {
+    } else if tasks_failed > 0 {
         1
     } else {
         0
