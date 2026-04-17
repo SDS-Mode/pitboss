@@ -111,6 +111,21 @@ pub fn format_tile_title(state: &crate::state::AppState, idx: usize) -> String {
     }
 }
 
+/// Format the subtitle string for the tile at `idx` in `state.tasks`.
+///
+/// Returns `← {parent-id}` if the tile has a parent (i.e. it's a worker
+/// spawned by a lead), otherwise an empty string.
+pub fn format_tile_subtitle(state: &crate::state::AppState, idx: usize) -> String {
+    let Some(tile) = state.tasks.get(idx) else {
+        return String::new();
+    };
+    if let Some(parent) = &tile.parent_task_id {
+        format!("\u{2190} {parent}")
+    } else {
+        String::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Init / teardown
 // ---------------------------------------------------------------------------
@@ -328,10 +343,20 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
         Style::default().fg(Color::DarkGray)
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {tile_title} "))
         .border_style(border_style);
+
+    // For worker tiles, append a dim parent annotation on the bottom border
+    // so the hierarchy is visible without consuming content rows.
+    let subtitle = format_tile_subtitle(state, tile_idx);
+    if !subtitle.is_empty() {
+        block = block.title_bottom(Span::styled(
+            format!(" {subtitle} "),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -947,5 +972,24 @@ mod tests {
         let worker_title = crate::tui::format_tile_title(&s, 1);
         assert!(!worker_title.contains("[LEAD]"));
         assert!(worker_title.contains("worker-1"));
+    }
+
+    #[test]
+    fn worker_tile_shows_parent_annotation() {
+        let tiles = vec![
+            tile("triage", TileStatus::Running, None, 0, 0),
+            tile_with_parent("w-1", TileStatus::Running, Some("triage".into())),
+        ];
+        let s = state(tiles);
+        let sub = crate::tui::format_tile_subtitle(&s, 1);
+        assert!(sub.contains("← triage"));
+    }
+
+    #[test]
+    fn lead_tile_has_no_parent_annotation() {
+        let tiles = vec![tile("triage", TileStatus::Running, None, 0, 0)];
+        let s = state(tiles);
+        let sub = crate::tui::format_tile_subtitle(&s, 0);
+        assert!(!sub.contains("←"));
     }
 }
