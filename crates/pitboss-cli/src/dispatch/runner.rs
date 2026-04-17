@@ -123,7 +123,7 @@ pub async fn execute(
         wt_mgr.clone(),
         cleanup_policy_from(resolved.worktree_cleanup),
         run_subdir.clone(),
-        crate::dispatch::state::ApprovalPolicy::Block,
+        resolved.approval_policy.unwrap_or_default(),
     ));
     let control_sock = crate::control::control_socket_path(run_id, &run_dir);
     let _control = crate::control::server::start_control_server(

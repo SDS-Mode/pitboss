@@ -13,7 +13,7 @@ use pitboss_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore};
 use uuid::Uuid;
 
 use crate::control::{control_socket_path, server::start_control_server};
-use crate::dispatch::state::{ApprovalPolicy, DispatchState};
+use crate::dispatch::state::DispatchState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::{socket_path_for_run, McpServer};
 
@@ -96,7 +96,7 @@ pub async fn run_hierarchical(
         wt_mgr.clone(),
         cleanup_policy,
         run_subdir.clone(),
-        ApprovalPolicy::Block,
+        resolved.approval_policy.unwrap_or_default(),
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
