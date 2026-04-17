@@ -1,5 +1,32 @@
+# Rust / Cargo
 /target
 **/*.rs.bk
 Cargo.lock.bak
-.DS_Store
+
+# Editor / IDE
 *.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Profiling / perf
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg
+
+# Env / secrets
+.env
+.env.*
+
+# Project-internal docs (kept locally; not shipped)
+/docs/

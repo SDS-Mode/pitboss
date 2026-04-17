@@ -143,9 +143,6 @@ hierarchical mode, only the **lead** is resumed — the lead's next decisions
 determine whether to spawn fresh workers. `resolved.json` in the new run
 records the `resume_session_id` so you can audit what was picked up.
 
-Full design:
-[`docs/superpowers/specs/2026-04-17-hierarchical-orchestration-design.md`](docs/superpowers/specs/2026-04-17-hierarchical-orchestration-design.md).
-
 ## Concurrency
 
 Default `max_parallel` is 4. Override hierarchy: manifest `[run].max_parallel`
@@ -156,13 +153,12 @@ caps the lead's worker fanout, not the overall process count.
 
 ## Manual smoke testing
 
-See [`docs/v0.1-smoke-test.md`](docs/v0.1-smoke-test.md) for flat-mode offline
-+ live tests (10 offline + signal/drain coverage).
-
-See [`docs/v0.3-smoke-test.md`](docs/v0.3-smoke-test.md) for hierarchical-mode
-tests: schema validation, real 3-worker triage, Mosaic observation, budget
-enforcement, Ctrl-C drain, and `pitboss resume` verification (~$0.50–$1.50 in
-Haiku API usage).
+Automated offline scripts live in `scripts/` (see Development below). For
+live runs against real `claude`, exercise: schema validation, a real triage
+manifest with 2–4 workers, the TUI's `[LEAD]`/`← lead` annotations, budget
+enforcement with a tight `budget_usd`, Ctrl-C drain mid-run, and
+`pitboss resume <run-id>`. Budget roughly $0.50–$1.50 in Haiku API usage for
+a full sweep.
 
 Requires a working `claude` CLI authenticated via its normal subscription
 config (no `ANTHROPIC_API_KEY` needed on systems using Claude Code login).
@@ -182,8 +178,3 @@ Automated smoke scripts are in `scripts/`:
 scripts/smoke-part1.sh          # 10 offline flat-mode tests (no API calls)
 scripts/smoke-part3-tui.sh      # 7 non-interactive TUI tests (no API calls)
 ```
-
-See `docs/superpowers/specs/` for design docs:
-
-- `2026-04-16-pitboss-design.md` — v0.1 flat dispatcher
-- `2026-04-17-hierarchical-orchestration-design.md` — v0.3 hierarchical mode
