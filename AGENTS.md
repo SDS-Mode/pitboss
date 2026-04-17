@@ -96,7 +96,7 @@ TOML, typically named `pitboss.toml`. Every field annotated below.
 | `emit_event_stream` | bool | no | false | Emit a JSONL event stream alongside summary.jsonl. |
 | `max_workers` | int | only if `[[lead]]` present | unset | Hierarchical: hard cap on concurrent + queued workers (1–16). |
 | `budget_usd` | float | only if `[[lead]]` present | unset | Hierarchical: soft cap with reservation accounting. Worker spawns fail with `budget exceeded` once `spent + reserved + next_estimate > budget`. |
-| `lead_timeout_secs` | int | only if `[[lead]]` present | unset | Hierarchical: wall-clock cap on the lead. |
+| `lead_timeout_secs` | int | only if `[[lead]]` present | 3600 (fallback) | Hierarchical: wall-clock cap on the lead. No upper bound — set generously for multi-hour orchestration plans (e.g. `21600` for a 6-hour plan executor). The 3600s fallback is tuned for single-task leads, not plan drivers. |
 
 ### `[defaults]`
 
