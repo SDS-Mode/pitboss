@@ -239,6 +239,7 @@ async fn execute_task(
                     token_usage: Default::default(),
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
+                    parent_task_id: None,
                 };
             }
         }
@@ -289,6 +290,7 @@ async fn execute_task(
         token_usage: outcome.token_usage,
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
+        parent_task_id: None,
     }
 }
 

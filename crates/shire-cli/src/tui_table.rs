@@ -169,6 +169,7 @@ mod tests {
             },
             claude_session_id: None,
             final_message_preview: None,
+            parent_task_id: None,
         }
     }
 

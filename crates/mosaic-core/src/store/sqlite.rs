@@ -241,6 +241,7 @@ fn fetch_task_records(
             },
             claude_session_id,
             final_message_preview,
+            parent_task_id: None,
         });
     }
     Ok(out)
@@ -475,6 +476,7 @@ mod sqlite_tests {
             token_usage: TokenUsage::default(),
             claude_session_id: None,
             final_message_preview: None,
+            parent_task_id: None,
         }
     }
 

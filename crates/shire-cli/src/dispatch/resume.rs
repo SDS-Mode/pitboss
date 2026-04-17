@@ -162,6 +162,7 @@ mod tests {
                 token_usage: TokenUsage::default(),
                 claude_session_id: session_id.map(str::to_string),
                 final_message_preview: None,
+                parent_task_id: None,
             })
             .collect();
 
