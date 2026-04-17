@@ -3,9 +3,15 @@
 //! Uses `rusqlite` with the `bundled` feature so no system libsqlite is
 //! required — Cargo builds `SQLite` from source.
 //!
-//! # Schema versioning note
-//! This implementation assumes a greenfield database (v0.2.1). A `schema_versions`
-//! table would be needed for safe schema evolution in future versions.
+//! ## Schema evolution
+//!
+//! The initial schema was introduced in v0.2.1. Additive changes (new
+//! nullable columns) use idempotent migrations inside `SqliteStore::new`
+//! that check `pragma_table_info(...)` and `ALTER TABLE` only when the
+//! column is absent. This keeps old DBs forward-compatible without a
+//! dedicated `schema_versions` table. Non-additive changes (dropped
+//! columns, type changes, non-null constraints on existing columns)
+//! would require a migration versioning scheme.
 //!
 //! # Concurrency
 //! `SQLite`'s default journal mode (DELETE) is used; WAL mode is not required for
@@ -644,6 +650,9 @@ mod sqlite_tests {
 
     #[tokio::test]
     async fn sqlite_migrates_old_db_missing_parent_column() {
+        // Covers both the initial migration (ALTER TABLE adds the column) and
+        // the re-open idempotency guard (second open skips ALTER TABLE because
+        // the column now exists).
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("old.db");
 
@@ -672,5 +681,8 @@ mod sqlite_tests {
         rec.parent_task_id = Some("parent-x".into());
         store.append_record(run_id, &rec).await.unwrap();
         // No panic, no error — column migration worked.
+
+        // Re-open: must not attempt ALTER TABLE again (column now exists).
+        let _store2 = SqliteStore::new(db_path.clone()).unwrap();
     }
 }
