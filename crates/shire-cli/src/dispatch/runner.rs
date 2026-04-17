@@ -318,8 +318,25 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     args
 }
 
+/// The six MCP tool names the lead needs permission to call.
+/// Format: `mcp__<server-name>__<tool>`, where `shire` is the server name
+/// we emit in `write_mcp_config`.
+pub const SHIRE_MCP_TOOLS: &[&str] = &[
+    "mcp__shire__spawn_worker",
+    "mcp__shire__worker_status",
+    "mcp__shire__wait_for_worker",
+    "mcp__shire__wait_for_any",
+    "mcp__shire__list_workers",
+    "mcp__shire__cancel_worker",
+];
+
 /// Builds the argv for spawning the lead subprocess, including the
 /// `--mcp-config` pointer to the generated MCP server config file.
+///
+/// Claude Code gates MCP tool use behind a permission prompt that can't be
+/// answered in `-p` (non-interactive) mode, so we always pre-allow the six
+/// shire MCP tools here. User-specified `tools` (from defaults / per-lead)
+/// are merged in alongside the MCP set.
 pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
     mcp_config: &std::path::Path,
@@ -329,10 +346,15 @@ pub fn lead_spawn_args(
         "stream-json".into(),
         "--verbose".into(),
     ];
-    if !lead.tools.is_empty() {
-        args.push("--allowedTools".into());
-        args.push(lead.tools.join(","));
+
+    // Build the allowed-tools set: user tools + shire MCP tools.
+    let mut allowed: Vec<String> = lead.tools.clone();
+    for t in SHIRE_MCP_TOOLS {
+        allowed.push((*t).to_string());
     }
+    args.push("--allowedTools".into());
+    args.push(allowed.join(","));
+
     args.push("--model".into());
     args.push(lead.model.clone());
     args.push("--mcp-config".into());
@@ -713,5 +735,33 @@ mod tests {
         assert!(args.iter().any(|a| a == "/tmp/cfg.json"));
         assert!(args.iter().any(|a| a == "-p"));
         assert!(args.iter().any(|a| a == "p"));
+    }
+
+    #[test]
+    fn lead_spawn_args_auto_allows_shire_mcp_tools() {
+        use crate::manifest::resolve::ResolvedLead;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        // User-declared tool preserved
+        assert!(list.contains("Read"), "expected user tool, got {list}");
+        // All six shire MCP tools present under the `mcp__shire__` prefix.
+        for t in SHIRE_MCP_TOOLS {
+            assert!(list.contains(t), "expected {t} in allowedTools, got: {list}");
+        }
     }
 }
