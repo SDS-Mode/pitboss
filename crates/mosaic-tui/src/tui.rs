@@ -126,6 +126,15 @@ pub fn format_tile_subtitle(state: &crate::state::AppState, idx: usize) -> Strin
     }
 }
 
+/// Count tiles that were spawned as workers (i.e. have a `parent_task_id`).
+pub fn workers_spawned(state: &crate::state::AppState) -> usize {
+    state
+        .tasks
+        .iter()
+        .filter(|t| t.parent_task_id.is_some())
+        .count()
+}
+
 // ---------------------------------------------------------------------------
 // Init / teardown
 // ---------------------------------------------------------------------------
@@ -244,8 +253,15 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
         String::new()
     };
 
+    let workers = workers_spawned(state);
+    let workers_part = if workers > 0 {
+        format!(" — {workers} workers spawned")
+    } else {
+        String::new()
+    };
+
     let title_text = format!(
-        " Mosaic — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part} "
+        " Mosaic — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part}{workers_part} "
     );
 
     let para = Paragraph::new(title_text)
@@ -991,5 +1007,16 @@ mod tests {
         let s = state(tiles);
         let sub = crate::tui::format_tile_subtitle(&s, 0);
         assert!(!sub.contains("←"));
+    }
+
+    #[test]
+    fn workers_spawned_counts_tiles_with_parent() {
+        let tiles = vec![
+            tile("lead", TileStatus::Running, None, 0, 0),
+            tile_with_parent("w-1", TileStatus::Running, Some("lead".into())),
+            tile_with_parent("w-2", TileStatus::Running, Some("lead".into())),
+        ];
+        let s = state(tiles);
+        assert_eq!(crate::tui::workers_spawned(&s), 2);
     }
 }
