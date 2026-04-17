@@ -503,3 +503,118 @@ async fn e2e_lead_request_approval_round_trip() {
 
     state.cancel.terminate();
 }
+
+#[tokio::test]
+async fn e2e_lead_reprompts_running_worker() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+
+    // Custom state: worker script holds until signal so the reprompt has
+    // something mid-flight to redirect.
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "lead prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(5.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    // Worker script emits init+result so session_id gets captured via the
+    // promote_task mpsc channel, THEN holds so the worker stays Running
+    // when reprompt_worker runs (reprompt requires session_id).
+    let hold_script = FakeScript::new()
+        .stdout_line(r#"{"type":"system","subtype":"init","session_id":"worker-sess"}"#)
+        .stdout_line(
+            r#"{"type":"result","session_id":"worker-sess","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(hold_script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+    ));
+
+    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+
+    // Spawn a worker, sleep for init+result to land (session_id captured),
+    // reprompt it.
+    let script = dir.path().join("script.jsonl");
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"original"},"bind":"w1"}}
+{"sleep_ms":200}
+{"mcp_call":{"name":"reprompt_worker","args":{"task_id":"$w1.task_id","prompt":"reconsider"},"bind":"rep"}}
+{"sleep_ms":100}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(outcome.exit_code, Some(0), "exit non-zero: {outcome:?}");
+
+    // Extract the worker's task_id for subsequent assertions.
+    let task_id = {
+        let workers = state.workers.read().await;
+        workers.keys().next().cloned().expect("at least one worker")
+    };
+
+    // events.jsonl should contain a reprompt entry.
+    let events_path = run_subdir.join("tasks").join(&task_id).join("events.jsonl");
+    let events = tokio::fs::read_to_string(&events_path).await.unwrap();
+    assert!(
+        events.contains("\"kind\":\"reprompt\""),
+        "events.jsonl missing reprompt: {events}"
+    );
+
+    // Counter bumped.
+    let counters = state
+        .worker_counters
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(counters.reprompt_count, 1);
+
+    state.cancel.terminate();
+}
