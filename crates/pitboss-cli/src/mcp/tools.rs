@@ -1808,6 +1808,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_reprompt_worker_from_done_errors() {
+        let state = test_state().await;
+        // Insert a Done worker — terminal state, no reprompt allowed.
+        let rec = pitboss_core::store::TaskRecord {
+            task_id: "w-done".into(),
+            status: pitboss_core::store::TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: std::path::PathBuf::from("/tmp/x"),
+            token_usage: Default::default(),
+            claude_session_id: Some("sess-done".into()),
+            final_message_preview: None,
+            parent_task_id: Some("lead".into()),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+        };
+        state
+            .workers
+            .write()
+            .await
+            .insert("w-done".into(), WorkerState::Done(rec));
+
+        let err = handle_reprompt_worker(
+            &state,
+            RepromptWorkerArgs {
+                task_id: "w-done".into(),
+                prompt: "retry".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("already completed"),
+            "expected 'already completed' in error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_request_approval_auto_approves() {
         use crate::dispatch::state::ApprovalPolicy;
         // Rebuild a state with AutoApprove.
