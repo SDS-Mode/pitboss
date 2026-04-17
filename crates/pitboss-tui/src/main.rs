@@ -54,6 +54,12 @@ enum Commands {
         #[arg(long, default_value_t = 30)]
         rows: u16,
     },
+    /// Print shell completion script for the given shell (bash, zsh, fish,
+    /// elvish, powershell) to stdout.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Open a specific run by UUID or directory name.
     #[command(external_subcommand)]
     Run(Vec<String>),
@@ -74,6 +80,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::Screenshot { run, cols, rows }) => {
             cmd_screenshot(run.as_deref(), cols, rows)
+        }
+        Some(Commands::Completions { shell }) => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "pitboss-tui", &mut std::io::stdout());
+            Ok(())
         }
         Some(Commands::Run(args)) => {
             if args.is_empty() {
@@ -320,5 +332,35 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> crate::state::AppSnapsh
         focus_log: Vec::new(),
         failed_count,
         run_started_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+
+    #[test]
+    fn completions_bash_contains_binary_name() {
+        // Smoke test: generate bash completions for pitboss-tui and confirm
+        // the output references the binary name. We're not validating the
+        // script content, just that the subcommand plumbing is wired up.
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(
+            clap_complete::Shell::Bash,
+            &mut cmd,
+            "pitboss-tui",
+            &mut buf,
+        );
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("pitboss-tui"),
+            "output should reference the binary name"
+        );
+        assert!(
+            s.contains("complete"),
+            "output should look like a completion script"
+        );
     }
 }

@@ -31,6 +31,12 @@ fn main() -> Result<()> {
         Command::McpBridge { socket } => {
             run_mcp_bridge(&socket);
         }
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = cli::Cli::command();
+            clap_complete::generate(shell, &mut cmd, "pitboss", &mut std::io::stdout());
+            std::process::exit(0);
+        }
     }
 }
 

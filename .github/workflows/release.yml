@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build + upload (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          # Add macos-latest / aarch64-apple-darwin / x86_64-apple-darwin
+          # when ready. For now Linux x86_64 is the floor.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --release --target "$TARGET" \
+            -p pitboss-cli -p pitboss-tui
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET}/release/pitboss" \
+             "target/${TARGET}/release/pitboss-tui" \
+             dist/
+          cd dist
+          tar czf "pitboss-${REF_NAME}-${TARGET}.tar.gz" pitboss pitboss-tui
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/pitboss-*.tar.gz
+          generate_release_notes: true

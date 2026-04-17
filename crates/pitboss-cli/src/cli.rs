@@ -60,4 +60,35 @@ pub enum Command {
         /// Path to the pitboss MCP unix socket to bridge stdio to.
         socket: PathBuf,
     },
+    /// Print shell completion script for the given shell (bash, zsh, fish,
+    /// elvish, powershell) to stdout.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completions_bash_contains_pitboss_name() {
+        // Smoke test: generate bash completions and confirm the output
+        // references the binary name. We're not validating the script
+        // content, just that the subcommand plumbing is wired correctly.
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(clap_complete::Shell::Bash, &mut cmd, "pitboss", &mut buf);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("pitboss"),
+            "output should reference the binary name"
+        );
+        assert!(
+            s.contains("complete"),
+            "output should look like a completion script"
+        );
+    }
 }
