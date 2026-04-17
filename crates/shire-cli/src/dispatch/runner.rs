@@ -70,6 +70,8 @@ pub async fn execute(
     for task in resolved.tasks.clone() {
         if cancel.is_draining() { break; }
         let permit = semaphore.clone().acquire_owned().await?;
+        // Re-check after potentially blocking on the semaphore.
+        if cancel.is_draining() { break; }
         let spawner = spawner.clone();
         let store = store.clone();
         let cancel = cancel.clone();
@@ -304,5 +306,63 @@ mod tests {
             let script = self.0[i % self.0.len()].clone();
             FakeSpawner::new(script).spawn(cmd).await
         }
+    }
+
+    #[tokio::test]
+    async fn halt_on_failure_drains_after_first_failure() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path());
+        let run_dir = TempDir::new().unwrap();
+
+        let make_task = |id: &str| ResolvedTask {
+            id: id.into(),
+            directory: dir.path().to_path_buf(),
+            prompt: "p".into(), branch: None,
+            model: "m".into(), effort: crate::manifest::schema::Effort::High,
+            tools: vec![], timeout_secs: 30,
+            use_worktree: false, env: Default::default(),
+        };
+
+        let resolved = crate::manifest::resolve::ResolvedManifest {
+            max_parallel: 1,    // serialize so ordering is deterministic
+            halt_on_failure: true,
+            run_dir: run_dir.path().to_path_buf(),
+            worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
+            emit_event_stream: false,
+            tasks: vec![make_task("a"), make_task("b"), make_task("c")],
+        };
+
+        let spawner = Arc::new(CyclingFake(
+            vec![
+                FakeScript::new()
+                    .stdout_line(r#"{"type":"result","session_id":"s","usage":{"input_tokens":0,"output_tokens":0}}"#)
+                    .exit_code(7),   // fails → cascade
+                FakeScript::new().exit_code(0),
+                FakeScript::new().exit_code(0),
+            ],
+            std::sync::Mutex::new(0),
+        ));
+        let store = Arc::new(JsonFileStore::new(run_dir.path().to_path_buf()));
+        let rc = execute(resolved, PathBuf::from("claude"), spawner, store.clone(), false)
+            .await.unwrap();
+        assert_eq!(rc, 1);
+
+        // Expect only task "a" recorded; others were skipped by the drain.
+        // summary.json should exist with tasks.len() == 1.
+        let summary_path = run_dir.path()
+            .join(store_run_id_dir(run_dir.path()))
+            .join("summary.json");
+        let bytes = std::fs::read(&summary_path).unwrap();
+        let s: RunSummary = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(s.tasks.len(), 1);
+    }
+
+    fn store_run_id_dir(root: &std::path::Path) -> String {
+        // Finds the single UUID-named subdir just created.
+        for entry in std::fs::read_dir(root).unwrap() {
+            let e = entry.unwrap();
+            if e.path().is_dir() { return e.file_name().to_string_lossy().to_string(); }
+        }
+        panic!("no run dir")
     }
 }
