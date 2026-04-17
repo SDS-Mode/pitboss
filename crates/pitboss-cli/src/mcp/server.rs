@@ -17,9 +17,9 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
-    handle_cancel_worker, handle_list_workers, handle_spawn_worker, handle_wait_for_any,
-    handle_wait_for_worker, handle_worker_status, SpawnWorkerArgs, TaskIdArgs, WaitForAnyArgs,
-    WaitForWorkerArgs,
+    handle_cancel_worker, handle_list_workers, handle_pause_worker, handle_spawn_worker,
+    handle_wait_for_any, handle_wait_for_worker, handle_worker_status, SpawnWorkerArgs, TaskIdArgs,
+    WaitForAnyArgs, WaitForWorkerArgs,
 };
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -126,6 +126,19 @@ impl PitbossHandler {
         Parameters(args): Parameters<TaskIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match handle_cancel_worker(&self.state, &args.task_id).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Pause a running worker. Snapshots its session id so continue_worker can resume."
+    )]
+    async fn pause_worker(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_pause_worker(&self.state, &args.task_id).await {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }

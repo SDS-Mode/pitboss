@@ -733,6 +733,41 @@ pub async fn handle_cancel_worker(
     Ok(CancelResult { ok: true })
 }
 
+pub async fn handle_pause_worker(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+) -> Result<CancelResult> {
+    let mut workers = state.workers.write().await;
+    let Some(entry) = workers.get(task_id).cloned() else {
+        anyhow::bail!("unknown task_id: {task_id}");
+    };
+    match entry {
+        WorkerState::Running {
+            session_id: Some(sid),
+            ..
+        } => {
+            let cancels = state.worker_cancels.read().await;
+            if let Some(tok) = cancels.get(task_id) {
+                tok.terminate();
+            }
+            workers.insert(
+                task_id.to_string(),
+                WorkerState::Paused {
+                    session_id: sid,
+                    paused_at: chrono::Utc::now(),
+                    prior_token_usage: Default::default(),
+                },
+            );
+            Ok(CancelResult { ok: true })
+        }
+        WorkerState::Running {
+            session_id: None, ..
+        } => anyhow::bail!("worker not yet initialized (no session_id)"),
+        WorkerState::Paused { .. } => anyhow::bail!("worker already paused"),
+        _ => anyhow::bail!("worker not in a pausable state"),
+    }
+}
+
 pub async fn handle_wait_for_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
@@ -1483,5 +1518,31 @@ mod tests {
         let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
         assert_eq!(back.summary, "spawn 3 workers");
         assert_eq!(back.timeout_secs, Some(60));
+    }
+
+    #[tokio::test]
+    async fn handle_pause_worker_pauses_running_worker() {
+        let state = test_state().await;
+        let worker_token = pitboss_core::session::CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), worker_token.clone());
+        state.workers.write().await.insert(
+            "w-1".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess".into()),
+            },
+        );
+        let res = handle_pause_worker(&state, "w-1").await.unwrap();
+        assert!(res.ok);
+        assert!(worker_token.is_terminated());
+        let workers = state.workers.read().await;
+        assert!(matches!(
+            workers.get("w-1").unwrap(),
+            WorkerState::Paused { .. }
+        ));
     }
 }
