@@ -658,6 +658,7 @@ dependencies = [
  "chrono",
  "git2",
  "libc",
+ "mosaic-core",
  "serde",
  "serde_json",
  "tempfile",

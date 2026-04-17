@@ -5,6 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 tokio       = { workspace = true }
 serde       = { workspace = true }
@@ -18,5 +22,6 @@ async-trait = { workspace = true }
 libc        = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-tokio    = { workspace = true, features = ["test-util"] }
+mosaic-core = { path = ".", features = ["test-support"] }
+tempfile    = { workspace = true }
+tokio       = { workspace = true, features = ["test-util"] }
