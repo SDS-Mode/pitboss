@@ -331,11 +331,35 @@ async fn run_worker(
         env: Default::default(),
     };
 
-    let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
-        .with_log_path(log_path.clone())
-        .with_stderr_log_path(stderr_path)
-        .run_to_completion(cancel, Duration::from_secs(timeout_secs))
-        .await;
+    let outcome = {
+        let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
+        let session_state = Arc::clone(&state);
+        let task_id_for_rx = task_id.clone();
+        let promote_task = tokio::spawn(async move {
+            if let Some(sid) = session_id_rx.recv().await {
+                let mut workers = session_state.workers.write().await;
+                if let Some(WorkerState::Running { started_at, .. }) =
+                    workers.get(&task_id_for_rx).cloned()
+                {
+                    workers.insert(
+                        task_id_for_rx,
+                        WorkerState::Running {
+                            started_at,
+                            session_id: Some(sid),
+                        },
+                    );
+                }
+            }
+        });
+        let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
+            .with_log_path(log_path.clone())
+            .with_stderr_log_path(stderr_path)
+            .with_session_id_tx(session_id_tx)
+            .run_to_completion(cancel, Duration::from_secs(timeout_secs))
+            .await;
+        promote_task.abort();
+        outcome
+    };
 
     let status = match outcome.final_state {
         pitboss_core::session::SessionState::Completed => TaskStatus::Success,
@@ -1263,5 +1287,36 @@ mod tests {
         assert!((initial_estimate_for("claude-haiku-4-5-20251001") - 0.10).abs() < 1e-9);
         assert!((initial_estimate_for("claude-sonnet-4-6-20251001") - 0.50).abs() < 1e-9);
         assert!((initial_estimate_for("claude-opus-4-7-20251001") - 2.00).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn running_worker_state_gets_session_id_after_init() {
+        use std::time::Duration;
+
+        let state = completing_test_state().await;
+        let mut rx = state.done_tx.subscribe();
+        let args = SpawnWorkerArgs {
+            prompt: "analyze".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        };
+        let spawn = handle_spawn_worker(&state, args).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("broadcast arrives")
+            .expect("broadcast open");
+
+        // Post-completion, the worker is in Done state. The session_id is
+        // preserved on TaskRecord via SessionOutcome. Assert it.
+        let workers = state.workers.read().await;
+        match workers.get(&spawn.task_id).unwrap() {
+            WorkerState::Done(rec) => {
+                assert_eq!(rec.claude_session_id.as_deref(), Some("sess_ok"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }
