@@ -258,6 +258,45 @@ pub async fn handle_wait_for_worker(
     }
 }
 
+pub async fn handle_wait_for_any(
+    state: &Arc<DispatchState>,
+    task_ids: &[String],
+    timeout_secs: Option<u64>,
+) -> Result<(String, TaskRecord)> {
+    if task_ids.is_empty() {
+        bail!("wait_for_any: task_ids is empty");
+    }
+
+    // Fast path: any already Done?
+    {
+        let workers = state.workers.read().await;
+        for id in task_ids {
+            if let Some(WorkerState::Done(rec)) = workers.get(id) {
+                return Ok((id.clone(), rec.clone()));
+            }
+        }
+    }
+
+    let mut rx = state.done_tx.subscribe();
+    let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
+
+    loop {
+        let result = tokio::time::timeout(wait_duration, rx.recv()).await;
+        match result {
+            Err(_) => bail!("wait_for_any timed out"),
+            Ok(Err(_)) => bail!("completion channel closed"),
+            Ok(Ok(completed_id)) => {
+                if task_ids.iter().any(|id| id == &completed_id) {
+                    let workers = state.workers.read().await;
+                    if let Some(WorkerState::Done(rec)) = workers.get(&completed_id) {
+                        return Ok((completed_id, rec.clone()));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +542,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_any_returns_first_completed() {
+        use mosaic_core::store::{TaskRecord, TaskStatus};
+        use std::time::Duration;
+
+        let state = test_state().await;
+        let ids = vec!["w-a".to_string(), "w-b".to_string(), "w-c".to_string()];
+        {
+            let mut w = state.workers.write().await;
+            for id in &ids {
+                w.insert(id.clone(), WorkerState::Pending);
+            }
+        }
+
+        // Race: w-b finishes first at 30ms, w-a at 100ms.
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let rec = TaskRecord {
+                task_id: "w-b".into(),
+                status: TaskStatus::Success,
+                exit_code: Some(0),
+                started_at: chrono::Utc::now(),
+                ended_at: chrono::Utc::now(),
+                duration_ms: 30,
+                worktree_path: None,
+                log_path: std::path::PathBuf::new(),
+                token_usage: Default::default(),
+                claude_session_id: None,
+                final_message_preview: None,
+                parent_task_id: Some("lead".into()),
+            };
+            let mut w = state_clone.workers.write().await;
+            w.insert("w-b".into(), WorkerState::Done(rec));
+            let _ = state_clone.done_tx.send("w-b".into());
+        });
+
+        let (winner_id, _rec) = handle_wait_for_any(&state, &ids, Some(5)).await.unwrap();
+        assert_eq!(winner_id, "w-b");
     }
 }
