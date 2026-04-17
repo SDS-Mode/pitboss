@@ -270,11 +270,32 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         }
     };
 
-    let resolved = match dispatch::build_resume_manifest(&run_subdir) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("shire resume: {e:#}");
-            std::process::exit(2);
+    // Detect hierarchical vs flat by peeking at resolved.json's `lead` field.
+    // Hierarchical runs re-spawn the lead with `--resume <session>`; flat runs
+    // re-spawn the surviving tasks.
+    let is_hierarchical = match std::fs::read(run_subdir.join("resolved.json")) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("lead").cloned())
+            .is_some_and(|l| !l.is_null()),
+        Err(_) => false,
+    };
+
+    let resolved = if is_hierarchical {
+        match dispatch::build_resume_hierarchical(&run_subdir) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("shire resume: {e:#}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        match dispatch::build_resume_manifest(&run_subdir) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("shire resume: {e:#}");
+                std::process::exit(2);
+            }
         }
     };
 
@@ -304,6 +325,25 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         // Use the prior run's run_dir so artifacts land alongside the original.
         // run_dir_override replaces both the base and the resolved manifest's run_dir.
         let effective_run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
+        if resolved.lead.is_some() {
+            return match dispatch::hierarchical::run_hierarchical(
+                resolved,
+                String::new(),
+                std::path::PathBuf::new(),
+                claude_bin,
+                claude_version,
+                Some(effective_run_dir),
+                false,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("hierarchical resume: {e:#}");
+                    1
+                }
+            };
+        }
         match dispatch::run_dispatch_inner(
             resolved,
             String::new(),

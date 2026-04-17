@@ -337,6 +337,10 @@ pub fn lead_spawn_args(
     args.push(lead.model.clone());
     args.push("--mcp-config".into());
     args.push(mcp_config.display().to_string());
+    if let Some(sess) = &lead.resume_session_id {
+        args.push("--resume".into());
+        args.push(sess.clone());
+    }
     args.push("-p".into());
     args.push(lead.prompt.clone());
     args
@@ -701,6 +705,7 @@ mod tests {
             timeout_secs: 60,
             use_worktree: false,
             env: Default::default(),
+            resume_session_id: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
         assert!(args.iter().any(|a| a == "--verbose"));

@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use mosaic_core::store::RunSummary;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
@@ -99,6 +100,57 @@ pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
         tasks: resumed_tasks,
         ..base
     })
+}
+
+/// Hierarchical-mode counterpart to `build_resume_manifest`. Reads
+/// `resolved.json` and `summary.json` from a prior hierarchical run, extracts
+/// the lead's `claude_session_id`, and returns a `ResolvedManifest` whose
+/// `lead.resume_session_id` is set so the caller can re-spawn the lead with
+/// `--resume`. Workers are NOT resumed — the lead decides what work to
+/// dispatch.
+///
+/// Errors if:
+/// - `resolved.json` / `summary.json` missing or unparseable
+/// - the prior run was not hierarchical (`lead.is_none()` in `resolved.json`)
+/// - the lead's record is not in `summary.json`
+/// - the lead has no `claude_session_id` (e.g. SpawnFailed before any output)
+pub fn build_resume_hierarchical(run_dir: &Path) -> Result<ResolvedManifest> {
+    let resolved_path = run_dir.join("resolved.json");
+    let bytes = std::fs::read(&resolved_path)
+        .with_context(|| format!("reading {}", resolved_path.display()))?;
+    let mut resolved: ResolvedManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", resolved_path.display()))?;
+
+    let lead = resolved
+        .lead
+        .as_mut()
+        .ok_or_else(|| anyhow!("run is not hierarchical (no lead in resolved.json)"))?;
+
+    let summary_path = run_dir.join("summary.json");
+    let summary_bytes = std::fs::read(&summary_path)
+        .with_context(|| format!("reading {}", summary_path.display()))?;
+    let summary: RunSummary = serde_json::from_slice(&summary_bytes)
+        .with_context(|| format!("parsing {}", summary_path.display()))?;
+
+    let lead_record = summary
+        .tasks
+        .iter()
+        .find(|r| r.task_id == lead.id)
+        .ok_or_else(|| anyhow!("no lead TaskRecord in summary"))?;
+
+    let session_id = lead_record
+        .claude_session_id
+        .clone()
+        .ok_or_else(|| anyhow!("lead has no claude_session_id — cannot resume"))?;
+
+    lead.resume_session_id = Some(session_id);
+
+    // Workers are dispatched dynamically by the lead — the `tasks` vec
+    // shouldn't carry flat-mode tasks anyway. Clear it defensively so a
+    // downstream flat-mode code path can't accidentally pick them up.
+    resolved.tasks.clear();
+
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -305,5 +357,89 @@ mod tests {
             manifest.tasks[0].resume_session_id.as_deref(),
             Some("sess_x")
         );
+    }
+
+    #[test]
+    fn build_resume_hierarchical_populates_session_id() {
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use mosaic_core::store::TaskRecord;
+        use mosaic_core::store::TaskStatus;
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let run_dir = dir.path();
+
+        // Synthesize resolved.json with a lead.
+        let mut resolved = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: run_dir.to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(ResolvedLead {
+                id: "triage".into(),
+                directory: PathBuf::from("/tmp"),
+                prompt: "original".into(),
+                branch: None,
+                model: "claude-haiku-4-5".into(),
+                effort: Effort::High,
+                tools: vec![],
+                timeout_secs: 600,
+                use_worktree: false,
+                env: Default::default(),
+                resume_session_id: None,
+            }),
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+        };
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec_pretty(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        // Synthesize summary.json with the lead's record including a session id.
+        let lead_record = TaskRecord {
+            task_id: "triage".into(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: PathBuf::new(),
+            token_usage: Default::default(),
+            claude_session_id: Some("session-abc-123".into()),
+            final_message_preview: None,
+            parent_task_id: None,
+        };
+        let summary = RunSummary {
+            run_id: Uuid::now_v7(),
+            manifest_path: PathBuf::new(),
+            shire_version: "0.3.0".into(),
+            claude_version: None,
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            total_duration_ms: 0,
+            tasks_total: 1,
+            tasks_failed: 0,
+            was_interrupted: false,
+            tasks: vec![lead_record],
+        };
+        std::fs::write(
+            run_dir.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).unwrap(),
+        )
+        .unwrap();
+
+        let resumed = build_resume_hierarchical(run_dir).unwrap();
+        let lead = resumed.lead.unwrap();
+        assert_eq!(lead.resume_session_id.as_deref(), Some("session-abc-123"));
+
+        // Silence unused warning on the un-reserialized resolved.
+        let _ = resolved.lead.take();
     }
 }

@@ -39,6 +39,10 @@ pub struct ResolvedLead {
     pub timeout_secs: u64,
     pub use_worktree: bool,
     pub env: HashMap<String, String>,
+    /// When set, pass `--resume <id>` to claude so the lead continues a prior
+    /// session. Populated by `build_resume_hierarchical`; `None` for fresh runs.
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +141,7 @@ fn resolve_lead(lead: &Lead, defaults: &Defaults, run: &RunConfig) -> Result<Res
         timeout_secs,
         use_worktree: lead.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
+        resume_session_id: None,
     })
 }
 

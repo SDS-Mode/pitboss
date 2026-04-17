@@ -408,6 +408,7 @@ mod tests {
             timeout_secs: 600,
             use_worktree: false,
             env: Default::default(),
+            resume_session_id: None,
         }
     }
 }
