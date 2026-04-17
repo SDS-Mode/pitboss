@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# smoke-part3-tui.sh — automates the non-interactive portions of the Mosaic TUI
+# smoke-part3-tui.sh — automates the non-interactive portions of the Pitboss TUI
 # smoke test (docs/v0.2-tui-smoke-test.md, tests 1-4, 6, 7, 9).
 #
 # Usage:
 #   scripts/smoke-part3-tui.sh
-#   MOSAIC=/path/to/mosaic scripts/smoke-part3-tui.sh
+#   PITBOSS_TUI=/path/to/pitboss-tui scripts/smoke-part3-tui.sh
 #
 # The interactive tests (5, 8) can't be automated — run those by hand after
 # this script passes.
 
 set -u
 
-MOSAIC="${MOSAIC:-$(pwd)/target/debug/mosaic}"
-if [ ! -x "$MOSAIC" ]; then
-    echo "ERROR: mosaic binary not found at $MOSAIC" >&2
-    echo "Run: cargo build -p mosaic-tui" >&2
+PITBOSS_TUI="${PITBOSS_TUI:-$(pwd)/target/debug/pitboss-tui}"
+if [ ! -x "$PITBOSS_TUI" ]; then
+    echo "ERROR: pitboss-tui binary not found at $PITBOSS_TUI" >&2
+    echo "Run: cargo build -p pitboss-tui" >&2
     exit 2
 fi
 
@@ -37,13 +37,13 @@ record() {
     printf "\n"
 }
 
-echo "=== Mosaic TUI Part 3 — non-interactive smoke tests ==="
-echo "binary: $MOSAIC"
+echo "=== Pitboss TUI Part 3 — non-interactive smoke tests ==="
+echo "binary: $PITBOSS_TUI"
 echo
 
 # -------------------------------------------------------------------
 # 1 — --help
-OUT=$("$MOSAIC" --help 2>&1); CODE=$?
+OUT=$("$PITBOSS_TUI" --help 2>&1); CODE=$?
 if [ "$CODE" = "0" ] && echo "$OUT" | grep -q "Usage:"; then
     record "1 --help" PASS
 else
@@ -52,8 +52,8 @@ fi
 
 # -------------------------------------------------------------------
 # 2 — --version
-OUT=$("$MOSAIC" --version 2>&1); CODE=$?
-if [ "$CODE" = "0" ] && echo "$OUT" | grep -qE "mosaic .*0\.1\.0"; then
+OUT=$("$PITBOSS_TUI" --version 2>&1); CODE=$?
+if [ "$CODE" = "0" ] && echo "$OUT" | grep -qE "pitboss-tui .*0\.1\.0"; then
     record "2 --version" PASS "$OUT"
 else
     record "2 --version" FAIL "exit $CODE: $OUT"
@@ -61,7 +61,7 @@ fi
 
 # -------------------------------------------------------------------
 # 3 — list (may be empty; both outcomes are OK)
-OUT=$("$MOSAIC" list 2>&1); CODE=$?
+OUT=$("$PITBOSS_TUI" list 2>&1); CODE=$?
 if [ "$CODE" = "0" ]; then
     if echo "$OUT" | grep -q "RUN ID"; then
         ROWS=$(echo "$OUT" | tail -n +3 | wc -l)
@@ -75,7 +75,7 @@ fi
 
 # -------------------------------------------------------------------
 # 4 — No-runs message via HOME override
-OUT=$(HOME=/tmp/definitely-no-shire-runs-here "$MOSAIC" list 2>&1); CODE=$?
+OUT=$(HOME=/tmp/definitely-no-shire-runs-here "$PITBOSS_TUI" list 2>&1); CODE=$?
 if [ "$CODE" = "0" ] && echo "$OUT" | grep -qi "No runs"; then
     record "4 no-runs message" PASS
 else
@@ -84,12 +84,12 @@ fi
 
 # -------------------------------------------------------------------
 # 6 — Prefix match (only if at least one run exists)
-POPULATED=$("$MOSAIC" list 2>&1 | tail -n +3 | head -1)
+POPULATED=$("$PITBOSS_TUI" list 2>&1 | tail -n +3 | head -1)
 if [ -n "$POPULATED" ]; then
     PREFIX=$(echo "$POPULATED" | awk '{print substr($1,1,8)}')
     # We can't actually launch the TUI non-interactively, but find_run_by_id
     # gets called before TUI init — a non-TTY failure means it DID find the run.
-    OUT=$("$MOSAIC" "$PREFIX" 2>&1); CODE=$?
+    OUT=$("$PITBOSS_TUI" "$PREFIX" 2>&1); CODE=$?
     # Expect error because no TTY, but error should NOT be "Run not found".
     if echo "$OUT" | grep -qi "Run .* not found"; then
         record "6 prefix match" FAIL "run lookup failed: $OUT"
@@ -102,7 +102,7 @@ fi
 
 # -------------------------------------------------------------------
 # 7 — Nonexistent run id
-OUT=$("$MOSAIC" zzzzzzz-not-a-real-run 2>&1); CODE=$?
+OUT=$("$PITBOSS_TUI" zzzzzzz-not-a-real-run 2>&1); CODE=$?
 if [ "$CODE" != "0" ] && echo "$OUT" | grep -qi "not found"; then
     record "7 nonexistent run" PASS "exit $CODE as expected"
 else
@@ -111,7 +111,7 @@ fi
 
 # -------------------------------------------------------------------
 # 9 — Non-TTY rejection
-OUT=$(echo "" | "$MOSAIC" 2>&1); CODE=$?
+OUT=$(echo "" | "$PITBOSS_TUI" 2>&1); CODE=$?
 if [ "$CODE" != "0" ]; then
     record "9 non-TTY fails explicitly" PASS "exit $CODE"
 else
@@ -120,8 +120,8 @@ fi
 
 # -------------------------------------------------------------------
 # Interactive tests (5, 8) — cannot automate
-record "5 open most recent (interactive)" SKIP "run mosaic manually in a real TTY"
-record "8 live updates (interactive)"    SKIP "pair with a running shire dispatch"
+record "5 open most recent (interactive)" SKIP "run pitboss-tui manually in a real TTY"
+record "8 live updates (interactive)"    SKIP "pair with a running pitboss dispatch"
 
 # -------------------------------------------------------------------
 echo
@@ -150,6 +150,6 @@ fi
 
 echo
 echo "Non-interactive Part 3 green. Run tests 5 + 8 manually in a real terminal:"
-echo "  $MOSAIC              # test 5: grid renders, keybindings work"
-echo "  # (in parallel with a running shire dispatch — test 8)"
+echo "  $PITBOSS_TUI              # test 5: grid renders, keybindings work"
+echo "  # (in parallel with a running pitboss dispatch — test 8)"
 exit 0

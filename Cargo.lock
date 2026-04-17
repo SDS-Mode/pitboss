@@ -1027,42 +1027,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "git2",
- "libc",
- "mosaic-core",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "mosaic-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "mosaic-core",
- "ratatui",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1156,6 +1120,68 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pitboss-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "atty",
+ "chrono",
+ "clap",
+ "fake-mcp-client",
+ "git2",
+ "libc",
+ "pitboss-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "pitboss-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "git2",
+ "libc",
+ "pitboss-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "pitboss-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "pitboss-core",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "pkg-config"
@@ -1494,32 +1520,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
  "dirs",
-]
-
-[[package]]
-name = "shire-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "atty",
- "chrono",
- "clap",
- "fake-mcp-client",
- "git2",
- "libc",
- "mosaic-core",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "shellexpand",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

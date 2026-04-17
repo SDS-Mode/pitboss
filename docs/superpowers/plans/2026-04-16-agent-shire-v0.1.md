@@ -4,7 +4,7 @@
 
 **Goal:** Build the v0.1 headless Rust dispatcher for parallel Claude Code agents ("Agent Shire"), per `docs/superpowers/specs/2026-04-16-agent-shire-design.md`.
 
-**Architecture:** Cargo workspace with two crates — `mosaic-core` (library: process/parser/session/worktree/store machinery) and `shire-cli` (binary: manifest loader + dispatcher). Plus a `tests-support/fake-claude` workspace member used only for integration tests. All async via tokio. TDD throughout with injected `ProcessSpawner` for unit tests and a scripted fake binary for end-to-end tests.
+**Architecture:** Cargo workspace with two crates — `pitboss-core` (library: process/parser/session/worktree/store machinery) and `pitboss-cli` (binary: manifest loader + dispatcher). Plus a `tests-support/fake-claude` workspace member used only for integration tests. All async via tokio. TDD throughout with injected `ProcessSpawner` for unit tests and a scripted fake binary for end-to-end tests.
 
 **Tech Stack:** Rust stable, tokio, serde/serde_json, toml, clap, git2, uuid (v7), chrono, thiserror, anyhow, tracing, async-trait, shellexpand, atty, tempfile.
 
@@ -27,10 +27,10 @@
 - Create: `Cargo.toml`
 - Create: `rust-toolchain.toml`
 - Create: `.gitignore`
-- Create: `crates/mosaic-core/Cargo.toml`
-- Create: `crates/mosaic-core/src/lib.rs`
-- Create: `crates/shire-cli/Cargo.toml`
-- Create: `crates/shire-cli/src/main.rs`
+- Create: `crates/pitboss-core/Cargo.toml`
+- Create: `crates/pitboss-core/src/lib.rs`
+- Create: `crates/pitboss-cli/Cargo.toml`
+- Create: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Write workspace manifest**
 
@@ -40,8 +40,8 @@ Create `Cargo.toml`:
 [workspace]
 resolver = "2"
 members = [
-    "crates/mosaic-core",
-    "crates/shire-cli",
+    "crates/pitboss-core",
+    "crates/pitboss-cli",
 ]
 
 [workspace.package]
@@ -92,13 +92,13 @@ Cargo.lock.bak
 *.swp
 ```
 
-- [ ] **Step 4: Write mosaic-core Cargo.toml**
+- [ ] **Step 4: Write pitboss-core Cargo.toml**
 
-Create `crates/mosaic-core/Cargo.toml`:
+Create `crates/pitboss-core/Cargo.toml`:
 
 ```toml
 [package]
-name         = "mosaic-core"
+name         = "pitboss-core"
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
@@ -120,12 +120,12 @@ tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["test-util"] }
 ```
 
-- [ ] **Step 5: Write mosaic-core lib.rs placeholder**
+- [ ] **Step 5: Write pitboss-core lib.rs placeholder**
 
-Create `crates/mosaic-core/src/lib.rs`:
+Create `crates/pitboss-core/src/lib.rs`:
 
 ```rust
-//! mosaic-core — shared runtime for Agent Shire and future Mosaic TUI.
+//! pitboss-core — shared runtime for Agent Shire and future Mosaic TUI.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic)]
@@ -143,13 +143,13 @@ mod smoke {
 }
 ```
 
-- [ ] **Step 6: Write shire-cli Cargo.toml**
+- [ ] **Step 6: Write pitboss-cli Cargo.toml**
 
-Create `crates/shire-cli/Cargo.toml`:
+Create `crates/pitboss-cli/Cargo.toml`:
 
 ```toml
 [package]
-name         = "shire-cli"
+name         = "pitboss-cli"
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
@@ -160,7 +160,7 @@ name = "shire"
 path = "src/main.rs"
 
 [dependencies]
-mosaic-core        = { path = "../mosaic-core" }
+pitboss-core        = { path = "../pitboss-core" }
 tokio              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
@@ -178,9 +178,9 @@ chrono             = { workspace = true }
 tempfile = { workspace = true }
 ```
 
-- [ ] **Step 7: Write shire-cli main.rs placeholder**
+- [ ] **Step 7: Write pitboss-cli main.rs placeholder**
 
-Create `crates/shire-cli/src/main.rs`:
+Create `crates/pitboss-cli/src/main.rs`:
 
 ```rust
 fn main() {
@@ -191,16 +191,16 @@ fn main() {
 - [ ] **Step 8: Verify workspace builds**
 
 Run: `cargo build --workspace`
-Expected: Successful build, one `shire` binary at `target/debug/shire`.
+Expected: Successful build, one `pitboss` binary at `target/debug/shire`.
 
-Run: `cargo test -p mosaic-core`
+Run: `cargo test -p pitboss-core`
 Expected: `test smoke::version_is_set ... ok`, 1 passed.
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add Cargo.toml rust-toolchain.toml .gitignore crates/
-git commit -m "Add Cargo workspace skeleton with mosaic-core and shire-cli"
+git commit -m "Add Cargo workspace skeleton with pitboss-core and pitboss-cli"
 ```
 
 ---
@@ -239,8 +239,8 @@ cargo test --workspace
 
 ## Layout
 
-- `crates/mosaic-core/` — library: session/process/parser/worktree/store machinery
-- `crates/shire-cli/`   — binary: `shire` CLI that consumes the library
+- `crates/pitboss-core/` — library: session/process/parser/worktree/store machinery
+- `crates/pitboss-cli/`   — binary: `pitboss` CLI that consumes the library
 - `tests-support/fake-claude/` — scripted fake `claude` used only in integration tests
 - `docs/` — design spec and implementation plan
 ```
@@ -286,22 +286,22 @@ git commit -m "Add cargo lint/tidy aliases"
 
 ---
 
-## Phase 1 — Parser (mosaic-core)
+## Phase 1 — Parser (pitboss-core)
 
 The parser is pure — no I/O, no async. Fixture-driven tests read canonical stream-json lines and assert on the emitted `Event`. Order of tasks: types first, then one event family per task.
 
 ### Task 4: Define Event enum, ParseError, and parse_line skeleton
 
 **Files:**
-- Create: `crates/mosaic-core/src/parser/mod.rs`
-- Create: `crates/mosaic-core/src/parser/events.rs`
-- Create: `crates/mosaic-core/src/error.rs`
-- Modify: `crates/mosaic-core/src/lib.rs`
-- Test: `crates/mosaic-core/src/parser/mod.rs` (inline `#[cfg(test)]`)
+- Create: `crates/pitboss-core/src/parser/mod.rs`
+- Create: `crates/pitboss-core/src/parser/events.rs`
+- Create: `crates/pitboss-core/src/error.rs`
+- Modify: `crates/pitboss-core/src/lib.rs`
+- Test: `crates/pitboss-core/src/parser/mod.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `crates/mosaic-core/src/parser/mod.rs` (create file):
+Add to `crates/pitboss-core/src/parser/mod.rs` (create file):
 
 ```rust
 //! Line-oriented parser for Claude Code `--output-format stream-json` output.
@@ -335,7 +335,7 @@ mod tests {
 }
 ```
 
-Add to `crates/mosaic-core/src/error.rs` (create file):
+Add to `crates/pitboss-core/src/error.rs` (create file):
 
 ```rust
 use std::fmt;
@@ -361,7 +361,7 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
 fn _unused_fmt_import(_: fmt::Arguments) {}
 ```
 
-Add to `crates/mosaic-core/src/parser/events.rs` (create file):
+Add to `crates/pitboss-core/src/parser/events.rs` (create file):
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -408,10 +408,10 @@ impl TokenUsage {
 pub(crate) fn _reserved_utc(_: DateTime<Utc>) {}
 ```
 
-Modify `crates/mosaic-core/src/lib.rs` — replace contents:
+Modify `crates/pitboss-core/src/lib.rs` — replace contents:
 
 ```rust
-//! mosaic-core — shared runtime for Agent Shire and future Mosaic TUI.
+//! pitboss-core — shared runtime for Agent Shire and future Mosaic TUI.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic)]
@@ -433,12 +433,12 @@ mod smoke {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p mosaic-core parser::tests::empty_line_is_malformed`
+Run: `cargo test -p pitboss-core parser::tests::empty_line_is_malformed`
 Expected: PANIC on `unimplemented!("parse_line")`.
 
 - [ ] **Step 3: Implement minimal parse_line (empty + unknown paths)**
 
-Replace `crates/mosaic-core/src/parser/mod.rs` with:
+Replace `crates/pitboss-core/src/parser/mod.rs` with:
 
 ```rust
 //! Line-oriented parser for Claude Code `--output-format stream-json` output.
@@ -481,13 +481,13 @@ mod tests {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p mosaic-core parser`
+Run: `cargo test -p pitboss-core parser`
 Expected: `test parser::tests::empty_line_is_malformed ... ok`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/
+git add crates/pitboss-core/
 git commit -m "Add parser skeleton with Event enum and ParseError"
 ```
 
@@ -496,12 +496,12 @@ git commit -m "Add parser skeleton with Event enum and ParseError"
 ### Task 5: Parse `system` events
 
 **Files:**
-- Modify: `crates/mosaic-core/src/parser/mod.rs`
-- Test: `crates/mosaic-core/src/parser/mod.rs`
+- Modify: `crates/pitboss-core/src/parser/mod.rs`
+- Test: `crates/pitboss-core/src/parser/mod.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to the `tests` module in `crates/mosaic-core/src/parser/mod.rs`:
+Append to the `tests` module in `crates/pitboss-core/src/parser/mod.rs`:
 
 ```rust
     #[test]
@@ -521,7 +521,7 @@ Append to the `tests` module in `crates/mosaic-core/src/parser/mod.rs`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core parser::tests::parses_system_init`
+Run: `cargo test -p pitboss-core parser::tests::parses_system_init`
 Expected: FAIL — assertion mismatch (got `Unknown`, expected `System`).
 
 - [ ] **Step 3: Implement system dispatch**
@@ -540,13 +540,13 @@ Replace the `match ty` block in `parse_line`:
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core parser`
+Run: `cargo test -p pitboss-core parser`
 Expected: both new tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/parser/mod.rs
+git add crates/pitboss-core/src/parser/mod.rs
 git commit -m "Parse system events in stream-json"
 ```
 
@@ -555,7 +555,7 @@ git commit -m "Parse system events in stream-json"
 ### Task 6: Parse `assistant` events (text and tool_use)
 
 **Files:**
-- Modify: `crates/mosaic-core/src/parser/mod.rs`
+- Modify: `crates/pitboss-core/src/parser/mod.rs`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -600,7 +600,7 @@ Append to the `tests` module:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core parser::tests::parses_assistant_text`
+Run: `cargo test -p pitboss-core parser::tests::parses_assistant_text`
 Expected: FAIL — no match arm for "assistant".
 
 - [ ] **Step 3: Implement assistant dispatch**
@@ -661,13 +661,13 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Event, ParseE
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core parser`
+Run: `cargo test -p pitboss-core parser`
 Expected: all assistant tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/parser/mod.rs
+git add crates/pitboss-core/src/parser/mod.rs
 git commit -m "Parse assistant text and tool_use events"
 ```
 
@@ -676,7 +676,7 @@ git commit -m "Parse assistant text and tool_use events"
 ### Task 7: Parse `user` (tool_result) events
 
 **Files:**
-- Modify: `crates/mosaic-core/src/parser/mod.rs`
+- Modify: `crates/pitboss-core/src/parser/mod.rs`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -703,7 +703,7 @@ Append to the `tests` module:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core parser::tests::parses_user_tool_result_string`
+Run: `cargo test -p pitboss-core parser::tests::parses_user_tool_result_string`
 Expected: FAIL — no match arm for "user".
 
 - [ ] **Step 3: Implement user dispatch**
@@ -749,13 +749,13 @@ fn parse_user(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError>
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core parser`
+Run: `cargo test -p pitboss-core parser`
 Expected: both user tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/parser/mod.rs
+git add crates/pitboss-core/src/parser/mod.rs
 git commit -m "Parse user tool_result events"
 ```
 
@@ -764,7 +764,7 @@ git commit -m "Parse user tool_result events"
 ### Task 8: Parse `result` events with usage extraction
 
 **Files:**
-- Modify: `crates/mosaic-core/src/parser/mod.rs`
+- Modify: `crates/pitboss-core/src/parser/mod.rs`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -820,7 +820,7 @@ Append to the `tests` module:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core parser::tests::parses_result_with_usage`
+Run: `cargo test -p pitboss-core parser::tests::parses_result_with_usage`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement result dispatch**
@@ -880,13 +880,13 @@ fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core parser`
+Run: `cargo test -p pitboss-core parser`
 Expected: all result tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/parser/mod.rs
+git add crates/pitboss-core/src/parser/mod.rs
 git commit -m "Parse result events and extract token usage"
 ```
 
@@ -895,7 +895,7 @@ git commit -m "Parse result events and extract token usage"
 ### Task 9: Parser tolerance and cleanup
 
 **Files:**
-- Modify: `crates/mosaic-core/src/parser/mod.rs`
+- Modify: `crates/pitboss-core/src/parser/mod.rs`
 
 - [ ] **Step 1: Write tests pinning tolerance contract**
 
@@ -936,7 +936,7 @@ Append to the `tests` module:
 
 - [ ] **Step 2: Run tests — should all pass already**
 
-Run: `cargo test -p mosaic-core parser`
+Run: `cargo test -p pitboss-core parser`
 Expected: all pass (tolerance behaviors are already implemented by Task 4's fallback branch and using `serde_json::Value`).
 
 If any fail, fix inline in `parse_line` — the intent is already correct, only bugs to repair. Do not broaden scope.
@@ -944,27 +944,27 @@ If any fail, fix inline in `parse_line` — the intent is already correct, only 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/parser/mod.rs
+git add crates/pitboss-core/src/parser/mod.rs
 git commit -m "Pin parser tolerance contract with tests"
 ```
 
 ---
 
-## Phase 2 — Process Layer (mosaic-core)
+## Phase 2 — Process Layer (pitboss-core)
 
 Two traits (`ProcessSpawner`, `ChildProcess`), one tokio real impl, and a `FakeSpawner` used by unit tests elsewhere. Keeping the trait object-safe via `#[async_trait]`.
 
 ### Task 10: Define ProcessSpawner and ChildProcess traits with types
 
 **Files:**
-- Create: `crates/mosaic-core/src/process/mod.rs`
-- Create: `crates/mosaic-core/src/process/spawner.rs`
-- Modify: `crates/mosaic-core/src/lib.rs`
-- Modify: `crates/mosaic-core/src/error.rs`
+- Create: `crates/pitboss-core/src/process/mod.rs`
+- Create: `crates/pitboss-core/src/process/spawner.rs`
+- Modify: `crates/pitboss-core/src/lib.rs`
+- Modify: `crates/pitboss-core/src/error.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/mosaic-core/src/process/mod.rs`:
+Create `crates/pitboss-core/src/process/mod.rs`:
 
 ```rust
 //! Process spawn abstraction. Real impl uses tokio; tests inject fakes.
@@ -994,7 +994,7 @@ mod tests {
 }
 ```
 
-Create `crates/mosaic-core/src/process/spawner.rs`:
+Create `crates/pitboss-core/src/process/spawner.rs`:
 
 ```rust
 use std::collections::HashMap;
@@ -1040,7 +1040,7 @@ pub trait ProcessSpawner: Send + Sync + 'static {
 }
 ```
 
-Add to `crates/mosaic-core/src/error.rs`:
+Add to `crates/pitboss-core/src/error.rs`:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -1056,10 +1056,10 @@ pub enum SpawnError {
 }
 ```
 
-Modify `crates/mosaic-core/src/lib.rs` — replace contents:
+Modify `crates/pitboss-core/src/lib.rs` — replace contents:
 
 ```rust
-//! mosaic-core — shared runtime for Agent Shire and future Mosaic TUI.
+//! pitboss-core — shared runtime for Agent Shire and future Mosaic TUI.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic)]
@@ -1082,13 +1082,13 @@ mod smoke {
 
 - [ ] **Step 2: Run tests to verify they compile and pass**
 
-Run: `cargo test -p mosaic-core process`
+Run: `cargo test -p pitboss-core process`
 Expected: `spawn_cmd_is_constructible ... ok`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/process/ crates/mosaic-core/src/lib.rs crates/mosaic-core/src/error.rs
+git add crates/pitboss-core/src/process/ crates/pitboss-core/src/lib.rs crates/pitboss-core/src/error.rs
 git commit -m "Define ProcessSpawner and ChildProcess traits"
 ```
 
@@ -1097,12 +1097,12 @@ git commit -m "Define ProcessSpawner and ChildProcess traits"
 ### Task 11: Implement TokioSpawner (real process spawning)
 
 **Files:**
-- Create: `crates/mosaic-core/src/process/tokio_impl.rs`
-- Modify: `crates/mosaic-core/src/process/mod.rs`
+- Create: `crates/pitboss-core/src/process/tokio_impl.rs`
+- Modify: `crates/pitboss-core/src/process/mod.rs`
 
 - [ ] **Step 1: Write failing test (uses `echo` as a stable cross-platform-ish command)**
 
-Append to `crates/mosaic-core/src/process/mod.rs`:
+Append to `crates/pitboss-core/src/process/mod.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1149,7 +1149,7 @@ mod real_tests {
 }
 ```
 
-Update the module declaration in `crates/mosaic-core/src/process/mod.rs`:
+Update the module declaration in `crates/pitboss-core/src/process/mod.rs`:
 
 ```rust
 pub mod spawner;
@@ -1161,12 +1161,12 @@ pub use tokio_impl::TokioSpawner;
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core process::real_tests`
+Run: `cargo test -p pitboss-core process::real_tests`
 Expected: FAIL — `TokioSpawner` undefined.
 
 - [ ] **Step 3: Implement TokioSpawner**
 
-Create `crates/mosaic-core/src/process/tokio_impl.rs`:
+Create `crates/pitboss-core/src/process/tokio_impl.rs`:
 
 ```rust
 use std::pin::Pin;
@@ -1259,7 +1259,7 @@ impl ProcessSpawner for TokioSpawner {
 }
 ```
 
-Add `libc` to `crates/mosaic-core/Cargo.toml` dependencies (SIGTERM on unix):
+Add `libc` to `crates/pitboss-core/Cargo.toml` dependencies (SIGTERM on unix):
 
 ```toml
 [dependencies]
@@ -1273,11 +1273,11 @@ Also add to workspace root `Cargo.toml` `[workspace.dependencies]`:
 libc = "0.2"
 ```
 
-Then change mosaic-core's dependency to `libc = { workspace = true }`.
+Then change pitboss-core's dependency to `libc = { workspace = true }`.
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core process`
+Run: `cargo test -p pitboss-core process`
 Expected: both real_tests pass.
 
 Run: `cargo lint`
@@ -1286,7 +1286,7 @@ Expected: no clippy warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/ Cargo.toml
+git add crates/pitboss-core/ Cargo.toml
 git commit -m "Implement TokioSpawner using tokio::process::Command"
 ```
 
@@ -1295,14 +1295,14 @@ git commit -m "Implement TokioSpawner using tokio::process::Command"
 ### Task 12: FakeSpawner for deterministic unit tests
 
 **Files:**
-- Create: `crates/mosaic-core/src/process/fake.rs`
-- Modify: `crates/mosaic-core/src/process/mod.rs`
+- Create: `crates/pitboss-core/src/process/fake.rs`
+- Modify: `crates/pitboss-core/src/process/mod.rs`
 
 `FakeSpawner` is `#[cfg(feature = "test-support")]`-gated so external consumers can opt into it. We'll enable that feature in dev-dependencies automatically.
 
 - [ ] **Step 1: Add feature flag**
 
-Modify `crates/mosaic-core/Cargo.toml`:
+Modify `crates/pitboss-core/Cargo.toml`:
 
 ```toml
 [features]
@@ -1321,11 +1321,11 @@ all-features = true
 doctest = false
 ```
 
-And ensure mosaic-core's own dev-tests enable it. Add a `[dev-dependencies]` self-entry:
+And ensure pitboss-core's own dev-tests enable it. Add a `[dev-dependencies]` self-entry:
 
 ```toml
 [dev-dependencies]
-mosaic-core = { path = ".", features = ["test-support"] }
+pitboss-core = { path = ".", features = ["test-support"] }
 tempfile    = { workspace = true }
 tokio       = { workspace = true, features = ["test-util"] }
 ```
@@ -1334,7 +1334,7 @@ tokio       = { workspace = true, features = ["test-util"] }
 
 - [ ] **Step 2: Write failing test**
 
-Append to `crates/mosaic-core/src/process/mod.rs`:
+Append to `crates/pitboss-core/src/process/mod.rs`:
 
 ```rust
 #[cfg(all(test, feature = "test-support"))]
@@ -1386,7 +1386,7 @@ mod fake_tests {
 }
 ```
 
-Update the module declaration in `crates/mosaic-core/src/process/mod.rs`:
+Update the module declaration in `crates/pitboss-core/src/process/mod.rs`:
 
 ```rust
 pub mod spawner;
@@ -1401,12 +1401,12 @@ pub use tokio_impl::TokioSpawner;
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core --features test-support process::fake_tests`
+Run: `cargo test -p pitboss-core --features test-support process::fake_tests`
 Expected: FAIL — `FakeSpawner` undefined.
 
 - [ ] **Step 4: Implement FakeSpawner**
 
-Create `crates/mosaic-core/src/process/fake.rs`:
+Create `crates/pitboss-core/src/process/fake.rs`:
 
 ```rust
 use std::pin::Pin;
@@ -1581,32 +1581,32 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
 
 - [ ] **Step 5: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core --features test-support process`
+Run: `cargo test -p pitboss-core --features test-support process`
 Expected: fake_tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/mosaic-core/
+git add crates/pitboss-core/
 git commit -m "Add FakeSpawner under test-support feature"
 ```
 
 ---
 
-## Phase 3 — Session Layer (mosaic-core)
+## Phase 3 — Session Layer (pitboss-core)
 
 The `SessionHandle` drives one Claude subprocess from spawn to outcome. It owns: the child, the parser loop, a state machine, a cancel token, and a log writer. Tested entirely against `FakeSpawner`.
 
 ### Task 13: CancelToken with drain + terminate channels
 
 **Files:**
-- Create: `crates/mosaic-core/src/session/mod.rs`
-- Create: `crates/mosaic-core/src/session/cancel.rs`
-- Modify: `crates/mosaic-core/src/lib.rs`
+- Create: `crates/pitboss-core/src/session/mod.rs`
+- Create: `crates/pitboss-core/src/session/cancel.rs`
+- Modify: `crates/pitboss-core/src/lib.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/mosaic-core/src/session/mod.rs`:
+Create `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 //! Session handle and cancellation machinery.
@@ -1616,7 +1616,7 @@ pub mod cancel;
 pub use cancel::CancelToken;
 ```
 
-Create `crates/mosaic-core/src/session/cancel.rs`:
+Create `crates/pitboss-core/src/session/cancel.rs`:
 
 ```rust
 use tokio::sync::watch;
@@ -1693,7 +1693,7 @@ mod tests {
 }
 ```
 
-Modify `crates/mosaic-core/src/lib.rs` to add:
+Modify `crates/pitboss-core/src/lib.rs` to add:
 
 ```rust
 pub mod session;
@@ -1703,13 +1703,13 @@ pub mod session;
 
 - [ ] **Step 2: Run tests to verify they fail (compile)**
 
-Run: `cargo test -p mosaic-core session::cancel`
+Run: `cargo test -p pitboss-core session::cancel`
 Expected: compiles and tests pass (pure-logic module).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/session/ crates/mosaic-core/src/lib.rs
+git add crates/pitboss-core/src/session/ crates/pitboss-core/src/lib.rs
 git commit -m "Add CancelToken with drain and terminate channels"
 ```
 
@@ -1718,12 +1718,12 @@ git commit -m "Add CancelToken with drain and terminate channels"
 ### Task 14: SessionState enum with transition invariants
 
 **Files:**
-- Create: `crates/mosaic-core/src/session/state.rs`
-- Modify: `crates/mosaic-core/src/session/mod.rs`
+- Create: `crates/pitboss-core/src/session/state.rs`
+- Modify: `crates/pitboss-core/src/session/mod.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/mosaic-core/src/session/state.rs`:
+Create `crates/pitboss-core/src/session/state.rs`:
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -1781,7 +1781,7 @@ mod tests {
 }
 ```
 
-Modify `crates/mosaic-core/src/session/mod.rs`:
+Modify `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 //! Session handle and cancellation machinery.
@@ -1795,13 +1795,13 @@ pub use state::SessionState;
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core session::state`
+Run: `cargo test -p pitboss-core session::state`
 Expected: all pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/session/
+git add crates/pitboss-core/src/session/
 git commit -m "Add SessionState enum with terminal-state check"
 ```
 
@@ -1812,14 +1812,14 @@ git commit -m "Add SessionState enum with terminal-state check"
 This is the biggest task in the plan. Use the `test-support` feature. The SessionHandle owns the full pipeline: spawn → read stdout → parse → update state → observe exit → build SessionOutcome.
 
 **Files:**
-- Create: `crates/mosaic-core/src/session/outcome.rs`
-- Create: `crates/mosaic-core/src/session/handle.rs`
-- Modify: `crates/mosaic-core/src/session/mod.rs`
-- Modify: `crates/mosaic-core/src/error.rs`
+- Create: `crates/pitboss-core/src/session/outcome.rs`
+- Create: `crates/pitboss-core/src/session/handle.rs`
+- Modify: `crates/pitboss-core/src/session/mod.rs`
+- Modify: `crates/pitboss-core/src/error.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/mosaic-core/src/session/handle.rs` (skeleton first — real impl follows):
+Create `crates/pitboss-core/src/session/handle.rs` (skeleton first — real impl follows):
 
 ```rust
 use std::path::PathBuf;
@@ -1836,7 +1836,7 @@ use crate::process::{ProcessSpawner, SpawnCmd};
 use super::{CancelToken, SessionState};
 use super::outcome::SessionOutcome;
 
-/// One Claude Code session under mosaic-core's supervision.
+/// One Claude Code session under pitboss-core's supervision.
 pub struct SessionHandle {
     task_id: String,
     spawner: Arc<dyn ProcessSpawner>,
@@ -1865,7 +1865,7 @@ impl SessionHandle {
 }
 ```
 
-Create `crates/mosaic-core/src/session/outcome.rs`:
+Create `crates/pitboss-core/src/session/outcome.rs`:
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -1893,7 +1893,7 @@ impl SessionOutcome {
 }
 ```
 
-Add to `crates/mosaic-core/src/error.rs`:
+Add to `crates/pitboss-core/src/error.rs`:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -1906,7 +1906,7 @@ pub enum SessionError {
 }
 ```
 
-Modify `crates/mosaic-core/src/session/mod.rs`:
+Modify `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 //! Session handle and cancellation machinery.
@@ -1922,7 +1922,7 @@ pub use outcome::SessionOutcome;
 pub use state::SessionState;
 ```
 
-Write the failing test by appending to `crates/mosaic-core/src/session/mod.rs`:
+Write the failing test by appending to `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 #[cfg(all(test, feature = "test-support"))]
@@ -1985,12 +1985,12 @@ mod happy_path_tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core --features test-support session::happy_path_tests`
+Run: `cargo test -p pitboss-core --features test-support session::happy_path_tests`
 Expected: PANIC on `unimplemented!("run_to_completion")`.
 
 - [ ] **Step 3: Implement run_to_completion**
 
-Replace `crates/mosaic-core/src/session/handle.rs` with:
+Replace `crates/pitboss-core/src/session/handle.rs` with:
 
 ```rust
 use std::path::PathBuf;
@@ -2153,7 +2153,7 @@ fn truncate_preview(s: &str) -> String {
 }
 ```
 
-Add a module-level constant near the top of `crates/mosaic-core/src/session/mod.rs`:
+Add a module-level constant near the top of `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 use std::time::Duration;
@@ -2164,13 +2164,13 @@ pub const TERMINATE_GRACE: Duration = Duration::from_secs(10);
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core --features test-support session::happy_path_tests`
+Run: `cargo test -p pitboss-core --features test-support session::happy_path_tests`
 Expected: both tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/
+git add crates/pitboss-core/
 git commit -m "Implement SessionHandle::run_to_completion happy path"
 ```
 
@@ -2179,11 +2179,11 @@ git commit -m "Implement SessionHandle::run_to_completion happy path"
 ### Task 16: SessionHandle terminate + timeout flows
 
 **Files:**
-- Modify: `crates/mosaic-core/src/session/mod.rs` (add tests)
+- Modify: `crates/pitboss-core/src/session/mod.rs` (add tests)
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `crates/mosaic-core/src/session/mod.rs`:
+Append to `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 #[cfg(all(test, feature = "test-support"))]
@@ -2241,7 +2241,7 @@ mod cancel_tests {
 
 - [ ] **Step 2: Run tests to verify they pass**
 
-Run: `cargo test -p mosaic-core --features test-support session::cancel_tests`
+Run: `cargo test -p pitboss-core --features test-support session::cancel_tests`
 Expected: both pass (the happy-path implementation in Task 15 already handles these flows via `tokio::select!`).
 
 If any fail due to a timing race, the `TERMINATE_GRACE` sleep path may block the select — in that case, restructure `run_to_completion` so the grace delay happens after the `select!` exits, as shown in Task 15. Do not increase scope.
@@ -2249,7 +2249,7 @@ If any fail due to a timing race, the `TERMINATE_GRACE` sleep path may block the
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/session/mod.rs
+git add crates/pitboss-core/src/session/mod.rs
 git commit -m "Test SessionHandle terminate and timeout flows"
 ```
 
@@ -2258,11 +2258,11 @@ git commit -m "Test SessionHandle terminate and timeout flows"
 ### Task 17: SessionHandle spawn-failure path
 
 **Files:**
-- Modify: `crates/mosaic-core/src/session/mod.rs` (add test)
+- Modify: `crates/pitboss-core/src/session/mod.rs` (add test)
 
 - [ ] **Step 1: Write failing test**
 
-Append to `crates/mosaic-core/src/session/mod.rs`:
+Append to `crates/pitboss-core/src/session/mod.rs`:
 
 ```rust
 #[cfg(all(test, feature = "test-support"))]
@@ -2300,33 +2300,33 @@ mod spawn_fail_tests {
 
 - [ ] **Step 2: Run tests to verify they pass**
 
-Run: `cargo test -p mosaic-core --features test-support session::spawn_fail_tests`
+Run: `cargo test -p pitboss-core --features test-support session::spawn_fail_tests`
 Expected: pass (Task 15 already handles this path).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/session/mod.rs
+git add crates/pitboss-core/src/session/mod.rs
 git commit -m "Test SessionHandle spawn-failure path"
 ```
 
 ---
 
-## Phase 4 — Worktree Manager (mosaic-core)
+## Phase 4 — Worktree Manager (pitboss-core)
 
 Wraps `git2` to create and clean up isolated worktrees per task. Unit tests build throwaway repos with `tempfile::TempDir` + `git2::Repository::init`.
 
 ### Task 18: WorktreeManager skeleton + prepare() with no-branch path
 
 **Files:**
-- Create: `crates/mosaic-core/src/worktree/mod.rs`
-- Create: `crates/mosaic-core/src/worktree/manager.rs`
-- Modify: `crates/mosaic-core/src/lib.rs`
-- Modify: `crates/mosaic-core/src/error.rs`
+- Create: `crates/pitboss-core/src/worktree/mod.rs`
+- Create: `crates/pitboss-core/src/worktree/manager.rs`
+- Modify: `crates/pitboss-core/src/lib.rs`
+- Modify: `crates/pitboss-core/src/error.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/mosaic-core/src/worktree/mod.rs`:
+Create `crates/pitboss-core/src/worktree/mod.rs`:
 
 ```rust
 //! Git worktree lifecycle for task isolation.
@@ -2336,7 +2336,7 @@ pub mod manager;
 pub use manager::{Worktree, WorktreeManager, CleanupPolicy};
 ```
 
-Create `crates/mosaic-core/src/worktree/manager.rs` (skeleton):
+Create `crates/pitboss-core/src/worktree/manager.rs` (skeleton):
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -2388,7 +2388,7 @@ impl WorktreeManager {
 }
 ```
 
-Add to `crates/mosaic-core/src/error.rs`:
+Add to `crates/pitboss-core/src/error.rs`:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -2407,11 +2407,11 @@ pub enum WorktreeError {
 }
 ```
 
-Modify `crates/mosaic-core/src/lib.rs` to add `pub mod worktree;`.
+Modify `crates/pitboss-core/src/lib.rs` to add `pub mod worktree;`.
 
-Modify `crates/mosaic-core/Cargo.toml` to ensure `git2` is a direct dep (already there from Task 1).
+Modify `crates/pitboss-core/Cargo.toml` to ensure `git2` is a direct dep (already there from Task 1).
 
-Write the failing test by appending to `crates/mosaic-core/src/worktree/mod.rs`:
+Write the failing test by appending to `crates/pitboss-core/src/worktree/mod.rs`:
 
 ```rust
 #[cfg(test)]
@@ -2445,12 +2445,12 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core worktree`
+Run: `cargo test -p pitboss-core worktree`
 Expected: PANIC on `unimplemented!("prepare")`.
 
 - [ ] **Step 3: Implement prepare() without branch**
 
-Replace `crates/mosaic-core/src/worktree/manager.rs`:
+Replace `crates/pitboss-core/src/worktree/manager.rs`:
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -2539,13 +2539,13 @@ fn sibling_path(repo_root: &Path, name: &str) -> PathBuf {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core worktree::tests::prepare_detached_worktree_without_branch`
+Run: `cargo test -p pitboss-core worktree::tests::prepare_detached_worktree_without_branch`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/
+git add crates/pitboss-core/
 git commit -m "WorktreeManager::prepare for detached (no-branch) worktrees"
 ```
 
@@ -2554,12 +2554,12 @@ git commit -m "WorktreeManager::prepare for detached (no-branch) worktrees"
 ### Task 19: Worktree prepare() with branch creation or checkout
 
 **Files:**
-- Modify: `crates/mosaic-core/src/worktree/manager.rs`
-- Modify: `crates/mosaic-core/src/worktree/mod.rs` (tests)
+- Modify: `crates/pitboss-core/src/worktree/manager.rs`
+- Modify: `crates/pitboss-core/src/worktree/mod.rs` (tests)
 
 - [ ] **Step 1: Write failing tests**
 
-Append to the `tests` module in `crates/mosaic-core/src/worktree/mod.rs`:
+Append to the `tests` module in `crates/pitboss-core/src/worktree/mod.rs`:
 
 ```rust
     #[test]
@@ -2594,12 +2594,12 @@ Append to the `tests` module in `crates/mosaic-core/src/worktree/mod.rs`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core worktree::tests::prepare_creates_new_branch_when_absent`
+Run: `cargo test -p pitboss-core worktree::tests::prepare_creates_new_branch_when_absent`
 Expected: PANIC on `unimplemented!("branch path…")`.
 
 - [ ] **Step 3: Implement branch handling**
 
-Replace the `prepare` body in `crates/mosaic-core/src/worktree/manager.rs`:
+Replace the `prepare` body in `crates/pitboss-core/src/worktree/manager.rs`:
 
 ```rust
     pub fn prepare(
@@ -2645,13 +2645,13 @@ Replace the `prepare` body in `crates/mosaic-core/src/worktree/manager.rs`:
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core worktree`
+Run: `cargo test -p pitboss-core worktree`
 Expected: all three tests (including Task 18's) pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/
+git add crates/pitboss-core/
 git commit -m "Worktree prepare supports branch creation and checkout"
 ```
 
@@ -2660,8 +2660,8 @@ git commit -m "Worktree prepare supports branch creation and checkout"
 ### Task 20: Worktree branch-conflict detection
 
 **Files:**
-- Modify: `crates/mosaic-core/src/worktree/manager.rs`
-- Modify: `crates/mosaic-core/src/worktree/mod.rs` (tests)
+- Modify: `crates/pitboss-core/src/worktree/manager.rs`
+- Modify: `crates/pitboss-core/src/worktree/mod.rs` (tests)
 
 - [ ] **Step 1: Write failing test**
 
@@ -2682,7 +2682,7 @@ Append to the `tests` module:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core worktree::tests::prepare_rejects_branch_already_checked_out_in_another_worktree`
+Run: `cargo test -p pitboss-core worktree::tests::prepare_rejects_branch_already_checked_out_in_another_worktree`
 Expected: FAIL — git2 error bubbles up as a plain `Git` variant, not `BranchConflict`.
 
 - [ ] **Step 3: Implement the conflict detection**
@@ -2707,13 +2707,13 @@ Insert immediately after the "Ensure branch exists" block.
 
 - [ ] **Step 4: Run test to verify pass**
 
-Run: `cargo test -p mosaic-core worktree`
+Run: `cargo test -p pitboss-core worktree`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/worktree/
+git add crates/pitboss-core/src/worktree/
 git commit -m "Worktree rejects branch already checked out elsewhere"
 ```
 
@@ -2722,8 +2722,8 @@ git commit -m "Worktree rejects branch already checked out elsewhere"
 ### Task 21: Worktree cleanup with three policies
 
 **Files:**
-- Modify: `crates/mosaic-core/src/worktree/manager.rs`
-- Modify: `crates/mosaic-core/src/worktree/mod.rs` (tests)
+- Modify: `crates/pitboss-core/src/worktree/manager.rs`
+- Modify: `crates/pitboss-core/src/worktree/mod.rs` (tests)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -2777,12 +2777,12 @@ Append to the `tests` module:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core worktree::tests::cleanup_always_removes_worktree_on_success`
+Run: `cargo test -p pitboss-core worktree::tests::cleanup_always_removes_worktree_on_success`
 Expected: PANIC on `unimplemented!("cleanup — Task 21")`.
 
 - [ ] **Step 3: Implement cleanup**
 
-Replace `cleanup` in `crates/mosaic-core/src/worktree/manager.rs`:
+Replace `cleanup` in `crates/pitboss-core/src/worktree/manager.rs`:
 
 ```rust
     pub fn cleanup(
@@ -2815,32 +2815,32 @@ Replace `cleanup` in `crates/mosaic-core/src/worktree/manager.rs`:
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core worktree`
+Run: `cargo test -p pitboss-core worktree`
 Expected: all cleanup tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/worktree/
+git add crates/pitboss-core/src/worktree/
 git commit -m "WorktreeManager cleanup with three policies"
 ```
 
 ---
 
-## Phase 5 — Persistence (mosaic-core/store)
+## Phase 5 — Persistence (pitboss-core/store)
 
 Defines the wire types that appear in `summary.jsonl` / `summary.json`, the `SessionStore` trait, and the `JsonFileStore` implementation used by v0.1.
 
 ### Task 22: Wire types — TaskRecord, RunSummary, RunMeta
 
 **Files:**
-- Create: `crates/mosaic-core/src/store/mod.rs`
-- Create: `crates/mosaic-core/src/store/record.rs`
-- Modify: `crates/mosaic-core/src/lib.rs`
+- Create: `crates/pitboss-core/src/store/mod.rs`
+- Create: `crates/pitboss-core/src/store/record.rs`
+- Modify: `crates/pitboss-core/src/lib.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/mosaic-core/src/store/mod.rs`:
+Create `crates/pitboss-core/src/store/mod.rs`:
 
 ```rust
 //! Persistence — trait and file-backed implementation.
@@ -2850,7 +2850,7 @@ pub mod record;
 pub use record::{RunMeta, RunSummary, TaskRecord, TaskStatus};
 ```
 
-Create `crates/mosaic-core/src/store/record.rs`:
+Create `crates/pitboss-core/src/store/record.rs`:
 
 ```rust
 use std::collections::HashMap;
@@ -2912,9 +2912,9 @@ pub struct RunSummary {
 }
 ```
 
-Modify `crates/mosaic-core/src/lib.rs` to add `pub mod store;`.
+Modify `crates/pitboss-core/src/lib.rs` to add `pub mod store;`.
 
-Add to the bottom of `crates/mosaic-core/src/store/record.rs`:
+Add to the bottom of `crates/pitboss-core/src/store/record.rs`:
 
 ```rust
 #[cfg(test)]
@@ -2947,13 +2947,13 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core store`
+Run: `cargo test -p pitboss-core store`
 Expected: pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/store/ crates/mosaic-core/src/lib.rs
+git add crates/pitboss-core/src/store/ crates/pitboss-core/src/lib.rs
 git commit -m "Add store wire types: TaskRecord, RunSummary, RunMeta"
 ```
 
@@ -2962,13 +2962,13 @@ git commit -m "Add store wire types: TaskRecord, RunSummary, RunMeta"
 ### Task 23: SessionStore trait + StoreError
 
 **Files:**
-- Create: `crates/mosaic-core/src/store/traits.rs`
-- Modify: `crates/mosaic-core/src/store/mod.rs`
-- Modify: `crates/mosaic-core/src/error.rs`
+- Create: `crates/pitboss-core/src/store/traits.rs`
+- Modify: `crates/pitboss-core/src/store/mod.rs`
+- Modify: `crates/pitboss-core/src/error.rs`
 
 - [ ] **Step 1: Write trait**
 
-Create `crates/mosaic-core/src/store/traits.rs`:
+Create `crates/pitboss-core/src/store/traits.rs`:
 
 ```rust
 use async_trait::async_trait;
@@ -2986,7 +2986,7 @@ pub trait SessionStore: Send + Sync + 'static {
 }
 ```
 
-Modify `crates/mosaic-core/src/store/mod.rs`:
+Modify `crates/pitboss-core/src/store/mod.rs`:
 
 ```rust
 //! Persistence — trait and file-backed implementation.
@@ -2998,7 +2998,7 @@ pub use record::{RunMeta, RunSummary, TaskRecord, TaskStatus};
 pub use traits::SessionStore;
 ```
 
-Add to `crates/mosaic-core/src/error.rs`:
+Add to `crates/pitboss-core/src/error.rs`:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -3019,13 +3019,13 @@ pub enum StoreError {
 
 - [ ] **Step 2: Verify compiles**
 
-Run: `cargo check -p mosaic-core`
+Run: `cargo check -p pitboss-core`
 Expected: compiles clean.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/mosaic-core/src/store/ crates/mosaic-core/src/error.rs
+git add crates/pitboss-core/src/store/ crates/pitboss-core/src/error.rs
 git commit -m "Add SessionStore trait and StoreError"
 ```
 
@@ -3034,12 +3034,12 @@ git commit -m "Add SessionStore trait and StoreError"
 ### Task 24: JsonFileStore implementation
 
 **Files:**
-- Create: `crates/mosaic-core/src/store/json_file.rs`
-- Modify: `crates/mosaic-core/src/store/mod.rs`
+- Create: `crates/pitboss-core/src/store/json_file.rs`
+- Modify: `crates/pitboss-core/src/store/mod.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `crates/mosaic-core/src/store/mod.rs`:
+Append to `crates/pitboss-core/src/store/mod.rs`:
 
 ```rust
 pub mod json_file;
@@ -3129,12 +3129,12 @@ mod integration_tests {
 
 - [ ] **Step 2: Run tests to verify fail**
 
-Run: `cargo test -p mosaic-core store::integration_tests`
+Run: `cargo test -p pitboss-core store::integration_tests`
 Expected: FAIL — `JsonFileStore` undefined.
 
 - [ ] **Step 3: Implement JsonFileStore**
 
-Create `crates/mosaic-core/src/store/json_file.rs`:
+Create `crates/pitboss-core/src/store/json_file.rs`:
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -3233,29 +3233,29 @@ impl SessionStore for JsonFileStore {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core store`
+Run: `cargo test -p pitboss-core store`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/store/
+git add crates/pitboss-core/src/store/
 git commit -m "Implement JsonFileStore with orphan detection"
 ```
 
 ---
 
-## Phase 6 — Manifest Loader (shire-cli)
+## Phase 6 — Manifest Loader (pitboss-cli)
 
 ### Task 25: Manifest serde schema with deny_unknown_fields
 
 **Files:**
-- Create: `crates/shire-cli/src/manifest/mod.rs`
-- Create: `crates/shire-cli/src/manifest/schema.rs`
+- Create: `crates/pitboss-cli/src/manifest/mod.rs`
+- Create: `crates/pitboss-cli/src/manifest/schema.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/shire-cli/src/manifest/mod.rs`:
+Create `crates/pitboss-cli/src/manifest/mod.rs`:
 
 ```rust
 pub mod schema;
@@ -3265,7 +3265,7 @@ pub mod validate;
 pub use schema::{Manifest, RunConfig, Defaults, Task, Template};
 ```
 
-Create `crates/shire-cli/src/manifest/schema.rs`:
+Create `crates/pitboss-cli/src/manifest/schema.rs`:
 
 ```rust
 use std::collections::HashMap;
@@ -3360,7 +3360,7 @@ pub struct Task {
 }
 ```
 
-Write the failing test. Append to `crates/shire-cli/src/manifest/schema.rs`:
+Write the failing test. Append to `crates/pitboss-cli/src/manifest/schema.rs`:
 
 ```rust
 #[cfg(test)]
@@ -3428,19 +3428,19 @@ mod tests {
 
 To make this compile, also create stub files referenced from `mod.rs`:
 
-Create `crates/shire-cli/src/manifest/resolve.rs`:
+Create `crates/pitboss-cli/src/manifest/resolve.rs`:
 
 ```rust
 // Stub — populated in Task 26.
 ```
 
-Create `crates/shire-cli/src/manifest/validate.rs`:
+Create `crates/pitboss-cli/src/manifest/validate.rs`:
 
 ```rust
 // Stub — populated in Task 27.
 ```
 
-Wire the module into `main.rs` by modifying `crates/shire-cli/src/main.rs`:
+Wire the module into `main.rs` by modifying `crates/pitboss-cli/src/main.rs`:
 
 ```rust
 mod manifest;
@@ -3452,13 +3452,13 @@ fn main() {
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli manifest::schema::tests`
+Run: `cargo test -p pitboss-cli manifest::schema::tests`
 Expected: all three pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "Add manifest schema with deny_unknown_fields"
 ```
 
@@ -3467,11 +3467,11 @@ git commit -m "Add manifest schema with deny_unknown_fields"
 ### Task 26: Template resolution + defaults merging
 
 **Files:**
-- Modify: `crates/shire-cli/src/manifest/resolve.rs`
+- Modify: `crates/pitboss-cli/src/manifest/resolve.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Replace `crates/shire-cli/src/manifest/resolve.rs`:
+Replace `crates/pitboss-cli/src/manifest/resolve.rs`:
 
 ```rust
 use std::collections::HashMap;
@@ -3728,13 +3728,13 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli manifest::resolve`
+Run: `cargo test -p pitboss-cli manifest::resolve`
 Expected: all seven pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/manifest/resolve.rs
+git add crates/pitboss-cli/src/manifest/resolve.rs
 git commit -m "Manifest resolve: templates, defaults, concurrency precedence"
 ```
 
@@ -3743,11 +3743,11 @@ git commit -m "Manifest resolve: templates, defaults, concurrency precedence"
 ### Task 27: Validation — all documented failure modes
 
 **Files:**
-- Modify: `crates/shire-cli/src/manifest/validate.rs`
+- Modify: `crates/pitboss-cli/src/manifest/validate.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Replace `crates/shire-cli/src/manifest/validate.rs`:
+Replace `crates/pitboss-cli/src/manifest/validate.rs`:
 
 ```rust
 use std::collections::HashSet;
@@ -3935,13 +3935,13 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli manifest::validate`
+Run: `cargo test -p pitboss-cli manifest::validate`
 Expected: all seven pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/manifest/validate.rs
+git add crates/pitboss-cli/src/manifest/validate.rs
 git commit -m "Manifest validation: ids, directories, branch conflicts, ranges"
 ```
 
@@ -3950,19 +3950,19 @@ git commit -m "Manifest validation: ids, directories, branch conflicts, ranges"
 ### Task 28: Path expansion + top-level load function
 
 **Files:**
-- Create: `crates/shire-cli/src/manifest/load.rs`
-- Modify: `crates/shire-cli/src/manifest/mod.rs`
+- Create: `crates/pitboss-cli/src/manifest/load.rs`
+- Modify: `crates/pitboss-cli/src/manifest/mod.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Modify `crates/shire-cli/src/manifest/mod.rs` to add:
+Modify `crates/pitboss-cli/src/manifest/mod.rs` to add:
 
 ```rust
 pub mod load;
 pub use load::load_manifest;
 ```
 
-Create `crates/shire-cli/src/manifest/load.rs`:
+Create `crates/pitboss-cli/src/manifest/load.rs`:
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -4039,29 +4039,29 @@ prompt = "hi"
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli manifest::load`
+Run: `cargo test -p pitboss-cli manifest::load`
 Expected: pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/manifest/
+git add crates/pitboss-cli/src/manifest/
 git commit -m "Top-level load_manifest pipeline with path expansion"
 ```
 
 ---
 
-## Phase 7 — Dispatch Runner (shire-cli)
+## Phase 7 — Dispatch Runner (pitboss-cli)
 
 ### Task 29: CLI wiring with clap subcommands
 
 **Files:**
-- Create: `crates/shire-cli/src/cli.rs`
-- Modify: `crates/shire-cli/src/main.rs`
+- Create: `crates/pitboss-cli/src/cli.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Write the CLI skeleton**
 
-Create `crates/shire-cli/src/cli.rs`:
+Create `crates/pitboss-cli/src/cli.rs`:
 
 ```rust
 use std::path::PathBuf;
@@ -4102,7 +4102,7 @@ pub enum Command {
 }
 ```
 
-Replace `crates/shire-cli/src/main.rs`:
+Replace `crates/pitboss-cli/src/main.rs`:
 
 ```rust
 mod cli;
@@ -4138,7 +4138,7 @@ fn init_tracing(verbose: u8, quiet: bool) {
         (false, _)  => "trace",
     };
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("shire={level},mosaic_core={level}")));
+        .unwrap_or_else(|_| EnvFilter::new(format!("shire={level},pitboss_core={level}")));
     fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
 }
 
@@ -4166,16 +4166,16 @@ fn parse_env_max_parallel() -> Option<u32> {
 
 - [ ] **Step 2: Verify CLI builds and `validate` runs end-to-end**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: builds clean.
 
-Run: `cargo run -p shire-cli -- version`
+Run: `cargo run -p pitboss-cli -- version`
 Expected: `shire 0.1.0`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "CLI subcommands with clap; validate end-to-end works"
 ```
 
@@ -4184,13 +4184,13 @@ git commit -m "CLI subcommands with clap; validate end-to-end works"
 ### Task 30: Claude binary probe
 
 **Files:**
-- Create: `crates/shire-cli/src/dispatch/mod.rs`
-- Create: `crates/shire-cli/src/dispatch/probe.rs`
-- Modify: `crates/shire-cli/src/main.rs`
+- Create: `crates/pitboss-cli/src/dispatch/mod.rs`
+- Create: `crates/pitboss-cli/src/dispatch/probe.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/shire-cli/src/dispatch/mod.rs`:
+Create `crates/pitboss-cli/src/dispatch/mod.rs`:
 
 ```rust
 pub mod probe;
@@ -4202,7 +4202,7 @@ pub use probe::probe_claude;
 pub use runner::run_dispatch_inner;
 ```
 
-Create `crates/shire-cli/src/dispatch/probe.rs`:
+Create `crates/pitboss-cli/src/dispatch/probe.rs`:
 
 ```rust
 use std::path::Path;
@@ -4252,7 +4252,7 @@ mod tests {
 
 Create stub files to make `mod.rs` compile:
 
-`crates/shire-cli/src/dispatch/runner.rs`:
+`crates/pitboss-cli/src/dispatch/runner.rs`:
 
 ```rust
 use anyhow::Result;
@@ -4270,19 +4270,19 @@ pub async fn run_dispatch_inner(
 }
 ```
 
-`crates/shire-cli/src/dispatch/summary.rs`:
+`crates/pitboss-cli/src/dispatch/summary.rs`:
 
 ```rust
 // Populated in Task 33.
 ```
 
-`crates/shire-cli/src/dispatch/signals.rs`:
+`crates/pitboss-cli/src/dispatch/signals.rs`:
 
 ```rust
 // Populated in Task 34.
 ```
 
-Modify `crates/shire-cli/src/main.rs` to add `mod dispatch;`:
+Modify `crates/pitboss-cli/src/main.rs` to add `mod dispatch;`:
 
 ```rust
 mod cli;
@@ -4292,13 +4292,13 @@ mod manifest;
 
 - [ ] **Step 2: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli dispatch::probe`
+Run: `cargo test -p pitboss-cli dispatch::probe`
 Expected: both tests pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "Add claude binary probe with unparseable-output tolerance"
 ```
 
@@ -4309,31 +4309,31 @@ git commit -m "Add claude binary probe with unparseable-output tolerance"
 The dispatch runner is the beating heart. It owns the semaphore, spawns per-task executors, drives the store, and aggregates the summary. Unit-test with `FakeSpawner` injection via a trait.
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/runner.rs`
-- Modify: `crates/shire-cli/Cargo.toml`
-- Modify: `crates/shire-cli/src/main.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/runner.rs`
+- Modify: `crates/pitboss-cli/Cargo.toml`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
-- [ ] **Step 1: Add test-support feature pulling mosaic-core's equivalent**
+- [ ] **Step 1: Add test-support feature pulling pitboss-core's equivalent**
 
-Modify `crates/shire-cli/Cargo.toml` — add under `[features]`:
+Modify `crates/pitboss-cli/Cargo.toml` — add under `[features]`:
 
 ```toml
 [features]
-test-support = ["mosaic-core/test-support"]
+test-support = ["pitboss-core/test-support"]
 ```
 
 Modify `[dev-dependencies]`:
 
 ```toml
 [dev-dependencies]
-shire-cli  = { path = ".", features = ["test-support"] }
+pitboss-cli  = { path = ".", features = ["test-support"] }
 tempfile   = { workspace = true }
-mosaic-core = { path = "../mosaic-core", features = ["test-support"] }
+pitboss-core = { path = "../pitboss-core", features = ["test-support"] }
 ```
 
 - [ ] **Step 2: Write failing test**
 
-Replace `crates/shire-cli/src/dispatch/runner.rs`:
+Replace `crates/pitboss-cli/src/dispatch/runner.rs`:
 
 ```rust
 use std::path::PathBuf;
@@ -4342,10 +4342,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mosaic_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
-use mosaic_core::session::{CancelToken, SessionHandle};
-use mosaic_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus};
-use mosaic_core::worktree::{CleanupPolicy, WorktreeManager};
+use pitboss_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
+use pitboss_core::session::{CancelToken, SessionHandle};
+use pitboss_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus};
+use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
@@ -4509,11 +4509,11 @@ async fn execute_task(
         .await;
 
     let status = match outcome.final_state {
-        mosaic_core::session::SessionState::Completed         => TaskStatus::Success,
-        mosaic_core::session::SessionState::Failed { .. }     => TaskStatus::Failed,
-        mosaic_core::session::SessionState::TimedOut          => TaskStatus::TimedOut,
-        mosaic_core::session::SessionState::Cancelled         => TaskStatus::Cancelled,
-        mosaic_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
+        pitboss_core::session::SessionState::Completed         => TaskStatus::Success,
+        pitboss_core::session::SessionState::Failed { .. }     => TaskStatus::Failed,
+        pitboss_core::session::SessionState::TimedOut          => TaskStatus::TimedOut,
+        pitboss_core::session::SessionState::Cancelled         => TaskStatus::Cancelled,
+        pitboss_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
         _ => TaskStatus::Failed,
     };
 
@@ -4555,7 +4555,7 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
-    use mosaic_core::process::fake::{FakeScript, FakeSpawner};
+    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -4625,7 +4625,7 @@ mod tests {
     #[async_trait::async_trait]
     impl ProcessSpawner for CyclingFake {
         async fn spawn(&self, cmd: SpawnCmd)
-            -> Result<Box<dyn mosaic_core::process::ChildProcess>, mosaic_core::error::SpawnError>
+            -> Result<Box<dyn pitboss_core::process::ChildProcess>, pitboss_core::error::SpawnError>
         {
             let i = {
                 let mut lock = self.1.lock().unwrap();
@@ -4642,13 +4642,13 @@ mod tests {
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli --features test-support dispatch::runner`
+Run: `cargo test -p pitboss-cli --features test-support dispatch::runner`
 Expected: pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/ 
+git add crates/pitboss-cli/ 
 git commit -m "Dispatch runner: semaphore, per-task execution, summary aggregation"
 ```
 
@@ -4657,11 +4657,11 @@ git commit -m "Dispatch runner: semaphore, per-task execution, summary aggregati
 ### Task 32: Dispatch halt_on_failure cascade test
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/runner.rs` (add tests)
+- Modify: `crates/pitboss-cli/src/dispatch/runner.rs` (add tests)
 
 - [ ] **Step 1: Write failing test**
 
-Append to the `tests` module in `crates/shire-cli/src/dispatch/runner.rs`:
+Append to the `tests` module in `crates/pitboss-cli/src/dispatch/runner.rs`:
 
 ```rust
     #[tokio::test]
@@ -4725,13 +4725,13 @@ Append to the `tests` module in `crates/shire-cli/src/dispatch/runner.rs`:
 
 - [ ] **Step 2: Run test to verify pass**
 
-Run: `cargo test -p shire-cli --features test-support dispatch::runner::tests::halt_on_failure_drains_after_first_failure`
+Run: `cargo test -p pitboss-cli --features test-support dispatch::runner::tests::halt_on_failure_drains_after_first_failure`
 Expected: pass. (If it fails because drain isn't checked before permit acquisition, adjust the loop to break on `cancel.is_draining()` between `permit.acquire()` calls — code already does this.)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/dispatch/runner.rs
+git add crates/pitboss-cli/src/dispatch/runner.rs
 git commit -m "Test halt_on_failure cascade stops subsequent tasks"
 ```
 
@@ -4740,11 +4740,11 @@ git commit -m "Test halt_on_failure cascade stops subsequent tasks"
 ### Task 33: Wire run_dispatch into main.rs
 
 **Files:**
-- Modify: `crates/shire-cli/src/main.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Replace `run_dispatch` to call into the runner**
 
-Replace `fn run_dispatch` in `crates/shire-cli/src/main.rs`:
+Replace `fn run_dispatch` in `crates/pitboss-cli/src/main.rs`:
 
 ```rust
 fn run_dispatch(
@@ -4772,14 +4772,14 @@ fn run_dispatch(
 
 - [ ] **Step 2: Verify CLI dry-run end-to-end**
 
-Build a minimal shire.toml in a temp dir pointing at a git repo, and run `cargo run -p shire-cli -- dispatch /path/to/shire.toml --dry-run`. Expected: prints the spawn command lines.
+Build a minimal shire.toml in a temp dir pointing at a git repo, and run `cargo run -p pitboss-cli -- dispatch /path/to/shire.toml --dry-run`. Expected: prints the spawn command lines.
 
 (No automated test — smoke-verify and move on.)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/main.rs
+git add crates/pitboss-cli/src/main.rs
 git commit -m "Wire dispatch command through main.rs with probe + tokio runtime"
 ```
 
@@ -4790,17 +4790,17 @@ git commit -m "Wire dispatch command through main.rs with probe + tokio runtime"
 ### Task 34: Two-phase Ctrl-C handler
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/signals.rs`
-- Modify: `crates/shire-cli/src/dispatch/runner.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/signals.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/runner.rs`
 
 - [ ] **Step 1: Write the signals module**
 
-Replace `crates/shire-cli/src/dispatch/signals.rs`:
+Replace `crates/pitboss-cli/src/dispatch/signals.rs`:
 
 ```rust
 use std::time::Duration;
 
-use mosaic_core::session::CancelToken;
+use pitboss_core::session::CancelToken;
 
 const SECOND_SIGINT_WINDOW: Duration = Duration::from_secs(5);
 
@@ -4832,7 +4832,7 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
 
 - [ ] **Step 2: Install in execute()**
 
-Modify `crates/shire-cli/src/dispatch/runner.rs` — near the top of `execute()`, just after `store.init_run(...)`:
+Modify `crates/pitboss-cli/src/dispatch/runner.rs` — near the top of `execute()`, just after `store.init_run(...)`:
 
 ```rust
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
@@ -4845,7 +4845,7 @@ Modify `crates/shire-cli/src/dispatch/runner.rs` — near the top of `execute()`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/src/dispatch/
+git add crates/pitboss-cli/src/dispatch/
 git commit -m "Two-phase Ctrl-C watcher: drain then terminate"
 ```
 
@@ -4934,8 +4934,8 @@ Modify root `Cargo.toml` `[workspace] members`:
 
 ```toml
 members = [
-    "crates/mosaic-core",
-    "crates/shire-cli",
+    "crates/pitboss-core",
+    "crates/pitboss-cli",
     "tests-support/fake-claude",
 ]
 ```
@@ -5027,7 +5027,7 @@ use tempfile::TempDir;
 fn ensure_built() {
     // Build shire + fake-claude before running tests.
     let status = Command::new(env!("CARGO"))
-        .args(["build", "-p", "shire-cli", "-p", "fake-claude"])
+        .args(["build", "-p", "pitboss-cli", "-p", "fake-claude"])
         .status().unwrap();
     assert!(status.success(), "build failed");
 }
@@ -5116,7 +5116,7 @@ Create `tests/fixtures/scripts/exit2.jsonl`:
 {"stdout":"{\"type\":\"result\",\"session_id\":\"s\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"}
 ```
 
-- [ ] **Step 2: Append test — relies on per-task env (extend shire-cli to honor Task-level env vars that point at different fake scripts)**
+- [ ] **Step 2: Append test — relies on per-task env (extend pitboss-cli to honor Task-level env vars that point at different fake scripts)**
 
 For this integration test only, we rely on the `env = { MOSAIC_FAKE_SCRIPT = "..." }` per-task env already supported by shire's manifest schema.
 
@@ -5268,9 +5268,9 @@ env = {{ MOSAIC_FAKE_SCRIPT = "{hold}", MOSAIC_FAKE_HOLD = "1" }}
 
 Add `libc = { workspace = true }` as a dev-dependency of the workspace integration test (edit root `Cargo.toml`):
 
-Actually the workspace integration tests live in the workspace root, not in a crate — so they use the root `Cargo.toml` package if you declare one. Simpler: put this test inside `crates/shire-cli/tests/` instead. Move the test file there.
+Actually the workspace integration tests live in the workspace root, not in a crate — so they use the root `Cargo.toml` package if you declare one. Simpler: put this test inside `crates/pitboss-cli/tests/` instead. Move the test file there.
 
-Move `tests/` to `crates/shire-cli/tests/` by repeating the `Create` operations relative to that path. Update any `env!("CARGO_MANIFEST_DIR")` paths — they now point at `crates/shire-cli/`, so `fake_claude_path()` becomes:
+Move `tests/` to `crates/pitboss-cli/tests/` by repeating the `Create` operations relative to that path. Update any `env!("CARGO_MANIFEST_DIR")` paths — they now point at `crates/pitboss-cli/`, so `fake_claude_path()` becomes:
 
 ```rust
 pub fn fake_claude_path() -> PathBuf {
@@ -5286,7 +5286,7 @@ pub fn shire_binary() -> PathBuf {
 }
 ```
 
-Add `libc` to `crates/shire-cli/[dev-dependencies]`:
+Add `libc` to `crates/pitboss-cli/[dev-dependencies]`:
 
 ```toml
 libc = { workspace = true }
@@ -5294,13 +5294,13 @@ libc = { workspace = true }
 
 - [ ] **Step 3: Run**
 
-Run: `cargo test -p shire-cli --test dispatch_flows ctrl_c -- --test-threads=1`
+Run: `cargo test -p pitboss-cli --test dispatch_flows ctrl_c -- --test-threads=1`
 Expected: pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/
+git add crates/pitboss-cli/
 git commit -m "Integration test: two-phase Ctrl-C cancellation"
 ```
 
@@ -5311,16 +5311,16 @@ git commit -m "Integration test: two-phase Ctrl-C cancellation"
 ### Task 39: Non-TTY and TTY progress table
 
 **Files:**
-- Create: `crates/shire-cli/src/tui_table.rs`
-- Modify: `crates/shire-cli/src/main.rs`
-- Modify: `crates/shire-cli/src/dispatch/runner.rs`
+- Create: `crates/pitboss-cli/src/tui_table.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/runner.rs`
 
 - [ ] **Step 1: Write the table module**
 
-Create `crates/shire-cli/src/tui_table.rs`:
+Create `crates/pitboss-cli/src/tui_table.rs`:
 
 ```rust
-use mosaic_core::store::{TaskRecord, TaskStatus};
+use pitboss_core::store::{TaskRecord, TaskStatus};
 
 pub struct ProgressTable {
     is_tty: bool,
@@ -5427,7 +5427,7 @@ impl ProgressTable {
 
 - [ ] **Step 2: Wire into the runner**
 
-Modify `crates/shire-cli/src/dispatch/runner.rs` — at the top of `execute()`:
+Modify `crates/pitboss-cli/src/dispatch/runner.rs` — at the top of `execute()`:
 
 ```rust
     let is_tty = atty::is(atty::Stream::Stdout);
@@ -5437,7 +5437,7 @@ Modify `crates/shire-cli/src/dispatch/runner.rs` — at the top of `execute()`:
 
 Before `SessionHandle::new` in `execute_task` — accept `table` as a parameter and call `mark_running`. After the outcome is built, call `mark_done(&record)`. Thread `table: Arc<Mutex<ProgressTable>>` through the signature.
 
-Modify `crates/shire-cli/src/main.rs` to add `mod tui_table;`.
+Modify `crates/pitboss-cli/src/main.rs` to add `mod tui_table;`.
 
 - [ ] **Step 3: Smoke test manually**
 
@@ -5449,7 +5449,7 @@ Run a dispatch against fake-claude manually and watch the table render.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "Stdout progress table with TTY redraw and non-TTY append"
 ```
 
@@ -5474,7 +5474,7 @@ Headless Rust dispatcher for parallel Claude Code agent sessions.
 ## Install
 
 ```
-cargo install --path crates/shire-cli
+cargo install --path crates/pitboss-cli
 ```
 
 ## Quick start
@@ -5495,8 +5495,8 @@ branch = "feat/hello"
 Then:
 
 ```
-shire validate shire.toml
-shire dispatch shire.toml
+pitboss validate shire.toml
+pitboss dispatch shire.toml
 ```
 
 Artifacts land in `~/.local/share/shire/runs/<run-id>/`.
@@ -5512,7 +5512,7 @@ With a real `claude` binary on PATH and ANTHROPIC_API_KEY set:
 
 1. Create two throwaway git repos.
 2. Point one manifest at each with a trivial prompt ("write `hi` to a file").
-3. `shire dispatch ./manifest.toml` — confirm the progress table updates, both
+3. `pitboss dispatch ./manifest.toml` — confirm the progress table updates, both
    Hobbits succeed, and the summary.json contains expected fields.
 4. Run again with `halt_on_failure = true` and an intentionally-failing prompt
    in the first task. Confirm the second task is skipped.
@@ -5523,7 +5523,7 @@ With a real `claude` binary on PATH and ANTHROPIC_API_KEY set:
 
 ```
 cargo test --workspace
-cargo test -p mosaic-core --features test-support
+cargo test -p pitboss-core --features test-support
 cargo lint
 cargo tidy
 ```
@@ -5545,12 +5545,12 @@ git commit -m "README: quick start, concurrency override, manual smoke test"
 Three small gaps from the spec to close in one pass.
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/runner.rs`
-- Modify: `crates/shire-cli/src/main.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/runner.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Write run-dir snapshot files**
 
-Modify `crates/shire-cli/src/dispatch/runner.rs`. Extend `run_dispatch_inner` to accept the raw manifest TOML text, then write both snapshot files at the run-dir root once `run_id` is known (just before `store.init_run`):
+Modify `crates/pitboss-cli/src/dispatch/runner.rs`. Extend `run_dispatch_inner` to accept the raw manifest TOML text, then write both snapshot files at the run-dir root once `run_id` is known (just before `store.init_run`):
 
 ```rust
 pub async fn run_dispatch_inner(
@@ -5580,7 +5580,7 @@ Extend `execute` to accept `manifest_text`, `manifest_path`, `claude_version`. I
     }
 ```
 
-Note: `ResolvedManifest` and its members need `#[derive(Serialize)]` — add `Serialize` to the derive list in `crates/shire-cli/src/manifest/resolve.rs` for `ResolvedManifest` and `ResolvedTask`.
+Note: `ResolvedManifest` and its members need `#[derive(Serialize)]` — add `Serialize` to the derive list in `crates/pitboss-cli/src/manifest/resolve.rs` for `ResolvedManifest` and `ResolvedTask`.
 
 Thread `claude_version` into the `RunMeta` and `RunSummary`:
 
@@ -5599,7 +5599,7 @@ Thread `claude_version` into the `RunMeta` and `RunSummary`:
 
 - [ ] **Step 2: Exit codes per spec §8**
 
-Modify `crates/shire-cli/src/main.rs`. Restructure `run_dispatch` to map error classes to exit codes:
+Modify `crates/pitboss-cli/src/main.rs`. Restructure `run_dispatch` to map error classes to exit codes:
 
 ```rust
 fn run_dispatch(
@@ -5667,7 +5667,7 @@ Modify `execute` so the final exit code reflects cancellation state:
 
 - [ ] **Step 4: Test — validation failure → exit 2**
 
-Add to `crates/shire-cli/tests/dispatch_flows.rs`:
+Add to `crates/pitboss-cli/tests/dispatch_flows.rs`:
 
 ```rust
 #[test]
@@ -5693,7 +5693,7 @@ Expected: everything green, including new validation-exit test.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/shire-cli/
+git add crates/pitboss-cli/
 git commit -m "Exit codes per spec, snapshot files, claude_version plumbing"
 ```
 
@@ -5708,7 +5708,7 @@ No new code — a checkpoint.
 Run: `cargo test --workspace`
 Expected: every test passes.
 
-Run: `cargo test -p mosaic-core --features test-support`
+Run: `cargo test -p pitboss-core --features test-support`
 Expected: every feature-gated test passes.
 
 Run: `cargo lint`

@@ -81,6 +81,6 @@ impl FakeMcpClient {
 #[cfg(test)]
 mod tests {
     // Integration-level round-trip testing happens in
-    // crates/shire-cli/tests/hierarchical_flows.rs (Task 24+).
+    // crates/pitboss-cli/tests/hierarchical_flows.rs (Task 24+).
     // This module just validates the crate compiles.
 }

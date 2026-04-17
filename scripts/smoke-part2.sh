@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/smoke-part2.sh
-#   SHIRE=/path/to/shire scripts/smoke-part2.sh
+#   PITBOSS=/path/to/pitboss scripts/smoke-part2.sh
 #   SHIRE_SMOKE_DIR=/tmp/foo scripts/smoke-part2.sh
 #   SHIRE_SKIP_CTRL_C=1 scripts/smoke-part2.sh       # skip the interactive-ish test
 #   SHIRE_MODEL=claude-sonnet-4-6 scripts/smoke-part2.sh  # default: claude-haiku-4-5
@@ -19,14 +19,14 @@
 
 set -u
 
-SHIRE="${SHIRE:-shire}"
+PITBOSS="${PITBOSS:-pitboss}"
 MODEL="${SHIRE_MODEL:-claude-haiku-4-5}"
 SKIP_CTRL_C="${SHIRE_SKIP_CTRL_C:-0}"
 SKIP_HALT_ON_FAIL="${SHIRE_SKIP_HALT_ON_FAIL:-1}"  # skip by default; see 2.7 note
 
-if ! command -v "$SHIRE" >/dev/null 2>&1 && [ ! -x "$SHIRE" ]; then
-    echo "ERROR: shire binary not found (tried: $SHIRE)" >&2
-    echo "Run: cargo build --release -p shire-cli && export PATH=\"\$(pwd)/target/release:\$PATH\"" >&2
+if ! command -v "$PITBOSS" >/dev/null 2>&1 && [ ! -x "$PITBOSS" ]; then
+    echo "ERROR: pitboss binary not found (tried: $PITBOSS)" >&2
+    echo "Run: cargo build --release -p pitboss-cli && export PATH=\"\$(pwd)/target/release:\$PATH\"" >&2
     exit 2
 fi
 
@@ -43,7 +43,7 @@ fi
 # -------------------------------------------------------------------
 # Pre-flight: confirm the user wants to proceed (real money)
 echo "=== Part 2 — online smoke tests ==="
-echo "shire:     $("$SHIRE" version)"
+echo "pitboss:   $("$PITBOSS" version)"
 echo "claude:    $(claude --version 2>&1 | head -1)"
 echo "model:     $MODEL"
 echo "skip 2.7:  $([ "$SKIP_HALT_ON_FAIL" = "1" ] && echo yes || echo no)"
@@ -119,7 +119,7 @@ branch = "smoke/write-hi"
 EOF
 
 echo "== 2.1 Single-task happy path =="
-if "$SHIRE" dispatch "$SCRATCH/t1.toml"; then
+if "$PITBOSS" dispatch "$SCRATCH/t1.toml"; then
     RD=$(latest_run_dir)
     if [ -f "$RD/summary.json" ]; then
         STATUS=$(jq -r '.tasks[0].status' "$RD/summary.json")
@@ -172,7 +172,7 @@ if "$SHIRE" dispatch "$SCRATCH/t1.toml"; then
         record "2.1 happy dispatch" FAIL "no summary.json"
     fi
 else
-    record "2.1 happy dispatch" FAIL "shire exit $?"
+    record "2.1 happy dispatch" FAIL "pitboss exit $?"
 fi
 echo
 
@@ -202,7 +202,7 @@ EOF
 
 echo "== 2.5 Two-task parallel =="
 T0=$(date +%s)
-"$SHIRE" dispatch "$SCRATCH/t2.toml" >/dev/null 2>&1
+"$PITBOSS" dispatch "$SCRATCH/t2.toml" >/dev/null 2>&1
 PARCODE=$?
 T1=$(date +%s)
 ELAPSED=$((T1 - T0))
@@ -241,7 +241,7 @@ vars = { greeting = "hello", name = "world" }
 EOF
 
 echo "== 2.6 Template expansion =="
-if "$SHIRE" dispatch "$SCRATCH/t3.toml" >/dev/null 2>&1; then
+if "$PITBOSS" dispatch "$SCRATCH/t3.toml" >/dev/null 2>&1; then
     RD=$(latest_run_dir)
     # Check stdout.log (raw stream-json) for the substituted words — robust against
     # whatever claude decides to put in the final message.
@@ -283,7 +283,7 @@ directory = "$REPO_A"
 prompt = "Create skip.txt containing SKIPPED."
 EOF
     echo "== 2.7 halt_on_failure cascade =="
-    "$SHIRE" dispatch "$SCRATCH/t4.toml" >/dev/null 2>&1
+    "$PITBOSS" dispatch "$SCRATCH/t4.toml" >/dev/null 2>&1
     RD=$(latest_run_dir)
     if [ -f "$RD/summary.json" ]; then
         LEN=$(jq -r '.tasks | length' "$RD/summary.json")
@@ -314,7 +314,7 @@ EOF
 
 echo "== 2.8 Timeout enforcement =="
 T0=$(date +%s)
-"$SHIRE" dispatch "$SCRATCH/t5.toml" >/dev/null 2>&1
+"$PITBOSS" dispatch "$SCRATCH/t5.toml" >/dev/null 2>&1
 T1=$(date +%s)
 ELAPSED=$((T1 - T0))
 RD=$(latest_run_dir)
@@ -350,43 +350,43 @@ EOF
 
     echo "== 2.9 Two-phase Ctrl-C =="
     LOG=$(mktemp)
-    "$SHIRE" dispatch "$SCRATCH/t6.toml" > "$LOG" 2>&1 &
-    SHIRE_PID=$!
+    "$PITBOSS" dispatch "$SCRATCH/t6.toml" > "$LOG" 2>&1 &
+    PITBOSS_PID=$!
 
-    # Let shire spawn and start the task
+    # Let pitboss spawn and start the task
     sleep 4
 
     # First SIGINT → should emit drain message
-    kill -INT $SHIRE_PID 2>/dev/null
+    kill -INT $PITBOSS_PID 2>/dev/null
     sleep 1
 
     # Second SIGINT within 5s window → terminate
-    kill -INT $SHIRE_PID 2>/dev/null
+    kill -INT $PITBOSS_PID 2>/dev/null
 
-    # Wait up to 20s for shire to exit (TERMINATE_GRACE is 10s + safety)
+    # Wait up to 20s for pitboss to exit (TERMINATE_GRACE is 10s + safety)
     for i in $(seq 1 20); do
-        if ! kill -0 $SHIRE_PID 2>/dev/null; then break; fi
+        if ! kill -0 $PITBOSS_PID 2>/dev/null; then break; fi
         sleep 1
     done
-    wait $SHIRE_PID 2>/dev/null
-    SHIRE_EXIT=$?
+    wait $PITBOSS_PID 2>/dev/null
+    PITBOSS_EXIT=$?
 
     if grep -q "draining" "$LOG" && grep -q "terminating" "$LOG"; then
         # Exit code should be 130 per spec, but shire may bail with another code
-        if [ "$SHIRE_EXIT" = "130" ] || [ "$SHIRE_EXIT" -gt 0 ]; then
+        if [ "$PITBOSS_EXIT" = "130" ] || [ "$PITBOSS_EXIT" -gt 0 ]; then
             RD=$(latest_run_dir)
             if [ -f "$RD/summary.json" ]; then
                 STATUS=$(jq -r '.tasks[0].status' "$RD/summary.json")
                 if [ "$STATUS" = "Cancelled" ]; then
-                    record "2.9 two-phase Ctrl-C" PASS "exit=$SHIRE_EXIT status=Cancelled"
+                    record "2.9 two-phase Ctrl-C" PASS "exit=$PITBOSS_EXIT status=Cancelled"
                 else
-                    record "2.9 two-phase Ctrl-C" FAIL "exit=$SHIRE_EXIT but status=$STATUS"
+                    record "2.9 two-phase Ctrl-C" FAIL "exit=$PITBOSS_EXIT but status=$STATUS"
                 fi
             else
                 record "2.9 two-phase Ctrl-C" FAIL "no summary.json after cancel"
             fi
         else
-            record "2.9 two-phase Ctrl-C" FAIL "shire exit=$SHIRE_EXIT"
+            record "2.9 two-phase Ctrl-C" FAIL "pitboss exit=$PITBOSS_EXIT"
         fi
     else
         record "2.9 two-phase Ctrl-C" FAIL "drain/terminate log lines missing; see $LOG"
@@ -415,7 +415,7 @@ directory = "$REPO_A"
 prompt = "Create a file named wt-$POLICY.txt containing the single word done."
 branch = "$BR"
 EOF
-    "$SHIRE" dispatch "$TOML" >/dev/null 2>&1
+    "$PITBOSS" dispatch "$TOML" >/dev/null 2>&1
     EXIT_CODE=$?
     SIBLING="$SCRATCH"/repo-a-shire-wt-$POLICY-*
     if ls $SIBLING >/dev/null 2>&1; then
@@ -473,7 +473,7 @@ branch = "duplicate-branch"
 EOF
 
 echo "== 2.11 Branch-conflict validation =="
-"$SHIRE" dispatch "$SCRATCH/t8.toml" >/dev/null 2>&1
+"$PITBOSS" dispatch "$SCRATCH/t8.toml" >/dev/null 2>&1
 CODE=$?
 if [ "$CODE" = "2" ]; then
     record "2.11 branch conflict" PASS "exit=2 as expected"

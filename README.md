@@ -3,17 +3,17 @@
 Rust toolkit for running and observing parallel Claude Code agent sessions.
 Ships two binaries:
 
-- **`shire`** — headless dispatcher. Reads a `shire.toml` manifest, fans out N
+- **`pitboss`** — headless dispatcher. Reads a `shire.toml` manifest, fans out N
   `claude` subprocesses under a concurrency cap, writes structured per-run
-  artifacts. [See `crates/shire-cli/`.](crates/shire-cli/)
-- **`mosaic`** — terminal observer for in-progress or completed runs (v0.2-alpha).
-  Tile grid of task state, live log tailing, read-only. [See `crates/mosaic-tui/`.](crates/mosaic-tui/)
+  artifacts. [See `crates/pitboss-cli/`.](crates/pitboss-cli/)
+- **`pitboss-tui`** — terminal observer for in-progress or completed runs (v0.2-alpha).
+  Tile grid of task state, live log tailing, read-only. [See `crates/pitboss-tui/`.](crates/pitboss-tui/)
 
 ## Install
 
 ```
-cargo install --path crates/shire-cli
-cargo install --path crates/mosaic-tui
+cargo install --path crates/pitboss-cli
+cargo install --path crates/pitboss-tui
 ```
 
 ## Quick start — dispatch
@@ -34,8 +34,8 @@ branch = "feat/hello"
 Then:
 
 ```
-shire validate shire.toml
-shire dispatch shire.toml
+pitboss validate shire.toml
+pitboss dispatch shire.toml
 ```
 
 Artifacts land in `~/.local/share/shire/runs/<run-id>/`.
@@ -43,12 +43,12 @@ Artifacts land in `~/.local/share/shire/runs/<run-id>/`.
 ## Quick start — observe
 
 ```
-mosaic         # opens the most recent run
-mosaic list    # table of runs to stdout
-mosaic 019d99  # opens a run by UUID prefix
+pitboss-tui         # opens the most recent run
+pitboss-tui list    # table of runs to stdout
+pitboss-tui 019d99  # opens a run by UUID prefix
 ```
 
-See [`crates/mosaic-tui/README.md`](crates/mosaic-tui/README.md) for keybindings.
+See [`crates/pitboss-tui/README.md`](crates/pitboss-tui/README.md) for keybindings.
 
 ## Quick start — hierarchical (v0.3)
 
@@ -72,22 +72,22 @@ branch = "feat/triage-lead"
 Run it the same way:
 
 ```
-shire validate shire.toml   # prints a hierarchical summary when [[lead]] is used
-shire dispatch shire.toml
+pitboss validate shire.toml   # prints a hierarchical summary when [[lead]] is used
+pitboss dispatch shire.toml
 ```
 
 The lead has access to these MCP tools: `shire__spawn_worker`,
 `shire__worker_status`, `shire__wait_for_worker`, `shire__wait_for_any`,
 `shire__list_workers`, `shire__cancel_worker`.
 
-Under the hood, shire generates a `--mcp-config` file that points the lead's
-claude subprocess at `shire mcp-bridge <socket>` — a small helper subcommand
+Under the hood, pitboss generates a `--mcp-config` file that points the lead's
+claude subprocess at `pitboss mcp-bridge <socket>` — a small helper subcommand
 that proxies stdio to the shire MCP server's unix socket. The lead never
 invokes `mcp-bridge` directly; it's wired up automatically for every
 hierarchical run.
 
-In Mosaic, leads show a `[LEAD]` prefix and worker tiles display `← lead-id`
-so you can see who spawned what. `shire resume <run-id>` works for
+In the Pitboss TUI, leads show a `[LEAD]` prefix and worker tiles display `← lead-id`
+so you can see who spawned what. `pitboss resume <run-id>` works for
 hierarchical runs too — it re-invokes the lead with `--resume` and the session
 picks up where it left off. Only the lead is resumed; workers are not
 individually resumed — the lead's next decisions determine whether to spawn
@@ -106,7 +106,7 @@ With a real `claude` binary on PATH and ANTHROPIC_API_KEY set:
 
 1. Create two throwaway git repos.
 2. Point one manifest at each with a trivial prompt ("write `hi` to a file").
-3. `shire dispatch ./manifest.toml` — confirm the progress table updates, both
+3. `pitboss dispatch ./manifest.toml` — confirm the progress table updates, both
    Hobbits succeed, and the summary.json contains expected fields.
 4. Run again with `halt_on_failure = true` and an intentionally-failing prompt
    in the first task. Confirm the second task is skipped.
@@ -117,7 +117,7 @@ With a real `claude` binary on PATH and ANTHROPIC_API_KEY set:
 
 ```
 cargo test --workspace
-cargo test -p mosaic-core --features test-support
+cargo test -p pitboss-core --features test-support
 cargo lint
 cargo tidy
 ```

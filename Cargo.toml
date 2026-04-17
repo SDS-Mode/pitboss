@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/mosaic-core",
-    "crates/shire-cli",
-    "crates/mosaic-tui",
+    "crates/pitboss-core",
+    "crates/pitboss-cli",
+    "crates/pitboss-tui",
     "tests-support/fake-claude",
     "tests-support/fake-mcp-client",
 ]

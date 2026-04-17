@@ -16,7 +16,7 @@ interactive snap-in, no cross-run persistence. It exists to prove the core runti
 subprocess lifecycle, stream-json parsing, git-worktree isolation, and summary
 reporting — on a substrate that the eventual Mosaic TUI will share.
 
-The binary is `shire`. It reads `shire.toml`, validates, fans out N tasks under a
+The binary is `pitboss`. It reads `shire.toml`, validates, fans out N tasks under a
 concurrency cap, and writes structured artifacts to `~/.local/share/shire/runs/<run-id>/`.
 It is a drop-in tool for scripts, CI, cron, and local experimentation.
 
@@ -27,7 +27,7 @@ It is a drop-in tool for scripts, CI, cron, and local experimentation.
 - Parallel dispatch of N Claude Code sessions from one manifest, with per-task isolation.
 - Deterministic, machine-readable output artifacts (`summary.json`, per-task logs).
 - Two-phase Ctrl-C: drain cleanly, then escalate on second signal.
-- A library (`mosaic-core`) whose public API is designed today to support a future TUI
+- A library (`pitboss-core`) whose public API is designed today to support a future TUI
   consumer without refactoring.
 
 ### Non-goals (v0.1)
@@ -51,7 +51,7 @@ agentshire/
 ├── Cargo.lock
 ├── rust-toolchain.toml           # pin stable channel (e.g. 1.82)
 ├── crates/
-│   ├── mosaic-core/              # library — shared runtime machinery
+│   ├── pitboss-core/              # library — shared runtime machinery
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -77,7 +77,7 @@ agentshire/
 │   │       ├── ringbuf/          # bounded output buffer (used by future TUI)
 │   │       │   └── mod.rs
 │   │       └── error.rs          # thiserror-based error types
-│   └── shire-cli/                # binary — dispatch orchestrator
+│   └── pitboss-cli/                # binary — dispatch orchestrator
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs           # arg parsing, runtime init, signal handling
@@ -104,7 +104,7 @@ agentshire/
 └── README.md
 ```
 
-No stubbed `mosaic-tui` crate — it is added when TUI work begins. The workspace
+No stubbed `pitboss-tui` crate — it is added when TUI work begins. The workspace
 structure above is the only organizational commitment made now.
 
 ## 4. Manifest Schema (`shire.toml`)
@@ -183,7 +183,7 @@ runs can tune up or down.
 
 ### 4.4 Validation
 
-Run at `shire validate <file>` and implicitly at `shire dispatch <file>` startup.
+Run at `pitboss validate <file>` and implicitly at `pitboss dispatch <file>` startup.
 Fail-fast on any of:
 
 - Missing required fields (`id`, `directory`, `prompt`-or-`template`).
@@ -210,7 +210,7 @@ Keep the grammar small enough that the parser is obviously correct.
 ## 5. Runtime Architecture
 
 ```
-                   shire dispatch manifest.toml
+                   pitboss dispatch manifest.toml
                               │
                               ▼
                     ┌─────────────────────┐
@@ -262,7 +262,7 @@ Keep the grammar small enough that the parser is obviously correct.
                     └─────────────────────┘
 ```
 
-### 5.1 Core types (`mosaic-core`)
+### 5.1 Core types (`pitboss-core`)
 
 Non-exhaustive — signatures are illustrative, subject to normal API hygiene during
 implementation.
@@ -397,7 +397,7 @@ Two signal phases, mapped to a `CancelToken` owned by each `SessionHandle`:
    - `CancelToken::terminate()` broadcast.
    - Each active `SessionHandle` sends SIGTERM to its child.
    - Grace window of `TERMINATE_GRACE = 10 s` (compile-time constant in
-     `mosaic-core::session`; not configurable in v0.1), then SIGKILL any still running.
+     `pitboss-core::session`; not configurable in v0.1), then SIGKILL any still running.
    - Tasks terminated this way record `status = "Cancelled"` with `exit_code = None`.
 
 3. **`halt_on_failure = true`**: first task to end with `status != Success` triggers
@@ -405,7 +405,7 @@ Two signal phases, mapped to a `CancelToken` owned by each `SessionHandle`:
    accelerate.
 
 Summary writing is best-effort: every completed task fsync's its record to
-`summary.jsonl` *before* cleanup, so a `kill -9` on `shire` itself still leaves
+`summary.jsonl` *before* cleanup, so a `kill -9` on `pitboss` itself still leaves
 a partial transcript on disk.
 
 ## 6. Data Flow and Artifacts
@@ -541,19 +541,19 @@ set `use_worktree = false` explicitly at task or defaults level.
 
 ## 8. Error Handling
 
-- **`mosaic-core`** uses `thiserror` for explicit, exhaustive error enums on every
+- **`pitboss-core`** uses `thiserror` for explicit, exhaustive error enums on every
   public boundary (`SessionError`, `SpawnError`, `ParseError`, `WorktreeError`,
   `StoreError`). No `anyhow` in the library.
-- **`shire-cli`** uses `anyhow` at the CLI entry points; converts library errors
+- **`pitboss-cli`** uses `anyhow` at the CLI entry points; converts library errors
   with `.context(...)` annotations that name the task id and the operation.
-- **Exit codes for `shire dispatch`**:
+- **Exit codes for `pitboss dispatch`**:
   - `0` — all tasks `Success`, no interruption.
   - `1` — one or more tasks ended with `Failed`, `TimedOut`, or `SpawnFailed`.
   - `2` — validation failure (no tasks ran).
   - `130` — interrupted (Ctrl-C, SIGTERM to shire itself).
 - Stderr carries human-readable diagnostics; stdout carries the progress table
   and, when `-q/--quiet` is set, nothing.
-- `tracing` with `EnvFilter`: default `RUST_LOG=shire=info,mosaic_core=info`,
+- `tracing` with `EnvFilter`: default `RUST_LOG=shire=info,pitboss_core=info`,
   pretty output to stderr. `-v` / `-vv` bump verbosity.
 
 ## 9. Testing Strategy
@@ -563,7 +563,7 @@ Two layers, per Q8 of the brainstorm:
 ### 9.1 Unit tests (fast, deterministic)
 
 - `parser/` — fixture-driven, `parse_line(bytes) -> Event` over curated samples.
-  Fixtures live at `crates/mosaic-core/tests/fixtures/stream_json/*.jsonl`.
+  Fixtures live at `crates/pitboss-core/tests/fixtures/stream_json/*.jsonl`.
 - `session/state.rs` — state-transition correctness given synthesized events.
 - `manifest/resolve.rs` — template substitution, defaults merge, var validation.
 - `manifest/validate.rs` — rejects every documented failure mode.
@@ -598,7 +598,7 @@ Two layers, per Q8 of the brainstorm:
 From the spec, pruned to what v0.1 actually needs:
 
 ```toml
-# crates/mosaic-core/Cargo.toml
+# crates/pitboss-core/Cargo.toml
 [dependencies]
 tokio              = { version = "1", features = ["rt-multi-thread","process","io-util","sync","time","signal","macros","fs"] }
 serde              = { version = "1", features = ["derive"] }
@@ -616,9 +616,9 @@ tokio              = { version = "1", features = ["test-util"] }
 ```
 
 ```toml
-# crates/shire-cli/Cargo.toml
+# crates/pitboss-cli/Cargo.toml
 [dependencies]
-mosaic-core        = { path = "../mosaic-core" }
+pitboss-core        = { path = "../pitboss-core" }
 tokio              = { version = "1", features = ["rt-multi-thread","signal","macros"] }
 clap               = { version = "4", features = ["derive"] }
 toml               = "0.8"
@@ -661,14 +661,14 @@ by adding to this section in a follow-up PR.
 ## Appendix A — Command Surface
 
 ```
-shire validate <manifest.toml>
+pitboss validate <manifest.toml>
     Parse + resolve + validate. Prints validation report. Exit 0 if clean.
 
-shire dispatch <manifest.toml> [--run-dir PATH] [--dry-run] [-q|-v|-vv]
+pitboss dispatch <manifest.toml> [--run-dir PATH] [--dry-run] [-q|-v|-vv]
     Execute the manifest. --dry-run prints the resolved spawn commands and exits.
 
-shire version
-    Prints shire version and, if available, claude version.
+pitboss version
+    Prints pitboss version and, if available, claude version.
 ```
 
 ## Appendix B — First-PR Sequence (informal, for writing-plans)
@@ -678,14 +678,14 @@ task-level plan.
 
 1. Workspace skeleton, Cargo.toml files, rust-toolchain pin. CI configuration
    optional; land `cargo fmt`/`cargo clippy` pre-commit parity at minimum.
-2. `mosaic-core::parser` with fixtures — lowest-risk, purely functional.
-3. `mosaic-core::process::ProcessSpawner` trait + tokio impl + `FakeSpawner`.
-4. `mosaic-core::session` state machine against `FakeSpawner`.
-5. `mosaic-core::worktree` with real-git `TempDir` tests.
-6. `mosaic-core::store::JsonFileStore` with append/read round-trip tests.
-7. `shire-cli::manifest` load/resolve/validate.
-8. `shire-cli::dispatch::runner` — semaphore, task lifecycle, summary writing.
-9. `shire-cli::dispatch::signals` — two-phase Ctrl-C.
+2. `pitboss-core::parser` with fixtures — lowest-risk, purely functional.
+3. `pitboss-core::process::ProcessSpawner` trait + tokio impl + `FakeSpawner`.
+4. `pitboss-core::session` state machine against `FakeSpawner`.
+5. `pitboss-core::worktree` with real-git `TempDir` tests.
+6. `pitboss-core::store::JsonFileStore` with append/read round-trip tests.
+7. `pitboss-cli::manifest` load/resolve/validate.
+8. `pitboss-cli::dispatch::runner` — semaphore, task lifecycle, summary writing.
+9. `pitboss-cli::dispatch::signals` — two-phase Ctrl-C.
 10. `tests-support/fake-claude` + integration tests.
 11. Stdout progress table polish.
 12. Manual smoke test against real `claude`.

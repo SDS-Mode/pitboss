@@ -3,7 +3,7 @@
 **Status:** approved design, pre-implementation
 **Date:** 2026-04-17
 **Authors:** TheBigScript, Andy (Opus 4.7, max effort)
-**Prerequisites:** v0.2.2 landed and tagged (Mosaic TUI, SQLite store, `shire resume`, `shire diff`).
+**Prerequisites:** v0.2.2 landed and tagged (Mosaic TUI, SQLite store, `pitboss resume`, `pitboss diff`).
 
 ---
 
@@ -24,7 +24,7 @@ for recursion, worker count, and budget, and (d) minor TUI tweaks for lineage.
 
 ### 1.1 Goals
 
-- One-prompt operator workflow: write `lead_prompt`, run `shire dispatch`.
+- One-prompt operator workflow: write `lead_prompt`, run `pitboss dispatch`.
 - Lead can spawn workers dynamically in parallel (no pre-declared worker list).
 - Every worker gets the same worktree isolation, session tracking, cost
   accounting, and Mosaic visibility that flat-dispatch tasks get.
@@ -261,7 +261,7 @@ whatever it has or call `wait_for_any` on already-spawned workers.
 
 ```
  operator
-    │  shire dispatch manifest.toml
+    │  pitboss dispatch manifest.toml
     │
     ▼
 ┌───────────────────────────────────────┐
@@ -423,16 +423,16 @@ v0.3.1.
 
 ## 9. Resume, diff, validate
 
-- **`shire validate`** extends to accept `[[lead]]` manifests. Rejects mixed
+- **`pitboss validate`** extends to accept `[[lead]]` manifests. Rejects mixed
   `[[task]]` + `[[lead]]`, reports budget/cap/timeout out-of-range.
-- **`shire dispatch`** detects hierarchical mode when the resolved manifest has
+- **`pitboss dispatch`** detects hierarchical mode when the resolved manifest has
   `lead.is_some()` and routes to a new `run_hierarchical` internal function.
   The existing flat `execute` is unchanged; they share sub-helpers.
-- **`shire resume`** re-runs the lead with `--resume <lead_session_id>` from
+- **`pitboss resume`** re-runs the lead with `--resume <lead_session_id>` from
   the prior run's `TaskRecord`. Workers are NOT resumed — the lead decides
   whether to spawn fresh workers based on its context. Documentation says so
   explicitly; attempting to resume a specific worker by id errors.
-- **`shire diff`** works out of the box — leads and workers are `TaskRecord`
+- **`pitboss diff`** works out of the box — leads and workers are `TaskRecord`
   entries. The diff output is grouped by run, so a lead vs lead diff naturally
   pairs up.
 
@@ -486,9 +486,9 @@ budget; verify Mosaic shows lead + workers with lineage annotations.
 
 ```
 crates/
-├── mosaic-core/          # +1 field on TaskRecord, +1 SQLite column
-├── mosaic-tui/           # +lead/worker annotations in tile render
-├── shire-cli/            # NEW: src/mcp/    — MCP server + tool handlers
+├── pitboss-core/          # +1 field on TaskRecord, +1 SQLite column
+├── pitboss-tui/           # +lead/worker annotations in tile render
+├── pitboss-cli/            # NEW: src/mcp/    — MCP server + tool handlers
 │                         # NEW: src/dispatch/hierarchical.rs
 │                         # EXT: src/manifest/schema.rs — [[lead]] section
 │                         # EXT: src/manifest/validate.rs — hierarchical rules
@@ -510,7 +510,7 @@ Deliberately deferred so they aren't mistaken for v0.3 work:
 - `TeammateIdle` / `TaskCreated` / `TaskCompleted` hooks.
 - Plan approval workflow.
 - Multi-lead manifests.
-- Per-worker resume via `shire resume`.
+- Per-worker resume via `pitboss resume`.
 - Broadcast / parallel-forward-message patterns.
 - MCP server over anything but unix sockets (TCP, named pipes, etc.).
 - A GUI tree view of the run's worker lineage in Mosaic.

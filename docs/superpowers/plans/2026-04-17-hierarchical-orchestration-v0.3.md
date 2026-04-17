@@ -14,7 +14,7 @@
 
 - Workspace root: `/run/media/system/Dos/Projects/agentshire/`
 - Every task ends with a commit. Commits are small and buildable.
-- `cargo test --workspace --features mosaic-core/test-support` is the gate.
+- `cargo test --workspace --features pitboss-core/test-support` is the gate.
 - `cargo lint` (clippy `-D warnings`) must pass before every commit.
 - `cargo fmt --all -- --check` must pass before every commit.
 - Forward-reference stubs allowed ONLY when marked with `unimplemented!("covered in Task N")`.
@@ -27,12 +27,12 @@
 ### Task 1: Add `parent_task_id` to TaskRecord
 
 **Files:**
-- Modify: `crates/mosaic-core/src/store/record.rs`
-- Modify: `crates/mosaic-core/src/store/json_file.rs` (no-op for JSON — serde handles it)
+- Modify: `crates/pitboss-core/src/store/record.rs`
+- Modify: `crates/pitboss-core/src/store/json_file.rs` (no-op for JSON — serde handles it)
 
 - [ ] **Step 1: Write failing test**
 
-Append to `crates/mosaic-core/src/store/record.rs` `mod tests`:
+Append to `crates/pitboss-core/src/store/record.rs` `mod tests`:
 
 ```rust
     #[test]
@@ -79,12 +79,12 @@ Append to `crates/mosaic-core/src/store/record.rs` `mod tests`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core store::record::tests::task_record_with_parent_round_trips`
+Run: `cargo test -p pitboss-core store::record::tests::task_record_with_parent_round_trips`
 Expected: FAIL — field missing.
 
 - [ ] **Step 3: Add the field**
 
-In `crates/mosaic-core/src/store/record.rs`, modify the `TaskRecord` struct:
+In `crates/pitboss-core/src/store/record.rs`, modify the `TaskRecord` struct:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +119,7 @@ Each construction needs `parent_task_id: None,` before the closing brace.
 
 - [ ] **Step 5: Run full tests to verify pass**
 
-Run: `cargo test --workspace --features mosaic-core/test-support`
+Run: `cargo test --workspace --features pitboss-core/test-support`
 Expected: all 158 previous tests pass + 2 new tests pass.
 
 Run: `cargo lint`
@@ -128,7 +128,7 @@ Expected: clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/mosaic-core/src/store/record.rs
+git add crates/pitboss-core/src/store/record.rs
 git commit -m "Add parent_task_id to TaskRecord with backward-compat deserialization"
 ```
 
@@ -137,11 +137,11 @@ git commit -m "Add parent_task_id to TaskRecord with backward-compat deserializa
 ### Task 2: SQLite migration for parent_task_id column
 
 **Files:**
-- Modify: `crates/mosaic-core/src/store/sqlite.rs`
+- Modify: `crates/pitboss-core/src/store/sqlite.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Append to `crates/mosaic-core/src/store/sqlite.rs` `#[cfg(test)] mod sqlite_tests`:
+Append to `crates/pitboss-core/src/store/sqlite.rs` `#[cfg(test)] mod sqlite_tests`:
 
 ```rust
     #[tokio::test]
@@ -210,12 +210,12 @@ Append to `crates/mosaic-core/src/store/sqlite.rs` `#[cfg(test)] mod sqlite_test
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mosaic-core store::sqlite::sqlite_tests::sqlite_stores_parent_task_id`
+Run: `cargo test -p pitboss-core store::sqlite::sqlite_tests::sqlite_stores_parent_task_id`
 Expected: FAIL — column doesn't exist.
 
 - [ ] **Step 3: Update schema + migration**
 
-In `crates/mosaic-core/src/store/sqlite.rs`, update `SqliteStore::new` to add the column to both create and migrate paths. The key change is:
+In `crates/pitboss-core/src/store/sqlite.rs`, update `SqliteStore::new` to add the column to both create and migrate paths. The key change is:
 
 1. Include `parent_task_id TEXT NULL` in the `CREATE TABLE task_records` clause.
 2. After creating/opening the DB, run a migration check that uses `PRAGMA table_info(task_records)` to detect whether `parent_task_id` exists, and if not, issue `ALTER TABLE task_records ADD COLUMN parent_task_id TEXT NULL`.
@@ -292,7 +292,7 @@ Update the row→record mapper in `load_run` to also read `parent_task_id` (new 
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p mosaic-core store::sqlite`
+Run: `cargo test -p pitboss-core store::sqlite`
 Expected: all 4 sqlite tests (2 existing + 2 new) pass.
 
 Run: `cargo lint` and `cargo fmt --all -- --check`. Clean.
@@ -300,7 +300,7 @@ Run: `cargo lint` and `cargo fmt --all -- --check`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mosaic-core/src/store/sqlite.rs
+git add crates/pitboss-core/src/store/sqlite.rs
 git commit -m "SqliteStore: add parent_task_id column with idempotent migration"
 ```
 
@@ -310,7 +310,7 @@ git commit -m "SqliteStore: add parent_task_id column with idempotent migration"
 
 **Files:**
 - Modify: `Cargo.toml` (workspace root)
-- Modify: `crates/shire-cli/Cargo.toml`
+- Modify: `crates/pitboss-cli/Cargo.toml`
 
 - [ ] **Step 1: Add to workspace deps**
 
@@ -320,9 +320,9 @@ In root `Cargo.toml` `[workspace.dependencies]`, add:
 rmcp = { version = "0.8", features = ["server", "transport-io", "macros"] }
 ```
 
-- [ ] **Step 2: Add to shire-cli**
+- [ ] **Step 2: Add to pitboss-cli**
 
-In `crates/shire-cli/Cargo.toml` `[dependencies]`, add:
+In `crates/pitboss-cli/Cargo.toml` `[dependencies]`, add:
 
 ```toml
 rmcp = { workspace = true }
@@ -330,13 +330,13 @@ rmcp = { workspace = true }
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: build succeeds. No other changes yet — this is just adding the dep.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/shire-cli/Cargo.toml
+git add Cargo.toml Cargo.lock crates/pitboss-cli/Cargo.toml
 git commit -m "Add rmcp dependency for v0.3 MCP server"
 ```
 
@@ -347,11 +347,11 @@ git commit -m "Add rmcp dependency for v0.3 MCP server"
 ### Task 4: `[[lead]]` schema + new `[run]` fields
 
 **Files:**
-- Modify: `crates/shire-cli/src/manifest/schema.rs`
+- Modify: `crates/pitboss-cli/src/manifest/schema.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `crates/shire-cli/src/manifest/schema.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/manifest/schema.rs` `mod tests`:
 
 ```rust
     #[test]
@@ -411,12 +411,12 @@ Append to `crates/shire-cli/src/manifest/schema.rs` `mod tests`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p shire-cli manifest::schema::tests::parses_lead_section`
+Run: `cargo test -p pitboss-cli manifest::schema::tests::parses_lead_section`
 Expected: FAIL — `leads` field doesn't exist on `Manifest`.
 
 - [ ] **Step 3: Extend schema types**
 
-In `crates/shire-cli/src/manifest/schema.rs`:
+In `crates/pitboss-cli/src/manifest/schema.rs`:
 
 Add `Lead` struct:
 
@@ -492,7 +492,7 @@ Update `Default for RunConfig` to include `max_workers: None, budget_usd: None, 
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p shire-cli manifest::schema`
+Run: `cargo test -p pitboss-cli manifest::schema`
 Expected: all existing schema tests pass plus 3 new ones.
 
 Run: `cargo lint`. Clean.
@@ -500,7 +500,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/manifest/schema.rs
+git add crates/pitboss-cli/src/manifest/schema.rs
 git commit -m "manifest: add [[lead]] section and hierarchical [run] fields"
 ```
 
@@ -509,11 +509,11 @@ git commit -m "manifest: add [[lead]] section and hierarchical [run] fields"
 ### Task 5: Resolve `[[lead]]` into `ResolvedLead`
 
 **Files:**
-- Modify: `crates/shire-cli/src/manifest/resolve.rs`
+- Modify: `crates/pitboss-cli/src/manifest/resolve.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `crates/shire-cli/src/manifest/resolve.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/manifest/resolve.rs` `mod tests`:
 
 ```rust
     #[test]
@@ -573,12 +573,12 @@ Append to `crates/shire-cli/src/manifest/resolve.rs` `mod tests`:
 
 - [ ] **Step 2: Run tests — should fail because `ResolvedManifest` has no `lead` field**
 
-Run: `cargo test -p shire-cli manifest::resolve::tests::resolves_lead_inheriting_defaults`
+Run: `cargo test -p pitboss-cli manifest::resolve::tests::resolves_lead_inheriting_defaults`
 Expected: FAIL — `r.lead` doesn't exist.
 
 - [ ] **Step 3: Add `ResolvedLead` + hierarchical fields to `ResolvedManifest`**
 
-In `crates/shire-cli/src/manifest/resolve.rs`:
+In `crates/pitboss-cli/src/manifest/resolve.rs`:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,7 +687,7 @@ Fix any existing test that constructs `ResolvedManifest` literally to include th
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli manifest::resolve`
+Run: `cargo test -p pitboss-cli manifest::resolve`
 Expected: all pass.
 
 Run: `cargo lint`. Clean.
@@ -695,7 +695,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/manifest/resolve.rs
+git add crates/pitboss-cli/src/manifest/resolve.rs
 git commit -m "manifest: resolve [[lead]] into ResolvedLead with defaults inheritance"
 ```
 
@@ -704,11 +704,11 @@ git commit -m "manifest: resolve [[lead]] into ResolvedLead with defaults inheri
 ### Task 6: Hierarchical validation rules
 
 **Files:**
-- Modify: `crates/shire-cli/src/manifest/validate.rs`
+- Modify: `crates/pitboss-cli/src/manifest/validate.rs`
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `crates/shire-cli/src/manifest/validate.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/manifest/validate.rs` `mod tests`:
 
 ```rust
     #[test]
@@ -817,12 +817,12 @@ Append to `crates/shire-cli/src/manifest/validate.rs` `mod tests`:
 
 - [ ] **Step 2: Run tests to verify fail**
 
-Run: `cargo test -p shire-cli manifest::validate::tests::rejects_mixing_tasks_and_lead`
+Run: `cargo test -p pitboss-cli manifest::validate::tests::rejects_mixing_tasks_and_lead`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement validation rules**
 
-In `crates/shire-cli/src/manifest/validate.rs`, replace the top-level `validate` function:
+In `crates/pitboss-cli/src/manifest/validate.rs`, replace the top-level `validate` function:
 
 ```rust
 pub fn validate(resolved: &ResolvedManifest) -> Result<()> {
@@ -907,7 +907,7 @@ fn validate_hierarchical_ranges(r: &ResolvedManifest) -> Result<()> {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli manifest::validate`
+Run: `cargo test -p pitboss-cli manifest::validate`
 Expected: all pass (existing tests + 5 new).
 
 Run: `cargo lint`. Clean.
@@ -915,7 +915,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/manifest/validate.rs
+git add crates/pitboss-cli/src/manifest/validate.rs
 git commit -m "manifest: hierarchical-mode validation (mutex, ranges, lead checks)"
 ```
 
@@ -926,14 +926,14 @@ git commit -m "manifest: hierarchical-mode validation (mutex, ranges, lead check
 ### Task 7: Create `mcp` module skeleton
 
 **Files:**
-- Create: `crates/shire-cli/src/mcp/mod.rs`
-- Create: `crates/shire-cli/src/mcp/server.rs`
-- Create: `crates/shire-cli/src/mcp/tools.rs`
-- Modify: `crates/shire-cli/src/main.rs` (add `mod mcp;`)
+- Create: `crates/pitboss-cli/src/mcp/mod.rs`
+- Create: `crates/pitboss-cli/src/mcp/server.rs`
+- Create: `crates/pitboss-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/main.rs` (add `mod mcp;`)
 
 - [ ] **Step 1: Create the module structure**
 
-Create `crates/shire-cli/src/mcp/mod.rs`:
+Create `crates/pitboss-cli/src/mcp/mod.rs`:
 
 ```rust
 //! MCP server exposed to the lead Hobbit so it can spawn and coordinate
@@ -946,7 +946,7 @@ pub mod tools;
 pub use server::{McpServer, socket_path_for_run};
 ```
 
-Create `crates/shire-cli/src/mcp/server.rs` with a minimal skeleton:
+Create `crates/pitboss-cli/src/mcp/server.rs` with a minimal skeleton:
 
 ```rust
 //! Lifecycle of the shire MCP server (unix socket transport).
@@ -1016,7 +1016,7 @@ mod tests {
 }
 ```
 
-Create `crates/shire-cli/src/mcp/tools.rs` with placeholder types:
+Create `crates/pitboss-cli/src/mcp/tools.rs` with placeholder types:
 
 ```rust
 //! The six MCP tool handlers exposed to the lead. Real implementations
@@ -1044,7 +1044,7 @@ pub struct SpawnWorkerResult {
 pub struct WorkerStatus {
     pub state: String,
     pub started_at: Option<String>,
-    pub partial_usage: mosaic_core::parser::TokenUsage,
+    pub partial_usage: pitboss_core::parser::TokenUsage,
     pub last_text_preview: Option<String>,
 }
 
@@ -1062,14 +1062,14 @@ pub struct CancelResult {
 }
 ```
 
-Modify `crates/shire-cli/src/main.rs` to add `mod mcp;` after the existing module declarations.
+Modify `crates/pitboss-cli/src/main.rs` to add `mod mcp;` after the existing module declarations.
 
 - [ ] **Step 2: Verify the skeleton compiles**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: clean build (no warnings).
 
-Run: `cargo test -p shire-cli mcp::server::tests`
+Run: `cargo test -p pitboss-cli mcp::server::tests`
 Expected: 2 tests pass.
 
 Run: `cargo lint`. Clean.
@@ -1077,7 +1077,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/ crates/shire-cli/src/main.rs
+git add crates/pitboss-cli/src/mcp/ crates/pitboss-cli/src/main.rs
 git commit -m "mcp: module scaffolding + socket path helper"
 ```
 
@@ -1175,11 +1175,11 @@ git commit -m "tests-support: fake-mcp-client scaffold (rmcp client)"
 ### Task 9: Implement MCP server start/stop lifecycle
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/server.rs`
+- Modify: `crates/pitboss-cli/src/mcp/server.rs`
 
 - [ ] **Step 1: Write failing integration-style test**
 
-Append to `crates/shire-cli/src/mcp/server.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/mcp/server.rs` `mod tests`:
 
 ```rust
     #[tokio::test]
@@ -1201,12 +1201,12 @@ Append to `crates/shire-cli/src/mcp/server.rs` `mod tests`:
 
 - [ ] **Step 2: Run the test to confirm failure**
 
-Run: `cargo test -p shire-cli mcp::server::tests::server_starts_and_accepts_connection`
+Run: `cargo test -p pitboss-cli mcp::server::tests::server_starts_and_accepts_connection`
 Expected: PANIC on `unimplemented!("covered in Task 9")`.
 
 - [ ] **Step 3: Implement `McpServer::start`**
 
-Replace the `McpServer` struct body and impl in `crates/shire-cli/src/mcp/server.rs`:
+Replace the `McpServer` struct body and impl in `crates/pitboss-cli/src/mcp/server.rs`:
 
 ```rust
 use tokio::sync::oneshot;
@@ -1273,7 +1273,7 @@ impl Drop for McpServer {
 
 - [ ] **Step 4: Run the test to verify pass**
 
-Run: `cargo test -p shire-cli mcp::server::tests`
+Run: `cargo test -p pitboss-cli mcp::server::tests`
 Expected: all 3 tests pass (2 path-helper + 1 start).
 
 Run: `cargo lint`. Clean.
@@ -1281,7 +1281,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/server.rs
+git add crates/pitboss-cli/src/mcp/server.rs
 git commit -m "mcp: server start/stop lifecycle with unix-socket listener"
 ```
 
@@ -1292,12 +1292,12 @@ git commit -m "mcp: server start/stop lifecycle with unix-socket listener"
 ### Task 10: Define `DispatchState` shared between runner and MCP
 
 **Files:**
-- Create: `crates/shire-cli/src/dispatch/state.rs`
-- Modify: `crates/shire-cli/src/dispatch/mod.rs` (add `pub mod state;`)
+- Create: `crates/pitboss-cli/src/dispatch/state.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/mod.rs` (add `pub mod state;`)
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/shire-cli/src/dispatch/state.rs` (skeleton):
+Create `crates/pitboss-cli/src/dispatch/state.rs` (skeleton):
 
 ```rust
 //! Shared state for a single hierarchical run. Held in an Arc and shared
@@ -1307,8 +1307,8 @@ Create `crates/shire-cli/src/dispatch/state.rs` (skeleton):
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mosaic_core::session::CancelToken;
-use mosaic_core::store::{SessionStore, TaskRecord};
+use pitboss_core::session::CancelToken;
+use pitboss_core::store::{SessionStore, TaskRecord};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
@@ -1376,7 +1376,7 @@ mod tests {
     use super::*;
     use crate::manifest::resolve::ResolvedManifest;
     use crate::manifest::schema::WorktreeCleanup;
-    use mosaic_core::store::JsonFileStore;
+    use pitboss_core::store::JsonFileStore;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -1422,7 +1422,7 @@ mod tests {
 }
 ```
 
-Modify `crates/shire-cli/src/dispatch/mod.rs`:
+Modify `crates/pitboss-cli/src/dispatch/mod.rs`:
 
 ```rust
 pub mod probe;
@@ -1438,16 +1438,16 @@ pub use state::DispatchState;
 
 - [ ] **Step 2: Run tests to verify they fail (compile)**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: compiles clean.
 
-Run: `cargo test -p shire-cli dispatch::state`
+Run: `cargo test -p pitboss-cli dispatch::state`
 Expected: 3 tests pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/dispatch/
+git add crates/pitboss-cli/src/dispatch/
 git commit -m "dispatch: DispatchState shared between runner and MCP server"
 ```
 
@@ -1456,12 +1456,12 @@ git commit -m "dispatch: DispatchState shared between runner and MCP server"
 ### Task 11: MCP tool `list_workers`
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
-- Modify: `crates/shire-cli/src/mcp/server.rs`
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/mcp/server.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Append to `crates/shire-cli/src/mcp/tools.rs`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1475,8 +1475,8 @@ mod tests {
         // See Task 10 for the state construction pattern.
         use crate::manifest::resolve::ResolvedManifest;
         use crate::manifest::schema::WorktreeCleanup;
-        use mosaic_core::store::{JsonFileStore, SessionStore};
-        use mosaic_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::session::CancelToken;
         use tempfile::TempDir;
         use uuid::Uuid;
         use std::path::PathBuf;
@@ -1523,12 +1523,12 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify fail**
 
-Run: `cargo test -p shire-cli mcp::tools::tests::list_workers_empty_when_no_spawns`
+Run: `cargo test -p pitboss-cli mcp::tools::tests::list_workers_empty_when_no_spawns`
 Expected: FAIL — `handle_list_workers` undefined.
 
 - [ ] **Step 3: Implement `handle_list_workers`**
 
-Append to `crates/shire-cli/src/mcp/tools.rs`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs`:
 
 ```rust
 use std::sync::Arc;
@@ -1547,11 +1547,11 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
                 }
                 WorkerState::Done(rec) => (
                     match rec.status {
-                        mosaic_core::store::TaskStatus::Success => "Completed",
-                        mosaic_core::store::TaskStatus::Failed => "Failed",
-                        mosaic_core::store::TaskStatus::TimedOut => "TimedOut",
-                        mosaic_core::store::TaskStatus::Cancelled => "Cancelled",
-                        mosaic_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                        pitboss_core::store::TaskStatus::Success => "Completed",
+                        pitboss_core::store::TaskStatus::Failed => "Failed",
+                        pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
+                        pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
+                        pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
                     }.to_string(),
                     Some(rec.started_at.to_rfc3339()),
                 ),
@@ -1571,7 +1571,7 @@ Close the `#[cfg(test)] mod tests` block if left open.
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: 2 tests pass.
 
 Run: `cargo lint`. Clean.
@@ -1579,7 +1579,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/
+git add crates/pitboss-cli/src/mcp/
 git commit -m "mcp: handle_list_workers tool handler with filtering and state mapping"
 ```
 
@@ -1588,11 +1588,11 @@ git commit -m "mcp: handle_list_workers tool handler with filtering and state ma
 ### Task 12: MCP tool `spawn_worker` — happy path
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Append to `crates/shire-cli/src/mcp/tools.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs` `mod tests`:
 
 ```rust
     #[tokio::test]
@@ -1620,12 +1620,12 @@ Add `WorkerState` and state-path imports at the top of the `tests` module if not
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p shire-cli mcp::tools::tests::spawn_worker_adds_entry_to_state`
+Run: `cargo test -p pitboss-cli mcp::tools::tests::spawn_worker_adds_entry_to_state`
 Expected: FAIL — `handle_spawn_worker` undefined.
 
 - [ ] **Step 3: Implement `handle_spawn_worker` (happy path, no guards yet)**
 
-Append to `crates/shire-cli/src/mcp/tools.rs`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs`:
 
 ```rust
 use anyhow::{bail, Result};
@@ -1655,7 +1655,7 @@ pub async fn handle_spawn_worker(
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: 3 tests pass.
 
 Run: `cargo lint`. Clean.
@@ -1663,7 +1663,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/tools.rs
+git add crates/pitboss-cli/src/mcp/tools.rs
 git commit -m "mcp: handle_spawn_worker happy path (no guards, no real spawn yet)"
 ```
 
@@ -1672,7 +1672,7 @@ git commit -m "mcp: handle_spawn_worker happy path (no guards, no real spawn yet
 ### Task 13: `spawn_worker` cap, budget, drain guards
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1726,7 +1726,7 @@ Append to `mod tests`:
 
 - [ ] **Step 2: Run tests to verify fail**
 
-Run: `cargo test -p shire-cli mcp::tools::tests::spawn_worker_refuses_when_max_workers_reached`
+Run: `cargo test -p pitboss-cli mcp::tools::tests::spawn_worker_refuses_when_max_workers_reached`
 Expected: FAIL.
 
 - [ ] **Step 3: Add guards to `handle_spawn_worker`**
@@ -1780,7 +1780,7 @@ pub async fn handle_spawn_worker(
 const INITIAL_WORKER_COST_EST: f64 = 0.10;
 
 async fn estimate_new_worker_cost(state: &Arc<DispatchState>) -> f64 {
-    use mosaic_core::prices::cost_usd;
+    use pitboss_core::prices::cost_usd;
     let workers = state.workers.read().await;
     let mut costs: Vec<f64> = Vec::new();
     for w in workers.values() {
@@ -1802,7 +1802,7 @@ async fn estimate_new_worker_cost(state: &Arc<DispatchState>) -> f64 {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: 6 tests pass (3 list + 3 guards + happy path).
 
 Run: `cargo lint`. Clean.
@@ -1810,7 +1810,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/tools.rs
+git add crates/pitboss-cli/src/mcp/tools.rs
 git commit -m "mcp: spawn_worker guards (cap, budget with median estimate, drain)"
 ```
 
@@ -1819,7 +1819,7 @@ git commit -m "mcp: spawn_worker guards (cap, budget with median estimate, drain
 ### Task 14: MCP tools `worker_status`, `cancel_worker`
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1866,12 +1866,12 @@ Append:
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p shire-cli mcp::tools::tests::worker_status_reads_state`
+Run: `cargo test -p pitboss-cli mcp::tools::tests::worker_status_reads_state`
 Expected: FAIL — `handle_worker_status` undefined.
 
 - [ ] **Step 3: Implement the handlers**
 
-Append to `crates/shire-cli/src/mcp/tools.rs`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs`:
 
 ```rust
 pub async fn handle_worker_status(
@@ -1886,22 +1886,22 @@ pub async fn handle_worker_status(
         WorkerState::Pending => (
             "Pending".to_string(),
             None,
-            mosaic_core::parser::TokenUsage::default(),
+            pitboss_core::parser::TokenUsage::default(),
             None,
         ),
         WorkerState::Running { started_at } => (
             "Running".to_string(),
             Some(started_at.to_rfc3339()),
-            mosaic_core::parser::TokenUsage::default(),
+            pitboss_core::parser::TokenUsage::default(),
             None,
         ),
         WorkerState::Done(rec) => (
             match rec.status {
-                mosaic_core::store::TaskStatus::Success => "Completed",
-                mosaic_core::store::TaskStatus::Failed => "Failed",
-                mosaic_core::store::TaskStatus::TimedOut => "TimedOut",
-                mosaic_core::store::TaskStatus::Cancelled => "Cancelled",
-                mosaic_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                pitboss_core::store::TaskStatus::Success => "Completed",
+                pitboss_core::store::TaskStatus::Failed => "Failed",
+                pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
+                pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
+                pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
             }.to_string(),
             Some(rec.started_at.to_rfc3339()),
             rec.token_usage,
@@ -1939,7 +1939,7 @@ pub async fn handle_cancel_worker(
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: 9 tests pass.
 
 Run: `cargo lint`. Clean.
@@ -1947,7 +1947,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/tools.rs
+git add crates/pitboss-cli/src/mcp/tools.rs
 git commit -m "mcp: worker_status + cancel_worker handlers (minimal, refined in Task 22)"
 ```
 
@@ -1956,12 +1956,12 @@ git commit -m "mcp: worker_status + cancel_worker handlers (minimal, refined in 
 ### Task 15: MCP tool `wait_for_worker`
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
-- Modify: `crates/shire-cli/src/dispatch/state.rs` (add broadcast channel for completion events)
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/state.rs` (add broadcast channel for completion events)
 
 - [ ] **Step 1: Add completion notify to `DispatchState`**
 
-Modify `crates/shire-cli/src/dispatch/state.rs` — add a tokio broadcast channel that emits a `task_id` whenever a worker transitions to `Done`:
+Modify `crates/pitboss-cli/src/dispatch/state.rs` — add a tokio broadcast channel that emits a `task_id` whenever a worker transitions to `Done`:
 
 ```rust
 use tokio::sync::broadcast;
@@ -1992,12 +1992,12 @@ impl DispatchState {
 
 - [ ] **Step 2: Write failing test**
 
-Append to `crates/shire-cli/src/mcp/tools.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs` `mod tests`:
 
 ```rust
     #[tokio::test]
     async fn wait_for_worker_returns_outcome_on_completion() {
-        use mosaic_core::store::{TaskRecord, TaskStatus};
+        use pitboss_core::store::{TaskRecord, TaskStatus};
         use std::time::Duration;
 
         let state = test_state().await;
@@ -2050,15 +2050,15 @@ Append to `crates/shire-cli/src/mcp/tools.rs` `mod tests`:
 
 - [ ] **Step 3: Run to verify fail**
 
-Run: `cargo test -p shire-cli mcp::tools::tests::wait_for_worker_returns_outcome_on_completion`
+Run: `cargo test -p pitboss-cli mcp::tools::tests::wait_for_worker_returns_outcome_on_completion`
 Expected: FAIL.
 
 - [ ] **Step 4: Implement `handle_wait_for_worker`**
 
-Append to `crates/shire-cli/src/mcp/tools.rs`:
+Append to `crates/pitboss-cli/src/mcp/tools.rs`:
 
 ```rust
-use mosaic_core::store::TaskRecord;
+use pitboss_core::store::TaskRecord;
 use tokio::time::Duration;
 
 pub async fn handle_wait_for_worker(
@@ -2103,7 +2103,7 @@ pub async fn handle_wait_for_worker(
 
 - [ ] **Step 5: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: 11 tests pass.
 
 Run: `cargo lint`. Clean.
@@ -2111,7 +2111,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "mcp: wait_for_worker with broadcast channel + timeout path"
 ```
 
@@ -2120,7 +2120,7 @@ git commit -m "mcp: wait_for_worker with broadcast channel + timeout path"
 ### Task 16: MCP tool `wait_for_any`
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -2129,7 +2129,7 @@ Append to `mod tests`:
 ```rust
     #[tokio::test]
     async fn wait_for_any_returns_first_completed() {
-        use mosaic_core::store::{TaskRecord, TaskStatus};
+        use pitboss_core::store::{TaskRecord, TaskStatus};
         use std::time::Duration;
 
         let state = test_state().await;
@@ -2165,7 +2165,7 @@ Append to `mod tests`:
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p shire-cli mcp::tools::tests::wait_for_any_returns_first_completed`
+Run: `cargo test -p pitboss-cli mcp::tools::tests::wait_for_any_returns_first_completed`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement `handle_wait_for_any`**
@@ -2215,7 +2215,7 @@ pub async fn handle_wait_for_any(
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: 12 tests pass.
 
 Run: `cargo lint`. Clean.
@@ -2223,7 +2223,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/tools.rs
+git add crates/pitboss-cli/src/mcp/tools.rs
 git commit -m "mcp: wait_for_any — race waiter across multiple task_ids"
 ```
 
@@ -2234,11 +2234,11 @@ git commit -m "mcp: wait_for_any — race waiter across multiple task_ids"
 ### Task 17: Wire the 6 tools into the rmcp `ServerHandler`
 
 **Files:**
-- Modify: `crates/shire-cli/src/mcp/server.rs`
+- Modify: `crates/pitboss-cli/src/mcp/server.rs`
 
 - [ ] **Step 1: Replace the stub accept loop with a real rmcp server**
 
-Modify `crates/shire-cli/src/mcp/server.rs` to expose the tool set via rmcp. The specific rmcp 0.8 API call sequence is:
+Modify `crates/pitboss-cli/src/mcp/server.rs` to expose the tool set via rmcp. The specific rmcp 0.8 API call sequence is:
 
 ```rust
 use rmcp::{
@@ -2374,10 +2374,10 @@ Modify `mod tests::server_starts_and_accepts_connection` to pass an `Arc<Dispatc
 
 - [ ] **Step 3: Verify compiles + tests pass**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: clean build.
 
-Run: `cargo test -p shire-cli mcp`
+Run: `cargo test -p pitboss-cli mcp`
 Expected: all MCP tests still pass (the server-start test now uses a real state).
 
 Run: `cargo lint`. Clean.
@@ -2385,7 +2385,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/src/mcp/server.rs
+git add crates/pitboss-cli/src/mcp/server.rs
 git commit -m "mcp: wire six tools into rmcp ServerHandler on UnixListener"
 ```
 
@@ -2396,7 +2396,7 @@ git commit -m "mcp: wire six tools into rmcp ServerHandler on UnixListener"
 ### Task 18: Mode detection in `main.rs`
 
 **Files:**
-- Modify: `crates/shire-cli/src/main.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Add test for mode detection (optional — this change is tiny)**
 
@@ -2404,7 +2404,7 @@ Skip — the change is 5 lines of plumbing, covered by integration tests in Phas
 
 - [ ] **Step 2: Add the branch**
 
-In `crates/shire-cli/src/main.rs`, in `run_dispatch` (the function that calls `dispatch::run_dispatch_inner`), add mode detection:
+In `crates/pitboss-cli/src/main.rs`, in `run_dispatch` (the function that calls `dispatch::run_dispatch_inner`), add mode detection:
 
 ```rust
 fn run_dispatch(
@@ -2443,7 +2443,7 @@ This function references `dispatch::hierarchical::run_hierarchical` which lands 
 
 - [ ] **Step 3: Verify build fails (expected — reference to undefined fn)**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: FAIL — `run_hierarchical` undefined. This is deliberate; Task 19 introduces it.
 
 **Do not commit yet.** Proceed to Task 19; the commit lands then.
@@ -2453,12 +2453,12 @@ Expected: FAIL — `run_hierarchical` undefined. This is deliberate; Task 19 int
 ### Task 19: Implement `run_hierarchical` skeleton
 
 **Files:**
-- Create: `crates/shire-cli/src/dispatch/hierarchical.rs`
-- Modify: `crates/shire-cli/src/dispatch/mod.rs` (add `pub mod hierarchical;`)
+- Create: `crates/pitboss-cli/src/dispatch/hierarchical.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/mod.rs` (add `pub mod hierarchical;`)
 
 - [ ] **Step 1: Create the skeleton**
 
-Create `crates/shire-cli/src/dispatch/hierarchical.rs`:
+Create `crates/pitboss-cli/src/dispatch/hierarchical.rs`:
 
 ```rust
 //! Hierarchical dispatch path — one lead subprocess plus dynamically-spawned
@@ -2470,9 +2470,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mosaic_core::process::{ProcessSpawner, TokioSpawner};
-use mosaic_core::session::CancelToken;
-use mosaic_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore};
+use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+use pitboss_core::session::CancelToken;
+use pitboss_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -2578,7 +2578,7 @@ async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> R
 
 **Note on MCP config format:** The exact JSON schema that Claude Code accepts for `--mcp-config` should be verified during Task 20 against the claude CLI's current MCP server config reference. If it uses a different transport shape (e.g., `{"command": "sh", "args": ["-c", "nc -U /path/to/sock"]}`), adjust `write_mcp_config` accordingly.
 
-Modify `crates/shire-cli/src/dispatch/mod.rs`:
+Modify `crates/pitboss-cli/src/dispatch/mod.rs`:
 
 ```rust
 pub mod hierarchical;    // NEW
@@ -2586,7 +2586,7 @@ pub mod hierarchical;    // NEW
 
 - [ ] **Step 2: Verify build succeeds now**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: clean build.
 
 Run: `cargo lint`. Clean.
@@ -2594,7 +2594,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 3: Commit (bundles Task 18 + 19)**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "dispatch: hierarchical mode detection + run_hierarchical scaffold"
 ```
 
@@ -2603,12 +2603,12 @@ git commit -m "dispatch: hierarchical mode detection + run_hierarchical scaffold
 ### Task 20: Spawn the lead with `--mcp-config`
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/hierarchical.rs`
-- Modify: `crates/shire-cli/src/dispatch/runner.rs` (factor out `lead_spawn_args`)
+- Modify: `crates/pitboss-cli/src/dispatch/hierarchical.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/runner.rs` (factor out `lead_spawn_args`)
 
 - [ ] **Step 1: Factor a shared lead-arg builder**
 
-In `crates/shire-cli/src/dispatch/runner.rs`, extract a helper:
+In `crates/pitboss-cli/src/dispatch/runner.rs`, extract a helper:
 
 ```rust
 pub fn lead_spawn_args(lead: &crate::manifest::resolve::ResolvedLead, mcp_config: &std::path::Path) -> Vec<String> {
@@ -2633,7 +2633,7 @@ pub fn lead_spawn_args(lead: &crate::manifest::resolve::ResolvedLead, mcp_config
 
 - [ ] **Step 2: Write unit test for `lead_spawn_args`**
 
-Append to `crates/shire-cli/src/dispatch/runner.rs` `mod tests`:
+Append to `crates/pitboss-cli/src/dispatch/runner.rs` `mod tests`:
 
 ```rust
     #[test]
@@ -2657,17 +2657,17 @@ Append to `crates/shire-cli/src/dispatch/runner.rs` `mod tests`:
 
 - [ ] **Step 3: Run — should pass if the helper was written right**
 
-Run: `cargo test -p shire-cli dispatch::runner::tests::lead_spawn_args_includes_mcp_config_and_verbose`
+Run: `cargo test -p pitboss-cli dispatch::runner::tests::lead_spawn_args_includes_mcp_config_and_verbose`
 Expected: PASS.
 
 - [ ] **Step 4: Wire the lead spawn into `run_hierarchical`**
 
-In `crates/shire-cli/src/dispatch/hierarchical.rs`, replace the "3. Spawn the lead" stub with:
+In `crates/pitboss-cli/src/dispatch/hierarchical.rs`, replace the "3. Spawn the lead" stub with:
 
 ```rust
     // 3. Prepare lead worktree + spawn.
-    let wt_mgr = Arc::new(mosaic_core::worktree::WorktreeManager::new());
-    let mut lead_worktree_handle: Option<mosaic_core::worktree::Worktree> = None;
+    let wt_mgr = Arc::new(pitboss_core::worktree::WorktreeManager::new());
+    let mut lead_worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
     let lead_cwd = if lead.use_worktree {
         let name = format!("shire-lead-{}-{}", lead.id, run_id);
         match wt_mgr.prepare(&lead.directory, &name, lead.branch.as_deref()) {
@@ -2689,7 +2689,7 @@ In `crates/shire-cli/src/dispatch/hierarchical.rs`, replace the "3. Spawn the le
     let lead_log_path = lead_task_dir.join("stdout.log");
     let lead_stderr_path = lead_task_dir.join("stderr.log");
 
-    let spawn_cmd = mosaic_core::process::SpawnCmd {
+    let spawn_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
         args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
         cwd: lead_cwd.clone(),
@@ -2701,22 +2701,22 @@ In `crates/shire-cli/src/dispatch/hierarchical.rs`, replace the "3. Spawn the le
         crate::dispatch::state::WorkerState::Running { started_at: Utc::now() },
     );
 
-    let outcome = mosaic_core::session::SessionHandle::new(lead.id.clone(), spawner, spawn_cmd)
+    let outcome = pitboss_core::session::SessionHandle::new(lead.id.clone(), spawner, spawn_cmd)
         .with_log_path(lead_log_path.clone())
         .with_stderr_log_path(lead_stderr_path)
         .run_to_completion(cancel.clone(), std::time::Duration::from_secs(lead.timeout_secs))
         .await;
 
     // Build lead TaskRecord
-    let lead_record = mosaic_core::store::TaskRecord {
+    let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
         status: match outcome.final_state {
-            mosaic_core::session::SessionState::Completed => mosaic_core::store::TaskStatus::Success,
-            mosaic_core::session::SessionState::Failed { .. } => mosaic_core::store::TaskStatus::Failed,
-            mosaic_core::session::SessionState::TimedOut => mosaic_core::store::TaskStatus::TimedOut,
-            mosaic_core::session::SessionState::Cancelled => mosaic_core::store::TaskStatus::Cancelled,
-            mosaic_core::session::SessionState::SpawnFailed { .. } => mosaic_core::store::TaskStatus::SpawnFailed,
-            _ => mosaic_core::store::TaskStatus::Failed,
+            pitboss_core::session::SessionState::Completed => pitboss_core::store::TaskStatus::Success,
+            pitboss_core::session::SessionState::Failed { .. } => pitboss_core::store::TaskStatus::Failed,
+            pitboss_core::session::SessionState::TimedOut => pitboss_core::store::TaskStatus::TimedOut,
+            pitboss_core::session::SessionState::Cancelled => pitboss_core::store::TaskStatus::Cancelled,
+            pitboss_core::session::SessionState::SpawnFailed { .. } => pitboss_core::store::TaskStatus::SpawnFailed,
+            _ => pitboss_core::store::TaskStatus::Failed,
         },
         exit_code: outcome.exit_code,
         started_at: outcome.started_at,
@@ -2732,11 +2732,11 @@ In `crates/shire-cli/src/dispatch/hierarchical.rs`, replace the "3. Spawn the le
 
     // Cleanup worktree per policy
     if let Some(wt) = lead_worktree_handle {
-        let succeeded = matches!(lead_record.status, mosaic_core::store::TaskStatus::Success);
+        let succeeded = matches!(lead_record.status, pitboss_core::store::TaskStatus::Success);
         let cleanup = match resolved.worktree_cleanup {
-            crate::manifest::schema::WorktreeCleanup::Always => mosaic_core::worktree::CleanupPolicy::Always,
-            crate::manifest::schema::WorktreeCleanup::OnSuccess => mosaic_core::worktree::CleanupPolicy::OnSuccess,
-            crate::manifest::schema::WorktreeCleanup::Never => mosaic_core::worktree::CleanupPolicy::Never,
+            crate::manifest::schema::WorktreeCleanup::Always => pitboss_core::worktree::CleanupPolicy::Always,
+            crate::manifest::schema::WorktreeCleanup::OnSuccess => pitboss_core::worktree::CleanupPolicy::OnSuccess,
+            crate::manifest::schema::WorktreeCleanup::Never => pitboss_core::worktree::CleanupPolicy::Never,
         };
         let _ = wt_mgr.cleanup(wt, cleanup, succeeded);
     }
@@ -2754,10 +2754,10 @@ Replace the final summary assembly to include the lead record and (in Task 21) a
 
 - [ ] **Step 5: Verify compiles + existing tests still pass**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: clean.
 
-Run: `cargo test -p shire-cli`
+Run: `cargo test -p pitboss-cli`
 Expected: all tests pass.
 
 Run: `cargo lint`. Clean.
@@ -2765,7 +2765,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "hierarchical: spawn lead with --mcp-config and persist its record"
 ```
 
@@ -2774,7 +2774,7 @@ git commit -m "hierarchical: spawn lead with --mcp-config and persist its record
 ### Task 21: Handle in-flight worker records at finalization
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/hierarchical.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/hierarchical.rs`
 
 When the lead exits, any workers still Pending/Running need to be cancelled and have a TaskRecord written. This task adds that.
 
@@ -2784,15 +2784,15 @@ Skip — this is covered in integration tests. Move to implementation.
 
 - [ ] **Step 2: Implement lead-exit-cancels-workers**
 
-In `crates/shire-cli/src/dispatch/hierarchical.rs`, after the lead's record has been persisted, add:
+In `crates/pitboss-cli/src/dispatch/hierarchical.rs`, after the lead's record has been persisted, add:
 
 ```rust
     // Any in-flight workers get cancelled, their TaskRecord synthesized.
     cancel.terminate();   // signals all in-flight SessionHandles
     // Give them up to TERMINATE_GRACE to drain.
-    tokio::time::sleep(mosaic_core::session::TERMINATE_GRACE).await;
+    tokio::time::sleep(pitboss_core::session::TERMINATE_GRACE).await;
 
-    let worker_records: Vec<mosaic_core::store::TaskRecord> = {
+    let worker_records: Vec<pitboss_core::store::TaskRecord> = {
         let workers = state.workers.read().await;
         workers
             .iter()
@@ -2802,9 +2802,9 @@ In `crates/shire-cli/src/dispatch/hierarchical.rs`, after the lead's record has 
                 crate::dispatch::state::WorkerState::Pending |
                 crate::dispatch::state::WorkerState::Running { .. } => {
                     let now = Utc::now();
-                    mosaic_core::store::TaskRecord {
+                    pitboss_core::store::TaskRecord {
                         task_id: id.clone(),
-                        status: mosaic_core::store::TaskStatus::Cancelled,
+                        status: pitboss_core::store::TaskStatus::Cancelled,
                         exit_code: None,
                         started_at: now,
                         ended_at: now,
@@ -2830,7 +2830,7 @@ In `crates/shire-cli/src/dispatch/hierarchical.rs`, after the lead's record has 
     all_records.extend(worker_records);
 
     let tasks_failed = all_records.iter()
-        .filter(|r| !matches!(r.status, mosaic_core::store::TaskStatus::Success))
+        .filter(|r| !matches!(r.status, pitboss_core::store::TaskStatus::Success))
         .count();
 
     let ended_at = Utc::now();
@@ -2863,7 +2863,7 @@ Remove the earlier placeholder `Ok(0)` + empty summary.
 
 - [ ] **Step 3: Verify compiles + tests pass**
 
-Run: `cargo test --workspace --features mosaic-core/test-support`
+Run: `cargo test --workspace --features pitboss-core/test-support`
 Expected: all green.
 
 Run: `cargo lint`. Clean.
@@ -2871,7 +2871,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/src/dispatch/hierarchical.rs
+git add crates/pitboss-cli/src/dispatch/hierarchical.rs
 git commit -m "hierarchical: cancel in-flight workers on lead exit + persist records"
 ```
 
@@ -2880,16 +2880,16 @@ git commit -m "hierarchical: cancel in-flight workers on lead exit + persist rec
 ### Task 22: Refine per-worker cancellation (proper CancelToken per worker)
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/state.rs`
-- Modify: `crates/shire-cli/src/dispatch/hierarchical.rs`
-- Modify: `crates/shire-cli/src/mcp/tools.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/state.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/hierarchical.rs`
+- Modify: `crates/pitboss-cli/src/mcp/tools.rs`
 
 The Task 14 `handle_cancel_worker` drains the whole run; Task 22 introduces per-worker tokens so `cancel_worker` only targets one.
 
 - [ ] **Step 1: Add per-worker cancel map to `DispatchState`**
 
 ```rust
-// In crates/shire-cli/src/dispatch/state.rs
+// In crates/pitboss-cli/src/dispatch/state.rs
 
 pub struct DispatchState {
     // ... existing fields ...
@@ -2904,9 +2904,9 @@ In Phase 6 when integration tests wire the actual worker subprocess, the per-wor
 For this task, extend `handle_spawn_worker` (in Task 12/13) to create and register a per-worker token:
 
 ```rust
-// In crates/shire-cli/src/mcp/tools.rs — at the end of handle_spawn_worker:
+// In crates/pitboss-cli/src/mcp/tools.rs — at the end of handle_spawn_worker:
 
-    let worker_cancel = mosaic_core::session::CancelToken::new();
+    let worker_cancel = pitboss_core::session::CancelToken::new();
     state.worker_cancels.write().await.insert(task_id.clone(), worker_cancel);
 ```
 
@@ -2943,7 +2943,7 @@ The earlier test asserts `result.ok` — still true. Add:
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p shire-cli mcp::tools`
+Run: `cargo test -p pitboss-cli mcp::tools`
 Expected: all pass.
 
 Run: `cargo lint`. Clean.
@@ -2951,7 +2951,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "mcp: per-worker CancelToken in DispatchState; cancel_worker targets one"
 ```
 
@@ -2959,7 +2959,7 @@ git commit -m "mcp: per-worker CancelToken in DispatchState; cancel_worker targe
 
 ## Phase 6 — Integration tests
 
-Integration tests live in `crates/shire-cli/tests/hierarchical_flows.rs` and use `fake-mcp-client` to drive the shire MCP server as a simulated lead.
+Integration tests live in `crates/pitboss-cli/tests/hierarchical_flows.rs` and use `fake-mcp-client` to drive the shire MCP server as a simulated lead.
 
 ### Task 23: Implement `fake-mcp-client::connect` + `call_tool`
 
@@ -3013,12 +3013,12 @@ Add a `#[cfg(test)]` inline sanity test that starts `McpServer` in-process and c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shire_cli::mcp::{McpServer, socket_path_for_run};
+    use pitboss_cli::mcp::{McpServer, socket_path_for_run};
     use tempfile::TempDir;
     use uuid::Uuid;
 
     #[tokio::test]
-    #[ignore = "needs shire-cli as a dev-dep — enable when hierarchical tests land"]
+    #[ignore = "needs pitboss-cli as a dev-dep — enable when hierarchical tests land"]
     async fn fake_client_connects_to_shire_server() {
         // See Task 24 which actually exercises this end-to-end.
     }
@@ -3044,19 +3044,19 @@ git commit -m "fake-mcp-client: real rmcp client connect + call_tool"
 ### Task 24: Integration test — spawn + list + wait round-trip
 
 **Files:**
-- Create: `crates/shire-cli/tests/hierarchical_flows.rs`
-- Modify: `crates/shire-cli/Cargo.toml` (add `fake-mcp-client` as dev-dep)
+- Create: `crates/pitboss-cli/tests/hierarchical_flows.rs`
+- Modify: `crates/pitboss-cli/Cargo.toml` (add `fake-mcp-client` as dev-dep)
 
 - [ ] **Step 1: Add dev-dep**
 
 ```toml
-# in crates/shire-cli/Cargo.toml [dev-dependencies]
+# in crates/pitboss-cli/Cargo.toml [dev-dependencies]
 fake-mcp-client = { path = "../../tests-support/fake-mcp-client" }
 ```
 
 - [ ] **Step 2: Write the integration test**
 
-Create `crates/shire-cli/tests/hierarchical_flows.rs`:
+Create `crates/pitboss-cli/tests/hierarchical_flows.rs`:
 
 ```rust
 //! Integration tests for v0.3 hierarchical orchestration. These drive the
@@ -3068,12 +3068,12 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use fake_mcp_client::FakeMcpClient;
-use shire_cli::dispatch::state::DispatchState;
-use shire_cli::mcp::{McpServer, socket_path_for_run};
-use shire_cli::manifest::resolve::ResolvedManifest;
-use shire_cli::manifest::schema::WorktreeCleanup;
-use mosaic_core::session::CancelToken;
-use mosaic_core::store::{JsonFileStore, SessionStore};
+use pitboss_cli::dispatch::state::DispatchState;
+use pitboss_cli::mcp::{McpServer, socket_path_for_run};
+use pitboss_cli::manifest::resolve::ResolvedManifest;
+use pitboss_cli::manifest::schema::WorktreeCleanup;
+use pitboss_core::session::CancelToken;
+use pitboss_core::store::{JsonFileStore, SessionStore};
 use uuid::Uuid;
 
 fn mk_state() -> (TempDir, Arc<DispatchState>) {
@@ -3126,7 +3126,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/shire-cli/
+git add crates/pitboss-cli/
 git commit -m "hierarchical: integration test for spawn + list round-trip"
 ```
 
@@ -3135,7 +3135,7 @@ git commit -m "hierarchical: integration test for spawn + list round-trip"
 ### Task 25: Integration test — cap, budget, draining guard rejections
 
 **Files:**
-- Modify: `crates/shire-cli/tests/hierarchical_flows.rs`
+- Modify: `crates/pitboss-cli/tests/hierarchical_flows.rs`
 
 - [ ] **Step 1: Append tests**
 
@@ -3195,7 +3195,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/tests/
+git add crates/pitboss-cli/tests/
 git commit -m "hierarchical: integration tests for cap/budget/drain guards"
 ```
 
@@ -3205,7 +3205,7 @@ git commit -m "hierarchical: integration tests for cap/budget/drain guards"
 
 **Files:**
 - Modify: `tests-support/fake-claude/src/main.rs`
-- Modify: `crates/shire-cli/tests/hierarchical_flows.rs`
+- Modify: `crates/pitboss-cli/tests/hierarchical_flows.rs`
 
 - [ ] **Step 1: Extend fake-claude to emit tool_use events**
 
@@ -3248,7 +3248,7 @@ Add a small `random_id()` helper (or just use a counter).
 
 - [ ] **Step 2: Write an end-to-end test**
 
-Append to `crates/shire-cli/tests/hierarchical_flows.rs`:
+Append to `crates/pitboss-cli/tests/hierarchical_flows.rs`:
 
 ```rust
 #[tokio::test]
@@ -3272,7 +3272,7 @@ async fn hierarchical_run_with_one_worker_end_to_end() {
 
 - [ ] **Step 3: Verify — all existing tests still pass**
 
-Run: `cargo test --workspace --features mosaic-core/test-support`
+Run: `cargo test --workspace --features pitboss-core/test-support`
 Expected: all tests green.
 
 Run: `cargo lint`. Clean.
@@ -3280,7 +3280,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add tests-support/fake-claude/ crates/shire-cli/tests/
+git add tests-support/fake-claude/ crates/pitboss-cli/tests/
 git commit -m "hierarchical: fake-claude tool_use emission + deferred e2e placeholder"
 ```
 
@@ -3291,12 +3291,12 @@ git commit -m "hierarchical: fake-claude tool_use emission + deferred e2e placeh
 ### Task 27: Thread `parent_task_id` into `TileState`
 
 **Files:**
-- Modify: `crates/mosaic-tui/src/state.rs`
-- Modify: `crates/mosaic-tui/src/watcher.rs`
+- Modify: `crates/pitboss-tui/src/state.rs`
+- Modify: `crates/pitboss-tui/src/watcher.rs`
 
 - [ ] **Step 1: Add field to `TileState`**
 
-In `crates/mosaic-tui/src/state.rs`:
+In `crates/pitboss-tui/src/state.rs`:
 
 ```rust
 pub struct TileState {
@@ -3312,11 +3312,11 @@ pub struct TileState {
 
 - [ ] **Step 2: Populate in watcher**
 
-In `crates/mosaic-tui/src/watcher.rs`, wherever a `TileState` is constructed from a `TaskRecord`, set `parent_task_id: rec.parent_task_id.clone()`. For tiles built from `resolved.json` tasks that have no record yet, set `parent_task_id: None`.
+In `crates/pitboss-tui/src/watcher.rs`, wherever a `TileState` is constructed from a `TaskRecord`, set `parent_task_id: rec.parent_task_id.clone()`. For tiles built from `resolved.json` tasks that have no record yet, set `parent_task_id: None`.
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test --workspace --features mosaic-core/test-support`
+Run: `cargo test --workspace --features pitboss-core/test-support`
 Expected: all pass.
 
 Run: `cargo lint`. Clean.
@@ -3324,8 +3324,8 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/mosaic-tui/src/
-git commit -m "mosaic-tui: thread parent_task_id through TileState from TaskRecord"
+git add crates/pitboss-tui/src/
+git commit -m "pitboss-tui: thread parent_task_id through TileState from TaskRecord"
 ```
 
 ---
@@ -3333,7 +3333,7 @@ git commit -m "mosaic-tui: thread parent_task_id through TileState from TaskReco
 ### Task 28: Render lead tile with `[LEAD]` prefix + bold border
 
 **Files:**
-- Modify: `crates/mosaic-tui/src/tui.rs`
+- Modify: `crates/pitboss-tui/src/tui.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -3379,7 +3379,7 @@ And update the existing `tile()` helper to set `parent_task_id: None`.
 
 - [ ] **Step 2: Implement `format_tile_title`**
 
-Add to `crates/mosaic-tui/src/tui.rs`:
+Add to `crates/pitboss-tui/src/tui.rs`:
 
 ```rust
 pub fn format_tile_title(state: &crate::state::AppState, idx: usize) -> String {
@@ -3401,7 +3401,7 @@ Update the tile render path to use this helper for the tile's block title.
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p mosaic-tui tui::tests::render_tile_title_for_lead`
+Run: `cargo test -p pitboss-tui tui::tests::render_tile_title_for_lead`
 Expected: PASS.
 
 Run: `cargo lint`. Clean.
@@ -3409,8 +3409,8 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/mosaic-tui/src/
-git commit -m "mosaic-tui: [LEAD] prefix + bold border on lead tile"
+git add crates/pitboss-tui/src/
+git commit -m "pitboss-tui: [LEAD] prefix + bold border on lead tile"
 ```
 
 ---
@@ -3418,7 +3418,7 @@ git commit -m "mosaic-tui: [LEAD] prefix + bold border on lead tile"
 ### Task 29: Worker tile shows `← lead-id` annotation
 
 **Files:**
-- Modify: `crates/mosaic-tui/src/tui.rs`
+- Modify: `crates/pitboss-tui/src/tui.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -3462,7 +3462,7 @@ Wire this into the tile render path (add as an extra line inside the tile block)
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p mosaic-tui tui::tests`
+Run: `cargo test -p pitboss-tui tui::tests`
 Expected: all pass.
 
 Run: `cargo lint`. Clean.
@@ -3470,8 +3470,8 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/mosaic-tui/src/
-git commit -m "mosaic-tui: worker tiles show ← <parent-id> annotation"
+git add crates/pitboss-tui/src/
+git commit -m "pitboss-tui: worker tiles show ← <parent-id> annotation"
 ```
 
 ---
@@ -3479,7 +3479,7 @@ git commit -m "mosaic-tui: worker tiles show ← <parent-id> annotation"
 ### Task 30: Status bar `N workers spawned`
 
 **Files:**
-- Modify: `crates/mosaic-tui/src/tui.rs`
+- Modify: `crates/pitboss-tui/src/tui.rs`
 
 - [ ] **Step 1: Extend `render_title` / `run_stats`**
 
@@ -3510,7 +3510,7 @@ In the `render_title` (or `render_statusbar`) path, if `workers_spawned > 0`, ap
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p mosaic-tui`
+Run: `cargo test -p pitboss-tui`
 Expected: all pass.
 
 Run: `cargo lint`. Clean.
@@ -3518,22 +3518,22 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/mosaic-tui/src/tui.rs
-git commit -m "mosaic-tui: status bar shows '<N> workers spawned' counter"
+git add crates/pitboss-tui/src/tui.rs
+git commit -m "pitboss-tui: status bar shows '<N> workers spawned' counter"
 ```
 
 ---
 
 ## Phase 8 — CLI polish, docs, smoke test
 
-### Task 31: `shire validate` supports hierarchical manifests
+### Task 31: `pitboss validate` supports hierarchical manifests
 
 **Files:**
-- Modify: `crates/shire-cli/src/main.rs`
+- Modify: `crates/pitboss-cli/src/main.rs`
 
 - [ ] **Step 1: Extend `run_validate`**
 
-In `crates/shire-cli/src/main.rs`'s `run_validate`, update the output so hierarchical manifests print distinct info:
+In `crates/pitboss-cli/src/main.rs`'s `run_validate`, update the output so hierarchical manifests print distinct info:
 
 ```rust
 fn run_validate(manifest: &std::path::Path) -> Result<()> {
@@ -3553,35 +3553,35 @@ fn run_validate(manifest: &std::path::Path) -> Result<()> {
 
 - [ ] **Step 2: Verify**
 
-Run: `cargo build -p shire-cli`
+Run: `cargo build -p pitboss-cli`
 Expected: clean.
 
 Run a hand test with a toy hierarchical manifest:
 ```bash
 # (don't commit this toy file)
-./target/debug/shire validate /path/to/hierarchical.toml
+./target/debug/pitboss validate /path/to/hierarchical.toml
 ```
 Expected: prints the hierarchical summary.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/shire-cli/src/main.rs
+git add crates/pitboss-cli/src/main.rs
 git commit -m "shire: validate shows hierarchical manifest summary"
 ```
 
 ---
 
-### Task 32: `shire resume` for hierarchical runs
+### Task 32: `pitboss resume` for hierarchical runs
 
 **Files:**
-- Modify: `crates/shire-cli/src/dispatch/resume.rs`
+- Modify: `crates/pitboss-cli/src/dispatch/resume.rs`
 
 Resume a hierarchical run by re-running the lead with `--resume <lead_session_id>`. Workers are NOT resumed — the lead decides.
 
 - [ ] **Step 1: Add `build_resume_hierarchical` helper**
 
-In `crates/shire-cli/src/dispatch/resume.rs`, add:
+In `crates/pitboss-cli/src/dispatch/resume.rs`, add:
 
 ```rust
 pub fn build_resume_hierarchical(run_dir: &std::path::Path) -> anyhow::Result<ResolvedManifest> {
@@ -3617,7 +3617,7 @@ pub fn build_resume_hierarchical(run_dir: &std::path::Path) -> anyhow::Result<Re
 }
 ```
 
-Add `resume_session_id: Option<String>` to `ResolvedLead` in `crates/shire-cli/src/manifest/resolve.rs`.
+Add `resume_session_id: Option<String>` to `ResolvedLead` in `crates/pitboss-cli/src/manifest/resolve.rs`.
 
 Thread it into `lead_spawn_args` (from Task 20) so `--resume <id>` is added when set.
 
@@ -3627,7 +3627,7 @@ In `main.rs`'s `run_resume` function, check whether `resolved.json` has `lead.is
 
 - [ ] **Step 3: Add test**
 
-Append to `crates/shire-cli/src/dispatch/resume.rs`:
+Append to `crates/pitboss-cli/src/dispatch/resume.rs`:
 
 ```rust
     #[test]
@@ -3644,7 +3644,7 @@ Append to `crates/shire-cli/src/dispatch/resume.rs`:
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p shire-cli resume`
+Run: `cargo test -p pitboss-cli resume`
 Expected: pass.
 
 Run: `cargo lint`. Clean.
@@ -3652,7 +3652,7 @@ Run: `cargo lint`. Clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/shire-cli/src/
+git add crates/pitboss-cli/src/
 git commit -m "shire resume: hierarchical mode, reruns lead with --resume"
 ```
 
@@ -3667,12 +3667,12 @@ git commit -m "shire resume: hierarchical mode, reruns lead with --resume"
 
 Create `docs/v0.3-smoke-test.md` with a checklist mirroring `docs/v0.1-smoke-test.md`'s format, adapted for hierarchical mode. Include:
 
-1. Offline checks: `shire validate hierarchical-happy.toml`, with/without lead, mixed rejection.
+1. Offline checks: `pitboss validate hierarchical-happy.toml`, with/without lead, mixed rejection.
 2. Real-claude test: a 3-worker triage prompt on Haiku, cheap, budget = $1.
 3. Mosaic observation during the live run: verify lead tile shows `[LEAD]` prefix, workers show `← <lead-id>`, status bar shows `3 workers spawned`.
 4. Budget enforcement: hand-edit a manifest to `budget_usd = 0.05`, run it, observe the lead hitting the budget error and wrapping up gracefully.
 5. Ctrl-C drain during a hierarchical run.
-6. `shire resume <run-id>` after a hierarchical run completes.
+6. `pitboss resume <run-id>` after a hierarchical run completes.
 
 - [ ] **Step 2: Commit**
 
@@ -3707,7 +3707,7 @@ git commit -m "README: document v0.3 hierarchical mode with example"
 
 - [ ] **Step 1: Run the full suite**
 
-Run: `cargo test --workspace --features mosaic-core/test-support`
+Run: `cargo test --workspace --features pitboss-core/test-support`
 Expected: all tests green (target: ~180+ tests, depending on final integration coverage).
 
 Run: `cargo lint`. Clean.
