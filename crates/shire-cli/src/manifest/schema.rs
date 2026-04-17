@@ -16,6 +16,8 @@ pub struct Manifest {
     pub templates: Vec<Template>,
     #[serde(default, rename = "task")]
     pub tasks: Vec<Task>,
+    #[serde(default, rename = "lead")]
+    pub leads: Vec<Lead>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -29,6 +31,14 @@ pub struct RunConfig {
     pub worktree_cleanup: WorktreeCleanup,
     #[serde(default)]
     pub emit_event_stream: bool,
+
+    // NEW in v0.3 — only meaningful when [[lead]] is present.
+    #[serde(default)]
+    pub max_workers: Option<u32>,
+    #[serde(default)]
+    pub budget_usd: Option<f64>,
+    #[serde(default)]
+    pub lead_timeout_secs: Option<u64>,
 }
 
 impl Default for RunConfig {
@@ -39,6 +49,9 @@ impl Default for RunConfig {
             run_dir: None,
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
         }
     }
 }
@@ -103,6 +116,28 @@ pub struct Task {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lead {
+    pub id: String,
+    pub directory: PathBuf,
+    pub prompt: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<Effort>,
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub use_worktree: Option<bool>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +197,59 @@ mod tests {
         assert!(m.run.halt_on_failure);
         assert_eq!(m.templates.len(), 1);
         assert_eq!(m.tasks[0].template.as_deref(), Some("sweep"));
+    }
+
+    #[test]
+    fn parses_lead_section() {
+        let toml_src = r#"
+            [run]
+            max_workers = 4
+            budget_usd = 5.00
+            lead_timeout_secs = 1200
+
+            [[lead]]
+            id = "triage"
+            directory = "/tmp"
+            prompt = "coordinate the triage"
+            branch = "feat/triage"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.run.max_workers, Some(4));
+        assert_eq!(m.run.budget_usd, Some(5.00));
+        assert_eq!(m.run.lead_timeout_secs, Some(1200));
+        assert_eq!(m.leads.len(), 1);
+        assert_eq!(m.leads[0].id, "triage");
+        assert_eq!(m.leads[0].branch.as_deref(), Some("feat/triage"));
+    }
+
+    #[test]
+    fn rejects_unknown_lead_field() {
+        let toml_src = r#"
+            [[lead]]
+            id = "x"
+            directory = "/tmp"
+            prompt = "p"
+            wibble = "surprise"
+        "#;
+        let err: Result<Manifest, _> = toml::from_str(toml_src);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn parses_run_fields_without_lead_section() {
+        // These fields parse fine on their own; validation rejects them later
+        // when no [[lead]] is present.
+        let toml_src = r#"
+            [run]
+            max_workers = 2
+            budget_usd = 1.00
+
+            [[task]]
+            id = "x"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.run.max_workers, Some(2));
     }
 }
