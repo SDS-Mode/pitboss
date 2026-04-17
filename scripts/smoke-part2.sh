@@ -114,7 +114,7 @@ use_worktree = true
 [[task]]
 id = "write-hi"
 directory = "$REPO_A"
-prompt = "Create a file named hi.txt in the working directory containing only the single word: hello. Do not add commentary."
+prompt = "Create a file named hi.txt in the working directory containing only the single word: hello. Then commit it with: git add hi.txt && git commit -m 'add hi'. Do not add other commentary."
 branch = "smoke/write-hi"
 EOF
 
@@ -231,7 +231,7 @@ timeout_secs = 120
 
 [[template]]
 id = "greet"
-prompt = "Write a single line containing the two words {greeting} {name} to stdout, then stop."
+prompt = "Your ENTIRE response must be exactly two words, nothing else: {greeting} {name}. No confirmation, no commentary, no 'Done', no explanation — just those two words."
 
 [[task]]
 id = "english"
@@ -243,11 +243,13 @@ EOF
 echo "== 2.6 Template expansion =="
 if "$SHIRE" dispatch "$SCRATCH/t3.toml" >/dev/null 2>&1; then
     RD=$(latest_run_dir)
-    PREV=$(jq -r '.tasks[0].final_message_preview // ""' "$RD/summary.json")
-    if echo "$PREV" | grep -qi "hello" && echo "$PREV" | grep -qi "world"; then
-        record "2.6 template expansion" PASS
+    # Check stdout.log (raw stream-json) for the substituted words — robust against
+    # whatever claude decides to put in the final message.
+    LOG="$RD/tasks/english/stdout.log"
+    if grep -qi "hello" "$LOG" && grep -qi "world" "$LOG"; then
+        record "2.6 template expansion" PASS "found in stdout.log"
     else
-        record "2.6 template expansion" FAIL "preview: $PREV"
+        record "2.6 template expansion" FAIL "hello/world missing from stdout.log"
     fi
 else
     record "2.6 template expansion" FAIL "dispatch failed"
