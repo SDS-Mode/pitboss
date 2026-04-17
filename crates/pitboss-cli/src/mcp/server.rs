@@ -1,7 +1,5 @@
 //! Lifecycle of the pitboss MCP server (unix socket transport).
 
-#![allow(dead_code)]
-
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
