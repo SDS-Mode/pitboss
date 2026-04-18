@@ -43,6 +43,8 @@ rmcp               = { workspace = true }
 tokio-util         = { workspace = true }
 thiserror          = { workspace = true }
 schemars           = "1"
+reqwest            = { workspace = true }
+lru                = { workspace = true }
 
 [dev-dependencies]
 # Note: pitboss-core's test-support feature is pulled in directly here so
@@ -54,3 +56,5 @@ libc            = { workspace = true }
 pitboss-core    = { path = "../pitboss-core", features = ["test-support"] }
 fake-mcp-client = { path = "../../tests-support/fake-mcp-client" }
 fake-control-client = { path = "../../tests-support/fake-control-client" }
+wiremock           = { workspace = true }
+tracing-test       = { workspace = true }
