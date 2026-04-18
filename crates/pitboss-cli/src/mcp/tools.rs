@@ -361,6 +361,7 @@ async fn run_worker(
                     approvals_requested: 0,
                     approvals_approved: 0,
                     approvals_rejected: 0,
+                    model: Some(model.clone()),
                 };
                 let _ = state.store.append_record(state.run_id, &rec).await;
                 state
@@ -484,6 +485,7 @@ async fn run_worker(
         approvals_requested: counters.approvals_requested,
         approvals_approved: counters.approvals_approved,
         approvals_rejected: counters.approvals_rejected,
+        model: Some(model.clone()),
     };
 
     // Persist record.
@@ -665,6 +667,7 @@ pub async fn spawn_resume_worker(
     let _ = tokio::fs::create_dir_all(&task_dir).await;
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
+    let resume_model = model.clone();
 
     tokio::spawn(async move {
         use pitboss_core::store::{TaskRecord, TaskStatus};
@@ -710,6 +713,7 @@ pub async fn spawn_resume_worker(
             approvals_requested: counters.approvals_requested,
             approvals_approved: counters.approvals_approved,
             approvals_rejected: counters.approvals_rejected,
+            model: Some(resume_model),
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
         state_bg
@@ -1392,6 +1396,7 @@ mod tests {
                 approvals_requested: 0,
                 approvals_approved: 0,
                 approvals_rejected: 0,
+                model: None,
             };
             let mut w = state_clone.workers.write().await;
             w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -1463,6 +1468,7 @@ mod tests {
                 approvals_requested: 0,
                 approvals_approved: 0,
                 approvals_rejected: 0,
+                model: None,
             };
             let mut w = state_clone.workers.write().await;
             w.insert("w-b".into(), WorkerState::Done(rec));
@@ -1938,6 +1944,7 @@ mod tests {
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
+            model: None,
         };
         state
             .workers

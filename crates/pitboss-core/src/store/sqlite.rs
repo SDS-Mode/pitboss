@@ -60,6 +60,7 @@ impl SqliteStore {
         init_schema(&conn)?;
         migrate_parent_task_id(&conn)?;
         migrate_v04_event_counters(&conn)?;
+        migrate_task_model(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -89,6 +90,27 @@ fn migrate_parent_task_id(conn: &rusqlite::Connection) -> Result<(), StoreError>
             [],
         )
         .map_err(|e| StoreError::Incomplete(format!("migrate alter: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Idempotent migration: add the v0.4.2 `model` column to `task_records`
+/// if it's missing. Populated at spawn time so the Detail-view model
+/// field doesn't need to rescan the log on every snapshot tick.
+fn migrate_task_model(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let has_model = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('task_records') \
+                 WHERE name = 'model'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate model pragma prepare: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate model pragma exists: {e}")))?
+    };
+    if !has_model {
+        conn.execute("ALTER TABLE task_records ADD COLUMN model TEXT NULL", [])
+            .map_err(|e| StoreError::Incomplete(format!("migrate model alter: {e}")))?;
     }
     Ok(())
 }
@@ -205,6 +227,7 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             approvals_requested   INTEGER NOT NULL DEFAULT 0,
             approvals_approved    INTEGER NOT NULL DEFAULT 0,
             approvals_rejected    INTEGER NOT NULL DEFAULT 0,
+            model                 TEXT NULL,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -303,6 +326,7 @@ struct TaskRow {
     approvals_requested: i64,
     approvals_approved: i64,
     approvals_rejected: i64,
+    model: Option<String>,
 }
 
 impl TaskRow {
@@ -328,6 +352,7 @@ impl TaskRow {
             approvals_requested: row.get("approvals_requested").unwrap_or(0),
             approvals_approved: row.get("approvals_approved").unwrap_or(0),
             approvals_rejected: row.get("approvals_rejected").unwrap_or(0),
+            model: row.get("model").unwrap_or(None),
         })
     }
 
@@ -359,6 +384,7 @@ impl TaskRow {
             approvals_requested: self.approvals_requested.try_into().unwrap_or(0),
             approvals_approved: self.approvals_approved.try_into().unwrap_or(0),
             approvals_rejected: self.approvals_rejected.try_into().unwrap_or(0),
+            model: self.model,
         })
     }
 }
@@ -396,7 +422,7 @@ fn fetch_task_records(
                   token_input, token_output, token_cache_read, token_cache_creation, \
                   claude_session_id, final_message_preview, parent_task_id, \
                   pause_count, reprompt_count, approvals_requested, \
-                  approvals_approved, approvals_rejected \
+                  approvals_approved, approvals_rejected, model \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -514,9 +540,9 @@ impl SessionStore for SqliteStore {
                       token_input, token_output, token_cache_read, token_cache_creation, \
                       claude_session_id, final_message_preview, parent_task_id, \
                       pause_count, reprompt_count, approvals_requested, \
-                      approvals_approved, approvals_rejected) \
+                      approvals_approved, approvals_rejected, model) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                             ?17, ?18, ?19, ?20, ?21)",
+                             ?17, ?18, ?19, ?20, ?21, ?22)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -542,6 +568,7 @@ impl SessionStore for SqliteStore {
                         i64::from(record.approvals_requested),
                         i64::from(record.approvals_approved),
                         i64::from(record.approvals_rejected),
+                        record.model.as_deref(),
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -648,6 +675,7 @@ mod sqlite_tests {
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
+            model: None,
         }
     }
 

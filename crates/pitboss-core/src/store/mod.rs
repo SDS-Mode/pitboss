@@ -52,6 +52,7 @@ mod integration_tests {
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
+            model: None,
         }
     }
 

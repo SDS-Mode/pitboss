@@ -43,6 +43,13 @@ pub struct TaskRecord {
     pub approvals_approved: u32,
     #[serde(default)]
     pub approvals_rejected: u32,
+    /// Resolved model string (e.g. `"claude-opus-4-7"`). Populated at
+    /// spawn time for both lead and workers; `None` for pre-v0.4.2
+    /// records or when the model can't be resolved (spawn-failed
+    /// tasks with no model yet chosen). Consumers should fall back to
+    /// scanning the log if they need this for an older run.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +107,7 @@ mod tests {
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
+            model: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&json).unwrap();
@@ -127,6 +135,7 @@ mod tests {
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
+            model: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("parent_task_id"));
@@ -151,6 +160,54 @@ mod tests {
         }"#;
         let rec: TaskRecord = serde_json::from_str(old_json).unwrap();
         assert!(rec.parent_task_id.is_none());
+    }
+
+    #[test]
+    fn task_record_round_trips_model_field() {
+        let rec = TaskRecord {
+            task_id: "w1".into(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: Utc.with_ymd_and_hms(2026, 4, 18, 0, 0, 0).unwrap(),
+            ended_at: Utc.with_ymd_and_hms(2026, 4, 18, 0, 0, 30).unwrap(),
+            duration_ms: 30_000,
+            worktree_path: None,
+            log_path: PathBuf::from("/tmp/log"),
+            token_usage: TokenUsage::default(),
+            claude_session_id: None,
+            final_message_preview: None,
+            parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: Some("claude-opus-4-7".into()),
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("claude-opus-4-7"));
+        let back: TaskRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn task_record_missing_model_deserializes_as_none() {
+        // Pre-v0.4.2 records didn't have a `model` field; must still parse.
+        let old_json = r#"{
+            "task_id": "t1",
+            "status": "Success",
+            "exit_code": 0,
+            "started_at": "2026-04-17T00:00:00Z",
+            "ended_at":   "2026-04-17T00:00:30Z",
+            "duration_ms": 30000,
+            "worktree_path": null,
+            "log_path": "/dev/null",
+            "token_usage": {"input":0,"output":0,"cache_read":0,"cache_creation":0},
+            "claude_session_id": null,
+            "final_message_preview": null
+        }"#;
+        let rec: TaskRecord = serde_json::from_str(old_json).unwrap();
+        assert!(rec.model.is_none());
     }
 
     #[test]
@@ -196,6 +253,7 @@ mod tests {
             approvals_requested: 3,
             approvals_approved: 2,
             approvals_rejected: 1,
+            model: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&s).unwrap();
