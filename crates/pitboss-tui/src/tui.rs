@@ -474,7 +474,7 @@ fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
     let keys = if matches!(state.mode, Mode::PickingRun { .. }) {
         " [j/k] navigate  [Enter] open  [Esc] cancel"
     } else {
-        " [h/j/k/l] nav  [L] log  [o] open run  [?] help  [q] quit"
+        " [hjkl] nav  [Enter] snap  [L] log  [x/X] kill wrk/run  [p/c] pause/cont  [r] reprompt  [o] open  [?] help  [q] quit"
     };
     let para = Paragraph::new(keys).style(theme::muted_style());
     frame.render_widget(para, area);
@@ -574,7 +574,7 @@ fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let overlay_area = centered_rect(60, 60, area);
+    let overlay_area = centered_rect(70, 80, area);
     frame.render_widget(Clear, overlay_area);
 
     let block = Block::default()
@@ -589,17 +589,28 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("  Keybindings"),
         Line::from("  ──────────────────────────────"),
-        Line::from("  h / ← : focus left"),
-        Line::from("  l / → : focus right"),
-        Line::from("  k / ↑ : focus up (4 cols)"),
-        Line::from("  j / ↓ : focus down (4 cols)"),
-        Line::from("  L     : view full log overlay"),
-        Line::from("  r     : force refresh"),
-        Line::from("  ?     : toggle this help"),
-        Line::from("  q     : quit"),
-        Line::from("  Esc   : close overlay"),
+        Line::from("  Navigation"),
+        Line::from("    h / ←  : focus left"),
+        Line::from("    l / →  : focus right"),
+        Line::from("    k / ↑  : focus up (4 cols)"),
+        Line::from("    j / ↓  : focus down (4 cols)"),
         Line::from(""),
-        Line::from("  OBSERVE mode — no task spawning in v0.2-alpha."),
+        Line::from("  Views"),
+        Line::from("    Enter  : snap-in to focused tile (full-screen log)"),
+        Line::from("    L      : view full log overlay"),
+        Line::from("    o      : open run picker"),
+        Line::from(""),
+        Line::from("  Control (v0.4)"),
+        Line::from("    x      : cancel focused worker (confirm)"),
+        Line::from("    X      : cancel entire run (confirm)"),
+        Line::from("    p      : pause focused worker"),
+        Line::from("    c      : continue focused worker"),
+        Line::from("    r      : reprompt focused worker"),
+        Line::from(""),
+        Line::from("  System"),
+        Line::from("    ?      : toggle this help"),
+        Line::from("    q      : quit"),
+        Line::from("    Esc    : close overlay / modal"),
         Line::from(""),
         Line::from(Span::styled(
             "  Press Esc or ? to close",
