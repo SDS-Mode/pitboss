@@ -40,7 +40,11 @@
 
 [run]
 max_workers = 5
-budget_usd = 5.00
+# Generous budget so the full 5-worker spread completes. Last run at $5
+# stopped at 2/5 workers because Opus lead + 5 Opus-tier workers (per
+# defaults) is expensive. This is a recurring dogfood, not user-facing
+# sample — adjust if you mirror this into your own manifest.
+budget_usd = 100.00
 lead_timeout_secs = 3600
 worktree_cleanup = "never"
 dump_shared_store = true

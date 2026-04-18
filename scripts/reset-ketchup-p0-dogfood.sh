@@ -22,7 +22,10 @@ set -euo pipefail
 
 KETCHUP_DIR="/run/media/system/Dos/Projects/ketchup"
 BASELINE_TAG="dogfood/p0-baseline"
-WORKTREE_GLOB_PREFIX="/run/media/system/Dos/Projects/ketchup-pitboss-"
+# Any worktree whose checked-out branch starts with one of these is a
+# pitboss-dogfood worktree. Multiple prefixes to cover old + current
+# naming conventions (`demo/ketchup-p0-*` today; possible future adds).
+BRANCH_PREFIXES=("demo/ketchup-p0-")
 
 if [[ ! -d "$KETCHUP_DIR/.git" ]]; then
     echo "error: $KETCHUP_DIR is not a git repository" >&2
@@ -39,11 +42,19 @@ fi
 
 echo "== ketchup baseline: $(git rev-parse --short "$BASELINE_TAG")"
 
-# Discover + remove pitboss-managed worktrees. --force so uncommitted
-# worker changes are blown away; that's the whole point of the reset.
-mapfile -t worktrees < <(git worktree list --porcelain \
-    | awk '/^worktree / {print $2}' \
-    | grep -F "$WORKTREE_GLOB_PREFIX" || true)
+# Discover + remove pitboss-managed worktrees. Match by BRANCH prefix
+# rather than path — old dogfood runs used different path conventions
+# (ketchup-p0-N-lead vs ketchup-pitboss-*) and we want to clean up all
+# of them. --force so uncommitted worker changes are blown away;
+# that's the whole point of the reset.
+mapfile -t worktrees < <(git worktree list --porcelain | awk -v prefixes="$(IFS='|'; echo "${BRANCH_PREFIXES[*]}")" '
+    BEGIN { split(prefixes, ps, "|") }
+    /^worktree / { path = $2 }
+    /^branch refs\/heads\// {
+        br = substr($0, length("branch refs/heads/") + 1)
+        for (i in ps) if (index(br, ps[i]) == 1) { print path; break }
+    }
+')
 
 if [[ ${#worktrees[@]} -eq 0 ]]; then
     echo "no pitboss worktrees to remove"
@@ -60,7 +71,12 @@ fi
 
 # Delete demo/ketchup-p0-* local branches. -D since the branches diverge
 # from main via uncommitted-in-worktree changes that are now gone.
-mapfile -t branches < <(git branch --list 'demo/ketchup-p0-*' | sed 's/^[* ]*//')
+# Use for-each-ref to get clean branch names across all prefixes.
+mapfile -t branches < <(
+    for prefix in "${BRANCH_PREFIXES[@]}"; do
+        git for-each-ref --format='%(refname:short)' "refs/heads/${prefix}*"
+    done
+)
 if [[ ${#branches[@]} -eq 0 ]]; then
     echo "no demo/ketchup-p0-* branches to delete"
 else
