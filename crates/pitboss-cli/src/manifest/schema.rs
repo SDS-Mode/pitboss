@@ -18,6 +18,9 @@ pub struct Manifest {
     pub tasks: Vec<Task>,
     #[serde(default, rename = "lead")]
     pub leads: Vec<Lead>,
+    /// Notification sinks (v0.4.1+). Parsed as [[notification]] sections.
+    #[serde(default, rename = "notification")]
+    pub notification: Vec<crate::notify::config::NotificationConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -289,5 +292,24 @@ mod tests {
         "#;
         let err: Result<Manifest, _> = toml::from_str(toml_src);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn parses_notification_section() {
+        let toml_src = r#"
+[[notification]]
+kind = "webhook"
+url  = "https://example.com/hook"
+events = ["run_finished"]
+severity_min = "info"
+
+[[task]]
+id = "t"
+directory = "/tmp"
+prompt = "p"
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.notification.len(), 1);
+        assert_eq!(m.notification[0].events.as_ref().unwrap().len(), 1);
     }
 }
