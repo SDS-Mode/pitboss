@@ -86,3 +86,136 @@ async fn worker_cross_peer_write_is_forbidden() {
         other => panic!("expected Forbidden, got {other:?}"),
     }
 }
+
+use pitboss_cli::shared_store::tools::{
+    handle_lease_acquire, handle_lease_release, LeaseAcquireArgs, LeaseReleaseArgs,
+};
+
+/// Three workers concurrently call lease_acquire with a short wait_secs.
+/// Exactly one should acquire; the others should return acquired=false
+/// after the wait elapses because the first holder's lease TTL (200ms)
+/// is longer than the contenders' wait (50ms).
+#[tokio::test]
+async fn three_workers_lease_contention() {
+    let store = Arc::new(SharedStore::new());
+
+    let args_for = |worker_id: &str| LeaseAcquireArgs {
+        name: "shared-job".into(),
+        ttl_secs: 1,     // 1 second TTL for the winner
+        wait_secs: None, // non-blocking for this test
+        meta: worker_meta(worker_id),
+    };
+
+    let store1 = store.clone();
+    let store2 = store.clone();
+    let store3 = store.clone();
+
+    let (r1, r2, r3) = tokio::join!(
+        handle_lease_acquire(&store1, args_for("w1")),
+        handle_lease_acquire(&store2, args_for("w2")),
+        handle_lease_acquire(&store3, args_for("w3")),
+    );
+
+    let results = [r1.unwrap(), r2.unwrap(), r3.unwrap()];
+    let acquired_count = results.iter().filter(|r| r.acquired).count();
+    assert_eq!(
+        acquired_count, 1,
+        "exactly one of three concurrent acquires should succeed, got {}",
+        acquired_count
+    );
+
+    // The winner's lease_id should be present; losers should have None.
+    let winner = results.iter().find(|r| r.acquired).unwrap();
+    assert!(winner.lease_id.is_some());
+    assert!(winner.expires_at.is_some());
+    for loser in results.iter().filter(|r| !r.acquired) {
+        assert!(loser.lease_id.is_none());
+        assert!(loser.expires_at.is_none());
+    }
+}
+
+/// Holder releases; a waiter with wait_secs > 0 picks up the lease.
+#[tokio::test]
+async fn lease_wait_succeeds_when_holder_releases() {
+    let store = Arc::new(SharedStore::new());
+    // Worker A acquires first with a longer TTL.
+    let a = handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "slow-job".into(),
+            ttl_secs: 30,
+            wait_secs: None,
+            meta: worker_meta("worker-A"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(a.acquired);
+    let a_lease_id = a.lease_id.unwrap();
+
+    // Worker B starts waiting. A releases after 50ms. B should acquire.
+    let store_b = store.clone();
+    let b_waiter = tokio::spawn(async move {
+        handle_lease_acquire(
+            &store_b,
+            LeaseAcquireArgs {
+                name: "slow-job".into(),
+                ttl_secs: 30,
+                wait_secs: Some(2),
+                meta: worker_meta("worker-B"),
+            },
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle_lease_release(
+        &store,
+        LeaseReleaseArgs {
+            lease_id: a_lease_id,
+            meta: worker_meta("worker-A"),
+        },
+    )
+    .await
+    .unwrap();
+
+    let b_result = b_waiter.await.unwrap().unwrap();
+    assert!(
+        b_result.acquired,
+        "worker B should acquire after A releases"
+    );
+}
+
+/// Release is identity-checked: non-holder cannot release.
+#[tokio::test]
+async fn lease_release_by_non_holder_is_forbidden() {
+    let store = Arc::new(SharedStore::new());
+    let a = handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "exclusive".into(),
+            ttl_secs: 30,
+            wait_secs: None,
+            meta: worker_meta("worker-A"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(a.acquired);
+    let a_lease_id = a.lease_id.unwrap();
+
+    // Worker B tries to release worker A's lease.
+    let err = handle_lease_release(
+        &store,
+        LeaseReleaseArgs {
+            lease_id: a_lease_id,
+            meta: worker_meta("worker-B"),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        pitboss_cli::shared_store::StoreError::Forbidden(_)
+    ));
+}
