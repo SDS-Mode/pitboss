@@ -14,7 +14,7 @@ use crate::state::{AppSnapshot, TileState, TileStatus};
 
 const POLL_INTERVAL_MS: u64 = 250;
 /// Number of parsed focus-pane lines to keep.
-const TAIL_LINES: usize = 40;
+const TAIL_LINES: usize = 500;
 /// Maximum bytes to read off the end of a log file when tailing. Chosen so
 /// that even a verbose stream-json run has >> `TAIL_LINES` rendered events
 /// within this window, without re-parsing multi-megabyte logs every poll.

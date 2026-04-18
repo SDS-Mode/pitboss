@@ -524,7 +524,21 @@ fn render_detail_view(
 
     // --- Title bar ---
     let status_str = tile.map_or("?", |t| status_label(&t.status));
-    let title_text = format!(" Detail: {task_id} ({status_str}) ");
+    let total_lines = state.focus_log.len();
+    let viewport = state
+        .detail_log_viewport
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(1);
+    let max_scroll = total_lines.saturating_sub(viewport);
+    let display_scroll = scroll.min(max_scroll);
+    let first_visible = display_scroll + 1;
+    let last_visible = (display_scroll + viewport).min(total_lines);
+    let scroll_hint = if max_scroll == 0 {
+        format!(" (log {total_lines} lines; fits in view)")
+    } else {
+        format!(" (log {first_visible}-{last_visible} of {total_lines})")
+    };
+    let title_text = format!(" Detail: {task_id} ({status_str}){scroll_hint} ");
     // Intentional: inverted text on highlight bar — selection highlight pairing.
     let title_para = Paragraph::new(title_text).style(
         Style::default()
