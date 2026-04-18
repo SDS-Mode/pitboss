@@ -10,4 +10,5 @@ pub mod diff;
 pub mod dispatch;
 pub mod manifest;
 pub mod mcp;
+pub mod notify;
 pub mod tui_table;
