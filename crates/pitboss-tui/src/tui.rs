@@ -16,6 +16,7 @@ use ratatui::{
 };
 
 use crate::state::{AppState, Mode, TileStatus};
+use crate::theme;
 use pitboss_core::store::TaskStatus;
 
 // ---------------------------------------------------------------------------
@@ -275,11 +276,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
     );
 
     let para = Paragraph::new(title_text)
-        .style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
+        .style(theme::primary_style().add_modifier(Modifier::BOLD))
         .alignment(Alignment::Left);
     frame.render_widget(para, area);
 }
@@ -291,7 +288,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
 fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
     if state.tasks.is_empty() {
         let msg =
-            Paragraph::new(" No tasks found in this run.").style(Style::default().fg(Color::Gray));
+            Paragraph::new(" No tasks found in this run.").style(theme::secondary_style());
         frame.render_widget(msg, area);
         return;
     }
@@ -365,11 +362,9 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     // border. The focused branch stays first for semantic clarity even though
     // it produces an identical style to the unfocused-lead branch today.
     let border_style = if focused || is_lead {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        theme::focused_border()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::idle_border()
     };
 
     let mut block = Block::default()
@@ -383,7 +378,7 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     if !subtitle.is_empty() {
         block = block.title_bottom(Span::styled(
             format!(" {subtitle} "),
-            Style::default().fg(Color::DarkGray),
+            theme::muted_style(),
         ));
     }
 
@@ -416,15 +411,15 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
             Span::raw(" "),
             Span::styled(status_label, Style::default().fg(icon_color)),
         ]),
-        Line::from(Span::styled(duration_str, Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(duration_str, theme::secondary_style())),
         Line::from(Span::styled(
             format!(
                 "in:{} out:{}",
                 tile.token_usage_input, tile.token_usage_output
             ),
-            Style::default().fg(Color::DarkGray),
+            theme::muted_style(),
         )),
-        Line::from(Span::styled(cost_str, Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(cost_str, theme::muted_style())),
     ];
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -446,7 +441,7 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::TOP)
         .title(format!(" Focus: {focused_id} ({status_str}) "))
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(theme::idle_border());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -478,7 +473,7 @@ fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         " [h/j/k/l] nav  [L] log  [o] open run  [?] help  [q] quit"
     };
-    let para = Paragraph::new(keys).style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(keys).style(theme::muted_style());
     frame.render_widget(para, area);
 }
 
@@ -516,6 +511,8 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 
     // --- Title bar ---
     let title_text = format!(" Snap-in: {task_id} ({status_str}) — line {n}/{total_lines} ");
+    // Intentional: inverted text on highlight bar — selection highlight pairing,
+    // not a palette color. Keep inline.
     let title_para = Paragraph::new(title_text).style(
         Style::default()
             .fg(Color::Black)
@@ -543,7 +540,7 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 
     // --- Status bar ---
     let hint = " [Esc] back  [j/k] scroll  [Ctrl-D/U] page  [G] bottom  [g] top  [q] quit";
-    let status_para = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+    let status_para = Paragraph::new(hint).style(theme::muted_style());
     frame.render_widget(status_para, chunks[2]);
 }
 
@@ -558,7 +555,7 @@ fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Log: {focused_id}  [L/Esc] close "))
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_WARNING));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -580,7 +577,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Help — Pitboss TUI ")
-        .border_style(Style::default().fg(Color::Green));
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_INFO));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -603,7 +600,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "  Press Esc or ? to close",
-            Style::default().fg(Color::DarkGray),
+            theme::muted_style(),
         )),
     ];
 
@@ -619,13 +616,13 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Open Run  [j/k] navigate  [Enter] open  [Esc] cancel ")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_PICKER));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
 
     if state.run_list.is_empty() {
-        let msg = Paragraph::new(" No runs found.").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new(" No runs found.").style(theme::muted_style());
         frame.render_widget(msg, inner);
         return;
     }
@@ -651,6 +648,7 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
         })
         .collect();
 
+    // Intentional: inverted selection highlight pairing, not a palette color.
     let list = List::new(items)
         .highlight_style(
             Style::default()
@@ -684,7 +682,7 @@ fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::Kil
     let para = Paragraph::new(msg)
         .block(block)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(theme::OVERLAY_ACCENT_WARNING));
     frame.render_widget(para, modal);
 }
 
@@ -702,7 +700,7 @@ fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &
     let para = Paragraph::new(draft)
         .block(block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::White));
+        .style(theme::primary_style());
     frame.render_widget(para, modal);
 }
 
@@ -739,7 +737,7 @@ fn render_approval_modal(
     let para = Paragraph::new(body)
         .block(block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::White));
+        .style(theme::primary_style());
     frame.render_widget(para, modal);
 }
 
@@ -748,15 +746,16 @@ fn render_approval_modal(
 // ---------------------------------------------------------------------------
 
 fn status_icon(status: &TileStatus) -> (&'static str, Color) {
-    match status {
-        TileStatus::Pending => ("…", Color::Gray),
-        TileStatus::Running => ("●", Color::Cyan),
-        TileStatus::Done(TaskStatus::Success) => ("✓", Color::Green),
-        TileStatus::Done(TaskStatus::Failed) => ("✗", Color::Red),
-        TileStatus::Done(TaskStatus::TimedOut) => ("⏱", Color::Yellow),
-        TileStatus::Done(TaskStatus::Cancelled) => ("⊘", Color::Magenta),
-        TileStatus::Done(TaskStatus::SpawnFailed) => ("!", Color::Red),
-    }
+    let icon = match status {
+        TileStatus::Pending => "…",
+        TileStatus::Running => "●",
+        TileStatus::Done(TaskStatus::Success) => "✓",
+        TileStatus::Done(TaskStatus::Failed) => "✗",
+        TileStatus::Done(TaskStatus::TimedOut) => "⏱",
+        TileStatus::Done(TaskStatus::Cancelled) => "⊘",
+        TileStatus::Done(TaskStatus::SpawnFailed) => "!",
+    };
+    (icon, theme::tile_status_color(status))
 }
 
 fn status_label(status: &TileStatus) -> &'static str {
