@@ -524,19 +524,30 @@ fn render_detail_view(
 
     // --- Title bar ---
     let status_str = tile.map_or("?", |t| status_label(&t.status));
-    let total_lines = state.focus_log.len();
+    // Both totals use visual rows (post-wrap) published by the render pass.
+    // Falls back to focus_log.len() only before the first render pass when
+    // detail_log_total_rows is still 0 — ensures the hint shows something
+    // meaningful on the very first frame.
+    let total_rows = state
+        .detail_log_total_rows
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_rows = if total_rows == 0 {
+        state.focus_log.len()
+    } else {
+        total_rows
+    };
     let viewport = state
         .detail_log_viewport
         .load(std::sync::atomic::Ordering::Relaxed)
         .max(1);
-    let max_scroll = total_lines.saturating_sub(viewport);
+    let max_scroll = total_rows.saturating_sub(viewport);
     let display_scroll = scroll.min(max_scroll);
     let first_visible = display_scroll + 1;
-    let last_visible = (display_scroll + viewport).min(total_lines);
+    let last_visible = (display_scroll + viewport).min(total_rows);
     let scroll_hint = if max_scroll == 0 {
-        format!(" (log {total_lines} lines; fits in view)")
+        format!(" (log {total_rows} rows; fits in view)")
     } else {
-        format!(" (log {first_visible}-{last_visible} of {total_lines})")
+        format!(" (log rows {first_visible}-{last_visible} of {total_rows})")
     };
     let title_text = format!(" Detail: {task_id} ({status_str}){scroll_hint} ");
     // Intentional: inverted text on highlight bar — selection highlight pairing.
@@ -722,7 +733,10 @@ fn render_detail_metadata(
     frame.render_widget(para, inner);
 }
 
-/// Right-pane scrollable log. Same line-index slicing as the old snap-in.
+/// Right-pane scrollable log. Scroll unit is VISUAL ROWS post-wrap, not
+/// log-line indices — so long wrapped lines don't eat scroll budget and
+/// the "jump to bottom" position actually shows the end of the log
+/// regardless of how much content wraps.
 fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -731,29 +745,37 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let total_lines = state.focus_log.len();
     let visible_rows = inner.height as usize;
-    // Publish viewport rows so scroll handlers know real max_scroll.
-    state
-        .detail_log_viewport
-        .store(visible_rows, std::sync::atomic::Ordering::Relaxed);
-    let max_scroll = total_lines.saturating_sub(visible_rows);
-    let scroll = scroll.min(max_scroll);
 
-    let log_slice = if state.focus_log.is_empty() {
-        &[][..]
-    } else {
-        let start = scroll.min(state.focus_log.len());
-        let end = (scroll + visible_rows).min(state.focus_log.len());
-        &state.focus_log[start..end]
-    };
-
-    let lines: Vec<Line> = log_slice
+    // Build the Paragraph once with ALL log lines and use Paragraph::scroll
+    // to pick the visual row offset. ratatui::Paragraph::line_count(width)
+    // tells us the total visual rows after wrapping so we can compute a
+    // correct max_scroll in visual-row units.
+    let all_lines: Vec<Line> = state
+        .focus_log
         .iter()
         .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let para_for_count = Paragraph::new(all_lines.clone()).wrap(Wrap { trim: false });
+    let total_visual_rows = para_for_count.line_count(inner.width);
+
+    // Publish max_scroll (in visual rows) to the atomic so scroll handlers
+    // know the real cap for the current viewport + wrapped content.
+    let max_scroll = total_visual_rows.saturating_sub(visible_rows);
+    state
+        .detail_log_viewport
+        .store(visible_rows, std::sync::atomic::Ordering::Relaxed);
+    state
+        .detail_log_total_rows
+        .store(total_visual_rows, std::sync::atomic::Ordering::Relaxed);
+
+    let clamped_scroll = scroll.min(max_scroll);
+    let scroll_u16 = u16::try_from(clamped_scroll).unwrap_or(u16::MAX);
+
+    let para = Paragraph::new(all_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_u16, 0));
     frame.render_widget(para, inner);
 }
 
@@ -1113,6 +1135,7 @@ mod tests {
             control_connected: false,
             cached_git_diff: std::collections::HashMap::new(),
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
+            detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

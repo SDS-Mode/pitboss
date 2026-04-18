@@ -128,9 +128,14 @@ pub struct AppState {
     pub cached_git_diff: std::collections::HashMap<String, GitDiffSummary>,
     /// Height of the detail-view log pane (inner rows), set by the render
     /// pass via interior mutability. Read by the scroll handlers so they
-    /// know the real `max_scroll = total_lines - viewport` without having
+    /// know the real `max_scroll = total_rows - viewport` without having
     /// to query the terminal themselves. 0 until the first render.
     pub detail_log_viewport: std::sync::atomic::AtomicUsize,
+    /// Total visual rows of the detail log after word-wrap at the current
+    /// pane width, set by the render pass. Differs from `focus_log.len()`
+    /// whenever any line wraps — scroll must use this to map 1:1 with
+    /// what's painted. 0 until the first render.
+    pub detail_log_total_rows: std::sync::atomic::AtomicUsize,
 }
 
 /// Summary of a worker's worktree diff vs its base branch.
@@ -157,6 +162,7 @@ impl AppState {
             control_connected: false,
             cached_git_diff: std::collections::HashMap::new(),
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
+            detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -246,17 +252,19 @@ impl AppState {
         self.cached_git_diff.clear();
     }
 
-    /// Scroll down by `delta` lines in `SnapIn` mode. Clamps at the last valid
-    /// offset for the current `focus_log` length and `visible_rows`.
+    /// Scroll down by `delta` visual rows in `Detail` mode. Clamps at the last
+    /// valid row offset for the current wrapped log and viewport height.
     ///
     /// Disables auto-scroll if the new position is not at the bottom.
     pub fn detail_scroll_down(&mut self, delta: usize, _visible_rows: usize) {
-        let total = self.focus_log.len();
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
         let viewport = self
             .detail_log_viewport
             .load(std::sync::atomic::Ordering::Relaxed)
             .max(1);
-        let max_scroll = total.saturating_sub(viewport);
+        let max_scroll = total_rows.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -278,22 +286,22 @@ impl AppState {
         }
     }
 
-    /// Scroll up by `delta` lines in `Detail` mode. Clamps at 0.
+    /// Scroll up by `delta` visual rows in `Detail` mode. Clamps at 0.
     ///
-    /// Always disables auto-scroll (user is scrolling up). If the caller
-    /// was in auto-follow (`at_bottom = true`), the scroll value may be a
-    /// sentinel past `total_lines` set by `detail_auto_scroll` /
-    /// `detail_jump_bottom` — clamp down to `total_lines` first so the
-    /// first `k` press produces visible movement. When the user was
-    /// already scrolled (not auto-following), decrement from the current
-    /// value as-is.
+    /// Always disables auto-scroll (user is scrolling up). `state.scroll`
+    /// can legitimately be above `max_scroll` right after auto-follow (we
+    /// pin to `max_scroll` there, but the wrapped-row total may have shrunk
+    /// in between). Always re-clamp to `max_scroll` before decrementing so
+    /// the first `k` press produces visible movement.
     pub fn detail_scroll_up(&mut self, delta: usize) {
-        let total = self.focus_log.len();
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
         let viewport = self
             .detail_log_viewport
             .load(std::sync::atomic::Ordering::Relaxed)
             .max(1);
-        let max_scroll = total.saturating_sub(viewport);
+        let max_scroll = total_rows.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -329,12 +337,14 @@ impl AppState {
 
     /// Jump to the bottom of the log in `Detail` mode; re-enables auto-scroll.
     pub fn detail_jump_bottom(&mut self, _visible_rows: usize) {
-        let total = self.focus_log.len();
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
         let viewport = self
             .detail_log_viewport
             .load(std::sync::atomic::Ordering::Relaxed)
             .max(1);
-        let max_scroll = total.saturating_sub(viewport);
+        let max_scroll = total_rows.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -355,12 +365,14 @@ impl AppState {
     /// If `at_bottom` is true, advances `scroll` so the last line stays
     /// visible. Does nothing if the user has scrolled up.
     pub fn detail_auto_scroll(&mut self, _visible_rows: usize) {
-        let total = self.focus_log.len();
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
         let viewport = self
             .detail_log_viewport
             .load(std::sync::atomic::Ordering::Relaxed)
             .max(1);
-        let max_scroll = total.saturating_sub(viewport);
+        let max_scroll = total_rows.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             at_bottom,
@@ -745,6 +757,9 @@ mod tests {
         let mut state = make_state_with_tile("t");
         // Give the state some log lines so scroll can advance.
         state.focus_log = (0..20).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_total_rows
+            .store(20, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 0,
@@ -762,10 +777,13 @@ mod tests {
 
     #[test]
     fn scroll_down_increments_without_clamp() {
-        // Paragraph::scroll handles end-of-content clamping; state just
-        // tracks the requested offset.
+        // Handler clamps to max_scroll, but for this test total_rows is big
+        // enough (100) that the 5-delta advance doesn't hit the cap.
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..10).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_total_rows
+            .store(100, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 0,
@@ -812,6 +830,9 @@ mod tests {
         state
             .detail_log_viewport
             .store(10, std::sync::atomic::Ordering::Relaxed);
+        state
+            .detail_log_total_rows
+            .store(20, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 3,
@@ -860,6 +881,9 @@ mod tests {
         state
             .detail_log_viewport
             .store(10, std::sync::atomic::Ordering::Relaxed);
+        state
+            .detail_log_total_rows
+            .store(50, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 5,
@@ -892,14 +916,21 @@ mod tests {
         state
             .detail_log_viewport
             .store(10, std::sync::atomic::Ordering::Relaxed);
+        state
+            .detail_log_total_rows
+            .store(30, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 20,
             at_bottom: true,
         };
 
-        // Simulate new lines arriving — focus_log grows to 35 lines.
+        // Simulate new lines arriving — focus_log grows to 35 lines and the
+        // next render publishes the new total.
         state.focus_log = (0..35).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_total_rows
+            .store(35, std::sync::atomic::Ordering::Relaxed);
         state.detail_auto_scroll(10);
 
         if let Mode::Detail { scroll, .. } = &state.mode {
