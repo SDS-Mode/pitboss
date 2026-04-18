@@ -41,6 +41,60 @@ pub struct TokenUsageSchema {
     pub cache_creation: u64,
 }
 
+// Compile-time structural parity guards between TokenUsageSchema and
+// pitboss_core::parser::TokenUsage. If someone renames, adds, or removes
+// a field on either struct, these `From` impls won't compile — the
+// schema and the upstream type diverge loudly instead of silently.
+//
+// Previously these two structs could drift (the schema reported the
+// wrong shape), because the `#[schemars(with = ...)]` attribute on
+// WorkerStatus.partial_usage is a string reference checked only at
+// schema-generation time, not at field-layout time.
+impl From<pitboss_core::parser::TokenUsage> for TokenUsageSchema {
+    fn from(u: pitboss_core::parser::TokenUsage) -> Self {
+        let pitboss_core::parser::TokenUsage {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+        } = u;
+        Self {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+        }
+    }
+}
+
+impl From<TokenUsageSchema> for pitboss_core::parser::TokenUsage {
+    fn from(s: TokenUsageSchema) -> Self {
+        let TokenUsageSchema {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+        } = s;
+        Self {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+        }
+    }
+}
+
+// Size equality is not proof of field-shape equality (renames would
+// still pass), but it's a cheap extra signal — breaks loudly if a new
+// field lands on one side but not the other.
+const _TOKEN_USAGE_SCHEMA_SIZE_CHECK: () = {
+    assert!(
+        std::mem::size_of::<TokenUsageSchema>()
+            == std::mem::size_of::<pitboss_core::parser::TokenUsage>(),
+        "TokenUsageSchema and pitboss_core::parser::TokenUsage must stay in sync"
+    );
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkerStatus {
     pub state: String,

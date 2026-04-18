@@ -48,10 +48,17 @@ pub struct McpServer {
 
 /// The rmcp `ServerHandler` that exposes the six pitboss tools to the lead
 /// Hobbit via a per-connection MCP session.
+///
+/// Holds an `Arc<Mutex<Option<String>>>` that records the first actor_id
+/// observed in this connection's `_meta` fields. Used for per-connection
+/// lease cleanup: on disconnect, we call
+/// `SharedStore::release_all_for_actor(actor_id)` so dropped bridges
+/// don't leave their leases held until TTL expiry.
 #[derive(Clone)]
 pub struct PitbossHandler {
     state: Arc<DispatchState>,
     tool_router: ToolRouter<Self>,
+    connection_actor: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 impl PitbossHandler {
@@ -59,6 +66,38 @@ impl PitbossHandler {
         Self {
             state,
             tool_router: Self::tool_router(),
+            connection_actor: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Return a fresh handler instance for a new MCP connection — same
+    /// shared dispatcher state and tool router, but a dedicated
+    /// `connection_actor` slot so different connections don't trample
+    /// each other's identity tracking.
+    pub fn for_connection(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            tool_router: self.tool_router.clone(),
+            connection_actor: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Handle to the per-connection actor_id slot. Caller holds an
+    /// `Arc::clone` so it can read the observed actor_id after the
+    /// session ends (for `release_all_for_actor` cleanup).
+    pub fn connection_actor_handle(&self) -> Arc<tokio::sync::Mutex<Option<String>>> {
+        self.connection_actor.clone()
+    }
+
+    /// Record the actor_id on the first MCP tool call that carries one.
+    /// Later calls on the same connection are no-ops (first-seen wins).
+    async fn note_actor(&self, actor_id: &str) {
+        if actor_id.is_empty() {
+            return;
+        }
+        let mut slot = self.connection_actor.lock().await;
+        if slot.is_none() {
+            *slot = Some(actor_id.to_string());
         }
     }
 }
@@ -194,6 +233,9 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvGetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(m) = &args.meta {
+            self.note_actor(&m.actor_id).await;
+        }
         match crate::shared_store::tools::handle_kv_get(&self.state.shared_store, args).await {
             // Wrap Option<Entry> in an object so structuredContent is a
             // record (per MCP spec). A bare null was rejected by the
@@ -210,6 +252,7 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvSetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.note_actor(&args.meta.actor_id).await;
         match crate::shared_store::tools::handle_kv_set(&self.state.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
@@ -223,6 +266,7 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvCasArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.note_actor(&args.meta.actor_id).await;
         match crate::shared_store::tools::handle_kv_cas(&self.state.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
@@ -236,6 +280,9 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvListArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(m) = &args.meta {
+            self.note_actor(&m.actor_id).await;
+        }
         match crate::shared_store::tools::handle_kv_list(&self.state.shared_store, args).await {
             // Wrap Vec<ListMetadata> in an object — MCP spec requires
             // structuredContent to be a record.
@@ -251,6 +298,9 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvWaitArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(m) = &args.meta {
+            self.note_actor(&m.actor_id).await;
+        }
         match crate::shared_store::tools::handle_kv_wait(&self.state.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
@@ -264,6 +314,7 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::LeaseAcquireArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.note_actor(&args.meta.actor_id).await;
         match crate::shared_store::tools::handle_lease_acquire(&self.state.shared_store, args).await
         {
             Ok(v) => to_structured_result(&v),
@@ -278,6 +329,7 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::LeaseReleaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.note_actor(&args.meta.actor_id).await;
         match crate::shared_store::tools::handle_lease_release(&self.state.shared_store, args).await
         {
             Ok(()) => Ok(CallToolResult::structured(serde_json::json!({"ok": true}))),
@@ -367,7 +419,13 @@ impl McpServer {
                     accept = listener.accept() => {
                         match accept {
                             Ok((stream, _addr)) => {
-                                let h = handler.clone();
+                                // `for_connection` gives this session its own
+                                // `connection_actor` slot; cloning the Arc lets
+                                // the cleanup branch below read it after `serve`
+                                // returns without racing the moved handler.
+                                let h = handler.for_connection();
+                                let actor_slot = h.connection_actor_handle();
+                                let store_for_cleanup = h.state.shared_store.clone();
                                 let cancel_inner = cancel_outer.clone();
                                 // Track the spawned session task so Drop can signal cancellation
                                 // to per-connection tasks without waiting for MCP session timeouts.
@@ -386,6 +444,17 @@ impl McpServer {
                                                 }
                                             }
                                         } => {}
+                                    }
+                                    // Connection-drop cleanup: release every
+                                    // lease held by this session's actor.
+                                    // Until this hook existed, dropped bridges
+                                    // left leases held until TTL expiry —
+                                    // fine for short TTLs, but blocked other
+                                    // workers on long-held leases when a
+                                    // worker crashed.
+                                    let actor = actor_slot.lock().await.clone();
+                                    if let Some(id) = actor {
+                                        store_for_cleanup.release_all_for_actor(&id).await;
                                     }
                                 });
                             }
