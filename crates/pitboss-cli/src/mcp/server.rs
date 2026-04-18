@@ -307,15 +307,22 @@ fn to_structured_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult
 
 fn shared_store_err(e: &crate::shared_store::StoreError) -> ErrorData {
     use crate::shared_store::StoreError;
-    let (code, msg) = match e {
-        StoreError::InvalidArg(m) => ("invalid_arg", m.as_str()),
-        StoreError::Forbidden(m) => ("forbidden", m.as_str()),
-        StoreError::Conflict => ("conflict", "conflict"),
-        StoreError::Timeout => ("timeout", "timeout"),
-        StoreError::LimitExceeded { .. } => ("store_limit_exceeded", "store limit exceeded"),
-        StoreError::Shutdown => ("store_shutdown", "store shutdown"),
+    let (code, msg, extra) = match e {
+        StoreError::InvalidArg(m) => ("invalid_arg", m.as_str(), None),
+        StoreError::Forbidden(m) => ("forbidden", m.as_str(), None),
+        StoreError::Conflict => ("conflict", "conflict", None),
+        StoreError::Timeout => ("timeout", "timeout", None),
+        StoreError::LimitExceeded { which } => (
+            "store_limit_exceeded",
+            "store limit exceeded",
+            Some(serde_json::json!({"which": which})),
+        ),
+        StoreError::Shutdown => ("store_shutdown", "store shutdown", None),
     };
-    let data = serde_json::json!({"code": code});
+    let mut data = serde_json::json!({"code": code});
+    if let (Some(serde_json::Value::Object(inner)), Some(obj)) = (extra, data.as_object_mut()) {
+        obj.extend(inner);
+    }
     ErrorData::invalid_request(msg.to_string(), Some(data))
 }
 
