@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod config;
+pub mod sinks;
 
 /// Severity levels for `NotificationEnvelope`. Matches syslog heritage +
 /// PagerDuty/Opsgenie conventions. Ordered so filters can say
