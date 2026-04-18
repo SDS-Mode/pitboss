@@ -427,7 +427,7 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
         Line::from(Span::styled(cost_str, Style::default().fg(Color::DarkGray))),
     ];
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 }
 
@@ -461,10 +461,10 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let lines: Vec<Line> = log_slice
         .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Gray))))
+        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 }
 
@@ -535,10 +535,10 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 
     let lines: Vec<Line> = log_slice
         .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White))))
+        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let log_para = Paragraph::new(lines);
+    let log_para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(log_para, chunks[1]);
 
     // --- Status bar ---
