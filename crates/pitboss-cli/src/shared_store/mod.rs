@@ -24,6 +24,8 @@ pub struct Entry {
 pub enum StoreError {
     #[error("invalid argument: {0}")]
     InvalidArg(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 }
 
 /// Outcome of a compare-and-swap. `ok=true` means the write happened;
@@ -44,7 +46,53 @@ pub struct ListMetadata {
     pub size_bytes: u64,
 }
 
+/// Who's making the call, as injected by `mcp-bridge --actor-id / --actor-role`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallerIdentity {
+    pub id: String,
+    pub role: ActorRole,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActorRole {
+    Lead,
+    Worker,
+}
+
 const LIST_RESULT_CAP: usize = 1000;
+
+fn authorize_write(
+    path: &str,
+    caller: &CallerIdentity,
+    override_flag: bool,
+) -> Result<(), StoreError> {
+    let namespace = path.split('/').nth(1).unwrap_or("");
+    match (namespace, caller.role) {
+        ("ref", ActorRole::Lead) => Ok(()),
+        ("ref", ActorRole::Worker) => Err(StoreError::Forbidden("/ref is lead-write-only".into())),
+        ("peer", _) => {
+            let actor_seg = path.split('/').nth(2).unwrap_or("");
+            match (actor_seg == caller.id, caller.role, override_flag) {
+                (true, _, _) => Ok(()),
+                (_, ActorRole::Lead, true) => Ok(()),
+                (_, ActorRole::Lead, false) => Err(StoreError::Forbidden(
+                    "lead may write /peer/<other>/* only with override=true".into(),
+                )),
+                (_, ActorRole::Worker, _) => Err(StoreError::Forbidden(
+                    "workers may write only their own /peer/<self>/*".into(),
+                )),
+            }
+        }
+        ("shared", _) => Ok(()),
+        ("leases", _) => Err(StoreError::Forbidden(
+            "use lease_acquire, not kv_set on /leases/*".into(),
+        )),
+        _ => Err(StoreError::Forbidden(format!(
+            "unknown namespace: /{namespace}"
+        ))),
+    }
+}
 
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
@@ -146,6 +194,30 @@ impl SharedStore {
         out.sort_by(|a, b| a.path.cmp(&b.path));
         out.truncate(LIST_RESULT_CAP);
         Ok(out)
+    }
+
+    pub async fn authorized_set(
+        &self,
+        path: &str,
+        value: Vec<u8>,
+        caller: &CallerIdentity,
+        override_flag: bool,
+    ) -> Result<u64, StoreError> {
+        authorize_write(path, caller, override_flag)?;
+        self.set(path, value, &caller.id).await
+    }
+
+    pub async fn authorized_cas(
+        &self,
+        path: &str,
+        expected_version: u64,
+        new_value: Vec<u8>,
+        caller: &CallerIdentity,
+        override_flag: bool,
+    ) -> Result<CasResult, StoreError> {
+        authorize_write(path, caller, override_flag)?;
+        self.cas(path, expected_version, new_value, &caller.id)
+            .await
     }
 }
 
@@ -315,5 +387,103 @@ mod tests {
         assert_eq!(entries.len(), 1000);
         assert_eq!(entries[0].path, "/shared/item-00000");
         assert_eq!(entries[999].path, "/shared/item-00999");
+    }
+
+    fn lead() -> CallerIdentity {
+        CallerIdentity {
+            id: "lead-A".into(),
+            role: ActorRole::Lead,
+        }
+    }
+    fn worker(id: &str) -> CallerIdentity {
+        CallerIdentity {
+            id: id.into(),
+            role: ActorRole::Worker,
+        }
+    }
+
+    #[tokio::test]
+    async fn lead_can_write_ref() {
+        let s = SharedStore::new();
+        s.authorized_set("/ref/k", b"v".to_vec(), &lead(), false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_write_ref() {
+        let s = SharedStore::new();
+        let err = s
+            .authorized_set("/ref/k", b"v".to_vec(), &worker("w1"), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn worker_can_write_own_peer() {
+        let s = SharedStore::new();
+        s.authorized_set("/peer/w1/out", b"v".to_vec(), &worker("w1"), false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_write_other_peer() {
+        let s = SharedStore::new();
+        let err = s
+            .authorized_set("/peer/w2/out", b"v".to_vec(), &worker("w1"), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn lead_override_can_write_any_peer() {
+        let s = SharedStore::new();
+        s.authorized_set("/peer/w1/out", b"v".to_vec(), &lead(), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lead_override_rejected_for_worker() {
+        let s = SharedStore::new();
+        let err = s
+            .authorized_set("/peer/w2/out", b"v".to_vec(), &worker("w1"), true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn all_actors_can_write_shared() {
+        let s = SharedStore::new();
+        s.authorized_set("/shared/k", b"v".to_vec(), &worker("w1"), false)
+            .await
+            .unwrap();
+        s.authorized_set("/shared/k", b"v2".to_vec(), &lead(), false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn leases_namespace_rejects_kv_set() {
+        let s = SharedStore::new();
+        let err = s
+            .authorized_set("/leases/foo", b"v".to_vec(), &lead(), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn unknown_namespace_rejected() {
+        let s = SharedStore::new();
+        let err = s
+            .authorized_set("/other/foo", b"v".to_vec(), &lead(), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Forbidden(_)));
     }
 }
