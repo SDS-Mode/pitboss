@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::state::{AppSnapshot, AppState, Mode};
 use crate::watcher;
@@ -29,6 +29,7 @@ fn spawn_watcher(run_dir: PathBuf) -> (SnapshotRx, FocusTx) {
 }
 
 /// Run the TUI against the given run directory.
+#[allow(clippy::too_many_lines)]
 pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     let mut terminal = crate::tui::init()?;
 
@@ -142,6 +143,22 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                         let _ = focus_tx.send(tile.id.clone());
                     }
                 }
+                Event::Mouse(mouse) => {
+                    // Only wire wheel scroll in the detail view for now.
+                    // Tile grid mouse clicks, drag-select, etc. can be
+                    // added later if useful.
+                    if matches!(state.mode, Mode::Detail { .. }) {
+                        match mouse.kind {
+                            MouseEventKind::ScrollDown => {
+                                state.detail_scroll_down(3, DETAIL_VISIBLE_ROWS);
+                            }
+                            MouseEventKind::ScrollUp => {
+                                state.detail_scroll_up(3);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -151,8 +168,8 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
             state.apply_snapshot(snapshot);
             // If we're in snap-in mode and at the bottom, keep the view
             // scrolled to the last line as new log lines arrive.
-            if matches!(state.mode, Mode::SnapIn { .. }) {
-                state.snap_auto_scroll(SNAP_VISIBLE_ROWS);
+            if matches!(state.mode, Mode::Detail { .. }) {
+                state.detail_auto_scroll(DETAIL_VISIBLE_ROWS);
             }
         }
 
@@ -181,9 +198,9 @@ enum Action {
 /// We can't query the terminal size from the key handler, so we use a
 /// representative constant. The real render uses `area.height`, but
 /// scroll clamping is soft (extra scroll just shows blank) so this is fine
-/// for the handler. The render pass also calls `snap_auto_scroll` with the
+/// for the handler. The render pass also calls `detail_auto_scroll` with the
 /// real `visible_rows`.
-const SNAP_VISIBLE_ROWS: usize = 40;
+const DETAIL_VISIBLE_ROWS: usize = 40;
 
 /// Handle a single key press. Returns an [`Action`] describing what to do next.
 fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
@@ -194,10 +211,9 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
 
     match state.mode {
         Mode::Normal => handle_normal(state, code),
-        Mode::ViewingLog => handle_viewing_log(state, code),
         Mode::Help => handle_help(state, code),
         Mode::PickingRun { .. } => handle_picking_run(state, code),
-        Mode::SnapIn { .. } => handle_snap_in(state, code, modifiers),
+        Mode::Detail { .. } => handle_detail(state, code, modifiers),
         Mode::ConfirmKill { .. } => handle_confirm_kill(state, code),
         Mode::PromptReprompt { .. } => handle_prompt_reprompt(state, code, modifiers),
         Mode::ApprovalModal { .. } => handle_approval_modal(state, code, modifiers),
@@ -215,9 +231,6 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
         KeyCode::Char('k') | KeyCode::Up => state.focus_up(),
         KeyCode::Char('j') | KeyCode::Down => state.focus_down(),
 
-        // Log overlay
-        KeyCode::Char('L') => state.mode = Mode::ViewingLog,
-
         // Help overlay
         KeyCode::Char('?') => state.mode = Mode::Help,
 
@@ -225,7 +238,7 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
         KeyCode::Char('o') => state.enter_picker(),
 
         // Snap-in: enter full-screen view for the focused tile.
-        KeyCode::Enter => state.enter_snap_in(),
+        KeyCode::Enter => state.enter_detail(),
 
         // v0.4 — cancel focused worker.
         KeyCode::Char('x') => {
@@ -282,47 +295,38 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
     Action::Continue
 }
 
-fn handle_snap_in(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
+fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
     match code {
         // Exit back to grid.
-        KeyCode::Esc => state.exit_snap_in(),
+        KeyCode::Esc => state.exit_detail(),
 
         // Quit the whole app.
         KeyCode::Char('q') => return Action::Quit,
 
         // Scroll down one line.
-        KeyCode::Char('j') | KeyCode::Down => state.snap_scroll_down(1, SNAP_VISIBLE_ROWS),
+        KeyCode::Char('j') | KeyCode::Down => state.detail_scroll_down(1, DETAIL_VISIBLE_ROWS),
 
         // Scroll up one line.
-        KeyCode::Char('k') | KeyCode::Up => state.snap_scroll_up(1),
+        KeyCode::Char('k') | KeyCode::Up => state.detail_scroll_up(1),
 
         // Page down (Ctrl-D or PageDown).
         KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-            state.snap_scroll_down(10, SNAP_VISIBLE_ROWS);
+            state.detail_scroll_down(10, DETAIL_VISIBLE_ROWS);
         }
-        KeyCode::PageDown => state.snap_scroll_down(10, SNAP_VISIBLE_ROWS),
+        KeyCode::PageDown => state.detail_scroll_down(10, DETAIL_VISIBLE_ROWS),
 
         // Page up (Ctrl-U or PageUp).
         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-            state.snap_scroll_up(10);
+            state.detail_scroll_up(10);
         }
-        KeyCode::PageUp => state.snap_scroll_up(10),
+        KeyCode::PageUp => state.detail_scroll_up(10),
 
         // Jump to bottom, re-enable auto-scroll.
-        KeyCode::Char('G') => state.snap_jump_bottom(SNAP_VISIBLE_ROWS),
+        KeyCode::Char('G') => state.detail_jump_bottom(DETAIL_VISIBLE_ROWS),
 
         // Jump to top, disable auto-scroll.
-        KeyCode::Char('g') => state.snap_jump_top(),
+        KeyCode::Char('g') => state.detail_jump_top(),
 
-        _ => {}
-    }
-    Action::Continue
-}
-
-fn handle_viewing_log(state: &mut AppState, code: KeyCode) -> Action {
-    match code {
-        KeyCode::Char('L') | KeyCode::Esc => state.mode = Mode::Normal,
-        KeyCode::Char('q') => return Action::Quit,
         _ => {}
     }
     Action::Continue

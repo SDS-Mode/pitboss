@@ -207,6 +207,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: Some(policy),
             notifications: vec![],
+            dump_shared_store: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -226,6 +227,7 @@ mod tests {
             PathBuf::from("/tmp"),
             policy,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 

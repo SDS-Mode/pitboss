@@ -234,6 +234,24 @@ else
 fi
 
 # --------------------------------------------------------------------
+# 1.11 mcp-bridge exposes identity flags
+#   The worker-shared-store feature (v0.4.x) added --actor-id and
+#   --actor-role to `pitboss mcp-bridge`. Regressions in this surface
+#   would silently break worker MCP authz without any unit test firing.
+HELP_OUT=$("$PITBOSS" mcp-bridge --help 2>&1)
+HAS_ACTOR_ID=0
+HAS_ACTOR_ROLE=0
+echo "$HELP_OUT" | grep -q -- "--actor-id"   && HAS_ACTOR_ID=1
+echo "$HELP_OUT" | grep -q -- "--actor-role" && HAS_ACTOR_ROLE=1
+if [ "$HAS_ACTOR_ID" = "1" ] && [ "$HAS_ACTOR_ROLE" = "1" ]; then
+    say PASS "1.11 mcp-bridge identity flags"
+    record "1.11 mcp-bridge identity flags" PASS "--actor-id and --actor-role present"
+else
+    say FAIL "1.11 mcp-bridge identity flags" "actor-id=$HAS_ACTOR_ID actor-role=$HAS_ACTOR_ROLE"
+    record "1.11 mcp-bridge identity flags" FAIL "actor-id=$HAS_ACTOR_ID actor-role=$HAS_ACTOR_ROLE"
+fi
+
+# --------------------------------------------------------------------
 # Summary
 echo
 echo "=== Summary ==="

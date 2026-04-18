@@ -401,6 +401,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
         std::fs::write(
             run_dir.join("resolved.json"),

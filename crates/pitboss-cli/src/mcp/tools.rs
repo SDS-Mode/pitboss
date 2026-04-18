@@ -376,9 +376,30 @@ async fn run_worker(
         },
     );
 
+    // Generate worker-scoped mcp-config.json so the worker can reach
+    // the shared store via the bridge-injected identity.
+    let worker_task_dir = state.run_subdir.join("tasks").join(&task_id);
+    tokio::fs::create_dir_all(&worker_task_dir).await.ok();
+    let worker_mcp_config = worker_task_dir.join("mcp-config.json");
+    let socket_path =
+        crate::mcp::server::socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
+        &worker_mcp_config,
+        &socket_path,
+        &task_id,
+    )
+    .await
+    {
+        Ok(()) => Some(worker_mcp_config),
+        Err(e) => {
+            tracing::warn!("write worker mcp-config for {task_id}: {e}; proceeding without");
+            None
+        }
+    };
+
     let cmd = SpawnCmd {
         program: state.claude_binary.clone(),
-        args: worker_spawn_args(&prompt, &model, &tools),
+        args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref()),
         cwd: cwd.clone(),
         env: Default::default(),
     };
@@ -492,18 +513,52 @@ async fn release_reservation(state: &Arc<DispatchState>, task_id: &str) {
     }
 }
 
-fn worker_spawn_args(prompt: &str, model: &str, tools: &[String]) -> Vec<String> {
+/// MCP tool names workers need permission to call. Narrower than the lead's
+/// `PITBOSS_MCP_TOOLS` — workers only get the shared-store surface, never
+/// the orchestration tools (spawn_worker / cancel_worker / request_approval
+/// / etc.). Pre-approved via `--allowedTools` so claude doesn't stall at
+/// the interactive permission prompt.
+pub const PITBOSS_WORKER_MCP_TOOLS: &[&str] = &[
+    "mcp__pitboss__kv_get",
+    "mcp__pitboss__kv_set",
+    "mcp__pitboss__kv_cas",
+    "mcp__pitboss__kv_list",
+    "mcp__pitboss__kv_wait",
+    "mcp__pitboss__lease_acquire",
+    "mcp__pitboss__lease_release",
+];
+
+fn worker_spawn_args(
+    prompt: &str,
+    model: &str,
+    tools: &[String],
+    mcp_config: Option<&std::path::Path>,
+) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
     ];
-    if !tools.is_empty() {
+    // Workers always get the shared-store MCP tools in their allowlist when
+    // an mcp-config is supplied, alongside their user-declared tools. Without
+    // this, kv_set / lease_acquire / etc. hit the permission prompt which
+    // can't be answered in non-interactive mode.
+    let mut allowed: Vec<String> = tools.to_vec();
+    if mcp_config.is_some() {
+        for t in PITBOSS_WORKER_MCP_TOOLS {
+            allowed.push((*t).to_string());
+        }
+    }
+    if !allowed.is_empty() {
         args.push("--allowedTools".into());
-        args.push(tools.join(","));
+        args.push(allowed.join(","));
     }
     args.push("--model".into());
     args.push(model.to_string());
+    if let Some(path) = mcp_config {
+        args.push("--mcp-config".into());
+        args.push(path.display().to_string());
+    }
     args.push("-p".into());
     args.push(prompt.to_string());
     args
@@ -562,8 +617,32 @@ pub async fn spawn_resume_worker(
     let task_id_bg = task_id.clone();
     let lead_id_bg = state.lead_id.clone();
 
+    // Generate (or reuse) worker-scoped mcp-config.json for the resumed
+    // subprocess. write_worker_mcp_config is idempotent so calling it again
+    // on an existing file is safe.
+    let worker_task_dir = state.run_subdir.join("tasks").join(&task_id);
+    tokio::fs::create_dir_all(&worker_task_dir).await.ok();
+    let worker_mcp_config_path = worker_task_dir.join("mcp-config.json");
+    let socket_path =
+        crate::mcp::server::socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
+        &worker_mcp_config_path,
+        &socket_path,
+        &task_id,
+    )
+    .await
+    {
+        Ok(()) => Some(worker_mcp_config_path),
+        Err(e) => {
+            tracing::warn!(
+                "write worker mcp-config for {task_id} (resume): {e}; proceeding without"
+            );
+            None
+        }
+    };
+
     // Build spawn args with --resume.
-    let mut spawn_args_v = worker_spawn_args(&prompt, &model, &tools);
+    let mut spawn_args_v = worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref());
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
 
@@ -1058,6 +1137,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1087,6 +1167,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 
@@ -1429,6 +1510,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1456,6 +1538,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 
@@ -1911,6 +1994,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: Some(ApprovalPolicy::AutoApprove),
             notifications: vec![],
+            dump_shared_store: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();
@@ -1932,6 +2016,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::AutoApprove,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ));
         let resp = handle_request_approval(
             &state,

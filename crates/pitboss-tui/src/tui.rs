@@ -3,6 +3,7 @@
 use std::io::Stdout;
 
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -143,7 +144,12 @@ pub fn workers_spawned(state: &crate::state::AppState) -> usize {
 pub fn init() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // EnableMouseCapture lets us receive MouseEvent::ScrollUp/ScrollDown
+    // for wheel scrolling in the detail view. Costs: the alt-screen
+    // terminal no longer receives native selection/copy via click-drag
+    // (users can typically hold Shift to bypass mouse capture in most
+    // terminal emulators).
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -151,7 +157,11 @@ pub fn init() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 pub fn teardown(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -171,13 +181,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     frame.render_widget(Clear, area);
 
     // SnapIn is a full-screen replacement — skip the normal grid entirely.
-    if let Mode::SnapIn {
+    if let Mode::Detail {
         ref task_id,
         scroll,
         ..
     } = state.mode
     {
-        render_snap_in(frame, area, state, task_id, scroll);
+        render_detail_view(frame, area, state, task_id, scroll);
         return;
     }
 
@@ -197,7 +207,6 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // Overlays (drawn last so they appear on top).
     match &state.mode {
-        Mode::ViewingLog => render_log_overlay(frame, area, state),
         Mode::Help => render_help_overlay(frame, area),
         Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, *selected),
         Mode::ConfirmKill { target } => render_confirm_kill(frame, area, target),
@@ -210,7 +219,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             summary,
             sub_mode,
         } => render_approval_modal(frame, area, request_id, task_id, summary, sub_mode),
-        Mode::Normal | Mode::SnapIn { .. } => {}
+        Mode::Normal | Mode::Detail { .. } => {}
     }
 }
 
@@ -488,9 +497,15 @@ fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
 // Snap-in full-screen view
 // ---------------------------------------------------------------------------
 
-fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str, scroll: usize) {
-    // Layout: title_bar (1) | log_body (fill) | status_bar (1)
-    let chunks = Layout::default()
+fn render_detail_view(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    task_id: &str,
+    scroll: usize,
+) {
+    // Outer: title (1) | body (fill) | status (1)
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
@@ -499,78 +514,379 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
         ])
         .split(area);
 
-    let total_lines = state.focus_log.len();
-    let visible_rows = chunks[1].height as usize;
+    // Body: metadata pane (left, fixed ~40 cols) | log pane (right, fills)
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(40), Constraint::Min(0)])
+        .split(outer[1]);
 
-    // N = last visible line index (1-based, capped at total).
-    let n = (scroll + visible_rows).min(total_lines);
-
-    // Status of the snapped tile (if it still exists).
-    let status_str = state
-        .tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .map_or("?", |t| status_label(&t.status));
+    let tile = state.tasks.iter().find(|t| t.id == task_id);
 
     // --- Title bar ---
-    let title_text = format!(" Snap-in: {task_id} ({status_str}) — line {n}/{total_lines} ");
-    // Intentional: inverted text on highlight bar — selection highlight pairing,
-    // not a palette color. Keep inline.
+    let status_str = tile.map_or("?", |t| status_label(&t.status));
+    // Both totals use visual rows (post-wrap) published by the render pass.
+    // Falls back to focus_log.len() only before the first render pass when
+    // detail_log_total_rows is still 0 — ensures the hint shows something
+    // meaningful on the very first frame.
+    let total_rows = state
+        .detail_log_total_rows
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let total_rows = if total_rows == 0 {
+        state.focus_log.len()
+    } else {
+        total_rows
+    };
+    let viewport = state
+        .detail_log_viewport
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(1);
+    let max_scroll = total_rows.saturating_sub(viewport);
+    let display_scroll = scroll.min(max_scroll);
+    let first_visible = display_scroll + 1;
+    let last_visible = (display_scroll + viewport).min(total_rows);
+    let scroll_hint = if max_scroll == 0 {
+        format!(" (log {total_rows} rows; fits in view)")
+    } else {
+        format!(" (log rows {first_visible}-{last_visible} of {total_rows})")
+    };
+    let title_text = format!(" Detail: {task_id} ({status_str}){scroll_hint} ");
+    // Intentional: inverted text on highlight bar — selection highlight pairing.
     let title_para = Paragraph::new(title_text).style(
         Style::default()
             .fg(Color::Black)
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(title_para, chunks[0]);
+    frame.render_widget(title_para, outer[0]);
 
-    // --- Log body ---
-    let log_slice = if state.focus_log.is_empty() {
-        &[][..]
-    } else {
-        let start = scroll.min(state.focus_log.len());
-        let end = (scroll + visible_rows).min(state.focus_log.len());
-        &state.focus_log[start..end]
-    };
+    // --- Metadata pane (left) ---
+    render_detail_metadata(frame, body[0], state, task_id, tile);
 
-    let lines: Vec<Line> = log_slice
-        .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
-        .collect();
-
-    let log_para = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(log_para, chunks[1]);
+    // --- Log pane (right) ---
+    render_detail_log(frame, body[1], state, scroll);
 
     // --- Status bar ---
-    let hint = " [Esc] back  [j/k] scroll  [Ctrl-D/U] page  [G] bottom  [g] top  [q] quit";
+    let hint = " [jk Ctrl-D/U gG] scroll log  [Esc] back  [q] quit";
     let status_para = Paragraph::new(hint).style(theme::muted_style());
-    frame.render_widget(status_para, chunks[2]);
+    frame.render_widget(status_para, outer[2]);
 }
 
-fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
-    let overlay_area = centered_rect(90, 85, area);
-
-    // Clear background
-    frame.render_widget(Clear, overlay_area);
-
-    let focused_id = state.focused_tile().map_or("—", |t| t.id.as_str());
-
+/// Left-pane metadata for the detail view. Pulls from `TileState`, scans
+/// `focus_log` for live activity counters, and reads cached git diff.
+#[allow(clippy::too_many_lines)]
+fn render_detail_metadata(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    task_id: &str,
+    tile: Option<&crate::state::TileState>,
+) {
+    // Mirror the log-pane Clear so leftover cells from the neighbour can't
+    // bleed into this pane when scroll changes the log's paint extent.
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Log: {focused_id}  [L/Esc] close "))
-        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_WARNING));
+        .title(" Metadata ")
+        .border_style(theme::idle_border());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let inner = block.inner(overlay_area);
-    frame.render_widget(block, overlay_area);
+    let mut lines: Vec<Line> = Vec::with_capacity(32);
 
-    let lines: Vec<Line> = state
-        .focus_log
-        .iter()
-        .map(|l| Line::from(Span::raw(l.as_str())))
-        .collect();
+    let Some(tile) = tile else {
+        lines.push(Line::from(Span::styled(
+            "task not found in state",
+            theme::muted_style(),
+        )));
+        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(para, inner);
+        return;
+    };
+
+    // --- Identity ---
+    lines.push(Line::from(Span::styled(
+        "IDENTITY",
+        theme::secondary_style().add_modifier(Modifier::BOLD),
+    )));
+    let role = if tile.parent_task_id.is_none() {
+        "lead"
+    } else {
+        "worker"
+    };
+    lines.push(kv_line("role", role));
+    if let Some(parent) = tile.parent_task_id.as_deref() {
+        lines.push(kv_line("parent", &short_id(parent)));
+    }
+    let model_display = tile.model.as_deref().unwrap_or("—");
+    let model_initial = model_initial(tile.model.as_deref());
+    lines.push(kv_line(
+        "model",
+        &format!("{model_initial}  {model_display}"),
+    ));
+    lines.push(Line::from(""));
+
+    // --- Lifecycle ---
+    lines.push(Line::from(Span::styled(
+        "LIFECYCLE",
+        theme::secondary_style().add_modifier(Modifier::BOLD),
+    )));
+    let (icon, icon_color) = status_icon(&tile.status);
+    let status_label_str = status_label(&tile.status);
+    lines.push(Line::from(vec![
+        Span::styled("  status  ", theme::muted_style()),
+        Span::styled(icon, Style::default().fg(icon_color)),
+        Span::raw(" "),
+        Span::styled(status_label_str, Style::default().fg(icon_color)),
+    ]));
+    if let Some(exit) = tile.exit_code {
+        lines.push(kv_line("exit", &exit.to_string()));
+    }
+    if let Some(ms) = tile.duration_ms {
+        lines.push(kv_line("duration", &fmt_ms(ms)));
+    } else {
+        lines.push(kv_line("duration", "—"));
+    }
+    lines.push(Line::from(""));
+
+    // --- Economics ---
+    lines.push(Line::from(Span::styled(
+        "TOKENS",
+        theme::secondary_style().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(kv_line("input", &fmt_tokens(tile.token_usage_input)));
+    lines.push(kv_line("output", &fmt_tokens(tile.token_usage_output)));
+    lines.push(kv_line("cache_r", &fmt_tokens(tile.cache_read)));
+    lines.push(kv_line("cache_c", &fmt_tokens(tile.cache_creation)));
+    let cache_hit_pct = {
+        let total = tile.token_usage_input + tile.cache_read + tile.cache_creation;
+        if total == 0 {
+            0u64
+        } else {
+            // All operands non-negative so cast_sign_loss is a false positive;
+            // precision loss at these magnitudes is negligible for a % display.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_precision_loss,
+                clippy::cast_sign_loss
+            )]
+            let pct = (tile.cache_read as f64 / total as f64 * 100.0) as u64;
+            pct
+        }
+    };
+    lines.push(kv_line("cache %", &format!("{cache_hit_pct}")));
+
+    if let Some(model) = tile.model.as_deref() {
+        let usage = pitboss_core::parser::TokenUsage {
+            input: tile.token_usage_input,
+            output: tile.token_usage_output,
+            cache_read: tile.cache_read,
+            cache_creation: tile.cache_creation,
+        };
+        let cost = pitboss_core::prices::cost_usd(model, &usage);
+        let cost_str = pitboss_core::prices::fmt_cost(cost);
+        lines.push(kv_line("cost", &cost_str));
+    }
+    lines.push(Line::from(""));
+
+    // --- Activity (scanned from focus_log) ---
+    lines.push(Line::from(Span::styled(
+        "ACTIVITY (tail)",
+        theme::secondary_style().add_modifier(Modifier::BOLD),
+    )));
+    let metrics = scan_focus_log(&state.focus_log);
+    lines.push(kv_line("tool calls", &metrics.tool_use.to_string()));
+    lines.push(kv_line("results", &metrics.tool_result.to_string()));
+    lines.push(kv_line("text msgs", &metrics.assistant_text.to_string()));
+    if metrics.rate_limit > 0 {
+        lines.push(kv_line("rate lim", &metrics.rate_limit.to_string()));
+    }
+    if !metrics.top_tools.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  top tools:",
+            theme::muted_style(),
+        )));
+        for (name, count) in &metrics.top_tools {
+            // Strip the mcp__pitboss__ prefix for brevity.
+            let short_name = name.strip_prefix("mcp__pitboss__").unwrap_or(name);
+            lines.push(Line::from(Span::styled(
+                format!("    {count}× {short_name}"),
+                theme::muted_style(),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // --- Git diff (cached on detail entry) ---
+    lines.push(Line::from(Span::styled(
+        "GIT DIFF",
+        theme::secondary_style().add_modifier(Modifier::BOLD),
+    )));
+    if let Some(diff) = state.cached_git_diff.get(task_id) {
+        lines.push(kv_line("files", &diff.files_changed.to_string()));
+        lines.push(kv_line("+lines", &diff.insertions.to_string()));
+        lines.push(kv_line("-lines", &diff.deletions.to_string()));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  (unavailable — worktree path not tracked)",
+            theme::muted_style(),
+        )));
+    }
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// Right-pane scrollable log. Scroll unit is VISUAL ROWS post-wrap, not
+/// log-line indices — so long wrapped lines don't eat scroll budget and
+/// the "jump to bottom" position actually shows the end of the log
+/// regardless of how much content wraps.
+///
+/// We paint via `Buffer::set_stringn` directly rather than wrapping through
+/// `Paragraph`. Ratatui 0.29's Paragraph render loop has no `x < area.width`
+/// guard, so any over-measurement by its wrapping/truncating composers
+/// (triggered by certain graphemes or style modifiers in our log) paints
+/// past the pane's right edge and bleeds into the neighbouring metadata
+/// pane. `set_stringn` takes an explicit `max_width` and clips to both that
+/// and buffer bounds, so there's nowhere for overflow to land.
+fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: usize) {
+    // Clear + block first. Clear blanks every cell in the pane so that any
+    // row we don't paint below (short log, or viewport > content) shows as
+    // empty rather than showing stale content from a previous frame.
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Log ")
+        .border_style(theme::idle_border());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible_rows = inner.height as usize;
+    let pane_width = inner.width as usize;
+    if pane_width == 0 || visible_rows == 0 {
+        return;
+    }
+
+    // Pre-wrap each log line ourselves into chunks of at most `pane_width`
+    // chars. Each chunk becomes a single painted row. We track the row's
+    // style alongside so set_stringn can color it consistently.
+    let mut wrapped: Vec<(String, Style)> =
+        Vec::with_capacity(state.focus_log.len().saturating_mul(2));
+    for raw in &state.focus_log {
+        let style = crate::theme::log_line_style(raw);
+        if raw.is_empty() {
+            wrapped.push((String::new(), style));
+            continue;
+        }
+        let chars: Vec<char> = raw.chars().collect();
+        for chunk in chars.chunks(pane_width) {
+            wrapped.push((chunk.iter().collect(), style));
+        }
+    }
+    let total_visual_rows = wrapped.len();
+
+    // Publish viewport + total so scroll handlers compute a correct cap.
+    state
+        .detail_log_viewport
+        .store(visible_rows, std::sync::atomic::Ordering::Relaxed);
+    state
+        .detail_log_total_rows
+        .store(total_visual_rows, std::sync::atomic::Ordering::Relaxed);
+
+    let max_scroll = total_visual_rows.saturating_sub(visible_rows);
+    let clamped_scroll = scroll.min(max_scroll);
+    let end = (clamped_scroll + visible_rows).min(total_visual_rows);
+
+    let buf = frame.buffer_mut();
+    let left = inner.left();
+    let top = inner.top();
+    for (row_idx, (line, style)) in wrapped[clamped_scroll..end].iter().enumerate() {
+        // row_idx < visible_rows ≤ inner.height, which is already a u16.
+        let y = top + u16::try_from(row_idx).unwrap_or(u16::MAX);
+        // `set_stringn` returns the (x, y) of the first cell after the
+        // painted string — we ignore it; clipping is handled internally.
+        // The `max_width` is pane_width so the string is truncated at the
+        // right edge regardless of what's in `line`.
+        buf.set_stringn(left, y, line, pane_width, *style);
+    }
+}
+
+/// Simple `  key  value` two-column line for the metadata pane.
+fn kv_line(key: &str, value: &str) -> Line<'static> {
+    // 12-char left-padded label so "tool calls" (exactly 10 chars) still
+    // has a visible gap before the value. Indent is 2 spaces. Total
+    // prefix = 14 chars before the value.
+    Line::from(vec![
+        Span::styled(format!("  {key:<12}"), theme::muted_style()),
+        Span::styled(value.to_string(), theme::primary_style()),
+    ])
+}
+
+/// Collapse very long ids (UUID-format) into a shorter form for display.
+fn short_id(id: &str) -> String {
+    if id.len() > 20 {
+        format!("{}…{}", &id[..8], &id[id.len() - 4..])
+    } else {
+        id.to_string()
+    }
+}
+
+/// Single-character model family initial: H/S/O for Haiku/Sonnet/Opus,
+/// `?` otherwise.
+fn model_initial(model: Option<&str>) -> &'static str {
+    match model.unwrap_or("") {
+        m if m.contains("haiku") => "H",
+        m if m.contains("sonnet") => "S",
+        m if m.contains("opus") => "O",
+        _ => "?",
+    }
+}
+
+/// Counters extracted from the focus-log tail.
+#[derive(Debug, Default)]
+struct FocusLogMetrics {
+    assistant_text: usize,
+    tool_use: usize,
+    tool_result: usize,
+    rate_limit: usize,
+    /// Top 3 tool names by frequency (descending).
+    top_tools: Vec<(String, usize)>,
+}
+
+/// Scan the tailed focus log (already formatted with prefix chars by
+/// `watcher::format_event`) and count events by type, plus tally tool
+/// names for the "top tools" breakdown.
+fn scan_focus_log(focus_log: &[String]) -> FocusLogMetrics {
+    use std::collections::HashMap;
+    let mut m = FocusLogMetrics::default();
+    let mut tool_counts: HashMap<String, usize> = HashMap::new();
+
+    for line in focus_log {
+        if let Some(rest) = line.strip_prefix("* ") {
+            m.tool_use += 1;
+            // Format: "* <tool_name> <args_summary>"
+            if let Some(space) = rest.find(' ') {
+                let name = &rest[..space];
+                *tool_counts.entry(name.to_string()).or_insert(0) += 1;
+            } else {
+                *tool_counts.entry(rest.to_string()).or_insert(0) += 1;
+            }
+        } else if line.starts_with("< ") {
+            m.tool_result += 1;
+        } else if line.starts_with("> ") {
+            m.assistant_text += 1;
+        } else if line.starts_with("! ") {
+            m.rate_limit += 1;
+        }
+    }
+
+    // Sort by count descending, then by name ascending for a stable order —
+    // HashMap iteration is unstable, so without the secondary key entries
+    // with equal counts flicker between frames.
+    let mut sorted: Vec<(String, usize)> = tool_counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sorted.truncate(3);
+    m.top_tools = sorted;
+    m
 }
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
@@ -831,6 +1147,7 @@ mod tests {
             log_path: PathBuf::from("/dev/null"),
             model: None,
             parent_task_id: None,
+            worktree_path: None,
         }
     }
 
@@ -847,6 +1164,9 @@ mod tests {
             run_started_at: None,
             control_client: None,
             control_connected: false,
+            cached_git_diff: std::collections::HashMap::new(),
+            detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
+            detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -952,7 +1272,7 @@ mod tests {
             "line two".to_string(),
             "line three".to_string(),
         ];
-        s.mode = Mode::SnapIn {
+        s.mode = Mode::Detail {
             task_id: task_id.to_string(),
             scroll: 0,
             at_bottom: true,
@@ -991,7 +1311,7 @@ mod tests {
             "> first log line".to_string(),
             "> second log line".to_string(),
         ];
-        s.mode = Mode::SnapIn {
+        s.mode = Mode::Detail {
             task_id: task_id.to_string(),
             scroll: 0,
             at_bottom: true,

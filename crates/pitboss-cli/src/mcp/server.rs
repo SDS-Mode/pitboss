@@ -183,6 +183,97 @@ impl PitbossHandler {
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
     }
+
+    #[tool(description = "Read a value from the shared store. Returns null if the key is missing.")]
+    async fn kv_get(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::KvGetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_kv_get(&self.state.shared_store, args).await {
+            Ok(v) => to_structured_result(&v),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
+
+    #[tool(
+        description = "Write a value to the shared store. Namespace-authz checked against the caller's actor_role + actor_id."
+    )]
+    async fn kv_set(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::KvSetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_kv_set(&self.state.shared_store, args).await {
+            Ok(v) => to_structured_result(&v),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
+
+    #[tool(
+        description = "Atomic compare-and-swap. expected_version=0 means the key must not exist."
+    )]
+    async fn kv_cas(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::KvCasArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_kv_cas(&self.state.shared_store, args).await {
+            Ok(v) => to_structured_result(&v),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
+
+    #[tool(
+        description = "List metadata of entries matching a glob pattern. * is single-segment; ** is cross-segment. Caps at 1000 results."
+    )]
+    async fn kv_list(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::KvListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_kv_list(&self.state.shared_store, args).await {
+            Ok(v) => to_structured_result(&v),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
+
+    #[tool(
+        description = "Block until a key is written (or exists with version >= min_version). Times out."
+    )]
+    async fn kv_wait(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::KvWaitArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_kv_wait(&self.state.shared_store, args).await {
+            Ok(v) => to_structured_result(&v),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
+
+    #[tool(
+        description = "Acquire a named lease with a TTL. wait_secs > 0 blocks up to that duration trying."
+    )]
+    async fn lease_acquire(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::LeaseAcquireArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_lease_acquire(&self.state.shared_store, args).await
+        {
+            Ok(v) => to_structured_result(&v),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
+
+    #[tool(
+        description = "Release a previously-acquired lease. Only the recorded holder can release."
+    )]
+    async fn lease_release(
+        &self,
+        Parameters(args): Parameters<crate::shared_store::tools::LeaseReleaseArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::shared_store::tools::handle_lease_release(&self.state.shared_store, args).await
+        {
+            Ok(()) => Ok(CallToolResult::structured(serde_json::json!({"ok": true}))),
+            Err(e) => Err(shared_store_err(&e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -212,6 +303,27 @@ fn to_structured_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult
     let v = serde_json::to_value(value)
         .map_err(|e| ErrorData::internal_error(format!("serialize: {e}"), None))?;
     Ok(CallToolResult::structured(v))
+}
+
+fn shared_store_err(e: &crate::shared_store::StoreError) -> ErrorData {
+    use crate::shared_store::StoreError;
+    let (code, msg, extra) = match e {
+        StoreError::InvalidArg(m) => ("invalid_arg", m.as_str(), None),
+        StoreError::Forbidden(m) => ("forbidden", m.as_str(), None),
+        StoreError::Conflict => ("conflict", "conflict", None),
+        StoreError::Timeout => ("timeout", "timeout", None),
+        StoreError::LimitExceeded { which } => (
+            "store_limit_exceeded",
+            "store limit exceeded",
+            Some(serde_json::json!({"which": which})),
+        ),
+        StoreError::Shutdown => ("store_shutdown", "store shutdown", None),
+    };
+    let mut data = serde_json::json!({"code": code});
+    if let (Some(serde_json::Value::Object(inner)), Some(obj)) = (extra, data.as_object_mut()) {
+        obj.extend(inner);
+    }
+    ErrorData::invalid_request(msg.to_string(), Some(data))
 }
 
 impl McpServer {
@@ -370,6 +482,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -389,6 +502,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ));
 
         let sock = dir.path().join("test.sock");
@@ -431,6 +545,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -450,6 +565,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ));
 
         let sock = dir.path().join("drop-test.sock");

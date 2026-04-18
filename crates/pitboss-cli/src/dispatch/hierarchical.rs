@@ -119,6 +119,7 @@ pub async fn run_hierarchical(
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
         notification_router,
+        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
@@ -136,7 +137,7 @@ pub async fn run_hierarchical(
 
     // 2. Build the --mcp-config file for the lead.
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
-    write_mcp_config(&mcp_config_path, &socket).await?;
+    write_mcp_config(&mcp_config_path, &socket, &lead.id, "lead").await?;
 
     // 3. Prepare lead worktree + spawn.
     let mut lead_worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
@@ -324,6 +325,14 @@ pub async fn run_hierarchical(
     };
     store.finalize_run(&summary).await?;
 
+    // Optional post-mortem dump of shared-store contents.
+    if resolved.dump_shared_store {
+        let dump_path = run_subdir.join("shared-store.json");
+        if let Err(e) = state.shared_store.dump_to_path(&dump_path).await {
+            tracing::warn!(?e, "shared-store dump failed");
+        }
+    }
+
     // Exit code same as flat dispatch
     let rc = if was_interrupted {
         130
@@ -337,13 +346,19 @@ pub async fn run_hierarchical(
 
 /// Emit a `--mcp-config` file that tells claude to launch our own pitboss
 /// binary as a stdio MCP server, passing the socket path as an argument.
-/// `pitboss mcp-bridge <socket>` then proxies bytes between claude's stdio
-/// pair and the pitboss MCP server's unix socket.
+/// `pitboss mcp-bridge --actor-id <id> --actor-role <role> <socket>` proxies
+/// bytes between claude's stdio pair and the pitboss MCP server's unix socket,
+/// stamping every inbound tool call with the caller's identity.
 ///
 /// This avoids relying on a non-standard `transport: { type: "unix", ... }`
 /// field that claude's MCP client may not honor. The generated config uses
 /// only the documented `command` + `args` (stdio transport) shape.
-async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> Result<()> {
+async fn write_mcp_config(
+    path: &std::path::Path,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str, // "lead" or "worker"
+) -> Result<()> {
     // Find the pitboss binary path (the one running us now) so the lead can
     // re-exec the same build for the bridge subcommand.
     let pitboss_exe =
@@ -353,9 +368,53 @@ async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> R
         "mcpServers": {
             "pitboss": {
                 "command": pitboss_exe.to_string_lossy(),
-                "args": ["mcp-bridge", socket.to_string_lossy()],
+                "args": [
+                    "mcp-bridge",
+                    "--actor-id", actor_id,
+                    "--actor-role", actor_role,
+                    socket.to_string_lossy(),
+                ],
             }
         }
+    });
+    let bytes = serde_json::to_vec_pretty(&cfg)?;
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
+}
+
+/// Emit a worker-scoped `--mcp-config` file. Lists only the 7 shared-store
+/// tools — NOT spawn_worker / cancel_worker / wait_for_worker / etc.
+/// The bridge command includes the worker's actor_id + actor_role=worker
+/// so the dispatcher can identify the caller and enforce namespace authz.
+pub async fn write_worker_mcp_config(
+    path: &std::path::Path,
+    socket: &std::path::Path,
+    worker_id: &str,
+) -> Result<()> {
+    let pitboss_exe =
+        std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
+
+    let cfg = serde_json::json!({
+        "mcpServers": {
+            "pitboss": {
+                "command": pitboss_exe.to_string_lossy(),
+                "args": [
+                    "mcp-bridge",
+                    "--actor-id", worker_id,
+                    "--actor-role", "worker",
+                    socket.to_string_lossy(),
+                ],
+            }
+        },
+        "allowedTools": [
+            "mcp__pitboss__kv_get",
+            "mcp__pitboss__kv_set",
+            "mcp__pitboss__kv_cas",
+            "mcp__pitboss__kv_list",
+            "mcp__pitboss__kv_wait",
+            "mcp__pitboss__lease_acquire",
+            "mcp__pitboss__lease_release"
+        ]
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
     tokio::fs::write(path, bytes).await?;

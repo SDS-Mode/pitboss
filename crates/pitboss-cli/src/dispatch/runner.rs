@@ -134,6 +134,7 @@ pub async fn execute(
     // against. Flat mode has no lead and no spawn_worker path, but cancel and
     // list_workers still apply.
     let notification_router_for_emit = notification_router.clone();
+    let shared_store = Arc::new(crate::shared_store::SharedStore::new());
     let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
         run_id,
         resolved.clone(),
@@ -147,6 +148,7 @@ pub async fn execute(
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
         notification_router,
+        shared_store.clone(),
     ));
     let control_sock = crate::control::control_socket_path(run_id, &run_dir);
     let _control = crate::control::server::start_control_server(
@@ -241,6 +243,14 @@ pub async fn execute(
         tasks: records,
     };
     store.finalize_run(&summary).await?;
+
+    // Optional post-mortem dump of shared-store contents.
+    if resolved.dump_shared_store {
+        let dump_path = run_subdir.join("shared-store.json");
+        if let Err(e) = shared_store.dump_to_path(&dump_path).await {
+            tracing::warn!(?e, "shared-store dump failed");
+        }
+    }
 
     // Emit RunFinished event if notification router is configured.
     if let Some(router) = notification_router_for_emit {
@@ -401,10 +411,13 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     args
 }
 
-/// The six MCP tool names the lead needs permission to call.
+/// MCP tool names the lead needs permission to call. Pre-approved via the
+/// lead's `--allowedTools` flag so claude never stalls at the interactive
+/// permission prompt (which can't be answered in `-p` non-interactive mode).
 /// Format: `mcp__<server-name>__<tool>`, where `pitboss` is the server name
 /// we emit in `write_mcp_config`.
 pub const PITBOSS_MCP_TOOLS: &[&str] = &[
+    // Worker orchestration tools (v0.3+).
     "mcp__pitboss__spawn_worker",
     "mcp__pitboss__worker_status",
     "mcp__pitboss__wait_for_worker",
@@ -415,6 +428,17 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__continue_worker",
     "mcp__pitboss__request_approval",
     "mcp__pitboss__reprompt_worker",
+    // Shared-store tools (v0.5+). Leads can read/write the per-run
+    // coordination surface alongside workers; without these in the
+    // allowlist, claude stalls at the permission prompt the first time
+    // the lead tries kv_set / lease_acquire / etc.
+    "mcp__pitboss__kv_get",
+    "mcp__pitboss__kv_set",
+    "mcp__pitboss__kv_cas",
+    "mcp__pitboss__kv_list",
+    "mcp__pitboss__kv_wait",
+    "mcp__pitboss__lease_acquire",
+    "mcp__pitboss__lease_release",
 ];
 
 /// Builds the argv for spawning the lead subprocess, including the
@@ -540,6 +564,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -625,6 +650,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -723,6 +749,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
 
         let spawner = Arc::new(CyclingFake(

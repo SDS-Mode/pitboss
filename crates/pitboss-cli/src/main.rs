@@ -28,8 +28,12 @@ fn main() -> Result<()> {
         Command::Diff { run_a, run_b, json } => {
             run_diff(&run_a, &run_b, json);
         }
-        Command::McpBridge { socket } => {
-            run_mcp_bridge(&socket);
+        Command::McpBridge {
+            socket,
+            actor_id,
+            actor_role,
+        } => {
+            run_mcp_bridge(&socket, &actor_id, actor_role);
         }
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -44,25 +48,29 @@ fn main() -> Result<()> {
 /// can talk to the pitboss MCP server (which listens on a unix socket). A
 /// single-threaded runtime is plenty for a simple byte-pipe — no need for
 /// work-stealing.
-fn run_mcp_bridge(socket: &std::path::Path) -> ! {
+fn run_mcp_bridge(
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: crate::cli::ActorRoleArg,
+) -> ! {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        Ok(r) => r,
+        Ok(rt) => rt,
         Err(e) => {
             eprintln!("mcp-bridge: runtime: {e}");
             std::process::exit(2);
         }
     };
-    let code = match rt.block_on(mcp::run_bridge(socket)) {
-        Ok(c) => c,
+    let result = rt.block_on(crate::mcp::bridge::run_bridge(socket, actor_id, actor_role));
+    match result {
+        Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("mcp-bridge: {e:#}");
-            1
+            std::process::exit(2);
         }
-    };
-    std::process::exit(code);
+    }
 }
 
 fn init_tracing(verbose: u8, quiet: bool) {

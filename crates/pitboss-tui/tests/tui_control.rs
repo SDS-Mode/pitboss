@@ -111,6 +111,7 @@ fn empty_grid_cells_are_cleared() {
             log_path: PathBuf::from("/tmp/nope"),
             model: None,
             parent_task_id: None,
+            worktree_path: None,
         }
     }
 
@@ -176,6 +177,7 @@ fn focus_log_content_does_not_bleed_into_tile_grid() {
             log_path: PathBuf::from("/tmp/nope"),
             model: None,
             parent_task_id: None,
+            worktree_path: None,
         }
     }
 

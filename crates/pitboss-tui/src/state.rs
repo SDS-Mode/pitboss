@@ -9,19 +9,22 @@ use pitboss_core::store::TaskStatus;
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
-    ViewingLog,
     Help,
     /// The run-picker overlay is open; `selected` is the highlighted row index.
     PickingRun {
         selected: usize,
     },
-    /// Full-screen snap-in view of a single task's log.
+    /// Full-screen detail view of a single task. Left pane shows task
+    /// metadata (role, model, tokens, cost, events, git diff, ...); right
+    /// pane shows the log with scroll. Replaces the v0.4-era `ViewingLog`
+    /// overlay and `SnapIn` full-screen log view — both were redundant
+    /// (same log content, different chrome).
     ///
-    /// `task_id` identifies which tile we're viewing (may differ from the grid
-    /// focus if the user switched focus while in snap-in).
+    /// `task_id` identifies which tile we're viewing (may differ from the
+    /// grid focus if the user switched focus while in detail).
     /// `scroll` is the row offset from the top (0 = start of log).
     /// `at_bottom` tracks whether we should auto-scroll as new lines arrive.
-    SnapIn {
+    Detail {
         task_id: String,
         scroll: usize,
         at_bottom: bool,
@@ -88,6 +91,11 @@ pub struct TileState {
     /// Parent task id, if this tile represents a subagent task.
     #[allow(dead_code)]
     pub parent_task_id: Option<String>,
+    /// Git worktree directory for this task, if pitboss created one.
+    /// Populated from `summary.jsonl`/`summary.json` when the task has
+    /// settled. `None` for in-flight tasks (the record hasn't been written
+    /// yet) and for `use_worktree = false` tasks.
+    pub worktree_path: Option<PathBuf>,
 }
 
 /// Full application state updated each poll cycle.
@@ -113,6 +121,29 @@ pub struct AppState {
     /// Whether the control socket is currently connected. Mirrored from the
     /// client; used for the status-bar indicator.
     pub control_connected: bool,
+    /// Cached `git diff --stat` summary for a task's worktree, keyed by
+    /// `task_id`. Populated on `enter_detail` (synchronous shell-out) and
+    /// reused until the user exits detail mode. `None` for tasks whose
+    /// worktree path is unknown or whose diff couldn't be computed.
+    pub cached_git_diff: std::collections::HashMap<String, GitDiffSummary>,
+    /// Height of the detail-view log pane (inner rows), set by the render
+    /// pass via interior mutability. Read by the scroll handlers so they
+    /// know the real `max_scroll = total_rows - viewport` without having
+    /// to query the terminal themselves. 0 until the first render.
+    pub detail_log_viewport: std::sync::atomic::AtomicUsize,
+    /// Total visual rows of the detail log after word-wrap at the current
+    /// pane width, set by the render pass. Differs from `focus_log.len()`
+    /// whenever any line wraps — scroll must use this to map 1:1 with
+    /// what's painted. 0 until the first render.
+    pub detail_log_total_rows: std::sync::atomic::AtomicUsize,
+}
+
+/// Summary of a worker's worktree diff vs its base branch.
+#[derive(Debug, Clone, Default)]
+pub struct GitDiffSummary {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
 }
 
 impl AppState {
@@ -129,6 +160,9 @@ impl AppState {
             run_started_at: None,
             control_client: None,
             control_connected: false,
+            cached_git_diff: std::collections::HashMap::new(),
+            detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
+            detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -178,36 +212,60 @@ impl AppState {
         }
     }
 
-    /// Enter the snap-in view for the currently focused tile.
+    /// Enter the detail view for the currently focused tile.
     ///
-    /// No-op if there is no focused tile. If already in `SnapIn`, stays put
+    /// No-op if there is no focused tile. If already in `Detail`, stays put
     /// (don't nest). Starts at the bottom of the log (auto-scroll enabled).
-    pub fn enter_snap_in(&mut self) {
-        if matches!(self.mode, Mode::SnapIn { .. }) {
+    /// Also triggers a one-shot `git diff --stat` on the tile's worktree so
+    /// the metadata pane can show lines added/removed; the result is cached
+    /// in `self.cached_git_diff` until exit.
+    pub fn enter_detail(&mut self) {
+        if matches!(self.mode, Mode::Detail { .. }) {
             return;
         }
         let Some(tile) = self.focused_tile() else {
             return;
         };
         let task_id = tile.id.clone();
-        self.mode = Mode::SnapIn {
+        // Git diff is only meaningful for tasks that settled with a
+        // worktree_path recorded in summary.jsonl. For in-flight tasks
+        // the field is None (the record is written on settle), so we skip.
+        // Follow-up: add a <run-dir>/tasks/<id>/worktree.path file written
+        // at spawn time so in-flight diffs work too.
+        if let Some(worktree) = tile.worktree_path.as_deref() {
+            if let Some(summary) = compute_git_diff_summary(worktree) {
+                self.cached_git_diff.insert(task_id.clone(), summary);
+            }
+        }
+        self.mode = Mode::Detail {
             task_id,
             scroll: 0,
             at_bottom: true,
         };
     }
 
-    /// Exit the snap-in view and return to `Normal` mode.
-    pub fn exit_snap_in(&mut self) {
+    /// Exit the detail view and return to `Normal` mode. Clears the
+    /// git-diff cache since it was computed against the task's worktree at
+    /// entry time and may be stale by next entry.
+    pub fn exit_detail(&mut self) {
         self.mode = Mode::Normal;
+        self.cached_git_diff.clear();
     }
 
-    /// Scroll down by `delta` lines in `SnapIn` mode. Clamps at the last valid
-    /// offset for the current `focus_log` length and `visible_rows`.
+    /// Scroll down by `delta` visual rows in `Detail` mode. Clamps at the last
+    /// valid row offset for the current wrapped log and viewport height.
     ///
     /// Disables auto-scroll if the new position is not at the bottom.
-    pub fn snap_scroll_down(&mut self, delta: usize, visible_rows: usize) {
-        let Mode::SnapIn {
+    pub fn detail_scroll_down(&mut self, delta: usize, _visible_rows: usize) {
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total_rows.saturating_sub(viewport);
+        let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
             ..
@@ -215,17 +273,36 @@ impl AppState {
         else {
             return;
         };
-        let total = self.focus_log.len();
-        let max_scroll = total.saturating_sub(visible_rows);
-        *scroll = (*scroll + delta).min(max_scroll);
-        *at_bottom = *scroll >= max_scroll;
+        // Always re-clamp scroll to max_scroll before the op. state.scroll
+        // can legitimately be above max_scroll right after auto-follow
+        // (we just set it to `max_scroll` there, but `total` may have
+        // shrunk in between, or a prior op left it high). Without this
+        // re-clamp, decrementing from an above-range value produces no
+        // visible change until scroll drops below max_scroll.
+        let current = (*scroll).min(max_scroll);
+        *scroll = current.saturating_add(delta).min(max_scroll);
+        if *scroll >= max_scroll {
+            *at_bottom = true;
+        }
     }
 
-    /// Scroll up by `delta` lines in `SnapIn` mode. Clamps at 0.
+    /// Scroll up by `delta` visual rows in `Detail` mode. Clamps at 0.
     ///
-    /// Always disables auto-scroll (user is scrolling up).
-    pub fn snap_scroll_up(&mut self, delta: usize) {
-        let Mode::SnapIn {
+    /// Always disables auto-scroll (user is scrolling up). `state.scroll`
+    /// can legitimately be above `max_scroll` right after auto-follow (we
+    /// pin to `max_scroll` there, but the wrapped-row total may have shrunk
+    /// in between). Always re-clamp to `max_scroll` before decrementing so
+    /// the first `k` press produces visible movement.
+    pub fn detail_scroll_up(&mut self, delta: usize) {
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total_rows.saturating_sub(viewport);
+        let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
             ..
@@ -233,13 +310,20 @@ impl AppState {
         else {
             return;
         };
-        *scroll = scroll.saturating_sub(delta);
+        // ALWAYS clamp to max_scroll before decrementing (not just when
+        // leaving auto-follow). If state.scroll was left above max_scroll
+        // by any earlier code path, subsequent ups decrement from that
+        // high value and the user sees no visible change until scroll
+        // drops below max_scroll — the symptom the user reports as
+        // "scroll doesn't do anything."
+        let current = (*scroll).min(max_scroll);
+        *scroll = current.saturating_sub(delta);
         *at_bottom = false;
     }
 
     /// Jump to the top of the log in `SnapIn` mode; disables auto-scroll.
-    pub fn snap_jump_top(&mut self) {
-        let Mode::SnapIn {
+    pub fn detail_jump_top(&mut self) {
+        let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
             ..
@@ -251,9 +335,17 @@ impl AppState {
         *at_bottom = false;
     }
 
-    /// Jump to the bottom of the log in `SnapIn` mode; re-enables auto-scroll.
-    pub fn snap_jump_bottom(&mut self, visible_rows: usize) {
-        let Mode::SnapIn {
+    /// Jump to the bottom of the log in `Detail` mode; re-enables auto-scroll.
+    pub fn detail_jump_bottom(&mut self, _visible_rows: usize) {
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total_rows.saturating_sub(viewport);
+        let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
             ..
@@ -261,17 +353,27 @@ impl AppState {
         else {
             return;
         };
-        let total = self.focus_log.len();
-        *scroll = total.saturating_sub(visible_rows);
+        *scroll = max_scroll;
         *at_bottom = true;
     }
 
-    /// Called after a snapshot is applied while in `SnapIn` mode.
+    /// Scroll the log overlay down by `delta` visual rows. No upper bound
+    /// is enforced — `Paragraph::scroll` clips cleanly at end-of-content,
+    /// so overshooting just shows blank lines at the end.
+    /// Called after a snapshot is applied while in `Detail` mode.
     ///
     /// If `at_bottom` is true, advances `scroll` so the last line stays
     /// visible. Does nothing if the user has scrolled up.
-    pub fn snap_auto_scroll(&mut self, visible_rows: usize) {
-        let Mode::SnapIn {
+    pub fn detail_auto_scroll(&mut self, _visible_rows: usize) {
+        let total_rows = self
+            .detail_log_total_rows
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total_rows.saturating_sub(viewport);
+        let Mode::Detail {
             ref mut scroll,
             at_bottom,
             ..
@@ -280,8 +382,11 @@ impl AppState {
             return;
         };
         if at_bottom {
-            let total = self.focus_log.len();
-            *scroll = total.saturating_sub(visible_rows);
+            // Pin to exact max_scroll. state.scroll stays within
+            // [0, max_scroll] — the scroll handlers always clamp first
+            // but they're simpler to reason about when auto-follow
+            // doesn't introduce an invalid-scroll interval.
+            *scroll = max_scroll;
         }
     }
 
@@ -357,6 +462,54 @@ impl AppState {
             self.focus = self.tasks.len() - 1;
         }
     }
+}
+
+/// Compute `git diff --stat HEAD` in the given directory. Walks up to
+/// find the enclosing git worktree (so passing in `<run-dir>/tasks/<id>/`
+/// works — git discovers the worktree via the parent hierarchy). Returns
+/// `None` if the shell-out fails or the directory isn't inside a worktree.
+///
+/// Blocks the caller for ~20-50 ms. Only called once on detail-view entry;
+/// cached in `AppState.cached_git_diff` thereafter.
+pub(crate) fn compute_git_diff_summary(worktree: &std::path::Path) -> Option<GitDiffSummary> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("diff")
+        .arg("--shortstat")
+        .arg("HEAD")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Typical --shortstat output:
+    //   " 3 files changed, 120 insertions(+), 14 deletions(-)"
+    // Fields may be missing (e.g. "1 file changed, 5 insertions(+)" with no
+    // deletions section). Empty output = no diff.
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return Some(GitDiffSummary::default());
+    }
+    let mut summary = GitDiffSummary::default();
+    for token in line.split(',') {
+        let t = token.trim();
+        if let Some(n) = t
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if t.contains("file") {
+                summary.files_changed = n;
+            } else if t.contains("insertion") {
+                summary.insertions = n;
+            } else if t.contains("deletion") {
+                summary.deletions = n;
+            }
+        }
+    }
+    Some(summary)
 }
 
 /// A snapshot produced by the watcher thread every 500ms.
@@ -532,36 +685,37 @@ mod tests {
             log_path: PathBuf::from("/dev/null"),
             model: None,
             parent_task_id: None,
+            worktree_path: None,
         }];
         state
     }
 
     #[test]
-    fn enter_snap_in_from_normal() {
+    fn enter_detail_from_normal() {
         let mut state = make_state_with_tile("task-001");
         state.mode = Mode::Normal;
 
-        state.enter_snap_in();
+        state.enter_detail();
 
         assert!(
             matches!(
                 &state.mode,
-                Mode::SnapIn { task_id, at_bottom: true, .. } if task_id == "task-001"
+                Mode::Detail { task_id, at_bottom: true, .. } if task_id == "task-001"
             ),
             "expected SnapIn with task_id=task-001, got {:?}",
             state.mode
         );
-        if let Mode::SnapIn { scroll, .. } = &state.mode {
+        if let Mode::Detail { scroll, .. } = &state.mode {
             assert_eq!(*scroll, 0, "initial scroll should be 0");
         }
     }
 
     #[test]
-    fn enter_snap_in_noop_when_no_tile() {
+    fn enter_detail_noop_when_no_tile() {
         let mut state = make_state(); // no tasks
         state.mode = Mode::Normal;
 
-        state.enter_snap_in();
+        state.enter_detail();
 
         assert!(
             matches!(state.mode, Mode::Normal),
@@ -570,30 +724,30 @@ mod tests {
     }
 
     #[test]
-    fn enter_snap_in_noop_when_already_in_snap_in() {
+    fn enter_detail_noop_when_already_in_snap_in() {
         let mut state = make_state_with_tile("task-001");
-        state.mode = Mode::SnapIn {
+        state.mode = Mode::Detail {
             task_id: "task-001".to_string(),
             scroll: 5,
             at_bottom: false,
         };
 
-        state.enter_snap_in(); // should be a no-op
+        state.enter_detail(); // should be a no-op
 
         // scroll must be unchanged
-        assert!(matches!(&state.mode, Mode::SnapIn { scroll: 5, .. }));
+        assert!(matches!(&state.mode, Mode::Detail { scroll: 5, .. }));
     }
 
     #[test]
-    fn exit_snap_in_returns_to_normal() {
+    fn exit_detail_returns_to_normal() {
         let mut state = make_state_with_tile("task-001");
-        state.mode = Mode::SnapIn {
+        state.mode = Mode::Detail {
             task_id: "task-001".to_string(),
             scroll: 3,
             at_bottom: false,
         };
 
-        state.exit_snap_in();
+        state.exit_detail();
 
         assert!(matches!(state.mode, Mode::Normal));
     }
@@ -603,41 +757,47 @@ mod tests {
         let mut state = make_state_with_tile("t");
         // Give the state some log lines so scroll can advance.
         state.focus_log = (0..20).map(|i| format!("line {i}")).collect();
-        state.mode = Mode::SnapIn {
+        state
+            .detail_log_total_rows
+            .store(20, std::sync::atomic::Ordering::Relaxed);
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
         };
 
-        state.snap_scroll_down(1, 10);
+        state.detail_scroll_down(1, 10);
 
         assert!(
-            matches!(&state.mode, Mode::SnapIn { scroll: 1, .. }),
+            matches!(&state.mode, Mode::Detail { scroll: 1, .. }),
             "expected scroll=1, got {:?}",
             state.mode
         );
     }
 
     #[test]
-    fn scroll_down_clamps_at_max() {
+    fn scroll_down_increments_without_clamp() {
+        // Handler clamps to max_scroll, but for this test total_rows is big
+        // enough (100) that the 5-delta advance doesn't hit the cap.
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..10).map(|i| format!("line {i}")).collect();
-        // visible_rows=10 means max_scroll = 10 - 10 = 0
-        state.mode = Mode::SnapIn {
+        state
+            .detail_log_total_rows
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
         };
 
-        state.snap_scroll_down(999, 10);
+        state.detail_scroll_down(5, 10);
 
-        // Can't scroll past the end.
         assert!(
             matches!(
                 &state.mode,
-                Mode::SnapIn {
-                    scroll: 0,
-                    at_bottom: true,
+                Mode::Detail {
+                    scroll: 5,
+                    at_bottom: false,
                     ..
                 }
             ),
@@ -649,16 +809,16 @@ mod tests {
     #[test]
     fn scroll_up_clamps_at_zero() {
         let mut state = make_state_with_tile("t");
-        state.mode = Mode::SnapIn {
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
         };
 
-        state.snap_scroll_up(1);
+        state.detail_scroll_up(1);
 
         assert!(
-            matches!(&state.mode, Mode::SnapIn { scroll: 0, .. }),
+            matches!(&state.mode, Mode::Detail { scroll: 0, .. }),
             "scroll should stay at 0"
         );
     }
@@ -666,37 +826,44 @@ mod tests {
     #[test]
     fn scroll_up_decrements() {
         let mut state = make_state_with_tile("t");
-        state.mode = Mode::SnapIn {
+        state.focus_log = (0..20).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_viewport
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        state
+            .detail_log_total_rows
+            .store(20, std::sync::atomic::Ordering::Relaxed);
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 3,
             at_bottom: false,
         };
 
-        state.snap_scroll_up(1);
+        state.detail_scroll_up(1);
 
         assert!(
-            matches!(&state.mode, Mode::SnapIn { scroll: 2, .. }),
+            matches!(&state.mode, Mode::Detail { scroll: 2, .. }),
             "expected scroll=2, got {:?}",
             state.mode
         );
     }
 
     #[test]
-    fn snap_jump_top_sets_scroll_to_zero_and_disables_auto_scroll() {
+    fn detail_jump_top_sets_scroll_to_zero_and_disables_auto_scroll() {
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..50).map(|i| format!("line {i}")).collect();
-        state.mode = Mode::SnapIn {
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 30,
             at_bottom: true,
         };
 
-        state.snap_jump_top();
+        state.detail_jump_top();
 
         assert!(
             matches!(
                 &state.mode,
-                Mode::SnapIn {
+                Mode::Detail {
                     scroll: 0,
                     at_bottom: false,
                     ..
@@ -708,21 +875,27 @@ mod tests {
     }
 
     #[test]
-    fn snap_jump_bottom_enables_auto_scroll() {
+    fn detail_jump_bottom_enables_auto_scroll() {
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..50).map(|i| format!("line {i}")).collect();
-        state.mode = Mode::SnapIn {
+        state
+            .detail_log_viewport
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        state
+            .detail_log_total_rows
+            .store(50, std::sync::atomic::Ordering::Relaxed);
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 5,
             at_bottom: false,
         };
 
-        state.snap_jump_bottom(10);
+        state.detail_jump_bottom(10);
 
         assert!(
             matches!(
                 &state.mode,
-                Mode::SnapIn {
+                Mode::Detail {
                     at_bottom: true,
                     ..
                 }
@@ -730,48 +903,60 @@ mod tests {
             "got {:?}",
             state.mode
         );
-        if let Mode::SnapIn { scroll, .. } = &state.mode {
-            assert_eq!(*scroll, 40, "scroll should be total(50) - visible(10) = 40");
+        if let Mode::Detail { scroll, .. } = &state.mode {
+            // scroll == max_scroll = total(50) - viewport(10) = 40.
+            assert_eq!(*scroll, 40, "scroll should be max_scroll (40)");
         }
     }
 
     #[test]
-    fn snap_auto_scroll_advances_when_at_bottom() {
+    fn detail_auto_scroll_advances_when_at_bottom() {
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..30).map(|i| format!("line {i}")).collect();
-        state.mode = Mode::SnapIn {
+        state
+            .detail_log_viewport
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        state
+            .detail_log_total_rows
+            .store(30, std::sync::atomic::Ordering::Relaxed);
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
-            scroll: 20, // at bottom for 30 lines, 10 visible
+            scroll: 20,
             at_bottom: true,
         };
 
-        // Simulate new lines arriving — focus_log grows to 35 lines.
+        // Simulate new lines arriving — focus_log grows to 35 lines and the
+        // next render publishes the new total.
         state.focus_log = (0..35).map(|i| format!("line {i}")).collect();
-        state.snap_auto_scroll(10);
+        state
+            .detail_log_total_rows
+            .store(35, std::sync::atomic::Ordering::Relaxed);
+        state.detail_auto_scroll(10);
 
-        if let Mode::SnapIn { scroll, .. } = &state.mode {
-            assert_eq!(*scroll, 25, "should advance to 35-10=25");
+        if let Mode::Detail { scroll, .. } = &state.mode {
+            // scroll == max_scroll = total(35) - viewport(10) = 25.
+            assert_eq!(*scroll, 25, "auto-scroll should set scroll to max_scroll");
         } else {
-            panic!("not in SnapIn mode");
+            panic!("not in Detail mode");
         }
     }
 
     #[test]
-    fn snap_auto_scroll_noop_when_not_at_bottom() {
+    fn detail_auto_scroll_noop_when_not_at_bottom() {
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..30).map(|i| format!("line {i}")).collect();
-        state.mode = Mode::SnapIn {
+        state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 5,
             at_bottom: false,
         };
 
         state.focus_log = (0..35).map(|i| format!("line {i}")).collect();
-        state.snap_auto_scroll(10);
+        state.detail_auto_scroll(10);
 
         // scroll unchanged
         assert!(
-            matches!(&state.mode, Mode::SnapIn { scroll: 5, .. }),
+            matches!(&state.mode, Mode::Detail { scroll: 5, .. }),
             "got {:?}",
             state.mode
         );

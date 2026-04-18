@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ActorRoleArg {
+    Lead,
+    Worker,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "pitboss",
@@ -53,12 +60,20 @@ pub enum Command {
     },
     /// Print version information.
     Version,
-    /// Internal: proxy stdio <-> unix-socket for the lead Hobbit's MCP client.
+    /// Internal: proxy stdio <-> unix-socket for a claude subprocess's MCP client.
     /// Launched automatically by the `--mcp-config` file that pitboss generates
-    /// for hierarchical runs. Not intended for direct human use.
+    /// per-actor. Not intended for direct human use.
     McpBridge {
         /// Path to the pitboss MCP unix socket to bridge stdio to.
         socket: PathBuf,
+        /// Identity of the actor driving this bridge (lead id or worker id).
+        /// Injected into every outbound MCP tool call's `_meta` field so the
+        /// dispatcher can enforce namespace authz.
+        #[arg(long)]
+        actor_id: String,
+        /// Role of the actor: `lead` or `worker`.
+        #[arg(long, value_enum)]
+        actor_role: ActorRoleArg,
     },
     /// Print shell completion script for the given shell (bash, zsh, fish,
     /// elvish, powershell) to stdout.

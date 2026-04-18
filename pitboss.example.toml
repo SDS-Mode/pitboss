@@ -1,0 +1,165 @@
+# Pitboss — annotated example manifest.
+#
+# This file is a learning aid. Every field in pitboss's manifest schema
+# is explained inline below, with notes on when to use what. Copy this
+# file, rename it to `pitboss.toml`, edit the fields, then run:
+#
+#     pitboss validate pitboss.toml    # catches schema / resolution errors
+#     pitboss dispatch pitboss.toml    # actually runs it
+#     pitboss-tui                      # watch the live floor-view
+#
+# See README.md for a project overview and AGENTS.md for the full schema
+# reference. Ready-to-run examples under examples/:
+#
+#     examples/v0.4-approval-demo.toml         minimal hierarchical run
+#     examples/shared-store-haiku-demo.toml    shared-store demonstration
+#     examples/ketchup-p0-execute.toml         real-world refactor run
+
+# ────────────────────────────────────────────────────────────────────────────
+# [run] — run-wide configuration.
+# ────────────────────────────────────────────────────────────────────────────
+
+[run]
+
+# Flat-mode concurrency cap. Only meaningful when [[task]] is used (not
+# [[lead]]). Default 4. Overridden by ANTHROPIC_MAX_CONCURRENT env var.
+# max_parallel = 4
+
+# Hierarchical-mode worker cap (1-16). REQUIRED when [[lead]] is set.
+# Caps lead's dynamic fanout, independent of max_parallel.
+max_workers = 3
+
+# Hierarchical-mode budget (floating USD). REQUIRED when [[lead]] is set.
+# Reservation accounting: each spawn reserves a model-aware estimate
+# up front; `spawn_worker` returns "budget exceeded" once
+# spent + reserved + next_estimate > budget_usd.
+budget_usd = 1.50
+
+# Hierarchical-mode wall-clock cap on the lead (seconds). No hard upper
+# bound — set generously for multi-hour runs. Default 3600.
+lead_timeout_secs = 900
+
+# Stop flat-mode runs on first failure. Default false. Ignored in
+# hierarchical mode (leads decide their own retry semantics).
+# halt_on_failure = false
+
+# Where run artifacts land. Default ~/.local/share/pitboss/runs.
+# Override to pin a run to a specific location.
+# run_dir = "/tmp/my-pitboss-runs"
+
+# What to do with each worker's git worktree after it finishes:
+#   "always"      — always clean up (can't resume)
+#   "on_success"  — clean up only if the worker succeeded (DEFAULT)
+#   "never"       — keep all worktrees (useful for inspection / resume)
+worktree_cleanup = "on_success"
+
+# Write an event stream JSONL (pause / cancel / approval events) alongside
+# summary.jsonl. Off by default.
+# emit_event_stream = false
+
+# v0.4 only: approval_policy controls what happens when a lead calls
+# mcp__pitboss__request_approval without a TUI attached.
+#   "block"        — queue until a TUI connects (DEFAULT)
+#   "auto_approve" — immediately approve (useful for CI)
+#   "auto_reject"  — immediately reject
+# approval_policy = "block"
+
+# v0.5 only: when true, after finalize pitboss writes a JSON snapshot of
+# the shared store (all /ref/*, /peer/*, /shared/*, /leases/*) to
+# <run-dir>/shared-store.json. Useful for post-mortem or auditing the
+# cross-worker coordination state.
+dump_shared_store = true
+
+# ────────────────────────────────────────────────────────────────────────────
+# [defaults] — inherited by every [[task]] and [[lead]] unless overridden.
+# ────────────────────────────────────────────────────────────────────────────
+
+[defaults]
+
+# Claude model. Dated suffixes allowed.
+#   claude-haiku-4-5      — cheapest, fastest; bounded refactors, audits
+#   claude-sonnet-4-6     — mid-tier; most balanced
+#   claude-opus-4-7       — most capable; synthesis, planning, hard design
+model = "claude-haiku-4-5"
+
+# Claude --effort flag. "low" | "medium" | "high".
+# effort = "medium"
+
+# Allowed tool surface. Default covers the common set; specify to
+# restrict (e.g. a read-only analysis worker gets only [Read, Glob, Grep]).
+# Pitboss auto-appends its own MCP tools for leads and workers.
+# tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+
+# Per-task wall-clock cap. No default — omit for no cap, set for safety.
+# timeout_secs = 600
+
+# Git worktree isolation. true by default. Set false for read-only
+# analysis runs, or when workers should operate directly in the target.
+use_worktree = true
+
+# Env vars passed to the claude subprocess.
+# [defaults.env]
+# SOME_VAR = "value"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Task definitions: pick ONE of
+#   a) one-or-more [[task]] entries  (flat mode), OR
+#   b) exactly one [[lead]] entry    (hierarchical mode).
+# The two are mutually exclusive — a manifest is either flat or hierarchical.
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── a) FLAT MODE example (commented out by default) ──
+#
+# [[task]]
+# id = "audit"                                  # unique slug for this task
+# directory = "/path/to/repo"                   # must be a git repo if use_worktree
+# prompt = "Read src/foo.rs and summarize it."
+# branch = "feat/audit"                         # auto-generated if omitted
+# # model = "..."    # per-task override of [defaults]
+# # tools = [...]    # per-task override
+#
+# [[task]]
+# id = "lint"
+# directory = "/path/to/repo"
+# prompt = "Run `cargo clippy` and fix any warnings under -D warnings."
+
+# ── b) HIERARCHICAL MODE example (active by default) ──
+#
+# The lead is a single claude subprocess that receives the operator's
+# prompt + the full pitboss MCP toolbelt. It decides how many workers
+# to spawn, waits on them, and composes the final output.
+#
+# Auto-allowed MCP tools for leads (pitboss injects into --allowedTools):
+#     spawn_worker worker_status wait_for_worker wait_for_any list_workers
+#     cancel_worker pause_worker continue_worker request_approval
+#     reprompt_worker
+#     kv_get kv_set kv_cas kv_list kv_wait lease_acquire lease_release
+#
+# Workers get a narrower set: just the 7 kv_* / lease_* tools.
+
+[[lead]]
+id = "example-lead"
+directory = "/tmp/pitboss-example"  # must exist; set `use_worktree = false` or be a git repo
+branch = "example/lead"
+# model = "claude-opus-4-7"  # override defaults for the coordinator
+
+prompt = """
+This is a minimal hierarchical example that exercises the shared store.
+
+STEP 1: Write a shared configuration value to /ref/config using
+mcp__pitboss__kv_set. Use path="/ref/config" and value set to the UTF-8
+bytes of "example run, echo your id back".
+
+STEP 2: Spawn three workers in parallel via mcp__pitboss__spawn_worker.
+Each worker's prompt should be: "Read /ref/config via
+mcp__pitboss__kv_get. Then write a line to /shared/echoes/<your-actor-id>
+via mcp__pitboss__kv_set. The line's value: 'worker <N> says: <config content>'.
+Exit."
+
+STEP 3: Wait for all three via mcp__pitboss__wait_for_worker.
+
+STEP 4: List /shared/echoes/* via mcp__pitboss__kv_list. Read each entry
+via mcp__pitboss__kv_get and print a combined report of all three echoes.
+
+Then exit.
+"""

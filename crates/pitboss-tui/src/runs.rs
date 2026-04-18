@@ -96,12 +96,31 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
         }
     }
 
-    // Fall back: count lines in summary.jsonl. If the file is missing or
-    // empty, treat the run as aborted — the dispatcher wrote the initial
-    // manifest + resolved.json but never produced any task records.
+    // No summary.json. Determine whether the dispatcher is still alive by
+    // looking for the per-run control socket — pitboss-cli creates it at
+    // run start (see `pitboss_cli::control::control_socket_path`) and
+    // removes it at finalize. If it's there, the run is actively running
+    // regardless of whether summary.jsonl has records yet. Keeps early-
+    // stage runs (workers not yet settled) from being misclassified as
+    // aborted.
     let jsonl = run_dir.join("summary.jsonl");
-    let (total, failed) = count_jsonl_tasks(&jsonl);
-    let status = if total > 0 {
+    let (settled_total, failed) = count_jsonl_tasks(&jsonl);
+    let live = control_socket_is_live(&run_id, run_dir);
+
+    // For the count column: during a live run, summary.jsonl only grows as
+    // tasks SETTLE. The spawned-so-far count is the subdirectory count of
+    // <run-dir>/tasks/ (pitboss creates one per task at spawn time). Show
+    // max(settled, spawned) so the picker reflects in-flight work even
+    // before any of it has finished.
+    let spawned_count = count_tasks_subdirs(run_dir);
+    let total = settled_total.max(spawned_count);
+
+    let status = if live {
+        RunStatus::Running
+    } else if settled_total > 0 {
+        // Dispatcher is gone but did produce records — an interrupted run.
+        // We bucket this as "Running" in the 3-state taxonomy; users can
+        // distinguish by the absence of a live socket if needed.
         RunStatus::Running
     } else {
         RunStatus::Aborted
@@ -114,6 +133,36 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
         tasks_failed: failed,
         status,
     }
+}
+
+/// Count subdirectories under `<run-dir>/tasks/`. Each task (lead + every
+/// spawned worker) gets its own subdir at spawn time, so this gives the
+/// in-flight count during a live run — reliable even when summary.jsonl
+/// is still empty.
+fn count_tasks_subdirs(run_dir: &Path) -> usize {
+    let tasks_dir = run_dir.join("tasks");
+    let Ok(rd) = std::fs::read_dir(&tasks_dir) else {
+        return 0;
+    };
+    rd.flatten().filter(|e| e.path().is_dir()).count()
+}
+
+/// Return `true` if the pitboss control socket for `run_id` currently
+/// exists on disk. Mirrors `pitboss_cli::control::control_socket_path`:
+/// prefers `$XDG_RUNTIME_DIR/pitboss/<run-id>.control.sock`, falls back
+/// to `<run-dir>/<run-id>/control.sock` when `XDG_RUNTIME_DIR` is unset.
+/// The file is a unix-domain socket when the dispatcher is alive and
+/// gets unlinked on clean shutdown.
+fn control_socket_is_live(run_id: &str, run_dir: &Path) -> bool {
+    if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
+        let p = PathBuf::from(xdg)
+            .join("pitboss")
+            .join(format!("{run_id}.control.sock"));
+        if p.exists() {
+            return true;
+        }
+    }
+    run_dir.join(run_id).join("control.sock").exists()
 }
 
 /// Count total and failed task records from a `summary.jsonl` file.
