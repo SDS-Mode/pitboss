@@ -172,6 +172,19 @@ pub async fn handle_spawn_worker(
         // fallback if no worker has completed yet).
         let estimate = estimate_new_worker_cost(state, &worker_model).await;
         if spent + reserved + estimate > budget {
+            if let Some(router) = state.notification_router.clone() {
+                let envelope = crate::notify::NotificationEnvelope::new(
+                    &state.run_id.to_string(),
+                    crate::notify::Severity::Error,
+                    crate::notify::PitbossEvent::BudgetExceeded {
+                        run_id: state.run_id.to_string(),
+                        spent_usd: spent,
+                        budget_usd: budget,
+                    },
+                    chrono::Utc::now(),
+                );
+                let _ = router.dispatch(envelope).await;
+            }
             bail!(
                 "budget exceeded: ${:.2} spent + ${:.2} reserved + ${:.2} estimated > ${:.2} budget",
                 spent, reserved, estimate, budget
