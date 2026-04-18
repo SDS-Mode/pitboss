@@ -287,17 +287,25 @@ fn build_tile(
                 TileStatus::Pending
             }
         });
+        // Mid-flight tiles don't have a summary record yet. Scan the log
+        // directly to surface running token totals and (for dynamic
+        // workers not in resolved.json) the model. Without this scan the
+        // Detail view showed all zeros + "model ?" for up to the full
+        // worker runtime on slow tasks.
+        let (live_model, live_usage) = scan_live_stats(&log_path);
         TileState {
             id: id.to_string(),
             status,
             duration_ms: None,
-            token_usage_input: 0,
-            token_usage_output: 0,
-            cache_read: 0,
-            cache_creation: 0,
+            token_usage_input: live_usage.input,
+            token_usage_output: live_usage.output,
+            cache_read: live_usage.cache_read,
+            cache_creation: live_usage.cache_creation,
             exit_code: None,
             log_path,
-            model,
+            // Prefer the manifest-declared model (present for static tasks
+            // + lead) and fall back to the log-derived one (dynamic workers).
+            model: model.or(live_model),
             worktree_path: None,
             parent_task_id: if is_dynamic {
                 parent_task_id_fallback.map(str::to_string)
@@ -306,6 +314,63 @@ fn build_tile(
             },
         }
     }
+}
+
+/// Full-file scan of a worker's stdout.log for mid-flight stats:
+///   - model: from the first assistant message's `message.model`
+///   - usage: summed token counts across every assistant message's
+///     `message.usage` (each entry is per-turn, not cumulative).
+///
+/// O(log-size) on every snapshot tick — typical worker logs are well
+/// under 1 MB so this stays in the tens of microseconds. If logs ever
+/// grow past ~10 MB this should be promoted to a streaming scan with
+/// a per-tile watermark so we only parse new bytes each tick.
+fn scan_live_stats(path: &Path) -> (Option<String>, pitboss_core::parser::TokenUsage) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return (None, pitboss_core::parser::TokenUsage::default());
+    };
+    let reader = BufReader::new(file);
+    let mut model: Option<String> = None;
+    let mut usage = pitboss_core::parser::TokenUsage::default();
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(msg) = val.get("message") else {
+            continue;
+        };
+        if model.is_none() {
+            if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
+                model = Some(m.to_string());
+            }
+        }
+        if let Some(u) = msg.get("usage") {
+            usage.input += u
+                .get("input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage.output += u
+                .get("output_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage.cache_read += u
+                .get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage.cache_creation += u
+                .get("cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+        }
+    }
+    (model, usage)
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +756,56 @@ mod tests {
         );
         let live_tile = snap.tasks.iter().find(|t| t.id == "worker-live").unwrap();
         assert_eq!(live_tile.parent_task_id.as_deref(), Some("lead"));
+    }
+
+    #[test]
+    fn scan_live_stats_extracts_model_and_summed_usage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stdout.log");
+        // Two assistant turns with per-turn usage — expect sum. Model
+        // taken from the first assistant message.
+        let body = [
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":3}}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":2,"output_tokens":4,"cache_read_input_tokens":200,"cache_creation_input_tokens":1}}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+
+        let (model, usage) = scan_live_stats(&path);
+        assert_eq!(model.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(usage.input, 12);
+        assert_eq!(usage.output, 9);
+        assert_eq!(usage.cache_read, 300);
+        assert_eq!(usage.cache_creation, 4);
+    }
+
+    #[test]
+    fn scan_live_stats_missing_file_returns_defaults() {
+        let (model, usage) = scan_live_stats(Path::new("/nonexistent/file.log"));
+        assert!(model.is_none());
+        assert_eq!(usage.input, 0);
+        assert_eq!(usage.output, 0);
+    }
+
+    #[test]
+    fn scan_live_stats_skips_malformed_and_non_assistant_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stdout.log");
+        let body = [
+            "not json at all",
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"user","message":{"content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[],"usage":{"input_tokens":7,"output_tokens":3}}}"#,
+            "",
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+
+        let (model, usage) = scan_live_stats(&path);
+        assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(usage.input, 7);
+        assert_eq!(usage.output, 3);
     }
 
     #[test]
