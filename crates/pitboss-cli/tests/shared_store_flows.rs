@@ -303,3 +303,109 @@ async fn lead_without_override_cannot_write_other_peer() {
         pitboss_cli::shared_store::StoreError::Forbidden(_)
     ));
 }
+
+/// Exercises the connection-drop cleanup hook at the method level.
+/// SharedStore::release_all_for_actor releases every lease held by
+/// a given actor_id and fires the release notifier so waiters wake up.
+///
+/// The actual rmcp-side wiring (invoking this on MCP connection close)
+/// is a follow-up — see the #[ignore]d test below for the target
+/// end-to-end behavior.
+#[tokio::test]
+async fn release_all_for_actor_clears_held_leases() {
+    let store = Arc::new(SharedStore::new());
+    handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "a".into(),
+            ttl_secs: 60,
+            wait_secs: None,
+            meta: worker_meta("worker-X"),
+        },
+    )
+    .await
+    .unwrap();
+    handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "b".into(),
+            ttl_secs: 60,
+            wait_secs: None,
+            meta: worker_meta("worker-X"),
+        },
+    )
+    .await
+    .unwrap();
+    // Different actor holds "c"; it should survive.
+    handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "c".into(),
+            ttl_secs: 60,
+            wait_secs: None,
+            meta: worker_meta("worker-Y"),
+        },
+    )
+    .await
+    .unwrap();
+
+    store.release_all_for_actor("worker-X").await;
+
+    // Now worker-Z can take "a" and "b", but "c" is still held by worker-Y.
+    let a = handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "a".into(),
+            ttl_secs: 60,
+            wait_secs: None,
+            meta: worker_meta("worker-Z"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(a.acquired);
+    let b = handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "b".into(),
+            ttl_secs: 60,
+            wait_secs: None,
+            meta: worker_meta("worker-Z"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(b.acquired);
+    let c = handle_lease_acquire(
+        &store,
+        LeaseAcquireArgs {
+            name: "c".into(),
+            ttl_secs: 60,
+            wait_secs: None,
+            meta: worker_meta("worker-Z"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!c.acquired, "worker-Y still holds c");
+}
+
+// ---------------------------------------------------------------------------
+// Deferred: real rmcp-driven connection-drop
+// ---------------------------------------------------------------------------
+
+/// TODO(shared-store): wire SharedStore::release_all_for_actor into the rmcp
+/// server's per-connection lifecycle (fire it when a connection's tool-call
+/// stream ends). Until that lands, lease cleanup relies on TTL expiration.
+///
+/// The shape of the future test:
+///   1. Spawn a `pitboss mcp-bridge --actor-id worker-A --actor-role worker`
+///      subprocess that acquires a long-TTL lease.
+///   2. Kill the bridge process.
+///   3. Assert worker-B's lease_acquire for the same name succeeds within a
+///      short wait window (well before the TTL would naturally expire).
+#[tokio::test]
+#[ignore]
+async fn lease_released_when_mcp_connection_drops() {
+    panic!("not yet implemented — requires rmcp per-connection lifecycle wiring");
+}
