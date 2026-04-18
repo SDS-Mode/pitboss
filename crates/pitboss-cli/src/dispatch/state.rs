@@ -153,6 +153,7 @@ impl DispatchState {
         cleanup_policy: CleanupPolicy,
         run_subdir: PathBuf,
         approval_policy: ApprovalPolicy,
+        notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
     ) -> Self {
         let (done_tx, _) = broadcast::channel(64);
         Self {
@@ -179,7 +180,7 @@ impl DispatchState {
             approval_policy,
             control_writer: Mutex::new(None),
             worker_counters: RwLock::new(HashMap::new()),
-            notification_router: None,
+            notification_router,
         }
     }
 
@@ -247,6 +248,7 @@ mod tests {
             CleanupPolicy::Never,
             run_subdir,
             ApprovalPolicy::Block,
+            None,
         ));
         // Keep the TempDir alive for the test by leaking it — the state holds
         // PathBufs into it, and dropping `dir` at end of scope would invalidate

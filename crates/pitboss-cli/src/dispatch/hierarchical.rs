@@ -83,6 +83,27 @@ pub async fn run_hierarchical(
         }
     };
 
+    // Build notification router if manifest has any [[notification]] sections.
+    let notification_router = if !resolved.notifications.is_empty() {
+        let http = std::sync::Arc::new(reqwest::Client::new());
+        let sinks: Vec<_> = resolved
+            .notifications
+            .iter()
+            .enumerate()
+            .map(|(idx, cfg)| {
+                let sink = crate::notify::sinks::build(cfg, idx, &http)
+                    .context("build notification sink")?;
+                let filter = crate::notify::SinkFilter::from(cfg);
+                Ok::<_, anyhow::Error>((sink, filter))
+            })
+            .collect::<Result<_>>()?;
+        Some(std::sync::Arc::new(crate::notify::NotificationRouter::new(
+            sinks,
+        )))
+    } else {
+        None
+    };
+
     // 1. Start the MCP server.
     let socket = socket_path_for_run(run_id, &run_dir);
     let state = Arc::new(DispatchState::new(
@@ -97,6 +118,7 @@ pub async fn run_hierarchical(
         cleanup_policy,
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
+        notification_router,
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 

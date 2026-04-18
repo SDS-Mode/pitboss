@@ -136,6 +136,15 @@ impl SinkFilter {
     }
 }
 
+impl From<&crate::notify::config::NotificationConfig> for SinkFilter {
+    fn from(cfg: &crate::notify::config::NotificationConfig) -> Self {
+        Self {
+            events: cfg.events.clone(),
+            severity_min: cfg.severity_min,
+        }
+    }
+}
+
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};

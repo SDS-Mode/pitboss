@@ -109,9 +109,31 @@ pub async fn execute(
     let wt_mgr = Arc::new(WorktreeManager::new());
     let records: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Build notification router if manifest has any [[notification]] sections.
+    let notification_router = if !resolved.notifications.is_empty() {
+        let http = std::sync::Arc::new(reqwest::Client::new());
+        let sinks: Vec<_> = resolved
+            .notifications
+            .iter()
+            .enumerate()
+            .map(|(idx, cfg)| {
+                let sink = crate::notify::sinks::build(cfg, idx, &http)
+                    .context("build notification sink")?;
+                let filter = crate::notify::SinkFilter::from(cfg);
+                Ok::<_, anyhow::Error>((sink, filter))
+            })
+            .collect::<Result<_>>()?;
+        Some(std::sync::Arc::new(crate::notify::NotificationRouter::new(
+            sinks,
+        )))
+    } else {
+        None
+    };
+
     // Build a minimal DispatchState so the control server has something to bind
     // against. Flat mode has no lead and no spawn_worker path, but cancel and
     // list_workers still apply.
+    let notification_router_for_emit = notification_router.clone();
     let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
         run_id,
         resolved.clone(),
@@ -124,6 +146,7 @@ pub async fn execute(
         cleanup_policy_from(resolved.worktree_cleanup),
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
+        notification_router,
     ));
     let control_sock = crate::control::control_socket_path(run_id, &run_dir);
     let _control = crate::control::server::start_control_server(
@@ -218,6 +241,23 @@ pub async fn execute(
         tasks: records,
     };
     store.finalize_run(&summary).await?;
+
+    // Emit RunFinished event if notification router is configured.
+    if let Some(router) = notification_router_for_emit {
+        let env = crate::notify::NotificationEnvelope::new(
+            &run_id.to_string(),
+            crate::notify::Severity::Info,
+            crate::notify::PitbossEvent::RunFinished {
+                run_id: run_id.to_string(),
+                tasks_total: summary.tasks_total,
+                tasks_failed,
+                duration_ms: summary.total_duration_ms as u64,
+                spent_usd: 0.0,
+            },
+            Utc::now(),
+        );
+        let _ = router.dispatch(env).await;
+    }
 
     let rc = if cancel.is_terminated() {
         130
