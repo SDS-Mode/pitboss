@@ -148,6 +148,17 @@ pub struct AppState {
     /// `TileState.id` for the lead + each worker). Empty until the first
     /// broadcast arrives (~1 s after TUI connects).
     pub store_activity: std::collections::HashMap<String, StoreActivityCounters>,
+    /// Bounding rectangles of each tile, populated by `render_tile_grid`
+    /// each frame. Used by the mouse-click handler to hit-test which
+    /// tile a click landed on. Wrapped in a Mutex so the render pass
+    /// (which has `&AppState`) can update it via interior mutability —
+    /// same pattern as `detail_log_viewport`.
+    pub tile_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
+    /// Bounding rectangles of each run-picker row (y coords are absolute
+    /// terminal rows). Populated by `render_run_picker_overlay` whenever
+    /// the picker is visible; used by the mouse click handler to open
+    /// a run with one click.
+    pub picker_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
 }
 
 /// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
@@ -186,7 +197,39 @@ impl AppState {
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
             store_activity: std::collections::HashMap::new(),
+            tile_hit_rects: std::sync::Mutex::new(Vec::new()),
+            picker_hit_rects: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Hit-test: find the picker row index whose render rect contains
+    /// `(col, row)`. Same shape as `tile_at`. Returns `None` when the
+    /// picker isn't open or the click fell on empty space (run list
+    /// shorter than the picker area).
+    pub fn picker_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let rects = self.picker_hit_rects.lock().ok()?;
+        rects.iter().find_map(|(idx, r)| {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                Some(*idx)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Hit-test: find the tile index whose render rect contains `(col, row)`.
+    /// Populated by `render_tile_grid`; reads the cache under its Mutex.
+    /// Returns `None` if no tile matches (click outside the grid) or the
+    /// cache is empty (no render has run yet).
+    pub fn tile_at(&self, col: u16, row: u16) -> Option<usize> {
+        let rects = self.tile_hit_rects.lock().ok()?;
+        rects.iter().find_map(|(idx, r)| {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                Some(*idx)
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the currently focused tile, if any.
@@ -982,6 +1025,65 @@ mod tests {
             "got {:?}",
             state.mode
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // tile_at hit-test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tile_at_returns_tile_containing_click() {
+        use ratatui::layout::Rect;
+        let state = make_state();
+        // Two tiles side by side in a 40×10 area:
+        //   tile 0: x=0..20, y=0..10
+        //   tile 1: x=20..40, y=0..10
+        *state.tile_hit_rects.lock().unwrap() =
+            vec![(0, Rect::new(0, 0, 20, 10)), (1, Rect::new(20, 0, 20, 10))];
+        assert_eq!(state.tile_at(5, 5), Some(0));
+        assert_eq!(state.tile_at(19, 9), Some(0));
+        assert_eq!(state.tile_at(20, 0), Some(1));
+        assert_eq!(state.tile_at(39, 9), Some(1));
+    }
+
+    #[test]
+    fn tile_at_returns_none_outside_any_rect() {
+        use ratatui::layout::Rect;
+        let state = make_state();
+        *state.tile_hit_rects.lock().unwrap() = vec![(0, Rect::new(10, 10, 20, 10))];
+        // Left of the rect.
+        assert_eq!(state.tile_at(5, 15), None);
+        // Below the rect.
+        assert_eq!(state.tile_at(15, 25), None);
+        // Right edge is exclusive (x + width is one past the last column).
+        assert_eq!(state.tile_at(30, 15), None);
+    }
+
+    #[test]
+    fn tile_at_empty_cache_returns_none() {
+        // Before the first render the cache is empty; any click is a miss.
+        let state = make_state();
+        assert!(state.tile_hit_rects.lock().unwrap().is_empty());
+        assert_eq!(state.tile_at(0, 0), None);
+    }
+
+    #[test]
+    fn picker_row_at_returns_row_index() {
+        use ratatui::layout::Rect;
+        let state = make_state();
+        // Three picker rows stacked vertically: y=5,6,7.
+        *state.picker_hit_rects.lock().unwrap() = vec![
+            (0, Rect::new(2, 5, 40, 1)),
+            (1, Rect::new(2, 6, 40, 1)),
+            (2, Rect::new(2, 7, 40, 1)),
+        ];
+        assert_eq!(state.picker_row_at(10, 5), Some(0));
+        assert_eq!(state.picker_row_at(10, 6), Some(1));
+        assert_eq!(state.picker_row_at(10, 7), Some(2));
+        // Below last row.
+        assert_eq!(state.picker_row_at(10, 8), None);
+        // Left of picker.
+        assert_eq!(state.picker_row_at(0, 5), None);
     }
 
     // -----------------------------------------------------------------------

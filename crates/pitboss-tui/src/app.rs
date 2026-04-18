@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::state::{AppSnapshot, AppState, Mode};
 use crate::watcher;
@@ -150,22 +150,43 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                     }
                 }
                 Event::Mouse(mouse) => {
-                    // Only wire wheel scroll in the detail view for now.
-                    // Tile grid mouse clicks, drag-select, etc. can be
-                    // added later if useful.
-                    if matches!(state.mode, Mode::Detail { .. }) {
-                        match mouse.kind {
-                            // Wheel scroll: 5 rows/tick — matches `J`/`K`
-                            // shift-scroll cadence and feels natural for
-                            // quick log navigation without overshooting.
-                            MouseEventKind::ScrollDown => {
-                                state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
-                            }
-                            MouseEventKind::ScrollUp => {
-                                state.detail_scroll_up(5);
-                            }
-                            _ => {}
+                    let prev_focus = state.focus;
+                    let prev_mode_disc = std::mem::discriminant(&state.mode);
+                    let action = handle_mouse(&mut state, mouse);
+                    match action {
+                        Action::Quit => break,
+                        Action::SwitchRun { run_dir, run_id } => {
+                            // Same transition as the keyboard-driven
+                            // SwitchRun path above — restart the watcher
+                            // and reset run-local state.
+                            let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
+                            snapshot_rx = new_rx;
+                            focus_tx = new_tx;
+                            state.run_dir = run_dir;
+                            state.run_id = run_id;
+                            state.tasks = vec![];
+                            state.focus = 0;
+                            state.run_list.clear();
+                            state.mode = Mode::Normal;
+                            let _ = focus_tx.send(String::new());
+                            dirty = true;
+                            continue;
                         }
+                        Action::Continue => {}
+                    }
+
+                    // Mouse clicks can change focus + mode (tile click →
+                    // Detail, right-click → exit Detail). Mirror the
+                    // key-path's post-handler bookkeeping so the watcher
+                    // tails the new focus and the terminal clears on
+                    // mode transitions.
+                    if prev_focus != state.focus
+                        || prev_mode_disc != std::mem::discriminant(&state.mode)
+                    {
+                        dirty = true;
+                    }
+                    if let Some(tile) = state.focused_tile() {
+                        let _ = focus_tx.send(tile.id.clone());
                     }
                 }
                 _ => {}
@@ -210,6 +231,58 @@ enum Action {
 /// for the handler. The render pass also calls `detail_auto_scroll` with the
 /// real `visible_rows`.
 const DETAIL_VISIBLE_ROWS: usize = 40;
+
+/// Handle a single mouse event. Returns the same [`Action`] type as
+/// `handle_key` so the event-loop's existing `SwitchRun` dispatch can
+/// handle picker-click → open-run in one place.
+fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Action {
+    match (state.mode.clone(), mouse.kind) {
+        // Wheel scroll inside Detail view — 5 rows/tick, matches J/K
+        // shift-scroll cadence.
+        (Mode::Detail { .. }, MouseEventKind::ScrollDown) => {
+            state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
+        }
+        (Mode::Detail { .. }, MouseEventKind::ScrollUp) => {
+            state.detail_scroll_up(5);
+        }
+        // Right-click inside Detail view exits back to the grid —
+        // symmetric with Esc, easier than reaching for the keyboard.
+        (Mode::Detail { .. }, MouseEventKind::Down(MouseButton::Right)) => {
+            state.exit_detail();
+        }
+        // Left-click on a tile in the grid: focus + enter Detail
+        // (equivalent to hjkl + Enter). Clicks on the already-focused
+        // tile also enter Detail.
+        (Mode::Normal, MouseEventKind::Down(MouseButton::Left)) => {
+            if let Some(idx) = state.tile_at(mouse.column, mouse.row) {
+                state.focus = idx;
+                if let Some(tile) = state.focused_tile() {
+                    // The focus_tx is owned by run(); we can't touch it
+                    // from this helper. Caller observes Action::Continue
+                    // + re-reads focused_tile in the normal focus-notify
+                    // path at the top of the event loop.
+                    let _ = tile;
+                }
+                state.enter_detail();
+            }
+        }
+        // Left-click on a picker row: open that run (equivalent to
+        // highlighting + pressing Enter). The event-loop dispatches
+        // `SwitchRun` — same transition as keyboard select.
+        (Mode::PickingRun { .. }, MouseEventKind::Down(MouseButton::Left)) => {
+            if let Some(idx) = state.picker_row_at(mouse.column, mouse.row) {
+                if let Some(entry) = state.run_list.get(idx) {
+                    return Action::SwitchRun {
+                        run_dir: entry.run_dir.clone(),
+                        run_id: entry.run_id.clone(),
+                    };
+                }
+            }
+        }
+        _ => {}
+    }
+    Action::Continue
+}
 
 /// Handle a single key press. Returns an [`Action`] describing what to do next.
 fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {

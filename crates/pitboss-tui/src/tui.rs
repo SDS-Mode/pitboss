@@ -385,6 +385,10 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
         .constraints(row_constraints)
         .split(area);
 
+    // Refresh the hit-test cache for mouse click → tile lookup. Cleared
+    // each render so it reflects the current layout even after a resize.
+    let mut hit_rects: Vec<(usize, Rect)> = Vec::with_capacity(n);
+
     for row in 0..rows {
         let cols_layout = Layout::default()
             .direction(Direction::Horizontal)
@@ -397,8 +401,14 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
                 break;
             }
             let focused = tile_idx == state.focus;
-            render_tile(frame, cols_layout[col], state, tile_idx, focused);
+            let tile_rect = cols_layout[col];
+            render_tile(frame, tile_rect, state, tile_idx, focused);
+            hit_rects.push((tile_idx, tile_rect));
         }
+    }
+
+    if let Ok(mut cache) = state.tile_hit_rects.lock() {
+        *cache = hit_rects;
     }
 }
 
@@ -1069,6 +1079,19 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
     list_state.select(Some(selected));
 
     frame.render_stateful_widget(list, inner, &mut list_state);
+
+    // Populate the picker hit-cache so mouse clicks resolve to row
+    // indices. Rows are laid out top-to-bottom starting at `inner.y`;
+    // we clip to the inner height so clicks below the last run land
+    // on no row (returns None from `picker_row_at`).
+    if let Ok(mut cache) = state.picker_hit_rects.lock() {
+        cache.clear();
+        let max_rows = inner.height as usize;
+        for (idx, _) in state.run_list.iter().enumerate().take(max_rows) {
+            let y = inner.y + u16::try_from(idx).unwrap_or(u16::MAX);
+            cache.push((idx, ratatui::layout::Rect::new(inner.x, y, inner.width, 1)));
+        }
+    }
 }
 
 fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::KillTarget) {
@@ -1246,6 +1269,8 @@ mod tests {
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
             store_activity: std::collections::HashMap::new(),
+            tile_hit_rects: std::sync::Mutex::new(Vec::new()),
+            picker_hit_rects: std::sync::Mutex::new(Vec::new()),
         }
     }
 
