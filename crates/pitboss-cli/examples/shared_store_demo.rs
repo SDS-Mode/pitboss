@@ -119,7 +119,9 @@ async fn main() -> anyhow::Result<()> {
         t_write.elapsed().as_secs_f64() * 1000.0
     ));
 
-    let b_entry = b_task.await?.map_err(|e| anyhow::anyhow!("B wait: {e:?}"))?;
+    let b_entry = b_task
+        .await?
+        .map_err(|e| anyhow::anyhow!("B wait: {e:?}"))?;
     ok(&format!(
         "worker-B kv_wait resolved: {} (written_by={})",
         String::from_utf8_lossy(&b_entry.value),
@@ -240,14 +242,22 @@ async fn main() -> anyhow::Result<()> {
         dump_path.display(),
         size
     ));
-    let keys: Vec<&str> = ["/ref/project-config", "/peer/worker-A/result", "/peer/worker-B/lead-injected"].to_vec();
+    let keys: Vec<&str> = [
+        "/ref/project-config",
+        "/peer/worker-A/result",
+        "/peer/worker-B/lead-injected",
+    ]
+    .to_vec();
     for k in &keys {
         assert!(
             bytes.contains(&format!("\"path\": \"{k}\"")),
             "dump missing key {k}"
         );
     }
-    ok(&format!("dump contains all {} expected keys + lease metadata", keys.len()));
+    ok(&format!(
+        "dump contains all {} expected keys + lease metadata",
+        keys.len()
+    ));
 
     // ---------- Finish ----------
     println!();
