@@ -90,31 +90,47 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
 
         // --- Input (50ms poll) ---
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                let action = handle_key(&mut state, key.code, key.modifiers);
-                match action {
-                    Action::Quit => break,
-                    Action::SwitchRun { run_dir, run_id } => {
-                        // Restart the watcher on the new run dir.
-                        let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
-                        snapshot_rx = new_rx;
-                        focus_tx = new_tx;
-                        state.run_dir = run_dir;
-                        state.run_id = run_id;
-                        state.tasks = vec![];
-                        state.focus = 0;
-                        state.run_list.clear();
-                        state.mode = Mode::Normal;
-                        let _ = focus_tx.send(String::new());
-                        continue;
+            match event::read()? {
+                Event::Resize(_, _) => {
+                    // Force a visible clear + full redraw on the next frame.
+                    // Ratatui's autoresize shuffles buffer content when the
+                    // width changes (linear array re-indexes), so the diff
+                    // vs prev can leave stale cells physically visible in
+                    // the terminal. terminal.clear() emits `\x1b[2J` and
+                    // resets the back buffer, guaranteeing a clean redraw.
+                    terminal.clear()?;
+                }
+                Event::Key(key) => {
+                    let action = handle_key(&mut state, key.code, key.modifiers);
+                    match action {
+                        Action::Quit => break,
+                        Action::SwitchRun { run_dir, run_id } => {
+                            // Restart the watcher on the new run dir.
+                            let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
+                            snapshot_rx = new_rx;
+                            focus_tx = new_tx;
+                            state.run_dir = run_dir;
+                            state.run_id = run_id;
+                            state.tasks = vec![];
+                            state.focus = 0;
+                            state.run_list.clear();
+                            state.mode = Mode::Normal;
+                            let _ = focus_tx.send(String::new());
+                            // Tile count and layout change; force a clean
+                            // redraw to avoid stale content from the prior
+                            // run's tiles.
+                            terminal.clear()?;
+                            continue;
+                        }
+                        Action::Continue => {}
                     }
-                    Action::Continue => {}
-                }
 
-                // Notify watcher of new focus.
-                if let Some(tile) = state.focused_tile() {
-                    let _ = focus_tx.send(tile.id.clone());
+                    // Notify watcher of new focus.
+                    if let Some(tile) = state.focused_tile() {
+                        let _ = focus_tx.send(tile.id.clone());
+                    }
                 }
+                _ => {}
             }
         }
 
