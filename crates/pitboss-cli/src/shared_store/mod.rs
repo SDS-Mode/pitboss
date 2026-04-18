@@ -148,6 +148,19 @@ fn authorize_write(
     }
 }
 
+/// Per-actor activity counters surfaced to the TUI so each grid tile can
+/// show "kv:N lease:M" — a glanceable indicator of which workers are
+/// actively using the shared store vs idle. Counters are monotonically
+/// increasing for the lifetime of a run; kv covers get/set/cas/list/wait,
+/// lease covers acquire+release. Incremented for both successful and
+/// failed calls (authz/limit errors still count as "tried to use the
+/// store") so operators can see frustration loops in the numbers.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ActivityCounters {
+    pub kv_ops: u64,
+    pub lease_ops: u64,
+}
+
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
     limits: Limits,
@@ -155,6 +168,10 @@ pub struct SharedStore {
     cancel: CancellationToken,
     leases: LeaseRegistry,
     lease_notifier: broadcast::Sender<String>,
+    /// Per-actor activity counters, keyed by `actor_id`. Protected by a
+    /// standard RwLock (not the entries lock) so counter bumps don't
+    /// contend with reads/writes.
+    activity: RwLock<std::collections::HashMap<String, ActivityCounters>>,
 }
 
 impl SharedStore {
@@ -172,7 +189,35 @@ impl SharedStore {
             cancel: CancellationToken::new(),
             leases: LeaseRegistry::new(),
             lease_notifier,
+            activity: RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Increment the kv counter for `actor_id`. Called from each `kv_*`
+    /// MCP tool handler — no-op when the actor id is empty (defensive,
+    /// shouldn't happen in practice since the bridge stamps `_meta`).
+    pub async fn note_kv_op(&self, actor_id: &str) {
+        if actor_id.is_empty() {
+            return;
+        }
+        let mut activity = self.activity.write().await;
+        activity.entry(actor_id.to_string()).or_default().kv_ops += 1;
+    }
+
+    /// Increment the lease counter for `actor_id`. Called from
+    /// `lease_acquire` / `lease_release`.
+    pub async fn note_lease_op(&self, actor_id: &str) {
+        if actor_id.is_empty() {
+            return;
+        }
+        let mut activity = self.activity.write().await;
+        activity.entry(actor_id.to_string()).or_default().lease_ops += 1;
+    }
+
+    /// Snapshot the per-actor activity map. Used by the control server to
+    /// push periodic updates to the TUI.
+    pub async fn activity_snapshot(&self) -> std::collections::HashMap<String, ActivityCounters> {
+        self.activity.read().await.clone()
     }
 
     pub async fn get(&self, path: &str) -> Option<Entry> {
@@ -1049,5 +1094,49 @@ mod tests {
         assert!(text.contains("\"path\": \"/ref/a\""));
         assert!(text.contains("\"value_b64\":"));
         assert!(text.contains("\"name\": \"job-1\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Activity counters (v0.4.2+)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn activity_counters_start_empty() {
+        let s = SharedStore::new();
+        assert!(s.activity_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn note_kv_op_increments_kv_counter() {
+        let s = SharedStore::new();
+        s.note_kv_op("worker-A").await;
+        s.note_kv_op("worker-A").await;
+        s.note_kv_op("worker-B").await;
+        let snap = s.activity_snapshot().await;
+        assert_eq!(snap.get("worker-A").unwrap().kv_ops, 2);
+        assert_eq!(snap.get("worker-A").unwrap().lease_ops, 0);
+        assert_eq!(snap.get("worker-B").unwrap().kv_ops, 1);
+    }
+
+    #[tokio::test]
+    async fn note_lease_op_increments_lease_counter_independently() {
+        let s = SharedStore::new();
+        s.note_lease_op("worker-A").await;
+        s.note_kv_op("worker-A").await;
+        let snap = s.activity_snapshot().await;
+        let counters = snap.get("worker-A").unwrap();
+        assert_eq!(counters.kv_ops, 1);
+        assert_eq!(counters.lease_ops, 1);
+    }
+
+    #[tokio::test]
+    async fn note_ops_ignore_empty_actor_id() {
+        // Defensive: the bridge always stamps `_meta` so this shouldn't
+        // happen in practice, but an empty actor_id would otherwise
+        // create a bogus "" entry in the activity map.
+        let s = SharedStore::new();
+        s.note_kv_op("").await;
+        s.note_lease_op("").await;
+        assert!(s.activity_snapshot().await.is_empty());
     }
 }

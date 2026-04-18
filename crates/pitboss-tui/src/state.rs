@@ -142,6 +142,21 @@ pub struct AppState {
     /// from the wrong reactor and async I/O would silently hang. `None`
     /// only in tests where no control socket is in play.
     pub runtime_handle: Option<tokio::runtime::Handle>,
+    /// Per-actor shared-store activity counters received via the control
+    /// socket's periodic `StoreActivity` broadcast. Rendered as
+    /// `kv:N lease:M` on each grid tile. Keyed by `actor_id` (matches
+    /// `TileState.id` for the lead + each worker). Empty until the first
+    /// broadcast arrives (~1 s after TUI connects).
+    pub store_activity: std::collections::HashMap<String, StoreActivityCounters>,
+}
+
+/// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
+/// kept as a separate TUI-owned type so the state module doesn't depend
+/// on the wire protocol's serde derives.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StoreActivityCounters {
+    pub kv_ops: u64,
+    pub lease_ops: u64,
 }
 
 /// Summary of a worker's worktree diff vs its base branch.
@@ -170,6 +185,7 @@ impl AppState {
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
+            store_activity: std::collections::HashMap::new(),
         }
     }
 

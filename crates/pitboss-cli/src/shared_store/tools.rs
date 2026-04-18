@@ -150,10 +150,20 @@ fn require_identity_for_self(path: &str, meta: Option<&MetaField>) -> Result<Str
 
 // ---------- Handlers ----------
 
+// Counter-bump policy: every tool call that carries an actor identity
+// bumps the matching counter EXACTLY ONCE at entry, BEFORE authz or
+// execution. That way "tried and got denied" still shows up in the TUI
+// — often the most useful signal when debugging a worker that's spinning
+// on bad paths. For tools where identity is optional (Option<MetaField>
+// — reads), we only bump when it's actually present.
+
 pub async fn handle_kv_get(
     store: &Arc<SharedStore>,
     args: KvGetArgs,
 ) -> Result<Option<Entry>, StoreError> {
+    if let Some(m) = &args.meta {
+        store.note_kv_op(&m.actor_id).await;
+    }
     let path = require_identity_for_self(&args.path, args.meta.as_ref())?;
     Ok(store.get(&path).await)
 }
@@ -162,6 +172,7 @@ pub async fn handle_kv_set(
     store: &Arc<SharedStore>,
     args: KvSetArgs,
 ) -> Result<KvSetResult, StoreError> {
+    store.note_kv_op(&args.meta.actor_id).await;
     let caller: CallerIdentity = args.meta.into();
     let path = resolve_peer_self(&args.path, &caller.id);
     let version = store
@@ -174,6 +185,7 @@ pub async fn handle_kv_cas(
     store: &Arc<SharedStore>,
     args: KvCasArgs,
 ) -> Result<super::CasResult, StoreError> {
+    store.note_kv_op(&args.meta.actor_id).await;
     let caller: CallerIdentity = args.meta.into();
     let path = resolve_peer_self(&args.path, &caller.id);
     store
@@ -191,6 +203,9 @@ pub async fn handle_kv_list(
     store: &Arc<SharedStore>,
     args: KvListArgs,
 ) -> Result<Vec<ListMetadata>, StoreError> {
+    if let Some(m) = &args.meta {
+        store.note_kv_op(&m.actor_id).await;
+    }
     let glob = require_identity_for_self(&args.glob, args.meta.as_ref())?;
     store.list(&glob).await
 }
@@ -199,6 +214,9 @@ pub async fn handle_kv_wait(
     store: &Arc<SharedStore>,
     args: KvWaitArgs,
 ) -> Result<Entry, StoreError> {
+    if let Some(m) = &args.meta {
+        store.note_kv_op(&m.actor_id).await;
+    }
     let path = require_identity_for_self(&args.path, args.meta.as_ref())?;
     store
         .wait(
@@ -213,6 +231,7 @@ pub async fn handle_lease_acquire(
     store: &Arc<SharedStore>,
     args: LeaseAcquireArgs,
 ) -> Result<AcquireResult, StoreError> {
+    store.note_lease_op(&args.meta.actor_id).await;
     let caller: CallerIdentity = args.meta.into();
     store
         .lease_acquire(
@@ -228,6 +247,7 @@ pub async fn handle_lease_release(
     store: &Arc<SharedStore>,
     args: LeaseReleaseArgs,
 ) -> Result<(), StoreError> {
+    store.note_lease_op(&args.meta.actor_id).await;
     let caller: CallerIdentity = args.meta.into();
     store.lease_release(&args.lease_id, &caller).await
 }

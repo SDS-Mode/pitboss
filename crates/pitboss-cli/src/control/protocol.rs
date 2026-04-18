@@ -84,6 +84,20 @@ pub enum ControlEvent {
     RunFinished {
         summary: RunFinishedSummary,
     },
+    /// Periodic broadcast of per-actor shared-store activity. Emitted
+    /// once per `STORE_ACTIVITY_INTERVAL` (~1 s) while there's an active
+    /// TUI connection. TUI uses this to render `kv:N lease:M` inside
+    /// each grid tile so operators can see store utilization at a glance.
+    StoreActivity {
+        counters: Vec<ActorActivityEntry>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActorActivityEntry {
+    pub actor_id: String,
+    pub kv_ops: u64,
+    pub lease_ops: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,5 +288,27 @@ mod tests {
             },
         };
         assert_eq!(roundtrip_event(&rf), rf);
+    }
+
+    #[test]
+    fn store_activity_roundtrips() {
+        let ev = ControlEvent::StoreActivity {
+            counters: vec![
+                ActorActivityEntry {
+                    actor_id: "worker-A".into(),
+                    kv_ops: 42,
+                    lease_ops: 3,
+                },
+                ActorActivityEntry {
+                    actor_id: "lead".into(),
+                    kv_ops: 7,
+                    lease_ops: 0,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"event\":\"store_activity\""));
+        assert!(s.contains("\"worker-A\""));
+        assert_eq!(roundtrip_event(&ev), ev);
     }
 }
