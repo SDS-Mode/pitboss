@@ -581,6 +581,9 @@ fn render_detail_metadata(
     task_id: &str,
     tile: Option<&crate::state::TileState>,
 ) {
+    // Mirror the log-pane Clear so leftover cells from the neighbour can't
+    // bleed into this pane when scroll changes the log's paint extent.
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Metadata ")
@@ -738,6 +741,10 @@ fn render_detail_metadata(
 /// the "jump to bottom" position actually shows the end of the log
 /// regardless of how much content wraps.
 fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: usize) {
+    // Clear first. Belt-and-suspenders — the manual slice below should only
+    // paint cells inside the pane, but Clear guards against any stale cells
+    // beneath us from a prior frame.
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Log ")
@@ -746,23 +753,33 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
     frame.render_widget(block, area);
 
     let visible_rows = inner.height as usize;
+    let pane_width = inner.width as usize;
 
-    // Build the Paragraph once with ALL log lines and use Paragraph::scroll
-    // to pick the visual row offset. ratatui::Paragraph::line_count(width)
-    // tells us the total visual rows after wrapping so we can compute a
-    // correct max_scroll in visual-row units.
-    let all_lines: Vec<Line> = state
-        .focus_log
-        .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
-        .collect();
+    // Pre-wrap each log line ourselves into chunks of at most `pane_width`
+    // chars, then render with NO wrap. Rationale: ratatui 0.29's Paragraph
+    // with `.wrap(...).scroll(...)` has no `x < area.width` guard in its
+    // render loop — if the internal WordWrapper ever emits a wrapped row
+    // wider than the pane (triggered by certain non-ASCII graphemes in
+    // our log, e.g. "√" / "—"), cells paint past the pane's right edge and
+    // bleed into the neighbouring metadata pane. Chunking by char count
+    // here caps every line at `pane_width`, so no wrap logic runs in
+    // ratatui and there is nowhere for overflow characters to land.
+    let mut wrapped: Vec<Line> = Vec::with_capacity(state.focus_log.len() * 2);
+    for raw in &state.focus_log {
+        let style = crate::theme::log_line_style(raw);
+        if raw.is_empty() || pane_width == 0 {
+            wrapped.push(Line::from(Span::styled(raw.clone(), style)));
+            continue;
+        }
+        let chars: Vec<char> = raw.chars().collect();
+        for chunk in chars.chunks(pane_width) {
+            let s: String = chunk.iter().collect();
+            wrapped.push(Line::from(Span::styled(s, style)));
+        }
+    }
+    let total_visual_rows = wrapped.len();
 
-    let para_for_count = Paragraph::new(all_lines.clone()).wrap(Wrap { trim: false });
-    let total_visual_rows = para_for_count.line_count(inner.width);
-
-    // Publish max_scroll (in visual rows) to the atomic so scroll handlers
-    // know the real cap for the current viewport + wrapped content.
-    let max_scroll = total_visual_rows.saturating_sub(visible_rows);
+    // Publish viewport + total so scroll handlers compute a correct cap.
     state
         .detail_log_viewport
         .store(visible_rows, std::sync::atomic::Ordering::Relaxed);
@@ -770,12 +787,11 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
         .detail_log_total_rows
         .store(total_visual_rows, std::sync::atomic::Ordering::Relaxed);
 
+    let max_scroll = total_visual_rows.saturating_sub(visible_rows);
     let clamped_scroll = scroll.min(max_scroll);
-    let scroll_u16 = u16::try_from(clamped_scroll).unwrap_or(u16::MAX);
-
-    let para = Paragraph::new(all_lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_u16, 0));
+    let end = (clamped_scroll + visible_rows).min(total_visual_rows);
+    let visible: Vec<Line> = wrapped[clamped_scroll..end].to_vec();
+    let para = Paragraph::new(visible);
     frame.render_widget(para, inner);
 }
 
