@@ -64,6 +64,7 @@ async fn pause_op_writes_events_jsonl() {
         run_subdir.clone(),
         ApprovalPolicy::Block,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     let worker_token = CancelToken::new();
     state
@@ -150,6 +151,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         run_subdir.clone(),
         ApprovalPolicy::Block,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
     // Kick off a blocking request on a background task (no TUI attached yet).
@@ -248,6 +250,7 @@ async fn auto_approve_policy_responds_without_tui() {
         run_subdir,
         ApprovalPolicy::AutoApprove,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     let bridge = ApprovalBridge::new(state);
     let resp = bridge
@@ -294,6 +297,7 @@ async fn auto_reject_policy_responds_without_tui() {
         run_subdir,
         ApprovalPolicy::AutoReject,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     let bridge = ApprovalBridge::new(state);
     let resp = bridge

@@ -71,6 +71,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         run_subdir,
         ApprovalPolicy::Block,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     (dir, state)
 }

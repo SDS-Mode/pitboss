@@ -147,6 +147,7 @@ pub async fn execute(
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
         notification_router,
+        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
     ));
     let control_sock = crate::control::control_socket_path(run_id, &run_dir);
     let _control = crate::control::server::start_control_server(

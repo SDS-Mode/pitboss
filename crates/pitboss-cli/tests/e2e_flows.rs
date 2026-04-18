@@ -91,6 +91,7 @@ fn mk_state(
         run_subdir,
         approval_policy,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     (run_id, state)
 }
@@ -326,6 +327,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         run_subdir,
         ApprovalPolicy::Block,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
     let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
@@ -570,6 +572,7 @@ async fn e2e_lead_reprompts_running_worker() {
         run_subdir.clone(),
         ApprovalPolicy::Block,
         None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
     let sock = socket_path_for_run(run_id, &state.manifest.run_dir);

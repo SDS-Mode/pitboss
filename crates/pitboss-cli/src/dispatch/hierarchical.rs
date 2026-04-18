@@ -119,6 +119,7 @@ pub async fn run_hierarchical(
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
         notification_router,
+        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 

@@ -1087,6 +1087,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 
@@ -1456,6 +1457,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 
@@ -1932,6 +1934,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::AutoApprove,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ));
         let resp = handle_request_approval(
             &state,

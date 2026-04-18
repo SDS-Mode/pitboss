@@ -137,6 +137,8 @@ pub struct DispatchState {
     /// where events fire (`approval_request`, `run_finished`,
     /// `budget_exceeded`).
     pub notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
+    /// In-memory shared store for hub-mediated lead ↔ worker coordination.
+    pub shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
 }
 
 impl DispatchState {
@@ -154,6 +156,7 @@ impl DispatchState {
         run_subdir: PathBuf,
         approval_policy: ApprovalPolicy,
         notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
+        shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
     ) -> Self {
         let (done_tx, _) = broadcast::channel(64);
         Self {
@@ -181,6 +184,7 @@ impl DispatchState {
             control_writer: Mutex::new(None),
             worker_counters: RwLock::new(HashMap::new()),
             notification_router,
+            shared_store,
         }
     }
 
@@ -249,6 +253,7 @@ mod tests {
             run_subdir,
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ));
         // Keep the TempDir alive for the test by leaking it — the state holds
         // PathBufs into it, and dropping `dir` at end of scope would invalidate

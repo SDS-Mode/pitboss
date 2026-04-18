@@ -648,6 +648,7 @@ mod tests {
             dir.join(run_id.to_string()),
             ApprovalPolicy::Block,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 

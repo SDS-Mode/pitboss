@@ -226,6 +226,7 @@ mod tests {
             PathBuf::from("/tmp"),
             policy,
             None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
     }
 
