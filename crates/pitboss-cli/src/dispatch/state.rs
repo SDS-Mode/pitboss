@@ -132,6 +132,11 @@ pub struct DispatchState {
     /// Per-task event counters. Mutated by pause/continue/reprompt/approval
     /// paths; read when building the final `TaskRecord`.
     pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
+    /// v0.4.1: notification router, `None` when manifest has no
+    /// `[[notification]]` sections. Cloned into every call-site scope
+    /// where events fire (`approval_request`, `run_finished`,
+    /// `budget_exceeded`).
+    pub notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
 }
 
 impl DispatchState {
@@ -174,6 +179,7 @@ impl DispatchState {
             approval_policy,
             control_writer: Mutex::new(None),
             worker_counters: RwLock::new(HashMap::new()),
+            notification_router: None,
         }
     }
 
