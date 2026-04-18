@@ -354,7 +354,7 @@ branch conflict, non-git directory). Check the stderr log.
 
 ---
 
-## Operator keybindings (pitboss-tui, v0.4.3+)
+## Operator keybindings (pitboss-tui, v0.4.4+)
 
 Navigation / views:
 - `h j k l` / arrows — navigate tiles
@@ -557,6 +557,6 @@ dispatch first and have to ask follow-ups, you've probably wasted budget.
 
 ## Version
 
-Written for pitboss `v0.4.3`. Schema may evolve; `pitboss validate` is the
+Written for pitboss `v0.4.4`. Schema may evolve; `pitboss validate` is the
 source of truth. This document should stay self-contained — if something
 here conflicts with the actual binary, the binary wins. File a PR.

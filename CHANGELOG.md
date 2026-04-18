@@ -7,6 +7,48 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-04-18
+
+### Added
+- **Dependabot configuration** (`.github/dependabot.yml`) — weekly cargo
+  + github-actions updates, patch/minor grouped into a single rollup PR,
+  major bumps opened individually for per-ecosystem review. GitHub-native
+  Dependabot alerts handle security advisories.
+
+### Fixed
+- **MCP lease cleanup on connection drop.** When an MCP session
+  terminates (worker crash, bridge killed, operator Ctrl-C), every
+  lease held by that session's actor is now released immediately
+  instead of waiting for the lease TTL. Implemented via a
+  per-connection `actor_id` slot on `PitbossHandler` populated from
+  `_meta` on the first tool call; the accept loop calls
+  `SharedStore::release_all_for_actor` after `rmcp serve` returns.
+  The long-standing `#[ignore]`'d integration test is now live and
+  passing.
+- **Resume with cleaned worktree fails fast.** `pitboss resume` on a
+  hierarchical run whose lead worktree was cleaned (the default
+  `worktree_cleanup = "on_success"` behavior) now errors clearly
+  with a remediation hint, instead of respawning claude into a new
+  directory and letting `claude --resume <session>` cryptically fail
+  to locate its session data. Future resumes: set
+  `[run] worktree_cleanup = "never"` on the original manifest.
+
+### Changed
+- **Price table matches by model family, not exact revision.** Older
+  and future same-family revisions (`claude-opus-4-5`,
+  `claude-sonnet-4-9`, etc.) now resolve to family rates
+  automatically instead of returning `None` and rendering "—". Add a
+  more specific branch before the generic family match if pricing
+  ever splits within a family.
+- **CI workflow deps updated** (via Dependabot): `actions/checkout`
+  v4 → v6, `softprops/action-gh-release` v2 → v3. Clears the Node.js
+  20 deprecation warning on every run.
+- **Compile-time parity between `TokenUsageSchema` and
+  `pitboss_core::parser::TokenUsage`** via bidirectional `From` impls
+  with exhaustive destructuring + a `const _` size-eq assertion.
+  Field rename/add/remove on either side now breaks the build
+  loudly instead of silently drifting the MCP tool schema.
+
 ## [0.4.3] — 2026-04-18
 
 ### Added
