@@ -105,13 +105,57 @@ pub struct KvSetResult {
     pub version: u64,
 }
 
+// ---------- Path helpers ----------
+
+/// Rewrite `/peer/self/...` to `/peer/<caller_id>/...` so workers can use
+/// the generic `self` keyword without knowing their own actor_id.
+///
+/// Workers don't have a natural way to discover their actor_id (the
+/// dispatcher assigns UUIDs for dynamically-spawned workers). Before this
+/// helper, a task-prompt instruction like "write your findings to
+/// `/peer/p0-4/findings.md`" would fail authz because the worker's actual
+/// actor_id is a UUID, not `p0-4`. Workers would then narrate about the
+/// mismatch and waste turns experimenting with paths. `self` is an
+/// always-correct alias.
+///
+/// Applies to both `/peer/self/...` (single-segment) and `/peer/self`
+/// (exact). Any other path is returned unchanged.
+fn resolve_peer_self(path: &str, caller_id: &str) -> String {
+    if path == "/peer/self" {
+        return format!("/peer/{caller_id}");
+    }
+    if let Some(rest) = path.strip_prefix("/peer/self/") {
+        return format!("/peer/{caller_id}/{rest}");
+    }
+    path.to_string()
+}
+
+/// Reject `self`-aliased paths when identity is missing. Used by read-only
+/// tools where `meta` is optional — if a caller omits `_meta` AND uses
+/// `/peer/self/...`, we can't resolve and return a clear error instead of
+/// silently reading the literal path `/peer/self/...`.
+fn require_identity_for_self(path: &str, meta: Option<&MetaField>) -> Result<String, StoreError> {
+    if path.starts_with("/peer/self") {
+        let Some(m) = meta else {
+            return Err(StoreError::InvalidArg(
+                "/peer/self/... requires caller identity (missing _meta). \
+                 Prefer /peer/<actor_id>/... when calling without identity."
+                    .into(),
+            ));
+        };
+        return Ok(resolve_peer_self(path, &m.actor_id));
+    }
+    Ok(path.to_string())
+}
+
 // ---------- Handlers ----------
 
 pub async fn handle_kv_get(
     store: &Arc<SharedStore>,
     args: KvGetArgs,
 ) -> Result<Option<Entry>, StoreError> {
-    Ok(store.get(&args.path).await)
+    let path = require_identity_for_self(&args.path, args.meta.as_ref())?;
+    Ok(store.get(&path).await)
 }
 
 pub async fn handle_kv_set(
@@ -119,8 +163,9 @@ pub async fn handle_kv_set(
     args: KvSetArgs,
 ) -> Result<KvSetResult, StoreError> {
     let caller: CallerIdentity = args.meta.into();
+    let path = resolve_peer_self(&args.path, &caller.id);
     let version = store
-        .authorized_set(&args.path, args.value, &caller, args.override_flag)
+        .authorized_set(&path, args.value, &caller, args.override_flag)
         .await?;
     Ok(KvSetResult { version })
 }
@@ -130,9 +175,10 @@ pub async fn handle_kv_cas(
     args: KvCasArgs,
 ) -> Result<super::CasResult, StoreError> {
     let caller: CallerIdentity = args.meta.into();
+    let path = resolve_peer_self(&args.path, &caller.id);
     store
         .authorized_cas(
-            &args.path,
+            &path,
             args.expected_version,
             args.new_value,
             &caller,
@@ -145,16 +191,18 @@ pub async fn handle_kv_list(
     store: &Arc<SharedStore>,
     args: KvListArgs,
 ) -> Result<Vec<ListMetadata>, StoreError> {
-    store.list(&args.glob).await
+    let glob = require_identity_for_self(&args.glob, args.meta.as_ref())?;
+    store.list(&glob).await
 }
 
 pub async fn handle_kv_wait(
     store: &Arc<SharedStore>,
     args: KvWaitArgs,
 ) -> Result<Entry, StoreError> {
+    let path = require_identity_for_self(&args.path, args.meta.as_ref())?;
     store
         .wait(
-            &args.path,
+            &path,
             Duration::from_secs(u64::from(args.timeout_secs)),
             args.min_version,
         )
@@ -182,4 +230,73 @@ pub async fn handle_lease_release(
 ) -> Result<(), StoreError> {
     let caller: CallerIdentity = args.meta.into();
     store.lease_release(&args.lease_id, &caller).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_peer_self_rewrites_exact_match() {
+        assert_eq!(
+            resolve_peer_self("/peer/self", "worker-abc"),
+            "/peer/worker-abc"
+        );
+    }
+
+    #[test]
+    fn resolve_peer_self_rewrites_subpath() {
+        assert_eq!(
+            resolve_peer_self("/peer/self/findings.md", "worker-abc"),
+            "/peer/worker-abc/findings.md"
+        );
+    }
+
+    #[test]
+    fn resolve_peer_self_rewrites_nested_subpath() {
+        assert_eq!(
+            resolve_peer_self("/peer/self/out/a/b.json", "worker-abc"),
+            "/peer/worker-abc/out/a/b.json"
+        );
+    }
+
+    #[test]
+    fn resolve_peer_self_leaves_other_paths_untouched() {
+        assert_eq!(resolve_peer_self("/peer/other/x", "me"), "/peer/other/x");
+        assert_eq!(resolve_peer_self("/shared/foo", "me"), "/shared/foo");
+        assert_eq!(resolve_peer_self("/ref/x", "me"), "/ref/x");
+    }
+
+    #[test]
+    fn resolve_peer_self_does_not_rewrite_peer_selfx() {
+        // Path `/peer/selfish/...` is a different peer id that happens to
+        // start with "self" — must NOT be rewritten.
+        assert_eq!(
+            resolve_peer_self("/peer/selfish/out", "me"),
+            "/peer/selfish/out"
+        );
+    }
+
+    #[test]
+    fn require_identity_rejects_self_without_meta() {
+        let err = require_identity_for_self("/peer/self/x", None).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidArg(_)));
+    }
+
+    #[test]
+    fn require_identity_allows_non_self_without_meta() {
+        // Reads to any other path are fine without meta.
+        let out = require_identity_for_self("/shared/x", None).unwrap();
+        assert_eq!(out, "/shared/x");
+    }
+
+    #[test]
+    fn require_identity_rewrites_self_with_meta() {
+        let meta = MetaField {
+            actor_id: "worker-abc".into(),
+            actor_role: ActorRole::Worker,
+        };
+        let out = require_identity_for_self("/peer/self/x", Some(&meta)).unwrap();
+        assert_eq!(out, "/peer/worker-abc/x");
+    }
 }

@@ -188,7 +188,7 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "Read a value from the shared store. Returns { entry: null } when the key is missing."
+        description = "Read a value from the shared store. Returns { entry: null } when the key is missing. Paths starting with /peer/self/ are resolved against the caller's actor_id."
     )]
     async fn kv_get(
         &self,
@@ -204,7 +204,7 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "Write a value to the shared store. Namespace-authz checked against the caller's actor_role + actor_id."
+        description = "Write a value to the shared store. Namespace-authz checked against the caller's actor_role + actor_id. Workers should write to /peer/self/... (auto-resolves to /peer/<your-actor-id>/...) or /shared/..."
     )]
     async fn kv_set(
         &self,
@@ -217,7 +217,7 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "Atomic compare-and-swap. expected_version=0 means the key must not exist."
+        description = "Atomic compare-and-swap. expected_version=0 means the key must not exist. Paths starting with /peer/self/ are resolved against the caller's actor_id."
     )]
     async fn kv_cas(
         &self,
@@ -230,7 +230,7 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "List metadata of entries matching a glob pattern. * is single-segment; ** is cross-segment. Caps at 1000 results. Returns { entries: [...] }."
+        description = "List metadata of entries matching a glob pattern. * is single-segment; ** is cross-segment. Caps at 1000 results. Returns { entries: [...] }. Patterns starting with /peer/self/ are resolved against the caller's actor_id (requires _meta)."
     )]
     async fn kv_list(
         &self,
@@ -245,7 +245,7 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "Block until a key is written (or exists with version >= min_version). Times out."
+        description = "Block until a key is written (or exists with version >= min_version). Times out. Paths starting with /peer/self/ are resolved against the caller's actor_id."
     )]
     async fn kv_wait(
         &self,

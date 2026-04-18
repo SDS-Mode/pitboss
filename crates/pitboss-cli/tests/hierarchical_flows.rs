@@ -99,7 +99,9 @@ async fn mcp_spawn_and_list_round_trip() {
     assert!(task_id.starts_with("worker-"));
 
     let list_result = client.call_tool("list_workers", json!({})).await.unwrap();
-    let list = list_result.as_array().unwrap();
+    // list_workers returns `{ workers: [...] }` — MCP spec requires
+    // structuredContent to be a record, not a bare array.
+    let list = list_result["workers"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["task_id"].as_str().unwrap(), task_id);
 
