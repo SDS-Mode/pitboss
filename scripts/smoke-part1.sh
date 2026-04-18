@@ -94,7 +94,8 @@ echo
 # --------------------------------------------------------------------
 # 1.1 Version
 OUT=$("$PITBOSS" version 2>&1); CODE=$?
-if [ "$CODE" = "0" ] && [ "$OUT" = "pitboss 0.1.0" ]; then
+# Validate shape, not a pinned version: avoids breaking on every bump.
+if [ "$CODE" = "0" ] && [[ "$OUT" =~ ^pitboss\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     say PASS "1.1 version"
     record "1.1 version" PASS ""
 else
