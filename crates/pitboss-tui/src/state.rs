@@ -234,11 +234,10 @@ impl AppState {
             return;
         };
         let task_id = tile.id.clone();
-        // Git diff is only meaningful for tasks that settled with a
-        // worktree_path recorded in summary.jsonl. For in-flight tasks
-        // the field is None (the record is written on settle), so we skip.
-        // Follow-up: add a <run-dir>/tasks/<id>/worktree.path file written
-        // at spawn time so in-flight diffs work too.
+        // worktree_path is populated for in-flight tiles via the
+        // `worktree.path` sidecar (written by the dispatcher at spawn
+        // time) and for completed tiles via TaskRecord.worktree_path —
+        // so this diff runs for both live and settled workers.
         if let Some(worktree) = tile.worktree_path.as_deref() {
             if let Some(summary) = compute_git_diff_summary(worktree) {
                 self.cached_git_diff.insert(task_id.clone(), summary);

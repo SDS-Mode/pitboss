@@ -162,6 +162,16 @@ pub async fn run_hierarchical(
     let lead_log_path = lead_task_dir.join("stdout.log");
     let lead_stderr_path = lead_task_dir.join("stderr.log");
 
+    // Persist the lead's worktree path so the TUI can run mid-flight
+    // git-diff against it (same pattern as workers — see mcp/tools.rs).
+    if lead.use_worktree {
+        let _ = tokio::fs::write(
+            lead_task_dir.join("worktree.path"),
+            lead_cwd.to_string_lossy().as_bytes(),
+        )
+        .await;
+    }
+
     let spawn_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
         args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
