@@ -6,13 +6,14 @@
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
 
-**v0.4.1** ships the notifications plugin system (webhook / Slack /
-Discord sinks, `[[notification]]` config), plus a v0.4.1.x TUI polish
-pass (word-wrap, semantic log-line coloring, theme module, refreshed
-keybinding legends). Builds on v0.4.0's live control plane:
-cancel/pause/continue/reprompt and operator-approval interrupts. See
-CHANGELOG + AGENTS.md for keybindings, MCP tools, and notification
-config.
+**v0.4.2** adds the worker shared store (seven `mcp__pitboss__kv_*` +
+`lease_*` tools with namespaced authz, `/peer/self/` path alias), a
+unified TUI Detail view (`Enter` on a tile — metadata + live git diff
++ scrollable log), live token & model stats for in-flight workers,
+tile signifiers (model-family color swatch + role glyph), and fixes
+the kill-command cascade so `cancel_run` actually terminates workers.
+See `CHANGELOG.md` for the full list and `AGENTS.md` for MCP tool
+reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
@@ -43,7 +44,7 @@ Pre-built binaries are attached to every GitHub release.
 ```bash
 # x86_64 Linux
 mkdir -p ~/.local/bin
-curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.4.1-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.4.2-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz -C ~/.local/bin
 
 pitboss version

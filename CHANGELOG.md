@@ -7,6 +7,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-04-18
+
 ### Added
 - **Worker shared store.** Per-run, in-memory, hub-mediated coordination
   surface for the lead and workers. Seven new MCP tools
@@ -21,6 +23,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   per run; optional finalize-time dump to `<run-dir>/shared-store.json`
   via `[run] dump_shared_store = true`. See
   `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
+- **Unified TUI Detail view** (press `Enter` on a tile). Replaces the
+  legacy `L` log-overlay + Snap-in modes with a single split-pane view:
+  left pane shows identity, lifecycle, token totals + cost, activity
+  counters (tool calls / results / top tools), and a one-shot
+  `git diff --shortstat` summary. Right pane shows the scrollable log.
 - **`/peer/self/` path alias for shared-store writes.** Workers don't
   have a natural way to discover their own actor_id (UUIDs are assigned
   at spawn for dynamically-spawned workers). Paths starting with
@@ -28,6 +35,47 @@ This project uses [Semantic Versioning](https://semver.org/).
   task prompts can say "write to `/peer/self/findings.md`" without
   needing to template an id. Applies to `kv_get`/`kv_set`/`kv_cas`/
   `kv_list`/`kv_wait`.
+- **In-flight git diff.** Dispatcher writes
+  `<run-dir>/tasks/<task-id>/worktree.path` at worker/lead spawn time,
+  so the Detail pane's GIT DIFF section shows live files-changed /
+  +lines / -lines before the TaskRecord lands on finalize.
+- **In-flight token + model stats.** Watcher scans each task's
+  `stdout.log` for per-turn `message.usage` and `message.model` so
+  token totals + model family populate from the first assistant turn,
+  not only after finalize. Dynamic workers (not in `resolved.json`)
+  finally get their model surfaced.
+- **Tile signifiers.** Every grid tile now shows a
+  model-family color swatch (opus = magenta, sonnet = blue, haiku =
+  green) and a role glyph in its title (★ lead, ▸ worker), replacing
+  the old `[LEAD]` text prefix.
+- **Log pane QoL.** Per-event caps raised 3-5× with a `… +N chars`
+  truncation marker; scroll-back buffer 500 → 2000 lines; new `J`/`K`
+  keybinds scroll 5 rows (fills the gap between `j`/`k` = 1 and
+  Ctrl-D/U = 10); mouse wheel bumped from 3 → 5 rows/tick.
+- **Reset script for recurring dogfood.** `scripts/reset-ketchup-p0-dogfood.sh`
+  tears down stale pitboss worktrees + `demo/ketchup-p0-*` branches
+  and resets the ketchup checkout to the `dogfood/p0-baseline` tag so
+  the 5-worker P0 refactor test is reproducible.
+
+### Fixed
+- **Kill commands now actually kill.** Two compounding bugs unified
+  under one fix: (a) TUI's control-socket `send_op` ran on a fresh
+  tokio runtime per call while the `ControlClient` writer was
+  registered with the TUI startup runtime — cross-runtime async I/O
+  silently hung. Switched to a stashed `Handle::spawn`. (b) `CancelRun`
+  only terminated the lead-only `state.cancel` token; worker cancel
+  tokens in `state.worker_cancels` were not cascaded. Both the TUI-driven
+  `CancelRun` op and `dispatch/hierarchical.rs` finalize now iterate
+  and terminate every worker token, so workers actually stop.
+- **TUI log-pane bleed.** Detail-view log lines containing non-ASCII
+  graphemes (e.g. `√`, `—`) could land cells past the pane's right
+  edge into the metadata pane. ratatui 0.29's `Paragraph::render_text`
+  has no `x < area.width` guard; we now paint via `Buffer::set_stringn`
+  with an explicit `max_width` for guaranteed containment.
+- **TUI scroll units.** Detail log scroll is now tracked in visual
+  rows (post-wrap) rather than log-line indices, so long wrapped lines
+  don't eat scroll budget and `jump-to-bottom` actually shows the end
+  of the log regardless of wrap.
 
 ### Changed
 - **MCP `structuredContent` is now always a record.** The shared-store
@@ -35,14 +83,18 @@ This project uses [Semantic Versioning](https://semver.org/).
   bare `null` / arrays, which Claude Code's MCP client rejected with
   `{"code":"invalid_type","message":"expected record, received ..."}`.
   Return shapes are now `{ entry: ... }`, `{ entries: [...] }`, and
-  `{ workers: [...] }` respectively. Existing callers that expected
-  bare arrays/nulls need to unwrap one level.
+  `{ workers: [...] }` respectively. **Breaking for callers** that
+  expected bare arrays/nulls — unwrap one level.
 - **Shared-store `Forbidden` errors now include caller's actor_id and
   a remediation hint.** Previously, "workers may write only their own
   `/peer/<self>/*`" left workers guessing what `<self>` resolves to.
   The message now names both the target peer and the caller's actual
   `actor_id`, and points at `/peer/self/...` as the always-correct
   path.
+- **Run id abbreviation in TUI title bar** switched from the
+  leading 8 chars (`019da1b8…`) to the last UUID segment
+  (`…146e21f77dd8`). UUIDv7 time-prefixes collide across sibling runs
+  from the same minute; the random tail actually differentiates.
 
 ## [0.4.1] — 2026-04-18
 
