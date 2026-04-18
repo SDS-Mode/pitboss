@@ -557,15 +557,13 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 }
 
 fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState, scroll: u16) {
-    // Wipe the ENTIRE frame first. Without this, the 5% margins outside
-    // the centered overlay keep showing tile-grid content from the
-    // earlier render_body pass — visible as character bleed along the
-    // left/right edges especially during scroll. The second Clear on
-    // `overlay_area` below is kept for safety even though it's redundant
-    // after the full-frame wipe.
-    frame.render_widget(Clear, area);
-
     let overlay_area = centered_rect(90, 85, area);
+
+    // Clear only the overlay area. The underlying title bar + tile grid
+    // remain visible in the ~5% margins — that's the modal-overlay look
+    // consistent with the help / run-picker / approval overlays. Some
+    // static tile content may show through at the edges; that's the
+    // cost of the floating-modal design, not a render bug.
     frame.render_widget(Clear, overlay_area);
 
     let focused_id = state.focused_tile().map_or("—", |t| t.id.as_str());
