@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::state::{AppSnapshot, AppState, Mode};
 use crate::watcher;
@@ -150,22 +150,31 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                     }
                 }
                 Event::Mouse(mouse) => {
-                    // Only wire wheel scroll in the detail view for now.
-                    // Tile grid mouse clicks, drag-select, etc. can be
-                    // added later if useful.
-                    if matches!(state.mode, Mode::Detail { .. }) {
-                        match mouse.kind {
-                            // Wheel scroll: 5 rows/tick — matches `J`/`K`
-                            // shift-scroll cadence and feels natural for
-                            // quick log navigation without overshooting.
-                            MouseEventKind::ScrollDown => {
-                                state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
-                            }
-                            MouseEventKind::ScrollUp => {
-                                state.detail_scroll_up(5);
-                            }
-                            _ => {}
+                    match (state.mode.clone(), mouse.kind) {
+                        // Wheel scroll inside Detail view — 5 rows/tick,
+                        // matches J/K shift-scroll cadence.
+                        (Mode::Detail { .. }, MouseEventKind::ScrollDown) => {
+                            state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
                         }
+                        (Mode::Detail { .. }, MouseEventKind::ScrollUp) => {
+                            state.detail_scroll_up(5);
+                        }
+                        // Left-click on a tile in the grid view: focus it
+                        // and enter Detail (equivalent to hjkl-nav + Enter).
+                        // Clicking the already-focused tile also enters
+                        // Detail — same muscle memory as double-click on
+                        // desktop icons.
+                        (Mode::Normal, MouseEventKind::Down(MouseButton::Left)) => {
+                            if let Some(idx) = state.tile_at(mouse.column, mouse.row) {
+                                state.focus = idx;
+                                if let Some(tile) = state.focused_tile() {
+                                    let _ = focus_tx.send(tile.id.clone());
+                                }
+                                state.enter_detail();
+                                dirty = true;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}

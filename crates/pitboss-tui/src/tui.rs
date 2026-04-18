@@ -385,6 +385,10 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
         .constraints(row_constraints)
         .split(area);
 
+    // Refresh the hit-test cache for mouse click → tile lookup. Cleared
+    // each render so it reflects the current layout even after a resize.
+    let mut hit_rects: Vec<(usize, Rect)> = Vec::with_capacity(n);
+
     for row in 0..rows {
         let cols_layout = Layout::default()
             .direction(Direction::Horizontal)
@@ -397,8 +401,14 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
                 break;
             }
             let focused = tile_idx == state.focus;
-            render_tile(frame, cols_layout[col], state, tile_idx, focused);
+            let tile_rect = cols_layout[col];
+            render_tile(frame, tile_rect, state, tile_idx, focused);
+            hit_rects.push((tile_idx, tile_rect));
         }
+    }
+
+    if let Ok(mut cache) = state.tile_hit_rects.lock() {
+        *cache = hit_rects;
     }
 }
 
@@ -1246,6 +1256,7 @@ mod tests {
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
             store_activity: std::collections::HashMap::new(),
+            tile_hit_rects: std::sync::Mutex::new(Vec::new()),
         }
     }
 
