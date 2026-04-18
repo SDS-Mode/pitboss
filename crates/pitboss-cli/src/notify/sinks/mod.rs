@@ -2,15 +2,15 @@
 
 #![allow(dead_code)]
 
+pub mod discord;
 pub mod log;
 pub mod slack;
 pub mod webhook;
-pub mod discord;
 
+pub use discord::DiscordSink;
 pub use log::LogSink;
 pub use slack::SlackSink;
 pub use webhook::WebhookSink;
-pub use discord::DiscordSink;
 
 use std::sync::Arc;
 
