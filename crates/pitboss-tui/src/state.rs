@@ -265,10 +265,14 @@ impl AppState {
         else {
             return;
         };
-        // Cap scroll at max_scroll so we don't accumulate a sentinel.
-        *scroll = (scroll.saturating_add(delta)).min(max_scroll);
-        // If we've reached max_scroll, user is at the bottom; re-enable
-        // auto-follow so incoming lines continue to scroll into view.
+        // Always re-clamp scroll to max_scroll before the op. state.scroll
+        // can legitimately be above max_scroll right after auto-follow
+        // (we just set it to `max_scroll` there, but `total` may have
+        // shrunk in between, or a prior op left it high). Without this
+        // re-clamp, decrementing from an above-range value produces no
+        // visible change until scroll drops below max_scroll.
+        let current = (*scroll).min(max_scroll);
+        *scroll = current.saturating_add(delta).min(max_scroll);
         if *scroll >= max_scroll {
             *at_bottom = true;
         }
@@ -285,9 +289,6 @@ impl AppState {
     /// value as-is.
     pub fn detail_scroll_up(&mut self, delta: usize) {
         let total = self.focus_log.len();
-        // Real viewport (log pane inner height) published by render. 0 on
-        // the first key press before any render has run; fall back to a
-        // safe default so the clamp below still works.
         let viewport = self
             .detail_log_viewport
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -301,14 +302,14 @@ impl AppState {
         else {
             return;
         };
-        if *at_bottom {
-            // Leaving auto-follow: clamp scroll to the real max so `k`
-            // produces immediate visible movement. Without this the first
-            // `k` decrements a sentinel past the render-time clamp
-            // boundary and the user sees nothing move.
-            *scroll = (*scroll).min(max_scroll);
-        }
-        *scroll = scroll.saturating_sub(delta);
+        // ALWAYS clamp to max_scroll before decrementing (not just when
+        // leaving auto-follow). If state.scroll was left above max_scroll
+        // by any earlier code path, subsequent ups decrement from that
+        // high value and the user sees no visible change until scroll
+        // drops below max_scroll — the symptom the user reports as
+        // "scroll doesn't do anything."
+        let current = (*scroll).min(max_scroll);
+        *scroll = current.saturating_sub(delta);
         *at_bottom = false;
     }
 
@@ -329,6 +330,11 @@ impl AppState {
     /// Jump to the bottom of the log in `Detail` mode; re-enables auto-scroll.
     pub fn detail_jump_bottom(&mut self, _visible_rows: usize) {
         let total = self.focus_log.len();
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -337,10 +343,7 @@ impl AppState {
         else {
             return;
         };
-        // Set scroll to total_lines. Render clamps to max_scroll
-        // (= total - visible_rows), which is the correct bottom position.
-        // Keep `at_bottom = true` so auto-follow tracks new lines.
-        *scroll = total;
+        *scroll = max_scroll;
         *at_bottom = true;
     }
 
@@ -353,6 +356,11 @@ impl AppState {
     /// visible. Does nothing if the user has scrolled up.
     pub fn detail_auto_scroll(&mut self, _visible_rows: usize) {
         let total = self.focus_log.len();
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             at_bottom,
@@ -362,9 +370,11 @@ impl AppState {
             return;
         };
         if at_bottom {
-            // scroll = total_lines. Render clamps to max_scroll for the
-            // correct bottom position.
-            *scroll = total;
+            // Pin to exact max_scroll. state.scroll stays within
+            // [0, max_scroll] — the scroll handlers always clamp first
+            // but they're simpler to reason about when auto-follow
+            // doesn't introduce an invalid-scroll interval.
+            *scroll = max_scroll;
         }
     }
 
@@ -798,6 +808,10 @@ mod tests {
     #[test]
     fn scroll_up_decrements() {
         let mut state = make_state_with_tile("t");
+        state.focus_log = (0..20).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_viewport
+            .store(10, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 3,
@@ -843,6 +857,9 @@ mod tests {
     fn detail_jump_bottom_enables_auto_scroll() {
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..50).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_viewport
+            .store(10, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 5,
@@ -863,13 +880,8 @@ mod tests {
             state.mode
         );
         if let Mode::Detail { scroll, .. } = &state.mode {
-            // New contract: scroll is set past the end (total + 1024) so
-            // Paragraph::scroll pins at the true last row regardless of
-            // the actual viewport height.
-            assert!(
-                *scroll >= 50,
-                "scroll should be >= total log lines, got {scroll}"
-            );
+            // scroll == max_scroll = total(50) - viewport(10) = 40.
+            assert_eq!(*scroll, 40, "scroll should be max_scroll (40)");
         }
     }
 
@@ -877,6 +889,9 @@ mod tests {
     fn detail_auto_scroll_advances_when_at_bottom() {
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..30).map(|i| format!("line {i}")).collect();
+        state
+            .detail_log_viewport
+            .store(10, std::sync::atomic::Ordering::Relaxed);
         state.mode = Mode::Detail {
             task_id: "t".to_string(),
             scroll: 20,
@@ -888,15 +903,10 @@ mod tests {
         state.detail_auto_scroll(10);
 
         if let Mode::Detail { scroll, .. } = &state.mode {
-            // New contract: scroll is pinned past the end so Paragraph::scroll
-            // keeps the latest content visible. We check >= 35 rather than
-            // an exact value.
-            assert!(
-                *scroll >= 35,
-                "auto-scroll should advance past current log length, got {scroll}"
-            );
+            // scroll == max_scroll = total(35) - viewport(10) = 25.
+            assert_eq!(*scroll, 25, "auto-scroll should set scroll to max_scroll");
         } else {
-            panic!("not in SnapIn mode");
+            panic!("not in Detail mode");
         }
     }
 
