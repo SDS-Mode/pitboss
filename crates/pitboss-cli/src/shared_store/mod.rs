@@ -118,46 +118,26 @@ impl SharedStore {
     }
 
     pub async fn list(&self, pattern: &str) -> Result<Vec<ListMetadata>, StoreError> {
-        // Glob pattern matching with custom single-segment (`*`) vs cross-segment (`**`) semantics
-        let is_double_star = pattern.contains("**");
         let pat = glob::Pattern::new(pattern)
             .map_err(|e| StoreError::InvalidArg(format!("bad glob: {e}")))?;
-
+        let opts = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
         let entries = self.entries.read().await;
         let mut out: Vec<ListMetadata> = entries
             .iter()
             .filter_map(|(key, entry)| {
                 let path = key.to_string_lossy().to_string();
-                if pat.matches(&path) {
-                    // For single-segment patterns (without **), ensure no `/` in the matched part
-                    if !is_double_star {
-                        // Find the base path (everything before the last `/`)
-                        if let Some(base_end) = pattern.rfind('/') {
-                            let pattern_base = &pattern[..=base_end];
-                            if !path.starts_with(pattern_base)
-                                || !path[pattern_base.len()..].contains('/')
-                            {
-                                // Path matches and has no additional `/` in the wildcard part
-                                return Some(ListMetadata {
-                                    path,
-                                    version: entry.version,
-                                    written_by: entry.written_by.clone(),
-                                    written_at: entry.written_at,
-                                    size_bytes: entry.value.len() as u64,
-                                });
-                            }
-                        }
-                    } else {
-                        // For **, allow any depth
-                        return Some(ListMetadata {
-                            path,
-                            version: entry.version,
-                            written_by: entry.written_by.clone(),
-                            written_at: entry.written_at,
-                            size_bytes: entry.value.len() as u64,
-                        });
-                    }
-                    None
+                if pat.matches_with(&path, opts) {
+                    Some(ListMetadata {
+                        path,
+                        version: entry.version,
+                        written_by: entry.written_by.clone(),
+                        written_at: entry.written_at,
+                        size_bytes: entry.value.len() as u64,
+                    })
                 } else {
                     None
                 }
