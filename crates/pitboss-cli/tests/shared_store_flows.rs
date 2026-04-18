@@ -394,18 +394,132 @@ async fn release_all_for_actor_clears_held_leases() {
 // Deferred: real rmcp-driven connection-drop
 // ---------------------------------------------------------------------------
 
-/// TODO(shared-store): wire SharedStore::release_all_for_actor into the rmcp
-/// server's per-connection lifecycle (fire it when a connection's tool-call
-/// stream ends). Until that lands, lease cleanup relies on TTL expiration.
+/// End-to-end test of the per-connection lease-cleanup hook:
+///   1. Session A (worker-A) acquires lease "job-1" with a long TTL.
+///   2. Session A closes.
+///   3. Session B (worker-B) can immediately acquire "job-1" — because
+///      `SharedStore::release_all_for_actor("worker-A")` fired as part of
+///      the connection-drop cleanup, not because the TTL elapsed.
 ///
-/// The shape of the future test:
-///   1. Spawn a `pitboss mcp-bridge --actor-id worker-A --actor-role worker`
-///      subprocess that acquires a long-TTL lease.
-///   2. Kill the bridge process.
-///   3. Assert worker-B's lease_acquire for the same name succeeds within a
-///      short wait window (well before the TTL would naturally expire).
+/// Without the cleanup hook, worker-B's acquire would return `acquired=false`
+/// until the 3600-second TTL expired — the pre-v0.4.3 behavior we shipped
+/// with a `#[ignore]` guard on this test.
 #[tokio::test]
-#[ignore]
 async fn lease_released_when_mcp_connection_drops() {
-    panic!("not yet implemented — requires rmcp per-connection lifecycle wiring");
+    use fake_mcp_client::FakeMcpClient;
+    use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState};
+    use pitboss_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
+    use pitboss_cli::manifest::schema::{Effort, WorktreeCleanup};
+    use pitboss_cli::mcp::{socket_path_for_run, McpServer};
+    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use pitboss_core::process::ProcessSpawner;
+    use pitboss_core::session::CancelToken;
+    use pitboss_core::store::{JsonFileStore, SessionStore};
+    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    // Minimal dispatch state wrapping a SharedStore. Lead + spawner are
+    // placeholders — we only drive lease_acquire, which doesn't touch
+    // worker machinery.
+    let dir = TempDir::new().unwrap();
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "p".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::Low,
+        tools: vec![],
+        timeout_secs: 60,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(5.0),
+        lead_timeout_secs: None,
+        approval_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+    };
+    let store_trait: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().into()));
+    let run_id = Uuid::now_v7();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(FakeScript::new()));
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store_trait,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        Arc::new(WorktreeManager::new()),
+        CleanupPolicy::Never,
+        dir.path().join(run_id.to_string()),
+        ApprovalPolicy::Block,
+        None,
+        Arc::new(SharedStore::new()),
+    ));
+
+    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Session A: acquire with a very long TTL so only the connection-drop
+    // cleanup can release it within the test timeframe.
+    let mut client_a = FakeMcpClient::connect(&socket).await.unwrap();
+    let acq_a = client_a
+        .call_tool(
+            "lease_acquire",
+            json!({
+                "name": "job-1",
+                "ttl_secs": 3600,
+                "_meta": { "actor_id": "worker-A", "actor_role": "worker" }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        acq_a["acquired"].as_bool().unwrap_or(false),
+        "session A should get the lease: {acq_a}"
+    );
+
+    client_a.close().await.unwrap();
+
+    // Give the server a beat to process the disconnect. The cleanup fires
+    // after `running.waiting()` returns in the accept-loop task, and that's
+    // one tokio task hop away from our test thread.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Session B: should be able to take the lease — it's free because A
+    // disconnected, not because 3600s elapsed.
+    let mut client_b = FakeMcpClient::connect(&socket).await.unwrap();
+    let acq_b = client_b
+        .call_tool(
+            "lease_acquire",
+            json!({
+                "name": "job-1",
+                "ttl_secs": 60,
+                "_meta": { "actor_id": "worker-B", "actor_role": "worker" }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        acq_b["acquired"].as_bool().unwrap_or(false),
+        "lease should be free after session A dropped: {acq_b}"
+    );
+    client_b.close().await.unwrap();
 }
