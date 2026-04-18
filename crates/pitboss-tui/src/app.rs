@@ -194,7 +194,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
 
     match state.mode {
         Mode::Normal => handle_normal(state, code),
-        Mode::ViewingLog => handle_viewing_log(state, code),
+        Mode::ViewingLog { .. } => handle_viewing_log(state, code, modifiers),
         Mode::Help => handle_help(state, code),
         Mode::PickingRun { .. } => handle_picking_run(state, code),
         Mode::SnapIn { .. } => handle_snap_in(state, code, modifiers),
@@ -216,7 +216,7 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
         KeyCode::Char('j') | KeyCode::Down => state.focus_down(),
 
         // Log overlay
-        KeyCode::Char('L') => state.mode = Mode::ViewingLog,
+        KeyCode::Char('L') => state.mode = Mode::ViewingLog { scroll: 0 },
 
         // Help overlay
         KeyCode::Char('?') => state.mode = Mode::Help,
@@ -319,10 +319,25 @@ fn handle_snap_in(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) 
     Action::Continue
 }
 
-fn handle_viewing_log(state: &mut AppState, code: KeyCode) -> Action {
+fn handle_viewing_log(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
     match code {
         KeyCode::Char('L') | KeyCode::Esc => state.mode = Mode::Normal,
         KeyCode::Char('q') => return Action::Quit,
+
+        // Vim-style scroll: j/k single line, Ctrl-D/Ctrl-U page, g/G edges.
+        KeyCode::Char('j') | KeyCode::Down => state.log_scroll_down(1),
+        KeyCode::Char('k') | KeyCode::Up => state.log_scroll_up(1),
+        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.log_scroll_down(10);
+        }
+        KeyCode::PageDown => state.log_scroll_down(10),
+        KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.log_scroll_up(10);
+        }
+        KeyCode::PageUp => state.log_scroll_up(10),
+        KeyCode::Char('g') => state.log_scroll_top(),
+        KeyCode::Char('G') => state.log_scroll_bottom(),
+
         _ => {}
     }
     Action::Continue

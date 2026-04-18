@@ -197,7 +197,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // Overlays (drawn last so they appear on top).
     match &state.mode {
-        Mode::ViewingLog => render_log_overlay(frame, area, state),
+        Mode::ViewingLog { scroll } => render_log_overlay(frame, area, state, *scroll),
         Mode::Help => render_help_overlay(frame, area),
         Mode::PickingRun { selected } => render_run_picker_overlay(frame, area, state, *selected),
         Mode::ConfirmKill { target } => render_confirm_kill(frame, area, target),
@@ -500,10 +500,6 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
         .split(area);
 
     let total_lines = state.focus_log.len();
-    let visible_rows = chunks[1].height as usize;
-
-    // N = last visible line index (1-based, capped at total).
-    let n = (scroll + visible_rows).min(total_lines);
 
     // Status of the snapped tile (if it still exists).
     let status_str = state
@@ -513,7 +509,8 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
         .map_or("?", |t| status_label(&t.status));
 
     // --- Title bar ---
-    let title_text = format!(" Snap-in: {task_id} ({status_str}) — line {n}/{total_lines} ");
+    let title_text =
+        format!(" Snap-in: {task_id} ({status_str}) — {total_lines} log lines — offset {scroll} ");
     // Intentional: inverted text on highlight bar — selection highlight pairing,
     // not a palette color. Keep inline.
     let title_para = Paragraph::new(title_text).style(
@@ -525,20 +522,19 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
     frame.render_widget(title_para, chunks[0]);
 
     // --- Log body ---
-    let log_slice = if state.focus_log.is_empty() {
-        &[][..]
-    } else {
-        let start = scroll.min(state.focus_log.len());
-        let end = (scroll + visible_rows).min(state.focus_log.len());
-        &state.focus_log[start..end]
-    };
-
-    let lines: Vec<Line> = log_slice
+    // Pass ALL log lines to the Paragraph and let ratatui's Paragraph::scroll
+    // handle the vertical offset. Works correctly with word-wrap (line-index
+    // slicing got confused when one log line wrapped to multiple visual rows).
+    let lines: Vec<Line> = state
+        .focus_log
         .iter()
         .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let log_para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let scroll_u16 = u16::try_from(scroll).unwrap_or(u16::MAX);
+    let log_para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_u16, 0));
     frame.render_widget(log_para, chunks[1]);
 
     // --- Status bar ---
@@ -547,7 +543,7 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
     frame.render_widget(status_para, chunks[2]);
 }
 
-fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
+fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState, scroll: u16) {
     let overlay_area = centered_rect(90, 85, area);
 
     // Clear background
@@ -557,7 +553,9 @@ fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Log: {focused_id}  [L/Esc] close "))
+        .title(format!(
+            " Log: {focused_id}  [j/k Ctrl-D/U g/G] scroll  [L/Esc] close "
+        ))
         .border_style(Style::default().fg(theme::OVERLAY_ACCENT_WARNING));
 
     let inner = block.inner(overlay_area);
@@ -566,10 +564,12 @@ fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
     let lines: Vec<Line> = state
         .focus_log
         .iter()
-        .map(|l| Line::from(Span::raw(l.as_str())))
+        .map(|l| Line::from(Span::styled(l.as_str(), theme::log_line_style(l))))
         .collect();
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(para, inner);
 }
 

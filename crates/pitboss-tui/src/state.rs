@@ -9,7 +9,12 @@ use pitboss_core::store::TaskStatus;
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
-    ViewingLog,
+    /// Log overlay for the focused tile. `scroll` is the vertical row
+    /// offset fed into `Paragraph::scroll`, letting users page through
+    /// longer logs than fit in the overlay.
+    ViewingLog {
+        scroll: u16,
+    },
     Help,
     /// The run-picker overlay is open; `selected` is the highlighted row index.
     PickingRun {
@@ -206,19 +211,17 @@ impl AppState {
     /// offset for the current `focus_log` length and `visible_rows`.
     ///
     /// Disables auto-scroll if the new position is not at the bottom.
-    pub fn snap_scroll_down(&mut self, delta: usize, visible_rows: usize) {
-        let Mode::SnapIn {
-            ref mut scroll,
-            ref mut at_bottom,
-            ..
-        } = self.mode
-        else {
+    pub fn snap_scroll_down(&mut self, delta: usize, _visible_rows: usize) {
+        // `Paragraph::scroll` clamps cleanly at end-of-content, so don't
+        // enforce a max here — overshooting renders blank at the bottom,
+        // and pressing `k` brings the user back to real content. This
+        // avoids the old bug where `visible_rows` (a 40-row constant) was
+        // larger than the actual rendered rows, locking scroll at 0.
+        let Mode::SnapIn { ref mut scroll, .. } = self.mode else {
             return;
         };
-        let total = self.focus_log.len();
-        let max_scroll = total.saturating_sub(visible_rows);
-        *scroll = (*scroll + delta).min(max_scroll);
-        *at_bottom = *scroll >= max_scroll;
+        *scroll = scroll.saturating_add(delta);
+        // Leave at_bottom as-is. Only `G` explicitly re-enables auto-follow.
     }
 
     /// Scroll up by `delta` lines in `SnapIn` mode. Clamps at 0.
@@ -252,7 +255,7 @@ impl AppState {
     }
 
     /// Jump to the bottom of the log in `SnapIn` mode; re-enables auto-scroll.
-    pub fn snap_jump_bottom(&mut self, visible_rows: usize) {
+    pub fn snap_jump_bottom(&mut self, _visible_rows: usize) {
         let Mode::SnapIn {
             ref mut scroll,
             ref mut at_bottom,
@@ -261,16 +264,51 @@ impl AppState {
         else {
             return;
         };
+        // Set scroll past any plausible viewport so Paragraph::scroll pins
+        // to the true bottom; the `at_bottom` flag keeps auto-follow live
+        // as new snapshots extend the log.
         let total = self.focus_log.len();
-        *scroll = total.saturating_sub(visible_rows);
+        *scroll = total.saturating_add(1024);
         *at_bottom = true;
+    }
+
+    /// Scroll the log overlay down by `delta` visual rows. No upper bound
+    /// is enforced — `Paragraph::scroll` clips cleanly at end-of-content,
+    /// so overshooting just shows blank lines at the end.
+    pub fn log_scroll_down(&mut self, delta: u16) {
+        if let Mode::ViewingLog { ref mut scroll } = self.mode {
+            *scroll = scroll.saturating_add(delta);
+        }
+    }
+
+    /// Scroll the log overlay up by `delta` visual rows. Clamps at 0.
+    pub fn log_scroll_up(&mut self, delta: u16) {
+        if let Mode::ViewingLog { ref mut scroll } = self.mode {
+            *scroll = scroll.saturating_sub(delta);
+        }
+    }
+
+    /// Jump to the top of the log overlay.
+    pub fn log_scroll_top(&mut self) {
+        if let Mode::ViewingLog { ref mut scroll } = self.mode {
+            *scroll = 0;
+        }
+    }
+
+    /// Jump to the bottom of the log overlay. Uses a large sentinel that
+    /// `Paragraph::scroll` clamps to the actual last row; renders as a
+    /// bottom-pinned view.
+    pub fn log_scroll_bottom(&mut self) {
+        if let Mode::ViewingLog { ref mut scroll } = self.mode {
+            *scroll = u16::MAX;
+        }
     }
 
     /// Called after a snapshot is applied while in `SnapIn` mode.
     ///
     /// If `at_bottom` is true, advances `scroll` so the last line stays
     /// visible. Does nothing if the user has scrolled up.
-    pub fn snap_auto_scroll(&mut self, visible_rows: usize) {
+    pub fn snap_auto_scroll(&mut self, _visible_rows: usize) {
         let Mode::SnapIn {
             ref mut scroll,
             at_bottom,
@@ -280,8 +318,10 @@ impl AppState {
             return;
         };
         if at_bottom {
+            // Same approach as snap_jump_bottom — pin past end; ratatui's
+            // Paragraph::scroll clamps.
             let total = self.focus_log.len();
-            *scroll = total.saturating_sub(visible_rows);
+            *scroll = total.saturating_add(1024);
         }
     }
 
@@ -619,25 +659,25 @@ mod tests {
     }
 
     #[test]
-    fn scroll_down_clamps_at_max() {
+    fn scroll_down_increments_without_clamp() {
+        // Paragraph::scroll handles end-of-content clamping; state just
+        // tracks the requested offset.
         let mut state = make_state_with_tile("t");
         state.focus_log = (0..10).map(|i| format!("line {i}")).collect();
-        // visible_rows=10 means max_scroll = 10 - 10 = 0
         state.mode = Mode::SnapIn {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
         };
 
-        state.snap_scroll_down(999, 10);
+        state.snap_scroll_down(5, 10);
 
-        // Can't scroll past the end.
         assert!(
             matches!(
                 &state.mode,
                 Mode::SnapIn {
-                    scroll: 0,
-                    at_bottom: true,
+                    scroll: 5,
+                    at_bottom: false,
                     ..
                 }
             ),
@@ -731,7 +771,13 @@ mod tests {
             state.mode
         );
         if let Mode::SnapIn { scroll, .. } = &state.mode {
-            assert_eq!(*scroll, 40, "scroll should be total(50) - visible(10) = 40");
+            // New contract: scroll is set past the end (total + 1024) so
+            // Paragraph::scroll pins at the true last row regardless of
+            // the actual viewport height.
+            assert!(
+                *scroll >= 50,
+                "scroll should be >= total log lines, got {scroll}"
+            );
         }
     }
 
@@ -741,7 +787,7 @@ mod tests {
         state.focus_log = (0..30).map(|i| format!("line {i}")).collect();
         state.mode = Mode::SnapIn {
             task_id: "t".to_string(),
-            scroll: 20, // at bottom for 30 lines, 10 visible
+            scroll: 20,
             at_bottom: true,
         };
 
@@ -750,7 +796,13 @@ mod tests {
         state.snap_auto_scroll(10);
 
         if let Mode::SnapIn { scroll, .. } = &state.mode {
-            assert_eq!(*scroll, 25, "should advance to 35-10=25");
+            // New contract: scroll is pinned past the end so Paragraph::scroll
+            // keeps the latest content visible. We check >= 35 rather than
+            // an exact value.
+            assert!(
+                *scroll >= 35,
+                "auto-scroll should advance past current log length, got {scroll}"
+            );
         } else {
             panic!("not in SnapIn mode");
         }
