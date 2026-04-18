@@ -389,7 +389,7 @@ mod tests {
                 mtime: SystemTime::UNIX_EPOCH,
                 tasks_total: i,
                 tasks_failed: 0,
-                is_complete: false,
+                status: crate::runs::RunStatus::Aborted,
             })
             .collect()
     }

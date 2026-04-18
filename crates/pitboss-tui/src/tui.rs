@@ -647,7 +647,7 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
         .iter()
         .map(|e| {
             let started = crate::runs::format_mtime(e.mtime);
-            let status = if e.is_complete { "complete" } else { "running" };
+            let status = e.status.label();
             // Format: "run-id  started  N tasks  N failed  status"
             let short_id = if e.run_id.len() > 38 {
                 &e.run_id[..38]

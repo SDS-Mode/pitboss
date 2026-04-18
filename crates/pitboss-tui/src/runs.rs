@@ -4,6 +4,34 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Status of a discovered run directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    /// `summary.json` exists and parsed — run finalized cleanly.
+    Complete,
+    /// `summary.jsonl` has at least one task record but no final
+    /// `summary.json` yet — dispatcher is (or was) running.
+    Running,
+    /// Neither `summary.json` nor any records in `summary.jsonl` — the
+    /// dispatcher wrote the initial manifest + resolved.json but never
+    /// produced task output (orphaned/aborted invocation).
+    Aborted,
+}
+
+impl RunStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Running => "running",
+            Self::Aborted => "aborted",
+        }
+    }
+
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 /// A summary entry for a single run directory.
 #[derive(Debug)]
 pub struct RunEntry {
@@ -12,7 +40,7 @@ pub struct RunEntry {
     pub mtime: SystemTime,
     pub tasks_total: usize,
     pub tasks_failed: usize,
-    pub is_complete: bool,
+    pub status: RunStatus,
 }
 
 /// Returns the base directory that holds all run sub-directories.
@@ -63,21 +91,28 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
                 mtime,
                 tasks_total: s.tasks_total,
                 tasks_failed: s.tasks_failed,
-                is_complete: true,
+                status: RunStatus::Complete,
             };
         }
     }
 
-    // Fall back: count lines in summary.jsonl.
+    // Fall back: count lines in summary.jsonl. If the file is missing or
+    // empty, treat the run as aborted — the dispatcher wrote the initial
+    // manifest + resolved.json but never produced any task records.
     let jsonl = run_dir.join("summary.jsonl");
     let (total, failed) = count_jsonl_tasks(&jsonl);
+    let status = if total > 0 {
+        RunStatus::Running
+    } else {
+        RunStatus::Aborted
+    };
     RunEntry {
         run_id,
         run_dir: run_dir.to_path_buf(),
         mtime,
         tasks_total: total,
         tasks_failed: failed,
-        is_complete: false,
+        status,
     }
 }
 
@@ -184,7 +219,7 @@ mod tests {
         assert_eq!(entry.run_id, "run-x");
         assert_eq!(entry.tasks_total, 0);
         assert_eq!(entry.tasks_failed, 0);
-        assert!(!entry.is_complete);
+        assert_eq!(entry.status, RunStatus::Aborted);
     }
 
     #[test]
