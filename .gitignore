@@ -30,3 +30,6 @@ flamegraph.svg
 
 # Project-internal docs (kept locally; not shipped)
 /docs/
+
+# Git worktrees
+.worktrees/
