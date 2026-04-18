@@ -399,25 +399,34 @@ fn tail_log(path: &Path, n: usize) -> Vec<String> {
     }
 }
 
+/// Per-event display caps. Originally tight for pre-word-wrap terminals;
+/// the v0.4.1.x word-wrap pass means long lines take more visual rows
+/// instead of falling off the right edge, so it's safe to show more per
+/// event. Snap-in mode (`Enter` to full-screen the focus log) uses the
+/// same formatter; if you need the untruncated stream-json, read
+/// `<run-dir>/tasks/<id>/stdout.log` directly.
+const CAP_ASSISTANT_TEXT: usize = 400;
+const CAP_TOOL_INPUT: usize = 240;
+const CAP_TOOL_RESULT: usize = 480;
+
 /// Parse one stream-json line and return a display string, or `None` to skip.
 fn format_event(bytes: &[u8]) -> Option<String> {
     let event = parse_line(bytes).ok()?;
     match event {
         Event::AssistantText { text } => {
-            // Take the first non-empty line, then cap at 180 chars.
             let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(&text);
-            let capped = cap_str(first_line, 180);
+            let capped = cap_str(first_line, CAP_ASSISTANT_TEXT);
             Some(format!("> {capped}"))
         }
         Event::AssistantToolUse {
             tool_name,
             input_summary,
         } => {
-            let summary = cap_str(&input_summary, 80);
+            let summary = cap_str(&input_summary, CAP_TOOL_INPUT);
             Some(format!("* {tool_name} {summary}"))
         }
         Event::ToolResult { content_summary } => {
-            let capped = cap_str(&content_summary, 180);
+            let capped = cap_str(&content_summary, CAP_TOOL_RESULT);
             Some(format!("< {capped}"))
         }
         Event::Result {
@@ -551,13 +560,15 @@ mod tests {
 
     #[test]
     fn format_event_truncates_long_text() {
-        let long = "a".repeat(500);
+        let long = "a".repeat(1000);
         let line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
         );
         let out = format_event(line.as_bytes()).unwrap();
-        // "> " prefix (2 chars) + at most 180 chars of content
-        assert!(out.chars().count() <= 2 + 180);
+        // "> " prefix (2 chars) + at most CAP_ASSISTANT_TEXT chars of content.
+        assert!(out.chars().count() <= 2 + CAP_ASSISTANT_TEXT);
+        // Must actually have truncated (input is longer than the cap).
+        assert!(out.chars().count() < 2 + 1000);
     }
 
     #[test]
