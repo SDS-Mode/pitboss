@@ -473,6 +473,16 @@ impl SharedStore {
         let _ = self.lease_notifier.send(lease_id.to_string());
         Ok(())
     }
+
+    /// Release all leases held by `actor_id`. Intended to be called when an
+    /// actor's MCP connection drops (lease-on-connection semantics). Wakes
+    /// any waiters subscribed via `lease_acquire(wait_secs > 0)`.
+    pub async fn release_all_for_actor(&self, actor_id: &str) {
+        let released = self.leases.release_all_for_actor(actor_id).await;
+        for name in released {
+            let _ = self.lease_notifier.send(name);
+        }
+    }
 }
 
 impl Default for SharedStore {
@@ -916,5 +926,37 @@ mod tests {
             .unwrap();
         assert!(res.acquired);
         releaser.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_all_for_actor_frees_held_leases() {
+        let s = SharedStore::new();
+        s.lease_acquire("a", std::time::Duration::from_secs(30), None, &worker("w1"))
+            .await
+            .unwrap();
+        s.lease_acquire("b", std::time::Duration::from_secs(30), None, &worker("w1"))
+            .await
+            .unwrap();
+        s.lease_acquire("c", std::time::Duration::from_secs(30), None, &worker("w2"))
+            .await
+            .unwrap();
+        s.release_all_for_actor("w1").await;
+
+        let a = s
+            .lease_acquire("a", std::time::Duration::from_secs(30), None, &worker("w3"))
+            .await
+            .unwrap();
+        assert!(a.acquired);
+        let b = s
+            .lease_acquire("b", std::time::Duration::from_secs(30), None, &worker("w3"))
+            .await
+            .unwrap();
+        assert!(b.acquired);
+        // w2 still holds "c"
+        let c = s
+            .lease_acquire("c", std::time::Duration::from_secs(30), None, &worker("w3"))
+            .await
+            .unwrap();
+        assert!(!c.acquired);
     }
 }

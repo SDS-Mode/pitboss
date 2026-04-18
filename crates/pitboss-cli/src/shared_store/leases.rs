@@ -98,6 +98,23 @@ impl LeaseRegistry {
         map.values().map(|(l, _)| l.clone()).collect()
     }
 
+    /// Release every lease currently held by the given actor. Returns the
+    /// lease names that were released. Called when an actor's MCP
+    /// connection drops.
+    pub async fn release_all_for_actor(&self, actor_id: &str) -> Vec<String> {
+        let mut map = self.inner.lock().await;
+        Self::prune_expired(&mut map);
+        let to_remove: Vec<String> = map
+            .iter()
+            .filter(|(_, (l, _))| l.holder == actor_id)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &to_remove {
+            map.remove(name);
+        }
+        to_remove
+    }
+
     fn prune_expired(map: &mut HashMap<String, (Lease, Instant)>) {
         let now = Instant::now();
         map.retain(|_, (_, deadline)| *deadline > now);
