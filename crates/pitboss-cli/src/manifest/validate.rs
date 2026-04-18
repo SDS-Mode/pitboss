@@ -10,6 +10,9 @@ use super::resolve::ResolvedManifest;
 /// Run all v0.1 validations. Call after [`crate::manifest::resolve::resolve`].
 pub fn validate(resolved: &ResolvedManifest) -> Result<()> {
     validate_mode(resolved)?;
+    for cfg in &resolved.notifications {
+        crate::notify::config::validate(cfg)?;
+    }
     if resolved.lead.is_some() {
         validate_lead(resolved)?;
         validate_hierarchical_ranges(resolved)?;
@@ -246,6 +249,29 @@ mod tests {
         }
     }
 
+    fn rm_with<F>(f: F) -> ResolvedManifest
+    where
+        F: FnOnce(&mut ResolvedManifest),
+    {
+        let d = with_tmp_repo(true);
+        let mut m = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(rl("lead", d.path().to_path_buf())),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            approval_policy: None,
+            notifications: vec![],
+        };
+        f(&mut m);
+        m
+    }
+
     #[test]
     fn rejects_duplicate_ids() {
         let d = with_tmp_repo(true);
@@ -422,5 +448,35 @@ mod tests {
             env: Default::default(),
             resume_session_id: None,
         }
+    }
+
+    #[test]
+    fn rejects_webhook_without_url() {
+        let m = rm_with(|m: &mut ResolvedManifest| {
+            m.notifications
+                .push(crate::notify::config::NotificationConfig {
+                    kind: crate::notify::config::SinkKind::Webhook,
+                    url: None,
+                    events: None,
+                    severity_min: crate::notify::Severity::Info,
+                });
+        });
+        let err = validate(&m).unwrap_err();
+        assert!(err.to_string().contains("requires a non-empty 'url'"));
+    }
+
+    #[test]
+    fn rejects_unknown_event() {
+        let m = rm_with(|m: &mut ResolvedManifest| {
+            m.notifications
+                .push(crate::notify::config::NotificationConfig {
+                    kind: crate::notify::config::SinkKind::Log,
+                    url: None,
+                    events: Some(vec!["hallucinate".into()]),
+                    severity_min: crate::notify::Severity::Info,
+                });
+        });
+        let err = validate(&m).unwrap_err();
+        assert!(err.to_string().contains("unknown event"));
     }
 }
