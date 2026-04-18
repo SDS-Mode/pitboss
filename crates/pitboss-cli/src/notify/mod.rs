@@ -4,6 +4,8 @@
 
 #![allow(dead_code)] // Wired up gradually across Tasks 2-21.
 
+use anyhow::Result;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +92,21 @@ impl NotificationEnvelope {
             source: run_id.to_string(),
         }
     }
+}
+
+/// Transport abstraction: given an envelope, put it somewhere operator-visible.
+/// Implemented by LogSink, WebhookSink, SlackSink, DiscordSink.
+#[async_trait]
+pub trait NotificationSink: Send + Sync {
+    /// Unique stable identifier used for log/audit lines — e.g.
+    /// "log", "webhook:1", "slack:prod-alerts".
+    fn id(&self) -> &str;
+
+    /// Emit a single envelope. Fire-and-forget semantics: the router
+    /// calls this inside a `tokio::spawn`. Errors are logged and
+    /// recorded as `TaskEvent::NotificationFailed`; they never
+    /// propagate to the dispatcher.
+    async fn emit(&self, env: &NotificationEnvelope) -> Result<()>;
 }
 
 #[cfg(test)]
