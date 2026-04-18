@@ -276,6 +276,7 @@ fn build_tile(
             log_path,
             model,
             parent_task_id: rec.parent_task_id.clone(),
+            worktree_path: rec.worktree_path.clone(),
         }
     } else {
         // Decide between Pending and Running by checking log freshness.
@@ -297,6 +298,7 @@ fn build_tile(
             exit_code: None,
             log_path,
             model,
+            worktree_path: None,
             parent_task_id: if is_dynamic {
                 parent_task_id_fallback.map(str::to_string)
             } else {

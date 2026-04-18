@@ -657,16 +657,10 @@ fn render_detail_metadata(
     )));
     let metrics = scan_focus_log(&state.focus_log);
     lines.push(kv_line("tool calls", &metrics.tool_use.to_string()));
-    lines.push(kv_line("tool results", &metrics.tool_result.to_string()));
+    lines.push(kv_line("results", &metrics.tool_result.to_string()));
     lines.push(kv_line("text msgs", &metrics.assistant_text.to_string()));
     if metrics.rate_limit > 0 {
-        lines.push(Line::from(vec![
-            Span::styled("  rate limits  ", theme::muted_style()),
-            Span::styled(
-                metrics.rate_limit.to_string(),
-                Style::default().fg(theme::LOG_RATE_LIMIT),
-            ),
-        ]));
+        lines.push(kv_line("rate lim", &metrics.rate_limit.to_string()));
     }
     if !metrics.top_tools.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -801,8 +795,11 @@ fn scan_focus_log(focus_log: &[String]) -> FocusLogMetrics {
         }
     }
 
+    // Sort by count descending, then by name ascending for a stable order —
+    // HashMap iteration is unstable, so without the secondary key entries
+    // with equal counts flicker between frames.
     let mut sorted: Vec<(String, usize)> = tool_counts.into_iter().collect();
-    sorted.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     sorted.truncate(3);
     m.top_tools = sorted;
     m
@@ -1066,6 +1063,7 @@ mod tests {
             log_path: PathBuf::from("/dev/null"),
             model: None,
             parent_task_id: None,
+            worktree_path: None,
         }
     }
 

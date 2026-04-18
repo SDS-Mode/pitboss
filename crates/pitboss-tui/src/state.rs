@@ -91,6 +91,11 @@ pub struct TileState {
     /// Parent task id, if this tile represents a subagent task.
     #[allow(dead_code)]
     pub parent_task_id: Option<String>,
+    /// Git worktree directory for this task, if pitboss created one.
+    /// Populated from `summary.jsonl`/`summary.json` when the task has
+    /// settled. `None` for in-flight tasks (the record hasn't been written
+    /// yet) and for `use_worktree = false` tasks.
+    pub worktree_path: Option<PathBuf>,
 }
 
 /// Full application state updated each poll cycle.
@@ -210,16 +215,13 @@ impl AppState {
             return;
         };
         let task_id = tile.id.clone();
-        // `log_path` lives at <run-dir>/tasks/<id>/stdout.log; the worktree
-        // path isn't stored on TileState so we derive it here. Pitboss puts
-        // worktrees next to the run artifacts: <run-dir>/<run-id>/<task-id>/
-        // when XDG is set, or we can look in the run's `.worktrees` dir.
-        // Safest: read resolved.json or summary.jsonl to get worktree_path.
-        // For v1 we fall back to running `git diff --stat` in the task's
-        // `log_path.parent()` directory and skip gracefully if that isn't
-        // inside a git worktree.
-        if let Some(parent) = tile.log_path.parent() {
-            if let Some(summary) = compute_git_diff_summary(parent) {
+        // Git diff is only meaningful for tasks that settled with a
+        // worktree_path recorded in summary.jsonl. For in-flight tasks
+        // the field is None (the record is written on settle), so we skip.
+        // Follow-up: add a <run-dir>/tasks/<id>/worktree.path file written
+        // at spawn time so in-flight diffs work too.
+        if let Some(worktree) = tile.worktree_path.as_deref() {
+            if let Some(summary) = compute_git_diff_summary(worktree) {
                 self.cached_git_diff.insert(task_id.clone(), summary);
             }
         }
@@ -255,10 +257,17 @@ impl AppState {
         // Leave at_bottom as-is. Only `G` explicitly re-enables auto-follow.
     }
 
-    /// Scroll up by `delta` lines in `SnapIn` mode. Clamps at 0.
+    /// Scroll up by `delta` lines in `Detail` mode. Clamps at 0.
     ///
-    /// Always disables auto-scroll (user is scrolling up).
+    /// Always disables auto-scroll (user is scrolling up). If the caller
+    /// was in auto-follow (`at_bottom = true`), the scroll value may be a
+    /// sentinel past `total_lines` set by `detail_auto_scroll` /
+    /// `detail_jump_bottom` — clamp down to `total_lines` first so the
+    /// first `k` press produces visible movement. When the user was
+    /// already scrolled (not auto-following), decrement from the current
+    /// value as-is.
     pub fn detail_scroll_up(&mut self, delta: usize) {
+        let total = self.focus_log.len();
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -267,6 +276,9 @@ impl AppState {
         else {
             return;
         };
+        if *at_bottom {
+            *scroll = (*scroll).min(total);
+        }
         *scroll = scroll.saturating_sub(delta);
         *at_bottom = false;
     }
@@ -285,8 +297,9 @@ impl AppState {
         *at_bottom = false;
     }
 
-    /// Jump to the bottom of the log in `SnapIn` mode; re-enables auto-scroll.
+    /// Jump to the bottom of the log in `Detail` mode; re-enables auto-scroll.
     pub fn detail_jump_bottom(&mut self, _visible_rows: usize) {
+        let total = self.focus_log.len();
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -295,11 +308,10 @@ impl AppState {
         else {
             return;
         };
-        // Set scroll past any plausible viewport so Paragraph::scroll pins
-        // to the true bottom; the `at_bottom` flag keeps auto-follow live
-        // as new snapshots extend the log.
-        let total = self.focus_log.len();
-        *scroll = total.saturating_add(1024);
+        // Set scroll to total_lines. Render clamps to max_scroll
+        // (= total - visible_rows), which is the correct bottom position.
+        // Keep `at_bottom = true` so auto-follow tracks new lines.
+        *scroll = total;
         *at_bottom = true;
     }
 
@@ -311,6 +323,7 @@ impl AppState {
     /// If `at_bottom` is true, advances `scroll` so the last line stays
     /// visible. Does nothing if the user has scrolled up.
     pub fn detail_auto_scroll(&mut self, _visible_rows: usize) {
+        let total = self.focus_log.len();
         let Mode::Detail {
             ref mut scroll,
             at_bottom,
@@ -320,10 +333,9 @@ impl AppState {
             return;
         };
         if at_bottom {
-            // Same approach as detail_jump_bottom — pin past end; ratatui's
-            // Paragraph::scroll clamps.
-            let total = self.focus_log.len();
-            *scroll = total.saturating_add(1024);
+            // scroll = total_lines. Render clamps to max_scroll for the
+            // correct bottom position.
+            *scroll = total;
         }
     }
 
@@ -408,18 +420,45 @@ impl AppState {
 ///
 /// Blocks the caller for ~20-50 ms. Only called once on detail-view entry;
 /// cached in `AppState.cached_git_diff` thereafter.
-pub(crate) fn compute_git_diff_summary(dir: &std::path::Path) -> Option<GitDiffSummary> {
-    // Pitboss worktrees live separate from the task's stdout.log dir —
-    // `log_path.parent()` points at <run-dir>/tasks/<id>/, which is NOT a
-    // git worktree. We need the worker's actual worktree. For v1 we look
-    // for a sibling `.worktrees/<id>` under the repo the task was spawned
-    // against; if that doesn't resolve we give up rather than guess.
-    // TileState doesn't carry `worktree_path` today; tracking that
-    // through the watcher is a follow-up.
-    let _ = dir;
-    // Stub: return None so the UI shows "unavailable" rather than lying.
-    // Actual implementation lands once TileState carries worktree_path.
-    None
+pub(crate) fn compute_git_diff_summary(worktree: &std::path::Path) -> Option<GitDiffSummary> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("diff")
+        .arg("--shortstat")
+        .arg("HEAD")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Typical --shortstat output:
+    //   " 3 files changed, 120 insertions(+), 14 deletions(-)"
+    // Fields may be missing (e.g. "1 file changed, 5 insertions(+)" with no
+    // deletions section). Empty output = no diff.
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return Some(GitDiffSummary::default());
+    }
+    let mut summary = GitDiffSummary::default();
+    for token in line.split(',') {
+        let t = token.trim();
+        if let Some(n) = t
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if t.contains("file") {
+                summary.files_changed = n;
+            } else if t.contains("insertion") {
+                summary.insertions = n;
+            } else if t.contains("deletion") {
+                summary.deletions = n;
+            }
+        }
+    }
+    Some(summary)
 }
 
 /// A snapshot produced by the watcher thread every 500ms.
@@ -595,6 +634,7 @@ mod tests {
             log_path: PathBuf::from("/dev/null"),
             model: None,
             parent_task_id: None,
+            worktree_path: None,
         }];
         state
     }
