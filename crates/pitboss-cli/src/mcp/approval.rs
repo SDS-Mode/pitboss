@@ -51,6 +51,21 @@ impl ApprovalBridge {
             },
         )
         .await;
+
+        if let Some(router) = self.state.notification_router.clone() {
+            let envelope = crate::notify::NotificationEnvelope::new(
+                &self.state.run_id.to_string(),
+                crate::notify::Severity::Warning,
+                crate::notify::PitbossEvent::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    task_id: task_id.clone(),
+                    summary: summary.clone(),
+                },
+                chrono::Utc::now(),
+            );
+            let _ = router.dispatch(envelope).await;
+        }
+
         let (tx, rx) = oneshot::channel::<ApprovalResponse>();
 
         // Does a TUI have the control writer?
