@@ -55,7 +55,7 @@ jobs:
           tar czf "pitboss-${REF_NAME}-${TARGET}.tar.gz" pitboss pitboss-tui
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/pitboss-*.tar.gz
           generate_release_notes: true
