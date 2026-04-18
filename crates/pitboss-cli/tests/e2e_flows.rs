@@ -624,3 +624,57 @@ async fn e2e_lead_reprompts_running_worker() {
 
     state.cancel.terminate();
 }
+
+#[tokio::test]
+async fn e2e_run_finished_notifies_webhook() {
+    support::ensure_built();
+
+    // wiremock server captures one POST matching the RunFinished shape.
+    let mock = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({ "event": { "kind": "run_finished" } }),
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let webhook_url = format!("{}/hook", mock.uri());
+
+    // Build a router with one webhook sink directly (bypass manifest
+    // parse since DispatchState::new takes the router as arg).
+    let http = std::sync::Arc::new(reqwest::Client::new());
+    let sink = std::sync::Arc::new(pitboss_cli::notify::sinks::WebhookSink::new(
+        0,
+        webhook_url.clone(),
+        http,
+    ));
+    let router = std::sync::Arc::new(pitboss_cli::notify::NotificationRouter::new(vec![(
+        sink as std::sync::Arc<dyn pitboss_cli::notify::NotificationSink>,
+        pitboss_cli::notify::SinkFilter {
+            events: Some(vec!["run_finished".into()]),
+            severity_min: pitboss_cli::notify::Severity::Info,
+        },
+    )]));
+
+    // Dispatch a RunFinished envelope directly (the full hierarchical
+    // lifecycle e2e is covered by existing tests + Tasks 17/18).
+    let _ = router
+        .dispatch(pitboss_cli::notify::NotificationEnvelope::new(
+            "run-e2e",
+            pitboss_cli::notify::Severity::Info,
+            pitboss_cli::notify::PitbossEvent::RunFinished {
+                run_id: "run-e2e".into(),
+                tasks_total: 1,
+                tasks_failed: 0,
+                duration_ms: 10,
+                spent_usd: 0.01,
+            },
+            chrono::Utc::now(),
+        ))
+        .await;
+
+    // Fire-and-forget — wait briefly for the tokio::spawn'd emit.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    mock.verify().await;
+}
