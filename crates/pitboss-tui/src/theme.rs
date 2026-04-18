@@ -78,20 +78,24 @@ pub const LOG_RATE_LIMIT: Color = Color::Yellow; // Warning
 pub const LOG_UNKNOWN: Color = Color::Gray; // Unknown shape
 pub const LOG_UNPARSEABLE: Color = Color::Gray; // parse_line Err
 
-/// Given a raw stream-json log line, return a `Style` for coloring it
-/// in the log pane. Parses the line and matches on `Event` variant.
-/// On parse failure, returns the `LOG_UNPARSEABLE` fallback.
+/// Given a pre-rendered focus-log line, return a `Style` for coloring
+/// it in the log pane. Matches on the display prefix written by
+/// `watcher::format_event`: `"> "` assistant text, `"* "` tool use,
+/// `"< "` tool result, `"v "` result, `"! "` rate limit. Anything else
+/// falls back to `LOG_UNPARSEABLE` gray.
 pub fn log_line_style(line: &str) -> Style {
-    use pitboss_core::parser::{parse_line, Event};
-    let color = match parse_line(line.as_bytes()) {
-        Ok(Event::AssistantText { .. }) => LOG_ASSISTANT_TEXT,
-        Ok(Event::AssistantToolUse { .. }) => LOG_TOOL_USE,
-        Ok(Event::ToolResult { .. }) => LOG_TOOL_RESULT,
-        Ok(Event::System { .. }) => LOG_SYSTEM,
-        Ok(Event::Result { .. }) => LOG_RESULT,
-        Ok(Event::RateLimit { .. }) => LOG_RATE_LIMIT,
-        Ok(Event::Unknown { .. }) => LOG_UNKNOWN,
-        Err(_) => LOG_UNPARSEABLE,
+    let color = if line.starts_with("> ") {
+        LOG_ASSISTANT_TEXT
+    } else if line.starts_with("* ") {
+        LOG_TOOL_USE
+    } else if line.starts_with("< ") {
+        LOG_TOOL_RESULT
+    } else if line.starts_with("v ") {
+        LOG_RESULT
+    } else if line.starts_with("! ") {
+        LOG_RATE_LIMIT
+    } else {
+        LOG_UNPARSEABLE
     };
     Style::default().fg(color)
 }
@@ -103,26 +107,16 @@ mod tests {
 
     #[test]
     fn log_line_style_maps_event_variants() {
+        // Inputs are the display strings produced by
+        // `watcher::format_event` (prefix char + content), not raw JSON.
         let cases = [
-            (
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
-                LOG_ASSISTANT_TEXT,
-            ),
-            (
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Read","input":{}}]}}"#,
-                LOG_TOOL_USE,
-            ),
-            (
-                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"ok"}]}]}}"#,
-                LOG_TOOL_RESULT,
-            ),
-            (r#"{"type":"system","subtype":"init"}"#, LOG_SYSTEM),
-            (
-                r#"{"type":"result","session_id":"s","usage":{"input_tokens":1,"output_tokens":1}}"#,
-                LOG_RESULT,
-            ),
-            (r#"{"type":"unknown","whatever":true}"#, LOG_UNKNOWN),
-            ("{not valid json", LOG_UNPARSEABLE),
+            ("> hi there", LOG_ASSISTANT_TEXT),
+            ("* Read {\"file_path\":\"/tmp/x\"}", LOG_TOOL_USE),
+            ("< ok", LOG_TOOL_RESULT),
+            ("v result (session=abcd1234... | in=1 out=1)", LOG_RESULT),
+            ("! rate-limit 429 (input) resets=?", LOG_RATE_LIMIT),
+            ("something unprefixed", LOG_UNPARSEABLE),
+            ("", LOG_UNPARSEABLE),
         ];
         for (line, expected) in cases {
             let style = log_line_style(line);

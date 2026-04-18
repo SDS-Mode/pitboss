@@ -163,6 +163,13 @@ pub fn teardown(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Re
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
 
+    // Wipe the full frame before any widget draws. Ratatui's Block/Paragraph
+    // only set STYLE for cells they "cover" — they don't clear character
+    // content for cells that no text lands in. On terminal resize or when
+    // a tile's inner content is shorter than the inner height, stale chars
+    // from the prior frame persist (visible leakage — fix for #129).
+    frame.render_widget(Clear, area);
+
     // SnapIn is a full-screen replacement — skip the normal grid entirely.
     if let Mode::SnapIn {
         ref task_id,
