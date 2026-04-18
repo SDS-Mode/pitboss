@@ -225,6 +225,7 @@ mod tests {
             CleanupPolicy::Never,
             PathBuf::from("/tmp"),
             policy,
+            None,
         ))
     }
 

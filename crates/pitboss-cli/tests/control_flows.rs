@@ -63,6 +63,7 @@ async fn pause_op_writes_events_jsonl() {
         CleanupPolicy::Never,
         run_subdir.clone(),
         ApprovalPolicy::Block,
+        None,
     ));
     let worker_token = CancelToken::new();
     state
@@ -148,6 +149,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         CleanupPolicy::Never,
         run_subdir.clone(),
         ApprovalPolicy::Block,
+        None,
     ));
 
     // Kick off a blocking request on a background task (no TUI attached yet).
@@ -245,6 +247,7 @@ async fn auto_approve_policy_responds_without_tui() {
         CleanupPolicy::Never,
         run_subdir,
         ApprovalPolicy::AutoApprove,
+        None,
     ));
     let bridge = ApprovalBridge::new(state);
     let resp = bridge
@@ -290,6 +293,7 @@ async fn auto_reject_policy_responds_without_tui() {
         CleanupPolicy::Never,
         run_subdir,
         ApprovalPolicy::AutoReject,
+        None,
     ));
     let bridge = ApprovalBridge::new(state);
     let resp = bridge

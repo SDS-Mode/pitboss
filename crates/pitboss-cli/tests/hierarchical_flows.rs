@@ -70,6 +70,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         CleanupPolicy::Never,
         run_subdir,
         ApprovalPolicy::Block,
+        None,
     ));
     (dir, state)
 }

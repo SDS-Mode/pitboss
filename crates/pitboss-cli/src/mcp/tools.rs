@@ -1073,6 +1073,7 @@ mod tests {
             CleanupPolicy::Never,
             run_subdir,
             ApprovalPolicy::Block,
+            None,
         ))
     }
 
@@ -1441,6 +1442,7 @@ mod tests {
             CleanupPolicy::Never,
             run_subdir,
             ApprovalPolicy::Block,
+            None,
         ))
     }
 
@@ -1916,6 +1918,7 @@ mod tests {
             CleanupPolicy::Never,
             run_subdir,
             ApprovalPolicy::AutoApprove,
+            None,
         ));
         let resp = handle_request_approval(
             &state,

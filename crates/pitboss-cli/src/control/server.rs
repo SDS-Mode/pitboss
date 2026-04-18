@@ -647,6 +647,7 @@ mod tests {
             CleanupPolicy::Never,
             dir.join(run_id.to_string()),
             ApprovalPolicy::Block,
+            None,
         ))
     }
 

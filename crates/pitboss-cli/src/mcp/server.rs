@@ -388,6 +388,7 @@ mod tests {
             CleanupPolicy::Never,
             run_subdir,
             ApprovalPolicy::Block,
+            None,
         ));
 
         let sock = dir.path().join("test.sock");
@@ -448,6 +449,7 @@ mod tests {
             CleanupPolicy::Never,
             run_subdir,
             ApprovalPolicy::Block,
+            None,
         ));
 
         let sock = dir.path().join("drop-test.sock");

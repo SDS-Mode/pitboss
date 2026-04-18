@@ -90,6 +90,7 @@ fn mk_state(
         CleanupPolicy::Never,
         run_subdir,
         approval_policy,
+        None,
     ));
     (run_id, state)
 }
@@ -324,6 +325,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         CleanupPolicy::Never,
         run_subdir,
         ApprovalPolicy::Block,
+        None,
     ));
 
     let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
@@ -567,6 +569,7 @@ async fn e2e_lead_reprompts_running_worker() {
         CleanupPolicy::Never,
         run_subdir.clone(),
         ApprovalPolicy::Block,
+        None,
     ));
 
     let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
