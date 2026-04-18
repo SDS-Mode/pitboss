@@ -26,6 +26,8 @@ pub enum StoreError {
     InvalidArg(String),
     #[error("forbidden: {0}")]
     Forbidden(String),
+    #[error("store limit exceeded: {which:?}")]
+    LimitExceeded { which: LimitKind },
 }
 
 /// Outcome of a compare-and-swap. `ok=true` means the write happened;
@@ -44,6 +46,33 @@ pub struct ListMetadata {
     pub written_by: String,
     pub written_at: DateTime<Utc>,
     pub size_bytes: u64,
+}
+
+/// Per-run write-size limits on the store. Configurable via
+/// `SharedStore::with_limits`; defaults apply in `SharedStore::new`.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_value_bytes: usize,
+    pub max_total_bytes: usize,
+    pub max_keys: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_value_bytes: 1024 * 1024,      // 1 MiB
+            max_total_bytes: 64 * 1024 * 1024, // 64 MiB
+            max_keys: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitKind {
+    Value,
+    Total,
+    Count,
 }
 
 /// Who's making the call, as injected by `mcp-bridge --actor-id / --actor-role`.
@@ -96,12 +125,18 @@ fn authorize_write(
 
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
+    limits: Limits,
 }
 
 impl SharedStore {
     pub fn new() -> Self {
+        Self::with_limits(Limits::default())
+    }
+
+    pub fn with_limits(limits: Limits) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            limits,
         }
     }
 
@@ -117,9 +152,30 @@ impl SharedStore {
         written_by: &str,
     ) -> Result<u64, StoreError> {
         validate_path(path)?;
+        if value.len() > self.limits.max_value_bytes {
+            return Err(StoreError::LimitExceeded {
+                which: LimitKind::Value,
+            });
+        }
         let key = PathBuf::from(path);
         let mut entries = self.entries.write().await;
-        let version = entries.get(&key).map_or(1, |e| e.version + 1);
+        let prev = entries.get(&key);
+        let is_new_key = prev.is_none();
+        let prev_size = prev.map_or(0, |e| e.value.len());
+        let new_size = value.len();
+        if is_new_key && entries.len() >= self.limits.max_keys {
+            return Err(StoreError::LimitExceeded {
+                which: LimitKind::Count,
+            });
+        }
+        let current_total: usize = entries.values().map(|e| e.value.len()).sum();
+        let projected_total = current_total - prev_size + new_size;
+        if projected_total > self.limits.max_total_bytes {
+            return Err(StoreError::LimitExceeded {
+                which: LimitKind::Total,
+            });
+        }
+        let version = prev.map_or(1, |e| e.version + 1);
         entries.insert(
             key,
             Entry {
@@ -140,13 +196,34 @@ impl SharedStore {
         written_by: &str,
     ) -> Result<CasResult, StoreError> {
         validate_path(path)?;
+        if new_value.len() > self.limits.max_value_bytes {
+            return Err(StoreError::LimitExceeded {
+                which: LimitKind::Value,
+            });
+        }
         let key = PathBuf::from(path);
         let mut entries = self.entries.write().await;
-        let current_version = entries.get(&key).map_or(0, |e| e.version);
+        let prev = entries.get(&key);
+        let current_version = prev.map_or(0, |e| e.version);
         if current_version != expected_version {
             return Ok(CasResult {
                 ok: false,
                 current_version,
+            });
+        }
+        let is_new_key = prev.is_none();
+        let prev_size = prev.map_or(0, |e| e.value.len());
+        let new_size = new_value.len();
+        if is_new_key && entries.len() >= self.limits.max_keys {
+            return Err(StoreError::LimitExceeded {
+                which: LimitKind::Count,
+            });
+        }
+        let current_total: usize = entries.values().map(|e| e.value.len()).sum();
+        let projected_total = current_total - prev_size + new_size;
+        if projected_total > self.limits.max_total_bytes {
+            return Err(StoreError::LimitExceeded {
+                which: LimitKind::Total,
             });
         }
         let new_version = current_version + 1;
@@ -485,5 +562,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_value() {
+        let s = SharedStore::new();
+        let big = vec![0u8; 1024 * 1024 + 1];
+        let err = s.set("/ref/big", big, "lead").await.unwrap_err();
+        match err {
+            StoreError::LimitExceeded { which } => assert_eq!(which, LimitKind::Value),
+            other => panic!("expected LimitExceeded{{ Value }}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_when_total_size_exceeded() {
+        let s = SharedStore::with_limits(Limits {
+            max_value_bytes: 1024,
+            max_total_bytes: 2048,
+            max_keys: 1000,
+        });
+        s.set("/ref/a", vec![0u8; 1024], "lead").await.unwrap();
+        s.set("/ref/b", vec![0u8; 1024], "lead").await.unwrap();
+        let err = s.set("/ref/c", vec![0u8; 1], "lead").await.unwrap_err();
+        match err {
+            StoreError::LimitExceeded { which } => assert_eq!(which, LimitKind::Total),
+            other => panic!("expected LimitExceeded{{ Total }}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_when_key_count_exceeded() {
+        let s = SharedStore::with_limits(Limits {
+            max_value_bytes: 10,
+            max_total_bytes: 10_000,
+            max_keys: 3,
+        });
+        s.set("/ref/a", b"x".to_vec(), "lead").await.unwrap();
+        s.set("/ref/b", b"x".to_vec(), "lead").await.unwrap();
+        s.set("/ref/c", b"x".to_vec(), "lead").await.unwrap();
+        let err = s.set("/ref/d", b"x".to_vec(), "lead").await.unwrap_err();
+        match err {
+            StoreError::LimitExceeded { which } => assert_eq!(which, LimitKind::Count),
+            other => panic!("expected LimitExceeded{{ Count }}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn overwrite_does_not_count_against_key_limit() {
+        let s = SharedStore::with_limits(Limits {
+            max_value_bytes: 10,
+            max_total_bytes: 10_000,
+            max_keys: 2,
+        });
+        s.set("/ref/a", b"x".to_vec(), "lead").await.unwrap();
+        s.set("/ref/a", b"y".to_vec(), "lead").await.unwrap();
     }
 }
