@@ -314,6 +314,10 @@ fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
 // ---------------------------------------------------------------------------
 
 fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Wipe any prior-frame content in the grid area before drawing tiles.
+    // Partial final rows would otherwise retain text from an earlier
+    // render, causing visible character leakage (fix for #129).
+    frame.render_widget(Clear, area);
     let n = state.tasks.len();
     let cols = TILE_COLS.min(n);
     let rows = n.div_ceil(cols);
