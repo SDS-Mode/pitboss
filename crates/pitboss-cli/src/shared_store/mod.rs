@@ -145,6 +145,8 @@ pub struct SharedStore {
     limits: Limits,
     notifier: broadcast::Sender<NotifyEvent>,
     cancel: CancellationToken,
+    leases: LeaseRegistry,
+    lease_notifier: broadcast::Sender<String>,
 }
 
 impl SharedStore {
@@ -154,11 +156,14 @@ impl SharedStore {
 
     pub fn with_limits(limits: Limits) -> Self {
         let (notifier, _) = broadcast::channel(256);
+        let (lease_notifier, _) = broadcast::channel(64);
         Self {
             entries: RwLock::new(HashMap::new()),
             limits,
             notifier,
             cancel: CancellationToken::new(),
+            leases: LeaseRegistry::new(),
+            lease_notifier,
         }
     }
 
@@ -384,6 +389,89 @@ impl SharedStore {
     /// `DispatchState` drop or explicit finalize.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    pub async fn lease_acquire(
+        &self,
+        name: &str,
+        ttl: std::time::Duration,
+        wait: Option<std::time::Duration>,
+        caller: &CallerIdentity,
+    ) -> Result<AcquireResult, StoreError> {
+        // Non-blocking attempt first.
+        match self.leases.acquire(name, ttl, caller).await {
+            Ok(lease) => {
+                return Ok(AcquireResult {
+                    acquired: true,
+                    lease_id: Some(lease.lease_id),
+                    expires_at: Some(lease.expires_at),
+                });
+            }
+            Err(StoreError::Conflict) => {}
+            Err(e) => return Err(e),
+        }
+
+        // If no wait requested, return failure immediately.
+        let Some(wait) = wait else {
+            return Ok(AcquireResult {
+                acquired: false,
+                lease_id: None,
+                expires_at: None,
+            });
+        };
+
+        // Subscribe BEFORE retrying so we don't miss a release that lands
+        // between our first attempt and the subscribe.
+        let mut rx = self.lease_notifier.subscribe();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(AcquireResult {
+                    acquired: false,
+                    lease_id: None,
+                    expires_at: None,
+                });
+            }
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Err(StoreError::Shutdown),
+                res = tokio::time::timeout(remaining, rx.recv()) => {
+                    match res {
+                        Err(_elapsed) => {
+                            return Ok(AcquireResult {
+                                acquired: false,
+                                lease_id: None,
+                                expires_at: None,
+                            });
+                        }
+                        Ok(_) => {
+                            // Something was released — retry.
+                            match self.leases.acquire(name, ttl, caller).await {
+                                Ok(lease) => {
+                                    return Ok(AcquireResult {
+                                        acquired: true,
+                                        lease_id: Some(lease.lease_id),
+                                        expires_at: Some(lease.expires_at),
+                                    });
+                                }
+                                Err(StoreError::Conflict) => continue,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn lease_release(
+        &self,
+        lease_id: &str,
+        caller: &CallerIdentity,
+    ) -> Result<(), StoreError> {
+        self.leases.release(lease_id, caller).await?;
+        let _ = self.lease_notifier.send(lease_id.to_string());
+        Ok(())
     }
 }
 
@@ -774,5 +862,59 @@ mod tests {
         });
         s.set("/ref/a", b"x".to_vec(), "lead").await.unwrap();
         s.set("/ref/a", b"y".to_vec(), "lead").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn store_exposes_lease_acquire_release() {
+        let s = SharedStore::new();
+        let caller = worker("w1");
+        let lease = s
+            .lease_acquire("job", std::time::Duration::from_secs(30), None, &caller)
+            .await
+            .unwrap();
+        assert!(lease.acquired);
+        let lease_id = lease.lease_id.unwrap();
+        let res = s
+            .lease_acquire(
+                "job",
+                std::time::Duration::from_secs(30),
+                None,
+                &worker("w2"),
+            )
+            .await
+            .unwrap();
+        assert!(!res.acquired);
+        s.lease_release(&lease_id, &caller).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lease_acquire_with_wait_succeeds_when_released() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        let lease = s
+            .lease_acquire(
+                "job",
+                std::time::Duration::from_secs(30),
+                None,
+                &worker("w1"),
+            )
+            .await
+            .unwrap();
+        let lease_id = lease.lease_id.unwrap();
+        let s2 = s.clone();
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            s2.lease_release(&lease_id, &worker("w1")).await.unwrap();
+        });
+        let res = s
+            .lease_acquire(
+                "job",
+                std::time::Duration::from_secs(30),
+                Some(std::time::Duration::from_secs(1)),
+                &worker("w2"),
+            )
+            .await
+            .unwrap();
+        assert!(res.acquired);
+        releaser.await.unwrap();
     }
 }
