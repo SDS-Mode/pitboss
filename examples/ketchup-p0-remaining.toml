@@ -1,0 +1,127 @@
+# Follow-up run for the P0 items that didn't land in ketchup-p0-execute.toml.
+# The first run completed P0.1 (Extract Pipeline) and P0.2 (Consolidate
+# Citations) successfully but hit the $5 budget before it could spawn
+# P0.3 / P0.4 / P0.5. Opus lead was the culprit — it spent $18 on plan
+# synthesis alone.
+#
+# Adjustments:
+#   - Lead downgraded Opus → Sonnet (~5x cheaper, still plenty for fan-out
+#     orchestration; save Opus for synthesis-heavy or novel-reasoning work).
+#   - Budget bumped $5 → $15 with headroom for ~$3 Sonnet lead + ~$1/worker.
+#   - Only the three un-executed P0 items are spawned here.
+#
+# Merge order from the first run's final report (still applies):
+#   1. demo/ketchup-p0-1  (P0.1 Pipeline extract)  — pure move, merge first
+#   2. demo/ketchup-p0-2  (P0.2 Citation consolidate) — reconcile manually
+#   3. this run → P0.3 Parsing rules collapse
+#   4. this run → P0.4 Mistakes reorg (recompute line offsets post-P0.2)
+#   5. this run → P0.5 Plugin consolidate (update SKILL-PIPELINE-GUIDE xref)
+#
+# Workers branch off the current HEAD of feature/pitboss-refactor-analysis.
+
+[run]
+max_workers = 3
+budget_usd = 15.00
+lead_timeout_secs = 2400
+worktree_cleanup = "never"
+dump_shared_store = true
+
+[defaults]
+model = "claude-haiku-4-5"
+use_worktree = true
+
+[[lead]]
+id = "ketchup-p0-remaining"
+directory = "/run/media/system/Dos/Projects/ketchup"
+branch = "demo/ketchup-p0-remaining-lead"
+# Sonnet for the coordinator — enough reasoning for 3-way fan-out + synthesis
+# without Opus's token cost.
+model = "claude-sonnet-4-6"
+
+prompt = """
+You are executing three remaining P0 refactor items on the Ketchup
+repository, after an earlier run completed P0.1 (Pipeline extract) and
+P0.2 (Citation consolidate). Your toolbelt includes spawn_worker,
+wait_for_worker, wait_for_any, kv_set, kv_get, kv_list, kv_wait,
+kv_cas, lease_acquire, lease_release.
+
+CONTEXT — a prior pitboss run generated refactor-analysis/REFACTOR-PLAN.md.
+Items P0.3, P0.4, and P0.5 were not executed due to budget exhaustion.
+
+STEP 1 — Publish shared context.
+
+Read refactor-analysis/REFACTOR-PLAN.md and extract ONLY the P0.3, P0.4,
+P0.5 sections. Write a condensed summary to /ref/plan-summary via
+mcp__pitboss__kv_set. Keep it tight — this run is budget-sensitive.
+
+Also publish /ref/conventions with a 10-line summary of the repo's
+style conventions (formatting, citation format, YAML frontmatter use).
+
+NOTE: An earlier run's P0.2 shifted the Common Mistakes section in
+SKILL.md by ~9 lines. Any P0.4 line-number references in the plan are
+relative to the pre-P0.2 state. The P0.4 worker should find the section
+by header name ("Common Mistakes") rather than relying on absolute line
+numbers.
+
+STEP 2 — Spawn three workers IN PARALLEL (one spawn_worker call each,
+back-to-back, do NOT wait between them). Each worker uses this template:
+
+WORKER PROMPT TEMPLATE:
+---
+You are worker P0.{N} ({TITLE}). You have access to: kv_get, kv_set,
+kv_cas, kv_list, kv_wait, lease_acquire, lease_release, plus standard
+filesystem tools.
+
+1. mcp__pitboss__kv_get path="/ref/plan-summary" to read the plan.
+2. Your target files: {FILES}.
+3. Execute the refactor per the plan. You are in your own worktree.
+   Read the target files first, then apply the refactor matching the
+   repo's conventions (kv_get "/ref/conventions" to confirm).
+4. If you notice anything that affects OTHER P0 items, kv_set a finding
+   at /shared/findings/{N}-<short-slug>.
+5. Verify: run `ls skills/ketchup/` and eyeball file sizes. If a test
+   command exists in the repo, run it.
+6. kv_set /peer/self/completed with JSON:
+     {item_id, files_touched, branch, test_status, summary, risks, follow_ups}
+7. Exit without committing or pushing.
+---
+
+Substitutions:
+  Worker P0.3: TITLE="Collapse 16 parsing rules into 8"
+               FILES="skills/ketchup/SKILL.md (Parsing Rules section)"
+  Worker P0.4: TITLE="Reorganize mistakes: remove phase-based duplication"
+               FILES="skills/ketchup/SKILL.md (Common Mistakes section — locate by header, not line#)"
+  Worker P0.5: TITLE="Consolidate plugin references — single source of truth"
+               FILES="skills/ketchup/plugin-registry.yaml, skills/ketchup/SKILL.md (remove duplicate plugin listings), skills/ketchup/SKILL-PIPELINE-GUIDE.md (P0.1 created this; update Step 1.5 plugin-discovery cross-reference if needed)"
+
+STEP 3 — Wait for all three via mcp__pitboss__wait_for_worker.
+
+STEP 4 — Aggregate: kv_list /shared/findings/*, kv_list /peer/*/completed,
+read each entry.
+
+STEP 5 — Print the final report in this exact format:
+
+  === Merge Plan (remaining P0) ===
+  P0.3 (branch=<worker-3-branch>): <1-sentence summary>
+    Files: <files_touched>
+    Test: <test_status>
+    Risks: <risks or "none">
+
+  P0.4 ...
+  P0.5 ...
+
+  === Cross-cutting findings ===
+  <each from /shared/findings/*>
+
+  === Combined merge order (with prior run) ===
+  1. demo/ketchup-p0-1 (P0.1)  — from prior run, merge first
+  2. demo/ketchup-p0-2 (P0.2)  — from prior run, manual reconciliation
+  3. <P0.3 branch>
+  4. <P0.4 branch>
+  5. <P0.5 branch>
+
+  === Follow-ups ===
+  <consolidated from workers>
+
+Then exit.
+"""

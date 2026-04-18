@@ -21,6 +21,28 @@ This project uses [Semantic Versioning](https://semver.org/).
   per run; optional finalize-time dump to `<run-dir>/shared-store.json`
   via `[run] dump_shared_store = true`. See
   `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
+- **`/peer/self/` path alias for shared-store writes.** Workers don't
+  have a natural way to discover their own actor_id (UUIDs are assigned
+  at spawn for dynamically-spawned workers). Paths starting with
+  `/peer/self/` are auto-resolved against the caller's actor_id, so
+  task prompts can say "write to `/peer/self/findings.md`" without
+  needing to template an id. Applies to `kv_get`/`kv_set`/`kv_cas`/
+  `kv_list`/`kv_wait`.
+
+### Changed
+- **MCP `structuredContent` is now always a record.** The shared-store
+  tools `kv_get`, `kv_list`, and `list_workers` previously returned
+  bare `null` / arrays, which Claude Code's MCP client rejected with
+  `{"code":"invalid_type","message":"expected record, received ..."}`.
+  Return shapes are now `{ entry: ... }`, `{ entries: [...] }`, and
+  `{ workers: [...] }` respectively. Existing callers that expected
+  bare arrays/nulls need to unwrap one level.
+- **Shared-store `Forbidden` errors now include caller's actor_id and
+  a remediation hint.** Previously, "workers may write only their own
+  `/peer/<self>/*`" left workers guessing what `<self>` resolves to.
+  The message now names both the target peer and the caller's actual
+  `actor_id`, and points at `/peer/self/...` as the always-correct
+  path.
 
 ## [0.4.1] — 2026-04-18
 
