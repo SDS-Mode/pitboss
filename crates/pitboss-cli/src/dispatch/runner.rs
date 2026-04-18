@@ -134,6 +134,7 @@ pub async fn execute(
     // against. Flat mode has no lead and no spawn_worker path, but cancel and
     // list_workers still apply.
     let notification_router_for_emit = notification_router.clone();
+    let shared_store = Arc::new(crate::shared_store::SharedStore::new());
     let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
         run_id,
         resolved.clone(),
@@ -147,7 +148,7 @@ pub async fn execute(
         run_subdir.clone(),
         resolved.approval_policy.unwrap_or_default(),
         notification_router,
-        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+        shared_store.clone(),
     ));
     let control_sock = crate::control::control_socket_path(run_id, &run_dir);
     let _control = crate::control::server::start_control_server(
@@ -242,6 +243,14 @@ pub async fn execute(
         tasks: records,
     };
     store.finalize_run(&summary).await?;
+
+    // Optional post-mortem dump of shared-store contents.
+    if resolved.dump_shared_store {
+        let dump_path = run_subdir.join("shared-store.json");
+        if let Err(e) = shared_store.dump_to_path(&dump_path).await {
+            tracing::warn!(?e, "shared-store dump failed");
+        }
+    }
 
     // Emit RunFinished event if notification router is configured.
     if let Some(router) = notification_router_for_emit {
@@ -541,6 +550,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -626,6 +636,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -724,6 +735,7 @@ mod tests {
             lead_timeout_secs: None,
             approval_policy: None,
             notifications: vec![],
+            dump_shared_store: false,
         };
 
         let spawner = Arc::new(CyclingFake(

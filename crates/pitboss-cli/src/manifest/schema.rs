@@ -46,6 +46,10 @@ pub struct RunConfig {
     // NEW in v0.4 — approval policy for when no TUI is attached.
     #[serde(default)]
     pub approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
+
+    // NEW in v0.4.2 — write shared-store.json on finalize for post-mortem.
+    #[serde(default)]
+    pub dump_shared_store: bool,
 }
 
 impl Default for RunConfig {
@@ -60,6 +64,7 @@ impl Default for RunConfig {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            dump_shared_store: false,
         }
     }
 }

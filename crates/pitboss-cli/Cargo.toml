@@ -46,6 +46,7 @@ schemars           = "1"
 reqwest            = { workspace = true }
 lru                = { workspace = true }
 glob               = { workspace = true }
+base64             = { workspace = true }
 
 [dev-dependencies]
 # Note: pitboss-core's test-support feature is pulled in directly here so

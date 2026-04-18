@@ -484,6 +484,52 @@ impl SharedStore {
             let _ = self.lease_notifier.send(name);
         }
     }
+
+    /// Write a JSON snapshot of all entries + leases to `path`. Values
+    /// are base64-encoded (non-UTF-8 safe). Called at finalize time when
+    /// `[run] dump_shared_store = true` is set. Pitboss never reads this
+    /// back — it's for post-mortem and debugging only.
+    pub async fn dump_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use base64::Engine as _;
+
+        #[derive(Debug, Serialize)]
+        struct DumpEntry {
+            path: String,
+            version: u64,
+            written_by: String,
+            written_at: DateTime<Utc>,
+            value_b64: String,
+        }
+
+        #[derive(Debug, Serialize)]
+        struct Dump {
+            finalized_at: DateTime<Utc>,
+            entries: Vec<DumpEntry>,
+            leases: Vec<Lease>,
+        }
+
+        let entries = self.entries.read().await;
+        let dump_entries: Vec<DumpEntry> = entries
+            .iter()
+            .map(|(k, e)| DumpEntry {
+                path: k.to_string_lossy().to_string(),
+                version: e.version,
+                written_by: e.written_by.clone(),
+                written_at: e.written_at,
+                value_b64: base64::engine::general_purpose::STANDARD.encode(&e.value),
+            })
+            .collect();
+        drop(entries);
+        let leases = self.leases.list().await;
+        let dump = Dump {
+            finalized_at: Utc::now(),
+            entries: dump_entries,
+            leases,
+        };
+        let bytes = serde_json::to_vec_pretty(&dump)?;
+        tokio::fs::write(path, bytes).await?;
+        Ok(())
+    }
 }
 
 impl Default for SharedStore {
@@ -959,5 +1005,27 @@ mod tests {
             .await
             .unwrap();
         assert!(!c.acquired);
+    }
+
+    #[tokio::test]
+    async fn dump_writes_entries_and_leases_as_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("dump.json");
+        let s = SharedStore::new();
+        s.set("/ref/a", b"hello".to_vec(), "lead").await.unwrap();
+        s.lease_acquire(
+            "job-1",
+            std::time::Duration::from_secs(30),
+            None,
+            &worker("w1"),
+        )
+        .await
+        .unwrap();
+        s.dump_to_path(&path).await.unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"path\": \"/ref/a\""));
+        assert!(text.contains("\"value_b64\":"));
+        assert!(text.contains("\"name\": \"job-1\""));
     }
 }

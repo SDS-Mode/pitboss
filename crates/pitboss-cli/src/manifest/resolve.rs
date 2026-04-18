@@ -63,6 +63,9 @@ pub struct ResolvedManifest {
     // NEW in v0.4.1:
     #[serde(default)]
     pub notifications: Vec<crate::notify::config::NotificationConfig>,
+    // NEW in v0.4.2:
+    #[serde(default)]
+    pub dump_shared_store: bool,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -121,6 +124,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         lead_timeout_secs: manifest.run.lead_timeout_secs,
         approval_policy: manifest.run.approval_policy,
         notifications,
+        dump_shared_store: manifest.run.dump_shared_store,
     })
 }
 

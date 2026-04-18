@@ -325,6 +325,14 @@ pub async fn run_hierarchical(
     };
     store.finalize_run(&summary).await?;
 
+    // Optional post-mortem dump of shared-store contents.
+    if resolved.dump_shared_store {
+        let dump_path = run_subdir.join("shared-store.json");
+        if let Err(e) = state.shared_store.dump_to_path(&dump_path).await {
+            tracing::warn!(?e, "shared-store dump failed");
+        }
+    }
+
     // Exit code same as flat dispatch
     let rc = if was_interrupted {
         130
