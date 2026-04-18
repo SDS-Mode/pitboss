@@ -56,8 +56,8 @@ prompt = "p"
     let mut cmd = Command::new(pitboss_binary());
     cmd.arg("dispatch").arg(&manifest_path);
     cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
-    cmd.env("MOSAIC_FAKE_SCRIPT", fixture("success.jsonl"));
-    cmd.env("MOSAIC_FAKE_EXIT_CODE", "0");
+    cmd.env("PITBOSS_FAKE_SCRIPT", fixture("success.jsonl"));
+    cmd.env("PITBOSS_FAKE_EXIT_CODE", "0");
     let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
@@ -136,8 +136,8 @@ prompt = "p"
     let mut cmd = Command::new(pitboss_binary());
     cmd.arg("dispatch").arg(&manifest_path);
     cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
-    cmd.env("MOSAIC_FAKE_SCRIPT", &exit2_script);
-    cmd.env("MOSAIC_FAKE_EXIT_CODE", "2");
+    cmd.env("PITBOSS_FAKE_SCRIPT", &exit2_script);
+    cmd.env("PITBOSS_FAKE_EXIT_CODE", "2");
     let out = cmd.output().unwrap();
 
     // pitboss should exit non-zero due to failures
@@ -196,7 +196,7 @@ id = "held"
 directory = "{repo}"
 prompt = "p"
 timeout_secs = 120
-env = {{ MOSAIC_FAKE_SCRIPT = "{hold}", MOSAIC_FAKE_HOLD = "1" }}
+env = {{ PITBOSS_FAKE_SCRIPT = "{hold}", PITBOSS_FAKE_HOLD = "1" }}
 "#,
             run_dir = run_dir.path().display(),
             repo = repo.path().display(),

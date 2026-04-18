@@ -106,7 +106,7 @@ async fn run_fake_claude_lead(
 ) -> SessionOutcome {
     let mut env = HashMap::new();
     env.insert(
-        "MOSAIC_FAKE_SCRIPT".to_string(),
+        "PITBOSS_FAKE_SCRIPT".to_string(),
         script_path.to_string_lossy().to_string(),
     );
     env.insert(

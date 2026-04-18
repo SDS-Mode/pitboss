@@ -33,3 +33,6 @@ flamegraph.svg
 
 # Git worktrees
 .worktrees/
+
+# Session-local Claude Code state (scheduled tasks, etc.)
+.claude/

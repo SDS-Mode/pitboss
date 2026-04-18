@@ -1,6 +1,6 @@
 //! Scripted fake-claude binary for integration tests.
 //!
-//! Reads a JSONL script from MOSAIC_FAKE_SCRIPT, executing each action in order:
+//! Reads a JSONL script from PITBOSS_FAKE_SCRIPT, executing each action in order:
 //!   {"stdout": "..."} — writes line to stdout
 //!   {"stderr": "..."} — writes line to stderr
 //!   {"sleep_ms": N}   — sleeps for N milliseconds
@@ -9,8 +9,8 @@
 //!   {"mcp_call": {"name": "...", "args": {...}, "bind": "...", "allow_err": bool}}
 //!       — issues an MCP tool call (requires PITBOSS_FAKE_MCP_SOCKET).
 //!
-//! After the script, exits with MOSAIC_FAKE_EXIT_CODE (default 0).
-//! If MOSAIC_FAKE_HOLD=1, blocks indefinitely after the script (for Ctrl-C tests).
+//! After the script, exits with PITBOSS_FAKE_EXIT_CODE (default 0).
+//! If PITBOSS_FAKE_HOLD=1, blocks indefinitely after the script (for Ctrl-C tests).
 //! Special-cases --version to print "fake-claude 0.0.0".
 
 mod bindings;
@@ -30,17 +30,17 @@ fn main() {
         return;
     }
 
-    let exit_code: i32 = std::env::var("MOSAIC_FAKE_EXIT_CODE")
+    let exit_code: i32 = std::env::var("PITBOSS_FAKE_EXIT_CODE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let hold = std::env::var("MOSAIC_FAKE_HOLD")
+    let hold = std::env::var("PITBOSS_FAKE_HOLD")
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
 
     // Execute the script if provided.
-    if let Ok(script_path) = std::env::var("MOSAIC_FAKE_SCRIPT") {
+    if let Ok(script_path) = std::env::var("PITBOSS_FAKE_SCRIPT") {
         let file = std::fs::File::open(&script_path)
             .unwrap_or_else(|e| panic!("fake-claude: cannot open script {script_path:?}: {e}"));
         let reader = BufReader::new(file);

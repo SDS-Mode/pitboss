@@ -10,7 +10,7 @@ use_worktree = false
 
 [[lead]]
 id = "refactor-analyst"
-directory = "/run/media/system/Dos/Projects/ketchup"
+directory = "/path/to/ketchup"
 prompt = """You are the lead refactor analyst for the Ketchup project — a Claude Code plugin that generates perspective-shaped technical research reports. The repo is currently on branch `feature/pitboss-refactor-analysis`.
 
 Key files to understand:
@@ -26,18 +26,18 @@ Your job: produce a refactor plan that makes the Ketchup skill more efficient. E
 Spawn 4 workers in parallel, each analyzing one angle:
 
 Worker A — SKILL.md structural audit:
-  prompt: "Read /run/media/system/Dos/Projects/ketchup/skills/ketchup/SKILL.md in full. Identify the top-level sections. Count lines/estimated-tokens per section. Flag: sections that could be split into a sub-skill, sections with internal duplication, sections that are over-specified (checklists/rules that the model would follow regardless). Write a 400-600 word audit to /tmp/ketchup-refactor/01-skill-audit.md with section-by-section recommendations."
+  prompt: "Read /path/to/ketchup/skills/ketchup/SKILL.md in full. Identify the top-level sections. Count lines/estimated-tokens per section. Flag: sections that could be split into a sub-skill, sections with internal duplication, sections that are over-specified (checklists/rules that the model would follow regardless). Write a 400-600 word audit to /tmp/ketchup-refactor/01-skill-audit.md with section-by-section recommendations."
 
 Worker B — CLI parsing rules audit:
-  prompt: "Read /run/media/system/Dos/Projects/ketchup/skills/ketchup/SKILL.md, focus on the 'Arguments' table and the 16 numbered 'Parsing Rules' underneath. Identify: rules that duplicate each other in different words, rules that can be collapsed into a single schema, rules that describe behavior the model handles by default, and rules that are essential. Propose a tighter 5-8 rule replacement preserving correctness. Write to /tmp/ketchup-refactor/02-cli-audit.md (~400 words)."
+  prompt: "Read /path/to/ketchup/skills/ketchup/SKILL.md, focus on the 'Arguments' table and the 16 numbered 'Parsing Rules' underneath. Identify: rules that duplicate each other in different words, rules that can be collapsed into a single schema, rules that describe behavior the model handles by default, and rules that are essential. Propose a tighter 5-8 rule replacement preserving correctness. Write to /tmp/ketchup-refactor/02-cli-audit.md (~400 words)."
 
 Worker C — Cross-file overlap audit:
-  prompt: "Read /run/media/system/Dos/Projects/ketchup/skills/ketchup/SKILL.md, notebook-format.md, and cite-and-tag.md. Identify content that appears in multiple files (formatting rules, citation conventions, output templates). Propose which file should own each piece and what should be deleted/consolidated. Write to /tmp/ketchup-refactor/03-overlap-audit.md (~400 words) with a 'canonical location' table at the end."
+  prompt: "Read /path/to/ketchup/skills/ketchup/SKILL.md, notebook-format.md, and cite-and-tag.md. Identify content that appears in multiple files (formatting rules, citation conventions, output templates). Propose which file should own each piece and what should be deleted/consolidated. Write to /tmp/ketchup-refactor/03-overlap-audit.md (~400 words) with a 'canonical location' table at the end."
 
 Worker D — README vs SKILL.md audit:
-  prompt: "Compare /run/media/system/Dos/Projects/ketchup/README.md against /run/media/system/Dos/Projects/ketchup/skills/ketchup/SKILL.md. The README is user-facing; SKILL.md is Claude-facing. Flag: content that belongs only in README (install, examples, quickstart), content that belongs only in SKILL.md (internal rules, decomposition recipes), and content duplicated across both. Recommend specific excisions from each file. Write to /tmp/ketchup-refactor/04-readme-vs-skill.md (~400 words)."
+  prompt: "Compare /path/to/ketchup/README.md against /path/to/ketchup/skills/ketchup/SKILL.md. The README is user-facing; SKILL.md is Claude-facing. Flag: content that belongs only in README (install, examples, quickstart), content that belongs only in SKILL.md (internal rules, decomposition recipes), and content duplicated across both. Recommend specific excisions from each file. Write to /tmp/ketchup-refactor/04-readme-vs-skill.md (~400 words)."
 
-Pass directory=/run/media/system/Dos/Projects/ketchup and model=claude-haiku-4-5 to each worker.
+Pass directory=/path/to/ketchup and model=claude-haiku-4-5 to each worker.
 
 Spawn all 4 workers in parallel via mcp__pitboss__spawn_worker. Call mcp__pitboss__wait_for_worker on each to wait for completion. Once all finish, read /tmp/ketchup-refactor/*.md and compose a combined REFACTOR-PLAN.md at /tmp/ketchup-refactor/REFACTOR-PLAN.md (~800 words) with:
   1. Executive summary (3-4 sentences on the overall direction)
