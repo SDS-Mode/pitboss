@@ -41,6 +41,12 @@ pub enum TaskEvent {
         approved: bool,
         edited: bool,
     },
+    NotificationFailed {
+        at: DateTime<Utc>,
+        sink_id: String,
+        event_kind: String,
+        error: String,
+    },
 }
 
 /// Append one event to `<run_subdir>/tasks/<task_id>/events.jsonl`.
