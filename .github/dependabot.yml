@@ -1,0 +1,58 @@
+# Dependabot configuration
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Cargo — Rust dependencies across the workspace. Dependabot reads the
+  # root Cargo.toml and walks the workspace members automatically when
+  # `directory: "/"` is pointed at the root.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+      include: "scope"
+    # Group patch + minor bumps into one PR per week to cut review load.
+    # Major bumps stay separate (they're the ones that actually need a
+    # human look).
+    groups:
+      rust-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    # Pin known-safe ignores here when upstream breaks us and we need
+    # time to catch up. Empty for now; uncomment as needed.
+    # ignore:
+    #   - dependency-name: "ratatui"
+    #     versions: ["0.30.*"]
+
+  # GitHub Actions — workflow files under .github/workflows/.
+  # Keeps actions/checkout, actions/upload-artifact, etc. current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    groups:
+      github-actions:
+        update-types:
+          - "minor"
+          - "patch"
