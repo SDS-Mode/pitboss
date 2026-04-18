@@ -34,6 +34,18 @@ pub struct CasResult {
     pub current_version: u64,
 }
 
+/// Metadata-only view of an entry, returned by `list`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListMetadata {
+    pub path: String,
+    pub version: u64,
+    pub written_by: String,
+    pub written_at: DateTime<Utc>,
+    pub size_bytes: u64,
+}
+
+const LIST_RESULT_CAP: usize = 1000;
+
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
 }
@@ -103,6 +115,57 @@ impl SharedStore {
             ok: true,
             current_version: new_version,
         })
+    }
+
+    pub async fn list(&self, pattern: &str) -> Result<Vec<ListMetadata>, StoreError> {
+        // Glob pattern matching with custom single-segment (`*`) vs cross-segment (`**`) semantics
+        let is_double_star = pattern.contains("**");
+        let pat = glob::Pattern::new(pattern)
+            .map_err(|e| StoreError::InvalidArg(format!("bad glob: {e}")))?;
+
+        let entries = self.entries.read().await;
+        let mut out: Vec<ListMetadata> = entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                let path = key.to_string_lossy().to_string();
+                if pat.matches(&path) {
+                    // For single-segment patterns (without **), ensure no `/` in the matched part
+                    if !is_double_star {
+                        // Find the base path (everything before the last `/`)
+                        if let Some(base_end) = pattern.rfind('/') {
+                            let pattern_base = &pattern[..=base_end];
+                            if !path.starts_with(pattern_base)
+                                || !path[pattern_base.len()..].contains('/')
+                            {
+                                // Path matches and has no additional `/` in the wildcard part
+                                return Some(ListMetadata {
+                                    path,
+                                    version: entry.version,
+                                    written_by: entry.written_by.clone(),
+                                    written_at: entry.written_at,
+                                    size_bytes: entry.value.len() as u64,
+                                });
+                            }
+                        }
+                    } else {
+                        // For **, allow any depth
+                        return Some(ListMetadata {
+                            path,
+                            version: entry.version,
+                            written_by: entry.written_by.clone(),
+                            written_at: entry.written_at,
+                            size_bytes: entry.value.len() as u64,
+                        });
+                    }
+                    None
+                } else {
+                    None
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out.truncate(LIST_RESULT_CAP);
+        Ok(out)
     }
 }
 
@@ -209,5 +272,68 @@ mod tests {
         let res = s.cas("/ref/k", 0, b"v2".to_vec(), "lead").await.unwrap();
         assert!(!res.ok);
         assert_eq!(res.current_version, 1);
+    }
+
+    #[tokio::test]
+    async fn list_matches_single_segment_glob() {
+        let s = SharedStore::new();
+        s.set("/ref/a", b"".to_vec(), "lead").await.unwrap();
+        s.set("/ref/b", b"".to_vec(), "lead").await.unwrap();
+        s.set("/ref/nested/c", b"".to_vec(), "lead").await.unwrap();
+        let mut paths: Vec<String> = s
+            .list("/ref/*")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/ref/a".to_string(), "/ref/b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_matches_cross_segment_glob() {
+        let s = SharedStore::new();
+        s.set("/ref/a", b"".to_vec(), "lead").await.unwrap();
+        s.set("/ref/nested/c", b"".to_vec(), "lead").await.unwrap();
+        let mut paths: Vec<String> = s
+            .list("/ref/**")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["/ref/a".to_string(), "/ref/nested/c".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_returns_metadata_not_values() {
+        let s = SharedStore::new();
+        s.set("/ref/a", b"hello".to_vec(), "lead").await.unwrap();
+        let entries = s.list("/ref/*").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.path, "/ref/a");
+        assert_eq!(e.size_bytes, 5);
+        assert_eq!(e.version, 1);
+        assert_eq!(e.written_by, "lead");
+    }
+
+    #[tokio::test]
+    async fn list_caps_results_at_1000() {
+        let s = SharedStore::new();
+        for i in 0..1500 {
+            s.set(&format!("/shared/item-{i:05}"), b"x".to_vec(), "lead")
+                .await
+                .unwrap();
+        }
+        let entries = s.list("/shared/*").await.unwrap();
+        assert_eq!(entries.len(), 1000);
+        assert_eq!(entries[0].path, "/shared/item-00000");
+        assert_eq!(entries[999].path, "/shared/item-00999");
     }
 }
