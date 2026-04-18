@@ -111,6 +111,114 @@ pub trait NotificationSink: Send + Sync {
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()>;
 }
 
+/// Filter for sink-specific event + severity matching.
+#[derive(Debug, Clone)]
+pub struct SinkFilter {
+    /// If Some, only emit events in this list. If None, emit all.
+    pub events: Option<Vec<String>>,
+    /// Minimum severity to emit (info, warning, error, critical).
+    pub severity_min: Severity,
+}
+
+impl SinkFilter {
+    /// Check if event + severity should be emitted to this sink.
+    pub fn matches(&self, env: &NotificationEnvelope) -> bool {
+        if env.severity < self.severity_min {
+            return false;
+        }
+        if let Some(ref allowed) = self.events {
+            if !allowed.contains(&env.event.kind().to_string()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
+
+/// Router fans envelopes to multiple sinks with LRU dedup and retry.
+pub struct NotificationRouter {
+    sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>,
+    dedup_cache: Mutex<LruCache<String, ()>>,
+}
+
+impl NotificationRouter {
+    /// Create a router with the given sinks and filters.
+    pub fn new(sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>) -> Self {
+        Self {
+            sinks,
+            dedup_cache: Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap())),
+        }
+    }
+
+    /// Dispatch envelope to all matching sinks. Deduplicates by dedup_key
+    /// and spawns fire-and-forget tasks with retry.
+    pub async fn dispatch(&self, env: NotificationEnvelope) -> Result<()> {
+        {
+            let mut cache = self.dedup_cache.lock().unwrap();
+            if cache.contains(&env.dedup_key) {
+                return Ok(());
+            }
+            cache.put(env.dedup_key.clone(), ());
+        }
+
+        for (sink, filter) in &self.sinks {
+            if !filter.matches(&env) {
+                continue;
+            }
+            let sink = Arc::clone(sink);
+            let env = env.clone();
+            tokio::spawn(async move {
+                if let Err(e) = emit_with_retry(&sink, &env).await {
+                    tracing::error!(
+                        sink_id = %sink.id(),
+                        dedup_key = %env.dedup_key,
+                        error = %e,
+                        "notification emit failed after retries"
+                    );
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Try emitting 3 times with exponential backoff: 100ms, 300ms, 900ms.
+/// Returns Ok on first success; Err on final failure.
+async fn emit_with_retry(
+    sink: &Arc<dyn NotificationSink>,
+    env: &NotificationEnvelope,
+) -> Result<()> {
+    let backoffs = [100, 300, 900];
+    for (attempt, &delay_ms) in backoffs.iter().enumerate() {
+        match sink.emit(env).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < 2 => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    delay_ms,
+                    error = %e,
+                    "notification emit failed, retrying"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+    Err(anyhow::anyhow!("emit_with_retry: exhausted attempts"))
+}
+
+/// Heuristic for determining if an error is fatal (should not retry).
+/// v0.4.1: always false — retry everything.
+fn is_fatal(_err: &anyhow::Error) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
