@@ -70,6 +70,12 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     };
     state.control_connected = control_client.as_ref().is_some_and(|c| c.is_connected());
     state.control_client = control_client;
+    // Stash a handle to THE runtime the ControlClient was built under.
+    // `send_op` callers must spawn on this handle — spinning up a fresh
+    // runtime per call (as the removed `futures_block_on` helper did)
+    // left the socket writer registered with a dead reactor and every
+    // kill/pause/reprompt op hung without error.
+    state.runtime_handle = Some(runtime.handle().clone());
     // `runtime` owns the background reader + forward tasks and must be kept
     // alive for the full event loop. It falls out of scope at the end of
     // `run()`; the tasks are dropped cleanly then.
@@ -257,24 +263,23 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
 
         // v0.4 — pause focused worker.
         KeyCode::Char('p') => {
-            if let (Some(client), Some(tile)) =
-                (state.control_client.clone(), state.focused_tile().cloned())
-            {
-                let op =
-                    pitboss_cli::control::protocol::ControlOp::PauseWorker { task_id: tile.id };
-                let _ = futures_block_on(async move { client.send_op(op).await });
+            if let Some(tile) = state.focused_tile().cloned() {
+                spawn_control_op(
+                    state,
+                    pitboss_cli::control::protocol::ControlOp::PauseWorker { task_id: tile.id },
+                );
             }
         }
         // v0.4 — continue focused worker (if paused).
         KeyCode::Char('c') => {
-            if let (Some(client), Some(tile)) =
-                (state.control_client.clone(), state.focused_tile().cloned())
-            {
-                let op = pitboss_cli::control::protocol::ControlOp::ContinueWorker {
-                    task_id: tile.id,
-                    prompt: None,
-                };
-                let _ = futures_block_on(async move { client.send_op(op).await });
+            if let Some(tile) = state.focused_tile().cloned() {
+                spawn_control_op(
+                    state,
+                    pitboss_cli::control::protocol::ControlOp::ContinueWorker {
+                        task_id: tile.id,
+                        prompt: None,
+                    },
+                );
             }
         }
 
@@ -404,18 +409,15 @@ fn handle_confirm_kill(state: &mut AppState, code: KeyCode) -> Action {
     };
     match code {
         KeyCode::Char('y' | 'Y') => {
-            if let Some(client) = state.control_client.clone() {
-                let op = match target {
-                    crate::state::KillTarget::Worker(id) => {
-                        pitboss_cli::control::protocol::ControlOp::CancelWorker { task_id: id }
-                    }
-                    crate::state::KillTarget::Run => {
-                        pitboss_cli::control::protocol::ControlOp::CancelRun
-                    }
-                };
-                // Best-effort async send. Detach via fire-and-forget.
-                let _ = futures_block_on(async move { client.send_op(op).await });
-            }
+            let op = match target {
+                crate::state::KillTarget::Worker(id) => {
+                    pitboss_cli::control::protocol::ControlOp::CancelWorker { task_id: id }
+                }
+                crate::state::KillTarget::Run => {
+                    pitboss_cli::control::protocol::ControlOp::CancelRun
+                }
+            };
+            spawn_control_op(state, op);
             state.mode = Mode::Normal;
         }
         _ => state.mode = Mode::Normal,
@@ -436,13 +438,13 @@ fn handle_prompt_reprompt(state: &mut AppState, code: KeyCode, modifiers: KeyMod
         KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
             // Ctrl+Enter: submit.
             if !draft.is_empty() {
-                if let Some(client) = state.control_client.clone() {
-                    let op = pitboss_cli::control::protocol::ControlOp::RepromptWorker {
+                spawn_control_op(
+                    state,
+                    pitboss_cli::control::protocol::ControlOp::RepromptWorker {
                         task_id: task_id.clone(),
                         prompt: draft.clone(),
-                    };
-                    let _ = futures_block_on(async move { client.send_op(op).await });
-                }
+                    },
+                );
             }
             state.mode = Mode::Normal;
             return Action::Continue;
@@ -580,29 +582,32 @@ fn send_approve(
     comment: Option<String>,
     edited_summary: Option<String>,
 ) {
-    if let Some(client) = state.control_client.clone() {
-        let op = pitboss_cli::control::protocol::ControlOp::Approve {
+    spawn_control_op(
+        state,
+        pitboss_cli::control::protocol::ControlOp::Approve {
             request_id: request_id.to_string(),
             approved,
             comment,
             edited_summary,
-        };
-        let _ = futures_block_on(async move { client.send_op(op).await });
-    }
+        },
+    );
 }
 
-// The TUI event loop runs outside any tokio runtime context (crossterm polls
-// synchronously). For fire-and-forget control-socket sends we use a tiny
-// single-threaded runtime per call. The operation is short — one writeln —
-// so the overhead is acceptable. If it ever becomes hot, migrate to a
-// persistent runtime handle threaded through AppState.
-fn futures_block_on<F>(fut: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio rt")
-        .block_on(fut)
+// Fire-and-forget dispatch of a control op onto the runtime the
+// `ControlClient` was built under. Earlier versions built a fresh
+// `new_current_thread()` runtime per call — that ran the socket write
+// through a reactor that didn't own the writer half, so every op hung
+// silently. We now spawn on the original handle (kept alive in AppState).
+// If either the client or runtime handle is missing (observe-only mode,
+// tests), the call is a no-op.
+fn spawn_control_op(state: &AppState, op: pitboss_cli::control::protocol::ControlOp) {
+    let (Some(client), Some(handle)) =
+        (state.control_client.clone(), state.runtime_handle.as_ref())
+    else {
+        return;
+    };
+    // Detach the JoinHandle — fire-and-forget send; send_op handles its own errors.
+    std::mem::drop(handle.spawn(async move {
+        let _ = client.send_op(op).await;
+    }));
 }

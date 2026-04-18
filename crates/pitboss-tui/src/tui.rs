@@ -1167,6 +1167,7 @@ mod tests {
             cached_git_diff: std::collections::HashMap::new(),
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
+            runtime_handle: None,
         }
     }
 

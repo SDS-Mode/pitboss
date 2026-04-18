@@ -136,6 +136,12 @@ pub struct AppState {
     /// whenever any line wraps — scroll must use this to map 1:1 with
     /// what's painted. 0 until the first render.
     pub detail_log_total_rows: std::sync::atomic::AtomicUsize,
+    /// Handle to the tokio runtime that owns the `ControlClient`. Must be
+    /// used to spawn any future that touches the control socket — building
+    /// a fresh `new_current_thread()` runtime per call would run the write
+    /// from the wrong reactor and async I/O would silently hang. `None`
+    /// only in tests where no control socket is in play.
+    pub runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 /// Summary of a worker's worktree diff vs its base branch.
@@ -163,6 +169,7 @@ impl AppState {
             cached_git_diff: std::collections::HashMap::new(),
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
+            runtime_handle: None,
         }
     }
 

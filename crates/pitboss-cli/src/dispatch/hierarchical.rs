@@ -255,8 +255,19 @@ pub async fn run_hierarchical(
     // and our internal cleanup termination signal to drain workers.
     let was_interrupted = cancel.is_draining() || cancel.is_terminated();
 
-    // Any in-flight workers get cancelled, their TaskRecord synthesized.
-    // `cancel.terminate()` signals all in-flight SessionHandles.
+    // Any in-flight workers get cancelled. `cancel` is the RUN-level token
+    // (observed only by the lead's SessionHandle), so terminating it alone
+    // leaves workers orphaned — their sessions use per-task tokens in
+    // `state.worker_cancels`. Cascade to every live worker so their
+    // SessionHandles SIGTERM the child claude processes too. Without this
+    // cascade, `ps` showed live claude workers after the run "finished"
+    // and the summary marked them Cancelled with no actual termination.
+    {
+        let cancels = state.worker_cancels.read().await;
+        for tok in cancels.values() {
+            tok.terminate();
+        }
+    }
     cancel.terminate();
     // Give them up to TERMINATE_GRACE to drain.
     tokio::time::sleep(pitboss_core::session::TERMINATE_GRACE).await;
