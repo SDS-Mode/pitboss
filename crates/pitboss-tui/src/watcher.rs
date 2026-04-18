@@ -266,13 +266,16 @@ fn build_tile(
             }
             _ => {}
         }
-        // Dynamic workers aren't in resolved.json, and TaskRecord doesn't
-        // carry the model. For those the model_map returns None and the
-        // Detail view would render "model ?". Pull the model out of the
-        // first assistant event via an early-out scan — cheap relative
-        // to the full scan_live_stats (which sums usage across every
-        // assistant message and scales with log size).
-        let model = model.or_else(|| scan_first_model(&log_path));
+        // Resolution order for completed tiles:
+        //   1. resolved.json model_map (static tasks + lead)
+        //   2. TaskRecord.model (v0.4.2+ — captured at spawn time)
+        //   3. log-scan fallback for pre-v0.4.2 records that don't carry
+        //      the field yet. Runs once-per-tick during the run, but only
+        //      for tiles whose record lacks `model`; cheap relative to
+        //      scan_live_stats and stops at the first assistant message.
+        let model = model
+            .or_else(|| rec.model.clone())
+            .or_else(|| scan_first_model(&log_path));
         TileState {
             id: id.to_string(),
             status: TileStatus::Done(rec.status.clone()),

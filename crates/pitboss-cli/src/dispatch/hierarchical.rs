@@ -243,6 +243,7 @@ pub async fn run_hierarchical(
         approvals_requested: lead_counters.approvals_requested,
         approvals_approved: lead_counters.approvals_approved,
         approvals_rejected: lead_counters.approvals_rejected,
+        model: Some(lead.model.clone()),
     };
 
     // Cleanup worktree per policy
@@ -284,6 +285,7 @@ pub async fn run_hierarchical(
 
     let worker_records: Vec<pitboss_core::store::TaskRecord> = {
         let workers = state.workers.read().await;
+        let worker_models = state.worker_models.read().await;
         workers
             .iter()
             .filter(|(id, _)| *id != &lead.id) // don't double-count the lead
@@ -311,6 +313,7 @@ pub async fn run_hierarchical(
                         approvals_requested: 0,
                         approvals_approved: 0,
                         approvals_rejected: 0,
+                        model: worker_models.get(id).cloned(),
                     }
                 }
             })

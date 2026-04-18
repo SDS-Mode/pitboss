@@ -328,6 +328,7 @@ async fn execute_task(
                     approvals_requested: 0,
                     approvals_approved: 0,
                     approvals_rejected: 0,
+                    model: Some(task.model.clone()),
                 };
             }
         }
@@ -384,6 +385,7 @@ async fn execute_task(
         approvals_requested: 0,
         approvals_approved: 0,
         approvals_rejected: 0,
+        model: Some(task.model.clone()),
     }
 }
 
