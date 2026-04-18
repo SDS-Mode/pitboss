@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::state::{AppSnapshot, TileState, TileStatus};
 
-const POLL_INTERVAL_MS: u64 = 500;
+const POLL_INTERVAL_MS: u64 = 250;
 /// Number of parsed focus-pane lines to keep.
 const TAIL_LINES: usize = 40;
 /// Maximum bytes to read off the end of a log file when tailing. Chosen so
