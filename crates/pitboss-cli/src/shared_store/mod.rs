@@ -2,6 +2,9 @@
 //! the lead and workers. See
 //! `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
 
+pub mod leases;
+pub use leases::{AcquireResult, Lease, LeaseRegistry};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -40,6 +43,8 @@ pub enum StoreError {
     Timeout,
     #[error("store shutdown")]
     Shutdown,
+    #[error("conflict")]
+    Conflict,
 }
 
 /// Outcome of a compare-and-swap. `ok=true` means the write happened;
