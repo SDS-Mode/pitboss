@@ -126,6 +126,11 @@ pub struct AppState {
     /// reused until the user exits detail mode. `None` for tasks whose
     /// worktree path is unknown or whose diff couldn't be computed.
     pub cached_git_diff: std::collections::HashMap<String, GitDiffSummary>,
+    /// Height of the detail-view log pane (inner rows), set by the render
+    /// pass via interior mutability. Read by the scroll handlers so they
+    /// know the real `max_scroll = total_lines - viewport` without having
+    /// to query the terminal themselves. 0 until the first render.
+    pub detail_log_viewport: std::sync::atomic::AtomicUsize,
 }
 
 /// Summary of a worker's worktree diff vs its base branch.
@@ -151,6 +156,7 @@ impl AppState {
             control_client: None,
             control_connected: false,
             cached_git_diff: std::collections::HashMap::new(),
+            detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -245,16 +251,27 @@ impl AppState {
     ///
     /// Disables auto-scroll if the new position is not at the bottom.
     pub fn detail_scroll_down(&mut self, delta: usize, _visible_rows: usize) {
-        // `Paragraph::scroll` clamps cleanly at end-of-content, so don't
-        // enforce a max here — overshooting renders blank at the bottom,
-        // and pressing `k` brings the user back to real content. This
-        // avoids the old bug where `visible_rows` (a 40-row constant) was
-        // larger than the actual rendered rows, locking scroll at 0.
-        let Mode::Detail { ref mut scroll, .. } = self.mode else {
+        let total = self.focus_log.len();
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total.saturating_sub(viewport);
+        let Mode::Detail {
+            ref mut scroll,
+            ref mut at_bottom,
+            ..
+        } = self.mode
+        else {
             return;
         };
-        *scroll = scroll.saturating_add(delta);
-        // Leave at_bottom as-is. Only `G` explicitly re-enables auto-follow.
+        // Cap scroll at max_scroll so we don't accumulate a sentinel.
+        *scroll = (scroll.saturating_add(delta)).min(max_scroll);
+        // If we've reached max_scroll, user is at the bottom; re-enable
+        // auto-follow so incoming lines continue to scroll into view.
+        if *scroll >= max_scroll {
+            *at_bottom = true;
+        }
     }
 
     /// Scroll up by `delta` lines in `Detail` mode. Clamps at 0.
@@ -268,6 +285,14 @@ impl AppState {
     /// value as-is.
     pub fn detail_scroll_up(&mut self, delta: usize) {
         let total = self.focus_log.len();
+        // Real viewport (log pane inner height) published by render. 0 on
+        // the first key press before any render has run; fall back to a
+        // safe default so the clamp below still works.
+        let viewport = self
+            .detail_log_viewport
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        let max_scroll = total.saturating_sub(viewport);
         let Mode::Detail {
             ref mut scroll,
             ref mut at_bottom,
@@ -277,7 +302,11 @@ impl AppState {
             return;
         };
         if *at_bottom {
-            *scroll = (*scroll).min(total);
+            // Leaving auto-follow: clamp scroll to the real max so `k`
+            // produces immediate visible movement. Without this the first
+            // `k` decrements a sentinel past the render-time clamp
+            // boundary and the user sees nothing move.
+            *scroll = (*scroll).min(max_scroll);
         }
         *scroll = scroll.saturating_sub(delta);
         *at_bottom = false;

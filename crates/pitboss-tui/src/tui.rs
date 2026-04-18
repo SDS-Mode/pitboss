@@ -3,6 +3,7 @@
 use std::io::Stdout;
 
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -143,7 +144,12 @@ pub fn workers_spawned(state: &crate::state::AppState) -> usize {
 pub fn init() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // EnableMouseCapture lets us receive MouseEvent::ScrollUp/ScrollDown
+    // for wheel scrolling in the detail view. Costs: the alt-screen
+    // terminal no longer receives native selection/copy via click-drag
+    // (users can typically hold Shift to bypass mouse capture in most
+    // terminal emulators).
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -151,7 +157,11 @@ pub fn init() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 pub fn teardown(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -709,6 +719,10 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
 
     let total_lines = state.focus_log.len();
     let visible_rows = inner.height as usize;
+    // Publish viewport rows so scroll handlers know real max_scroll.
+    state
+        .detail_log_viewport
+        .store(visible_rows, std::sync::atomic::Ordering::Relaxed);
     let max_scroll = total_lines.saturating_sub(visible_rows);
     let scroll = scroll.min(max_scroll);
 
@@ -731,8 +745,11 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
 
 /// Simple `  key  value` two-column line for the metadata pane.
 fn kv_line(key: &str, value: &str) -> Line<'static> {
+    // 12-char left-padded label so "tool calls" (exactly 10 chars) still
+    // has a visible gap before the value. Indent is 2 spaces. Total
+    // prefix = 14 chars before the value.
     Line::from(vec![
-        Span::styled(format!("  {key:<10}"), theme::muted_style()),
+        Span::styled(format!("  {key:<12}"), theme::muted_style()),
         Span::styled(value.to_string(), theme::primary_style()),
     ])
 }
@@ -1081,6 +1098,7 @@ mod tests {
             control_client: None,
             control_connected: false,
             cached_git_diff: std::collections::HashMap::new(),
+            detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

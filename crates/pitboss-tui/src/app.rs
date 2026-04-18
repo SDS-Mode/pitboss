@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::state::{AppSnapshot, AppState, Mode};
 use crate::watcher;
@@ -29,6 +29,7 @@ fn spawn_watcher(run_dir: PathBuf) -> (SnapshotRx, FocusTx) {
 }
 
 /// Run the TUI against the given run directory.
+#[allow(clippy::too_many_lines)]
 pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     let mut terminal = crate::tui::init()?;
 
@@ -140,6 +141,22 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                     // Notify watcher of new focus.
                     if let Some(tile) = state.focused_tile() {
                         let _ = focus_tx.send(tile.id.clone());
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    // Only wire wheel scroll in the detail view for now.
+                    // Tile grid mouse clicks, drag-select, etc. can be
+                    // added later if useful.
+                    if matches!(state.mode, Mode::Detail { .. }) {
+                        match mouse.kind {
+                            MouseEventKind::ScrollDown => {
+                                state.detail_scroll_down(3, DETAIL_VISIBLE_ROWS);
+                            }
+                            MouseEventKind::ScrollUp => {
+                                state.detail_scroll_up(3);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 _ => {}
