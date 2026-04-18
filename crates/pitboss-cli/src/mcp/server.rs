@@ -118,7 +118,10 @@ impl PitbossHandler {
     #[tool(description = "List all workers in the current run (excludes the lead).")]
     async fn list_workers(&self) -> Result<CallToolResult, ErrorData> {
         let summaries = handle_list_workers(&self.state).await;
-        to_structured_result(&summaries)
+        // MCP spec: structuredContent MUST be a record/object. Bare arrays
+        // (as `Vec<WorkerSummary>` would serialize) are rejected by the
+        // client's schema validator with "expected record, received array".
+        to_structured_result(&serde_json::json!({ "workers": summaries }))
     }
 
     #[tool(description = "Cancel a worker by task_id. Sends SIGTERM, grace, SIGKILL.")]
@@ -184,13 +187,18 @@ impl PitbossHandler {
         }
     }
 
-    #[tool(description = "Read a value from the shared store. Returns null if the key is missing.")]
+    #[tool(
+        description = "Read a value from the shared store. Returns { entry: null } when the key is missing."
+    )]
     async fn kv_get(
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvGetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match crate::shared_store::tools::handle_kv_get(&self.state.shared_store, args).await {
-            Ok(v) => to_structured_result(&v),
+            // Wrap Option<Entry> in an object so structuredContent is a
+            // record (per MCP spec). A bare null was rejected by the
+            // client's schema validator in early dogfood runs.
+            Ok(v) => to_structured_result(&serde_json::json!({ "entry": v })),
             Err(e) => Err(shared_store_err(&e)),
         }
     }
@@ -222,14 +230,16 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "List metadata of entries matching a glob pattern. * is single-segment; ** is cross-segment. Caps at 1000 results."
+        description = "List metadata of entries matching a glob pattern. * is single-segment; ** is cross-segment. Caps at 1000 results. Returns { entries: [...] }."
     )]
     async fn kv_list(
         &self,
         Parameters(args): Parameters<crate::shared_store::tools::KvListArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match crate::shared_store::tools::handle_kv_list(&self.state.shared_store, args).await {
-            Ok(v) => to_structured_result(&v),
+            // Wrap Vec<ListMetadata> in an object — MCP spec requires
+            // structuredContent to be a record.
+            Ok(v) => to_structured_result(&serde_json::json!({ "entries": v })),
             Err(e) => Err(shared_store_err(&e)),
         }
     }
@@ -591,5 +601,61 @@ mod tests {
             elapsed
         );
         assert!(!sock.exists(), "socket file should be removed on drop");
+    }
+
+    // MCP spec requires CallToolResult.structuredContent to be a record/object.
+    // Claude Code's MCP client validates it and rejects arrays / nulls with
+    // `{"code":"invalid_type","message":"expected record, received array|null"}`.
+    // These tests pin the wrapper shape for tools that return Option<_> / Vec<_>
+    // so the shape can't regress silently.
+    //
+    // Earlier dogfood runs (2026-04-18) showed ~32 tool failures across four
+    // runs, all rooted in this bug. Regression guard.
+
+    #[test]
+    fn kv_get_wraps_missing_entry_as_object_not_null() {
+        let none: Option<crate::shared_store::Entry> = None;
+        let result = to_structured_result(&serde_json::json!({ "entry": none })).unwrap();
+        let v = result
+            .structured_content
+            .expect("structured content present");
+        assert!(
+            v.is_object(),
+            "structuredContent must be a record, got {v:?}"
+        );
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("entry"), "missing `entry` key: {obj:?}");
+        assert!(
+            obj["entry"].is_null(),
+            "missing key should serialize as null INSIDE the record"
+        );
+    }
+
+    #[test]
+    fn kv_list_wraps_empty_result_as_object_not_array() {
+        let empty: Vec<crate::shared_store::ListMetadata> = Vec::new();
+        let result = to_structured_result(&serde_json::json!({ "entries": empty })).unwrap();
+        let v = result
+            .structured_content
+            .expect("structured content present");
+        assert!(
+            v.is_object(),
+            "structuredContent must be a record, got {v:?}"
+        );
+        assert!(v["entries"].is_array(), "entries should be an array");
+    }
+
+    #[test]
+    fn list_workers_wraps_empty_result_as_object_not_array() {
+        let empty: Vec<crate::mcp::tools::WorkerSummary> = Vec::new();
+        let result = to_structured_result(&serde_json::json!({ "workers": empty })).unwrap();
+        let v = result
+            .structured_content
+            .expect("structured content present");
+        assert!(
+            v.is_object(),
+            "structuredContent must be a record, got {v:?}"
+        );
+        assert!(v["workers"].is_array(), "workers should be an array");
     }
 }
