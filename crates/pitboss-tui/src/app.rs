@@ -408,6 +408,22 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
         E::Superseded | E::RunFinished { .. } => {
             state.control_connected = false;
         }
+        E::StoreActivity { counters } => {
+            // Rebuild the map from scratch each broadcast — the server
+            // sends the full snapshot, so we don't need to merge.
+            state.store_activity = counters
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.actor_id,
+                        crate::state::StoreActivityCounters {
+                            kv_ops: e.kv_ops,
+                            lease_ops: e.lease_ops,
+                        },
+                    )
+                })
+                .collect();
+        }
         _ => {}
     }
 }

@@ -226,6 +226,41 @@ async fn serve_connection(
         }
     });
 
+    // Periodic shared-store activity broadcaster. Each connection gets
+    // its own ticker so when the TUI reconnects it starts from the
+    // current live counters. 1 s cadence is fast enough for the TUI's
+    // 250 ms poll to feel responsive without flooding the socket.
+    let ev_tx_activity = ev_tx.clone();
+    let state_activity = state.clone();
+    let activity_pump = tokio::spawn(async move {
+        // Delay first emission by one period. tokio::time::interval's default
+        // is to fire immediately on construction, which would race ahead of
+        // the first OpAcked in tests that send an op right after hello.
+        let period = std::time::Duration::from_millis(STORE_ACTIVITY_INTERVAL_MS);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let snapshot = state_activity.shared_store.activity_snapshot().await;
+            let counters: Vec<crate::control::protocol::ActorActivityEntry> = snapshot
+                .into_iter()
+                .map(
+                    |(actor_id, c)| crate::control::protocol::ActorActivityEntry {
+                        actor_id,
+                        kv_ops: c.kv_ops,
+                        lease_ops: c.lease_ops,
+                    },
+                )
+                .collect();
+            if ev_tx_activity
+                .send(ControlEvent::StoreActivity { counters })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
     // Read loop.
     while let Ok(Some(line)) = reader.next_line().await {
         let reply = match serde_json::from_str::<ControlOp>(&line) {
@@ -247,7 +282,13 @@ async fn serve_connection(
         *cw = None;
     }
     pump.abort();
+    activity_pump.abort();
 }
+
+/// Period between `StoreActivity` broadcasts on the control socket.
+/// Tuned for TUI poll cadence (250 ms) — faster than 1 s is noise,
+/// slower feels laggy. Constant so tests can match expected payloads.
+const STORE_ACTIVITY_INTERVAL_MS: u64 = 1000;
 
 async fn send_event(
     writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,

@@ -477,7 +477,21 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
         },
     );
 
-    let lines = vec![
+    // Shared-store activity line: `kv:N lease:M`. Skip when both are 0
+    // (almost all tiles during the first second + the lead in flat-mode
+    // runs), so quiet tiles don't waste a row on a useless "kv:0 lease:0".
+    let activity_line = state
+        .store_activity
+        .get(&tile.id)
+        .filter(|c| c.kv_ops > 0 || c.lease_ops > 0)
+        .map(|c| {
+            Line::from(Span::styled(
+                format!("kv:{} lease:{}", c.kv_ops, c.lease_ops),
+                theme::muted_style(),
+            ))
+        });
+
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(icon, Style::default().fg(icon_color)),
             Span::raw(" "),
@@ -493,6 +507,9 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
         )),
         Line::from(Span::styled(cost_str, theme::muted_style())),
     ];
+    if let Some(line) = activity_line {
+        lines.push(line);
+    }
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
@@ -1228,6 +1245,7 @@ mod tests {
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
+            store_activity: std::collections::HashMap::new(),
         }
     }
 
