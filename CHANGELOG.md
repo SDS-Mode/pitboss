@@ -39,6 +39,12 @@ This project uses [Semantic Versioning](https://semver.org/).
   900ms), LRU dedup cache (size 64) prevents retry storms. New
   `TaskEvent::NotificationFailed` variant records delivery failures
   in `events.jsonl`.
+- **Semantic log-line coloring.** TUI's focus-log pane and full-screen
+  snap-in view now color each stream-json line by event type: white
+  for assistant text, cyan for tool use, green for tool results, gray
+  for system/unknown, magenta for result events, yellow for rate
+  limits. Driven by the new `pitboss_tui::theme::log_line_style`
+  helper. Unparseable lines fall back to gray.
 
 ### Fixed
 - Control-socket `approve` op now writes the `approval_response` event
@@ -47,6 +53,24 @@ This project uses [Semantic Versioning](https://semver.org/).
   v0.4.0 queue-drain path bypassed `respond`, so approvals drained on
   TUI connect produced no response event and didn't bump counters.
   Surfaced by the new e2e approval round-trip test.
+- **TUI tile grid no longer retains prior-frame content in empty cells.**
+  `render_tile_grid` now calls `frame.render_widget(Clear, area)`
+  before drawing tiles, so partial-final-row dead space stays clean.
+  Observed as character leakage during Stage 1 dogfood run (#129).
+- **TUI summary/count responsiveness improved.** Watcher poll interval
+  lowered from 500ms to 250ms; on-disk `summary.jsonl` writes now
+  surface in the TUI within 250ms instead of up to 500ms (#128).
+- **TUI text word-wraps at window width in log/tile/overlay bodies.**
+  Added `Wrap { trim: false }` to Paragraphs in `render_tile`,
+  `render_focus_log`, `render_snap_in`, `render_run_picker_overlay`,
+  and `render_approval_modal`. Title bar and status bar intentionally
+  stay single-line (truncation is desired there) (#130).
+- **TUI color usage consolidated.** New `pitboss_tui::theme` module
+  holds palette constants + style helpers. Status colors and UI
+  accent colors flow through `theme::*` instead of inline `Color::*`
+  literals scattered across `tui.rs`. No user-visible change in most
+  views; fixes accidental drift where the same semantic state
+  rendered in different colors in different contexts (#131).
 
 ## [0.4.0] — 2026-04-17
 
