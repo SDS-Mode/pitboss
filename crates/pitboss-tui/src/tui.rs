@@ -287,8 +287,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
     if state.tasks.is_empty() {
-        let msg =
-            Paragraph::new(" No tasks found in this run.").style(theme::secondary_style());
+        let msg = Paragraph::new(" No tasks found in this run.").style(theme::secondary_style());
         frame.render_widget(msg, area);
         return;
     }
@@ -376,10 +375,7 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     // so the hierarchy is visible without consuming content rows.
     let subtitle = format_tile_subtitle(state, tile_idx);
     if !subtitle.is_empty() {
-        block = block.title_bottom(Span::styled(
-            format!(" {subtitle} "),
-            theme::muted_style(),
-        ));
+        block = block.title_bottom(Span::styled(format!(" {subtitle} "), theme::muted_style()));
     }
 
     let inner = block.inner(area);
