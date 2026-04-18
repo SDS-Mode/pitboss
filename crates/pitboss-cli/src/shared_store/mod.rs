@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
+use tokio_util::sync::CancellationToken;
 
 /// One stored entry, keyed by path in the containing `SharedStore`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -16,6 +17,13 @@ pub struct Entry {
     pub version: u64,
     pub written_by: String,
     pub written_at: DateTime<Utc>,
+}
+
+/// Internal notification event fired on successful write.
+#[derive(Debug, Clone)]
+struct NotifyEvent {
+    path: PathBuf,
+    version: u64,
 }
 
 /// Errors returned by store operations. Each maps to a stable MCP error
@@ -28,6 +36,10 @@ pub enum StoreError {
     Forbidden(String),
     #[error("store limit exceeded: {which:?}")]
     LimitExceeded { which: LimitKind },
+    #[error("timeout")]
+    Timeout,
+    #[error("store shutdown")]
+    Shutdown,
 }
 
 /// Outcome of a compare-and-swap. `ok=true` means the write happened;
@@ -126,6 +138,8 @@ fn authorize_write(
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
     limits: Limits,
+    notifier: broadcast::Sender<NotifyEvent>,
+    cancel: CancellationToken,
 }
 
 impl SharedStore {
@@ -134,9 +148,12 @@ impl SharedStore {
     }
 
     pub fn with_limits(limits: Limits) -> Self {
+        let (notifier, _) = broadcast::channel(256);
         Self {
             entries: RwLock::new(HashMap::new()),
             limits,
+            notifier,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -176,6 +193,7 @@ impl SharedStore {
             });
         }
         let version = prev.map_or(1, |e| e.version + 1);
+        let notify_key = key.clone();
         entries.insert(
             key,
             Entry {
@@ -185,6 +203,11 @@ impl SharedStore {
                 written_at: Utc::now(),
             },
         );
+        drop(entries);
+        let _ = self.notifier.send(NotifyEvent {
+            path: notify_key,
+            version,
+        });
         Ok(version)
     }
 
@@ -227,6 +250,7 @@ impl SharedStore {
             });
         }
         let new_version = current_version + 1;
+        let notify_key = key.clone();
         entries.insert(
             key,
             Entry {
@@ -236,6 +260,11 @@ impl SharedStore {
                 written_at: Utc::now(),
             },
         );
+        drop(entries);
+        let _ = self.notifier.send(NotifyEvent {
+            path: notify_key,
+            version: new_version,
+        });
         Ok(CasResult {
             ok: true,
             current_version: new_version,
@@ -296,6 +325,61 @@ impl SharedStore {
         self.cas(path, expected_version, new_value, &caller.id)
             .await
     }
+
+    pub async fn wait(
+        &self,
+        path: &str,
+        timeout: std::time::Duration,
+        min_version: Option<u64>,
+    ) -> Result<Entry, StoreError> {
+        validate_path(path)?;
+        let key = PathBuf::from(path);
+        let min = min_version.unwrap_or(1);
+
+        // Subscribe BEFORE the fast-path check to avoid missing a write
+        // that lands between our read and our subscribe.
+        let mut rx = self.notifier.subscribe();
+
+        if let Some(entry) = self.entries.read().await.get(&key) {
+            if entry.version >= min {
+                return Ok(entry.clone());
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(StoreError::Timeout);
+            }
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Err(StoreError::Shutdown),
+                res = tokio::time::timeout(remaining, rx.recv()) => {
+                    match res {
+                        Err(_elapsed) => return Err(StoreError::Timeout),
+                        Ok(Err(broadcast::error::RecvError::Closed)) => return Err(StoreError::Shutdown),
+                        Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                        Ok(Ok(evt)) => {
+                            if evt.path == key && evt.version >= min {
+                                if let Some(entry) = self.entries.read().await.get(&key) {
+                                    if entry.version >= min {
+                                        return Ok(entry.clone());
+                                    }
+                                }
+                            }
+                            // Otherwise: not our event, loop.
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wake all blocking waiters with `StoreError::Shutdown`. Called from
+    /// `DispatchState` drop or explicit finalize.
+    pub fn shutdown(&self) {
+        self.cancel.cancel();
+    }
 }
 
 impl Default for SharedStore {
@@ -323,6 +407,74 @@ fn validate_path(path: &str) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn wait_returns_immediately_if_already_written() {
+        let s = SharedStore::new();
+        s.set("/ref/k", b"hi".to_vec(), "lead").await.unwrap();
+        let entry = s
+            .wait("/ref/k", Duration::from_secs(1), None)
+            .await
+            .unwrap();
+        assert_eq!(entry.value, b"hi");
+    }
+
+    #[tokio::test]
+    async fn wait_blocks_until_key_is_written() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        let s2 = s.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            s2.set("/ref/k", b"ready".to_vec(), "lead").await.unwrap();
+        });
+        let entry = s
+            .wait("/ref/k", Duration::from_secs(1), None)
+            .await
+            .unwrap();
+        assert_eq!(entry.value, b"ready");
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_respects_min_version() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        s.set("/ref/k", b"v1".to_vec(), "lead").await.unwrap();
+        let s2 = s.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            s2.set("/ref/k", b"v2".to_vec(), "lead").await.unwrap();
+        });
+        let entry = s
+            .wait("/ref/k", Duration::from_secs(1), Some(2))
+            .await
+            .unwrap();
+        assert_eq!(entry.value, b"v2");
+        assert_eq!(entry.version, 2);
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_times_out_when_key_never_written() {
+        let s = SharedStore::new();
+        let err = s
+            .wait("/ref/never", Duration::from_millis(50), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn wait_wakes_on_shutdown() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        let s2 = s.clone();
+        let waiter =
+            tokio::spawn(async move { s2.wait("/ref/never", Duration::from_secs(10), None).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        s.shutdown();
+        let res = waiter.await.unwrap();
+        assert!(matches!(res, Err(StoreError::Shutdown)));
+    }
 
     #[tokio::test]
     async fn set_get_round_trip_bumps_version() {
