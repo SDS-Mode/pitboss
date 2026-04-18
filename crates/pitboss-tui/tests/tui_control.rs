@@ -151,3 +151,70 @@ fn empty_grid_cells_are_cleared() {
         "grid retained leftover content from prior render:\n{text}"
     );
 }
+
+#[test]
+fn focus_log_content_does_not_bleed_into_tile_grid() {
+    // Simulates user's reported scenario: render a frame with focus_log
+    // containing long lines (which wrap), then re-render with *different*
+    // focus_log content. Assert no fragment from the first log's text
+    // appears in the upper (tile grid) region of the buffer.
+    use pitboss_tui::state::{AppState, TileState, TileStatus};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    fn mk_tile(id: &str) -> TileState {
+        TileState {
+            id: id.into(),
+            status: TileStatus::Running,
+            duration_ms: None,
+            token_usage_input: 0,
+            token_usage_output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+            exit_code: None,
+            log_path: PathBuf::from("/tmp/nope"),
+            model: None,
+            parent_task_id: None,
+        }
+    }
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut state = AppState::new(PathBuf::from("/tmp"), "run-1".into());
+    state.tasks = (0..16).map(|i| mk_tile(&format!("worker-{i}"))).collect();
+    state.focus = 0;
+    state.focus_log = vec![
+        "* Bash MAGICTOKENONE very long command with lots of content that WORDWRAPS".into(),
+        "< tool_result MAGICTOKENONE response data here with additional details".into(),
+        "> assistant text MAGICTOKENONE some explanation about what to do next".into(),
+    ];
+    terminal
+        .draw(|frame| pitboss_tui::tui::render(frame, &state))
+        .unwrap();
+
+    // Now simulate tile-focus change: different focus + different log content.
+    state.focus = 1;
+    state.focus_log = vec!["* Bash short cmd".into(), "< ok".into()];
+    terminal
+        .draw(|frame| pitboss_tui::tui::render(frame, &state))
+        .unwrap();
+
+    // Scrape ONLY the upper region (tile grid area, roughly rows 1..24 out
+    // of 40-row buffer — 60% body minus 1 title row). The string
+    // MAGICTOKENONE is unique to the first log; it must not appear anywhere
+    // in the tile grid.
+    let buf = terminal.backend().buffer();
+    let mut upper_region = String::new();
+    for y in 0..24 {
+        for x in 0..120 {
+            upper_region.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        upper_region.push('\n');
+    }
+    assert!(
+        !upper_region.contains("MAGICTOKENONE"),
+        "tile grid retained focus-log content from prior render:\n{upper_region}"
+    );
+}
