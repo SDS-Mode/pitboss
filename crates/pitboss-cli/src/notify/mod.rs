@@ -4,6 +4,7 @@
 
 #![allow(dead_code)] // Wired up gradually across Tasks 2-21.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Severity levels for `NotificationEnvelope`. Matches syslog heritage +
@@ -51,6 +52,42 @@ impl PitbossEvent {
             PitbossEvent::ApprovalRequest { .. } => "approval_request",
             PitbossEvent::RunFinished { .. } => "run_finished",
             PitbossEvent::BudgetExceeded { .. } => "budget_exceeded",
+        }
+    }
+}
+
+/// Carried to every sink on every emit. Typed + correlated.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotificationEnvelope {
+    /// "{run_id}:{event_kind}[:{discriminator}]" — PagerDuty/Opsgenie
+    /// style correlation ID for retry coalescing + downstream grouping.
+    pub dedup_key: String,
+    pub severity: Severity,
+    pub event: PitbossEvent,
+    pub ts: DateTime<Utc>,
+    /// run_id (or task_id where event is scoped to one worker).
+    pub source: String,
+}
+
+impl NotificationEnvelope {
+    /// Build an envelope with auto-derived dedup_key from (run_id, event kind,
+    /// and event-specific discriminator).
+    pub fn new(run_id: &str, severity: Severity, event: PitbossEvent, ts: DateTime<Utc>) -> Self {
+        let discriminator = match &event {
+            PitbossEvent::ApprovalRequest { request_id, .. } => Some(request_id.as_str()),
+            PitbossEvent::RunFinished { .. } => None,
+            PitbossEvent::BudgetExceeded { .. } => Some("first"),
+        };
+        let dedup_key = match discriminator {
+            Some(d) => format!("{run_id}:{}:{d}", event.kind()),
+            None => format!("{run_id}:{}", event.kind()),
+        };
+        Self {
+            dedup_key,
+            severity,
+            event,
+            ts,
+            source: run_id.to_string(),
         }
     }
 }
@@ -109,5 +146,40 @@ mod tests {
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"kind\":\"budget_exceeded\""));
+    }
+
+    #[test]
+    fn notification_envelope_constructs() {
+        let env = NotificationEnvelope {
+            dedup_key: "run-1:run_finished".into(),
+            severity: Severity::Info,
+            event: PitbossEvent::RunFinished {
+                run_id: "run-1".into(),
+                tasks_total: 1,
+                tasks_failed: 0,
+                duration_ms: 100,
+                spent_usd: 0.01,
+            },
+            ts: chrono::Utc::now(),
+            source: "run-1".into(),
+        };
+        assert_eq!(env.event.kind(), "run_finished");
+        assert_eq!(env.dedup_key, "run-1:run_finished");
+    }
+
+    #[test]
+    fn notification_envelope_dedup_key_helper() {
+        use chrono::Utc;
+        let env = NotificationEnvelope::new(
+            "run-1",
+            Severity::Warning,
+            PitbossEvent::ApprovalRequest {
+                request_id: "req-9".into(),
+                task_id: "lead".into(),
+                summary: "s".into(),
+            },
+            Utc::now(),
+        );
+        assert_eq!(env.dedup_key, "run-1:approval_request:req-9");
     }
 }
