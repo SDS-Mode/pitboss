@@ -7,6 +7,34 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-04-18
+
+### Added
+- **`TaskRecord.model` persistence.** Resolved model string is now
+  captured on the `TaskRecord` at spawn time (lead + workers, both
+  happy and spawn-fail paths) and round-tripped through JSON + SQLite.
+  Backward-compatible: `#[serde(default)]` on the new field means
+  pre-v0.4.3 records parse as `None`. SQLite store runs an idempotent
+  `migrate_task_model` migration on open. The TUI watcher prefers the
+  persisted model; log-scan fallback stays only for pre-v0.4.3 records.
+  Eliminates the ~100 MB/s of redundant disk reads the old fallback did
+  on every snapshot tick.
+- **Per-actor shared-store activity counters.** Each grid tile shows a
+  dim `kv:N lease:M` row when non-zero. Counters bump at tool-handler
+  entry — before authz — so failed attempts show up too (useful for
+  spotting workers spinning on bad paths). Surfaced via a new
+  `ControlEvent::StoreActivity { counters: Vec<ActorActivityEntry> }`
+  broadcast by the control server once per second per attached TUI.
+- **Mouse affordances in the TUI.**
+  - Left-click a grid tile — focus + open Detail view (equivalent to
+    `hjkl` + `Enter`).
+  - Left-click a run in the picker overlay — open that run (equivalent
+    to highlighting + `Enter`).
+  - Right-click inside Detail — exit back to the grid (symmetric with
+    `Esc`).
+  - Hit-test via per-frame cached tile/row rects in `AppState`, so
+    clicks stay accurate across resizes.
+
 ## [0.4.2] — 2026-04-18
 
 ### Added

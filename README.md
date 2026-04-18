@@ -6,14 +6,12 @@
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
 
-**v0.4.2** adds the worker shared store (seven `mcp__pitboss__kv_*` +
-`lease_*` tools with namespaced authz, `/peer/self/` path alias), a
-unified TUI Detail view (`Enter` on a tile — metadata + live git diff
-+ scrollable log), live token & model stats for in-flight workers,
-tile signifiers (model-family color swatch + role glyph), and fixes
-the kill-command cascade so `cancel_run` actually terminates workers.
-See `CHANGELOG.md` for the full list and `AGENTS.md` for MCP tool
-reference, keybindings, and manifest schema.
+**v0.4.3** polishes the dogfood experience on top of v0.4.2's worker
+shared store: persistent per-task model metadata, live KV/lease
+activity counters surfaced on each grid tile, and mouse affordances
+in the TUI (click-tile → Detail, click-picker-row → open run, right-
+click inside Detail → exit). See `CHANGELOG.md` for the full list and
+`AGENTS.md` for MCP tool reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
@@ -44,7 +42,7 @@ Pre-built binaries are attached to every GitHub release.
 ```bash
 # x86_64 Linux
 mkdir -p ~/.local/bin
-curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.4.2-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.4.3-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz -C ~/.local/bin
 
 pitboss version
@@ -229,14 +227,12 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-`v0.4.1` — v0.4.1 prerequisites (MCP-client fake-claude + e2e flows,
-`reprompt_worker` MCP tool), notifications plugin system (LogSink /
-WebhookSink / SlackSink / DiscordSink routed via `[[notification]]`
-config), and a v0.4.1.x TUI polish pass (grid-clear, 250ms poll,
-word-wrap, theme module, semantic log-line coloring, aborted-run
-status, refreshed legends). 335 tests pass under `cargo test
---workspace --features pitboss-core/test-support`. See
-[`CHANGELOG.md`](CHANGELOG.md) for the per-version history.
+`v0.4.3` — worker shared store + TUI Detail view + live in-flight
+stats + mouse affordances. Builds on v0.4.1's control plane
+(cancel/pause/continue/reprompt, operator approvals, notification
+sinks). 427 tests pass under `cargo test --workspace --features
+pitboss-core/test-support`. See [`CHANGELOG.md`](CHANGELOG.md) for the
+per-version history.
 
 ## Manual smoke testing
 
@@ -253,7 +249,7 @@ Requires `claude` authenticated via its normal subscription config (no
 
 ```bash
 cargo build --workspace
-cargo test --workspace --features pitboss-core/test-support    # 335 tests
+cargo test --workspace --features pitboss-core/test-support    # 427 tests
 cargo lint                                                     # clippy -D warnings
 cargo fmt --all -- --check
 ```

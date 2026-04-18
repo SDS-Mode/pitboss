@@ -251,9 +251,15 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__spawn_worker` | `{prompt, directory?, branch?, tools?, timeout_secs?, model?}` | `{task_id, worktree_path}` |
 | `mcp__pitboss__worker_status` | `{task_id}` | `{state, started_at, partial_usage, last_text_preview, prompt_preview}` |
 | `mcp__pitboss__wait_for_worker` | `{task_id, timeout_secs?}` | full `TaskRecord` when worker settles |
-| `mcp__pitboss__wait_for_any` | `{task_ids: [...], timeout_secs?}` | `(winner_id, TaskRecord)` on first settle |
-| `mcp__pitboss__list_workers` | `{}` | `[{task_id, state, prompt_preview, started_at}, ...]` |
+| `mcp__pitboss__wait_for_any` | `{task_ids: [...], timeout_secs?}` | `{task_id, record}` on first settle |
+| `mcp__pitboss__list_workers` | `{}` | `{workers: [{task_id, state, prompt_preview, started_at}, ...]}` |
 | `mcp__pitboss__cancel_worker` | `{task_id}` | `{ok: bool}` |
+| `mcp__pitboss__reprompt_worker` | `{task_id, prompt}` | `{ok: bool}` — mid-flight course-correct via `claude --resume` |
+
+All tool responses returning a collection are wrapped in a record
+(`{workers: [...]}`, `{entries: [...]}`, `{entry: ...}`) — MCP spec
+requires `structuredContent` to be `{ [key: string]: unknown }`, so
+tools don't return bare arrays or null. Unwrap one level from callers.
 
 **Worker spawn arg rules:**
 - `prompt` is the new worker's system prompt / `-p` payload. Required.
@@ -261,6 +267,34 @@ populated with these. You (the operator) don't list them explicitly.
 - `model` defaults to the lead's model. Override per-worker when you want
   heavier workers (Sonnet) under a Haiku lead.
 - `tools` defaults to the lead's tools.
+
+### Worker shared store (v0.4.2+)
+
+A per-run, in-memory, hub-mediated coordination surface. Workers get
+a narrower `mcp-config.json` that lists only the seven tools below
+(not `spawn_worker` — depth-1 invariant). Namespaces:
+
+- `/ref/*` — lead-write, all-read. Use for shared context (plans,
+  conventions, targets).
+- `/peer/<actor-id>/*` — actor-write (own path only), lead-override.
+  Use for per-worker outputs like `/peer/self/completed`.
+- `/shared/*` — all-write. Use for loose cross-worker coordination
+  like `/shared/findings/`.
+- `/leases/*` — managed via `lease_acquire` / `lease_release` only.
+
+Workers don't know their UUID actor-id; use the `/peer/self/` alias —
+the dispatcher resolves it to `/peer/<caller.actor_id>/` at the tool
+layer.
+
+| Tool | Args | Returns |
+|---|---|---|
+| `mcp__pitboss__kv_get` | `{path}` | `{entry: Option<Entry>}` |
+| `mcp__pitboss__kv_set` | `{path, value: bytes, override_flag?}` | `{version}` |
+| `mcp__pitboss__kv_cas` | `{path, expected_version, new_value: bytes, override_flag?}` | `{version, swapped}` |
+| `mcp__pitboss__kv_list` | `{glob}` | `{entries: [ListMetadata, ...]}` |
+| `mcp__pitboss__kv_wait` | `{path, timeout_secs, min_version?}` | `Entry` when condition met |
+| `mcp__pitboss__lease_acquire` | `{name, ttl_secs, wait_secs?}` | `{lease_id, version, ...}` |
+| `mcp__pitboss__lease_release` | `{lease_id}` | `{ok: true}` |
 
 ### `mcp__pitboss__pause_worker`
 
@@ -320,20 +354,32 @@ branch conflict, non-git directory). Check the stderr log.
 
 ---
 
-## Operator keybindings (pitboss-tui, v0.4.0+)
+## Operator keybindings (pitboss-tui, v0.4.3+)
 
 Navigation / views:
 - `h j k l` / arrows — navigate tiles
-- `Enter` — snap-in to focused tile (full-screen log)
-- `L` — log overlay for focused tile
+- `Enter` — open Detail view for focused tile (metadata pane + live
+  git-diff + scrollable log)
 - `o` — run picker (switch to another run)
 - `?` — help overlay (full keybinding reference)
 - `q` / `Ctrl-C` — quit
 - `Esc` — close any overlay / modal
 
+Mouse:
+- Left-click a grid tile — focus + open Detail
+- Left-click a run in the picker — open that run
+- Right-click inside Detail — exit back to grid
+- Scroll wheel inside Detail — scroll log 5 rows/tick
+
+Scroll cadence inside Detail:
+- `j` / `k` / arrows — 1 row
+- `J` / `K` — 5 rows
+- `Ctrl-D` / `Ctrl-U` / `PageDown` / `PageUp` — 10 rows
+- `g` / `G` — jump to top / bottom (bottom re-enables auto-follow)
+
 Control plane:
 - `x` — confirm+cancel focused worker
-- `X` — confirm+cancel entire run
+- `X` — confirm+cancel entire run (cascades SIGTERM to every worker)
 - `p` — pause focused worker (requires initialized session)
 - `c` — continue paused worker
 - `r` — open reprompt textarea (Ctrl+Enter to submit, Esc to cancel)
@@ -511,6 +557,6 @@ dispatch first and have to ask follow-ups, you've probably wasted budget.
 
 ## Version
 
-Written for pitboss `v0.4.1`. Schema may evolve; `pitboss validate` is the
+Written for pitboss `v0.4.3`. Schema may evolve; `pitboss validate` is the
 source of truth. This document should stay self-contained — if something
 here conflicts with the actual binary, the binary wins. File a PR.
