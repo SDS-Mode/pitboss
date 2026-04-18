@@ -373,3 +373,42 @@ async fn write_mcp_config(
     tokio::fs::write(path, bytes).await?;
     Ok(())
 }
+
+/// Emit a worker-scoped `--mcp-config` file. Lists only the 7 shared-store
+/// tools — NOT spawn_worker / cancel_worker / wait_for_worker / etc.
+/// The bridge command includes the worker's actor_id + actor_role=worker
+/// so the dispatcher can identify the caller and enforce namespace authz.
+pub async fn write_worker_mcp_config(
+    path: &std::path::Path,
+    socket: &std::path::Path,
+    worker_id: &str,
+) -> Result<()> {
+    let pitboss_exe =
+        std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
+
+    let cfg = serde_json::json!({
+        "mcpServers": {
+            "pitboss": {
+                "command": pitboss_exe.to_string_lossy(),
+                "args": [
+                    "mcp-bridge",
+                    "--actor-id", worker_id,
+                    "--actor-role", "worker",
+                    socket.to_string_lossy(),
+                ],
+            }
+        },
+        "allowedTools": [
+            "mcp__pitboss__kv_get",
+            "mcp__pitboss__kv_set",
+            "mcp__pitboss__kv_cas",
+            "mcp__pitboss__kv_list",
+            "mcp__pitboss__kv_wait",
+            "mcp__pitboss__lease_acquire",
+            "mcp__pitboss__lease_release"
+        ]
+    });
+    let bytes = serde_json::to_vec_pretty(&cfg)?;
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
+}
