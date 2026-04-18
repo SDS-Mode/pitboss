@@ -16,6 +16,7 @@ use ratatui::{
 };
 
 use crate::state::{AppState, Mode, TileStatus};
+use crate::theme;
 use pitboss_core::store::TaskStatus;
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,13 @@ pub fn teardown(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Re
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
 
+    // Wipe the full frame before any widget draws. Ratatui's Block/Paragraph
+    // only set STYLE for cells they "cover" — they don't clear character
+    // content for cells that no text lands in. On terminal resize or when
+    // a tile's inner content is shorter than the inner height, stale chars
+    // from the prior frame persist (visible leakage — fix for #129).
+    frame.render_widget(Clear, area);
+
     // SnapIn is a full-screen replacement — skip the normal grid entirely.
     if let Mode::SnapIn {
         ref task_id,
@@ -275,11 +283,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
     );
 
     let para = Paragraph::new(title_text)
-        .style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
+        .style(theme::primary_style().add_modifier(Modifier::BOLD))
         .alignment(Alignment::Left);
     frame.render_widget(para, area);
 }
@@ -290,8 +294,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
     if state.tasks.is_empty() {
-        let msg =
-            Paragraph::new(" No tasks found in this run.").style(Style::default().fg(Color::Gray));
+        let msg = Paragraph::new(" No tasks found in this run.").style(theme::secondary_style());
         frame.render_widget(msg, area);
         return;
     }
@@ -314,6 +317,10 @@ fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
 // ---------------------------------------------------------------------------
 
 fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Wipe any prior-frame content in the grid area before drawing tiles.
+    // Partial final rows would otherwise retain text from an earlier
+    // render, causing visible character leakage (fix for #129).
+    frame.render_widget(Clear, area);
     let n = state.tasks.len();
     let cols = TILE_COLS.min(n);
     let rows = n.div_ceil(cols);
@@ -361,11 +368,9 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     // border. The focused branch stays first for semantic clarity even though
     // it produces an identical style to the unfocused-lead branch today.
     let border_style = if focused || is_lead {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        theme::focused_border()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::idle_border()
     };
 
     let mut block = Block::default()
@@ -377,10 +382,7 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     // so the hierarchy is visible without consuming content rows.
     let subtitle = format_tile_subtitle(state, tile_idx);
     if !subtitle.is_empty() {
-        block = block.title_bottom(Span::styled(
-            format!(" {subtitle} "),
-            Style::default().fg(Color::DarkGray),
-        ));
+        block = block.title_bottom(Span::styled(format!(" {subtitle} "), theme::muted_style()));
     }
 
     let inner = block.inner(area);
@@ -412,18 +414,18 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
             Span::raw(" "),
             Span::styled(status_label, Style::default().fg(icon_color)),
         ]),
-        Line::from(Span::styled(duration_str, Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(duration_str, theme::secondary_style())),
         Line::from(Span::styled(
             format!(
                 "in:{} out:{}",
                 tile.token_usage_input, tile.token_usage_output
             ),
-            Style::default().fg(Color::DarkGray),
+            theme::muted_style(),
         )),
-        Line::from(Span::styled(cost_str, Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(cost_str, theme::muted_style())),
     ];
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 }
 
@@ -442,7 +444,7 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::TOP)
         .title(format!(" Focus: {focused_id} ({status_str}) "))
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(theme::idle_border());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -457,10 +459,10 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let lines: Vec<Line> = log_slice
         .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Gray))))
+        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 }
 
@@ -472,9 +474,9 @@ fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
     let keys = if matches!(state.mode, Mode::PickingRun { .. }) {
         " [j/k] navigate  [Enter] open  [Esc] cancel"
     } else {
-        " [h/j/k/l] nav  [L] log  [o] open run  [?] help  [q] quit"
+        " [hjkl] nav  [Enter] snap  [L] log  [x/X] kill wrk/run  [p/c] pause/cont  [r] reprompt  [o] open  [?] help  [q] quit"
     };
-    let para = Paragraph::new(keys).style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(keys).style(theme::muted_style());
     frame.render_widget(para, area);
 }
 
@@ -512,6 +514,8 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 
     // --- Title bar ---
     let title_text = format!(" Snap-in: {task_id} ({status_str}) — line {n}/{total_lines} ");
+    // Intentional: inverted text on highlight bar — selection highlight pairing,
+    // not a palette color. Keep inline.
     let title_para = Paragraph::new(title_text).style(
         Style::default()
             .fg(Color::Black)
@@ -531,15 +535,15 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 
     let lines: Vec<Line> = log_slice
         .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::White))))
+        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let log_para = Paragraph::new(lines);
+    let log_para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(log_para, chunks[1]);
 
     // --- Status bar ---
     let hint = " [Esc] back  [j/k] scroll  [Ctrl-D/U] page  [G] bottom  [g] top  [q] quit";
-    let status_para = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+    let status_para = Paragraph::new(hint).style(theme::muted_style());
     frame.render_widget(status_para, chunks[2]);
 }
 
@@ -554,7 +558,7 @@ fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Log: {focused_id}  [L/Esc] close "))
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_WARNING));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -570,13 +574,13 @@ fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let overlay_area = centered_rect(60, 60, area);
+    let overlay_area = centered_rect(70, 80, area);
     frame.render_widget(Clear, overlay_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Help — Pitboss TUI ")
-        .border_style(Style::default().fg(Color::Green));
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_INFO));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -585,21 +589,32 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("  Keybindings"),
         Line::from("  ──────────────────────────────"),
-        Line::from("  h / ← : focus left"),
-        Line::from("  l / → : focus right"),
-        Line::from("  k / ↑ : focus up (4 cols)"),
-        Line::from("  j / ↓ : focus down (4 cols)"),
-        Line::from("  L     : view full log overlay"),
-        Line::from("  r     : force refresh"),
-        Line::from("  ?     : toggle this help"),
-        Line::from("  q     : quit"),
-        Line::from("  Esc   : close overlay"),
+        Line::from("  Navigation"),
+        Line::from("    h / ←  : focus left"),
+        Line::from("    l / →  : focus right"),
+        Line::from("    k / ↑  : focus up (4 cols)"),
+        Line::from("    j / ↓  : focus down (4 cols)"),
         Line::from(""),
-        Line::from("  OBSERVE mode — no task spawning in v0.2-alpha."),
+        Line::from("  Views"),
+        Line::from("    Enter  : snap-in to focused tile (full-screen log)"),
+        Line::from("    L      : view full log overlay"),
+        Line::from("    o      : open run picker"),
+        Line::from(""),
+        Line::from("  Control (v0.4)"),
+        Line::from("    x      : cancel focused worker (confirm)"),
+        Line::from("    X      : cancel entire run (confirm)"),
+        Line::from("    p      : pause focused worker"),
+        Line::from("    c      : continue focused worker"),
+        Line::from("    r      : reprompt focused worker"),
+        Line::from(""),
+        Line::from("  System"),
+        Line::from("    ?      : toggle this help"),
+        Line::from("    q      : quit"),
+        Line::from("    Esc    : close overlay / modal"),
         Line::from(""),
         Line::from(Span::styled(
             "  Press Esc or ? to close",
-            Style::default().fg(Color::DarkGray),
+            theme::muted_style(),
         )),
     ];
 
@@ -615,13 +630,13 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Open Run  [j/k] navigate  [Enter] open  [Esc] cancel ")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_PICKER));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
 
     if state.run_list.is_empty() {
-        let msg = Paragraph::new(" No runs found.").style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new(" No runs found.").style(theme::muted_style());
         frame.render_widget(msg, inner);
         return;
     }
@@ -632,7 +647,7 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
         .iter()
         .map(|e| {
             let started = crate::runs::format_mtime(e.mtime);
-            let status = if e.is_complete { "complete" } else { "running" };
+            let status = e.status.label();
             // Format: "run-id  started  N tasks  N failed  status"
             let short_id = if e.run_id.len() > 38 {
                 &e.run_id[..38]
@@ -647,6 +662,7 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
         })
         .collect();
 
+    // Intentional: inverted selection highlight pairing, not a palette color.
     let list = List::new(items)
         .highlight_style(
             Style::default()
@@ -680,7 +696,7 @@ fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::Kil
     let para = Paragraph::new(msg)
         .block(block)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(theme::OVERLAY_ACCENT_WARNING));
     frame.render_widget(para, modal);
 }
 
@@ -698,7 +714,7 @@ fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &
     let para = Paragraph::new(draft)
         .block(block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::White));
+        .style(theme::primary_style());
     frame.render_widget(para, modal);
 }
 
@@ -735,7 +751,7 @@ fn render_approval_modal(
     let para = Paragraph::new(body)
         .block(block)
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::White));
+        .style(theme::primary_style());
     frame.render_widget(para, modal);
 }
 
@@ -744,15 +760,16 @@ fn render_approval_modal(
 // ---------------------------------------------------------------------------
 
 fn status_icon(status: &TileStatus) -> (&'static str, Color) {
-    match status {
-        TileStatus::Pending => ("…", Color::Gray),
-        TileStatus::Running => ("●", Color::Cyan),
-        TileStatus::Done(TaskStatus::Success) => ("✓", Color::Green),
-        TileStatus::Done(TaskStatus::Failed) => ("✗", Color::Red),
-        TileStatus::Done(TaskStatus::TimedOut) => ("⏱", Color::Yellow),
-        TileStatus::Done(TaskStatus::Cancelled) => ("⊘", Color::Magenta),
-        TileStatus::Done(TaskStatus::SpawnFailed) => ("!", Color::Red),
-    }
+    let icon = match status {
+        TileStatus::Pending => "…",
+        TileStatus::Running => "●",
+        TileStatus::Done(TaskStatus::Success) => "✓",
+        TileStatus::Done(TaskStatus::Failed) => "✗",
+        TileStatus::Done(TaskStatus::TimedOut) => "⏱",
+        TileStatus::Done(TaskStatus::Cancelled) => "⊘",
+        TileStatus::Done(TaskStatus::SpawnFailed) => "!",
+    };
+    (icon, theme::tile_status_color(status))
 }
 
 fn status_label(status: &TileStatus) -> &'static str {

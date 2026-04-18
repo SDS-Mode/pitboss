@@ -84,37 +84,65 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     // Send the initial focus (empty → watcher will tail first tile).
     let _ = focus_tx.send(String::new());
 
+    // When true, the physical terminal may have stale cells that ratatui's
+    // diff won't repaint (e.g., after a resize, focus change, or mode
+    // transition — some terminal emulators don't reliably apply every cell
+    // update emitted by crossterm). A `terminal.clear()` emits `\x1b[2J`
+    // and resets the back buffer, forcing a clean full redraw.
+    let mut dirty = false;
     loop {
         // --- Render ---
+        if dirty {
+            terminal.clear()?;
+            dirty = false;
+        }
         terminal.draw(|frame| crate::tui::render(frame, &state))?;
 
         // --- Input (50ms poll) ---
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                let action = handle_key(&mut state, key.code, key.modifiers);
-                match action {
-                    Action::Quit => break,
-                    Action::SwitchRun { run_dir, run_id } => {
-                        // Restart the watcher on the new run dir.
-                        let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
-                        snapshot_rx = new_rx;
-                        focus_tx = new_tx;
-                        state.run_dir = run_dir;
-                        state.run_id = run_id;
-                        state.tasks = vec![];
-                        state.focus = 0;
-                        state.run_list.clear();
-                        state.mode = Mode::Normal;
-                        let _ = focus_tx.send(String::new());
-                        continue;
-                    }
-                    Action::Continue => {}
+            match event::read()? {
+                Event::Resize(_, _) => {
+                    dirty = true;
                 }
+                Event::Key(key) => {
+                    let prev_focus = state.focus;
+                    let prev_mode_disc = std::mem::discriminant(&state.mode);
 
-                // Notify watcher of new focus.
-                if let Some(tile) = state.focused_tile() {
-                    let _ = focus_tx.send(tile.id.clone());
+                    let action = handle_key(&mut state, key.code, key.modifiers);
+                    match action {
+                        Action::Quit => break,
+                        Action::SwitchRun { run_dir, run_id } => {
+                            // Restart the watcher on the new run dir.
+                            let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
+                            snapshot_rx = new_rx;
+                            focus_tx = new_tx;
+                            state.run_dir = run_dir;
+                            state.run_id = run_id;
+                            state.tasks = vec![];
+                            state.focus = 0;
+                            state.run_list.clear();
+                            state.mode = Mode::Normal;
+                            let _ = focus_tx.send(String::new());
+                            dirty = true;
+                            continue;
+                        }
+                        Action::Continue => {}
+                    }
+
+                    // Mark dirty if focus or mode changed — those are the
+                    // transitions where terminal-side cell staleness shows.
+                    if prev_focus != state.focus
+                        || prev_mode_disc != std::mem::discriminant(&state.mode)
+                    {
+                        dirty = true;
+                    }
+
+                    // Notify watcher of new focus.
+                    if let Some(tile) = state.focused_tile() {
+                        let _ = focus_tx.send(tile.id.clone());
+                    }
                 }
+                _ => {}
             }
         }
 

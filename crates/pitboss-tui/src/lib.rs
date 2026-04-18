@@ -13,5 +13,6 @@ pub mod app;
 pub mod control;
 pub mod runs;
 pub mod state;
+pub mod theme;
 pub mod tui;
 pub mod watcher;

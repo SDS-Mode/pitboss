@@ -174,14 +174,13 @@ fn cmd_list() -> Result<()> {
 
     for e in &entries {
         let started = runs::format_mtime(e.mtime);
-        let status = if e.is_complete {
-            "complete"
-        } else {
-            "in-progress"
-        };
         println!(
             "{:<38}  {:<22}  {:>6}  {:>6}  {}",
-            e.run_id, started, e.tasks_total, e.tasks_failed, status
+            e.run_id,
+            started,
+            e.tasks_total,
+            e.tasks_failed,
+            e.status.label()
         );
     }
 
