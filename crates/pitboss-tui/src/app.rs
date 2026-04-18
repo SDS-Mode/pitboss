@@ -155,11 +155,14 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                     // added later if useful.
                     if matches!(state.mode, Mode::Detail { .. }) {
                         match mouse.kind {
+                            // Wheel scroll: 5 rows/tick — matches `J`/`K`
+                            // shift-scroll cadence and feels natural for
+                            // quick log navigation without overshooting.
                             MouseEventKind::ScrollDown => {
-                                state.detail_scroll_down(3, DETAIL_VISIBLE_ROWS);
+                                state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
                             }
                             MouseEventKind::ScrollUp => {
-                                state.detail_scroll_up(3);
+                                state.detail_scroll_up(5);
                             }
                             _ => {}
                         }
@@ -313,6 +316,12 @@ fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -
 
         // Scroll up one line.
         KeyCode::Char('k') | KeyCode::Up => state.detail_scroll_up(1),
+
+        // Medium-speed scroll: 5 lines. Sits between single-line j/k and
+        // half-page Ctrl-D/U. Shift-variants of the vim keys keep muscle
+        // memory intact for users who live on j/k=1.
+        KeyCode::Char('J') => state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS),
+        KeyCode::Char('K') => state.detail_scroll_up(5),
 
         // Page down (Ctrl-D or PageDown).
         KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {

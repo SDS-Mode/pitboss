@@ -566,7 +566,7 @@ fn render_detail_view(
     render_detail_log(frame, body[1], state, scroll);
 
     // --- Status bar ---
-    let hint = " [jk Ctrl-D/U gG] scroll log  [Esc] back  [q] quit";
+    let hint = " [jk 1 / JK 5 / Ctrl-D/U 10 / gG] scroll log  [Esc] back  [q] quit";
     let status_para = Paragraph::new(hint).style(theme::muted_style());
     frame.render_widget(status_para, outer[2]);
 }

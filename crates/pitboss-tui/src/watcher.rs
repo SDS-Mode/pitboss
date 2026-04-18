@@ -13,8 +13,10 @@ use serde::Deserialize;
 use crate::state::{AppSnapshot, TileState, TileStatus};
 
 const POLL_INTERVAL_MS: u64 = 250;
-/// Number of parsed focus-pane lines to keep.
-const TAIL_LINES: usize = 500;
+/// Number of parsed focus-pane lines to keep. Deep scroll-back on long
+/// runs is worth a few extra megabytes of in-memory state per focus
+/// change (each line is ~1 KB on average).
+const TAIL_LINES: usize = 2000;
 /// Maximum bytes to read off the end of a log file when tailing. Chosen so
 /// that even a verbose stream-json run has >> `TAIL_LINES` rendered events
 /// within this window, without re-parsing multi-megabyte logs every poll.
@@ -467,14 +469,13 @@ fn tail_log(path: &Path, n: usize) -> Vec<String> {
 }
 
 /// Per-event display caps. Originally tight for pre-word-wrap terminals;
-/// the v0.4.1.x word-wrap pass means long lines take more visual rows
-/// instead of falling off the right edge, so it's safe to show more per
-/// event. Snap-in mode (`Enter` to full-screen the focus log) uses the
-/// same formatter; if you need the untruncated stream-json, read
-/// `<run-dir>/tasks/<id>/stdout.log` directly.
-const CAP_ASSISTANT_TEXT: usize = 400;
-const CAP_TOOL_INPUT: usize = 240;
-const CAP_TOOL_RESULT: usize = 480;
+/// word-wrap + visual-row scroll now handle long lines correctly, so the
+/// caps can be generous. Truncated events get a `… +N chars` marker so
+/// operators know there's more content than shown — full untruncated
+/// stream-json is always in `<run-dir>/tasks/<id>/stdout.log`.
+const CAP_ASSISTANT_TEXT: usize = 2000;
+const CAP_TOOL_INPUT: usize = 1000;
+const CAP_TOOL_RESULT: usize = 3000;
 
 /// Parse one stream-json line and return a display string, or `None` to skip.
 fn format_event(bytes: &[u8]) -> Option<String> {
@@ -482,18 +483,18 @@ fn format_event(bytes: &[u8]) -> Option<String> {
     match event {
         Event::AssistantText { text } => {
             let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(&text);
-            let capped = cap_str(first_line, CAP_ASSISTANT_TEXT);
+            let capped = cap_with_marker(first_line, CAP_ASSISTANT_TEXT);
             Some(format!("> {capped}"))
         }
         Event::AssistantToolUse {
             tool_name,
             input_summary,
         } => {
-            let summary = cap_str(&input_summary, CAP_TOOL_INPUT);
+            let summary = cap_with_marker(&input_summary, CAP_TOOL_INPUT);
             Some(format!("* {tool_name} {summary}"))
         }
         Event::ToolResult { content_summary } => {
-            let capped = cap_str(&content_summary, CAP_TOOL_RESULT);
+            let capped = cap_with_marker(&content_summary, CAP_TOOL_RESULT);
             Some(format!("< {capped}"))
         }
         Event::Result {
@@ -523,7 +524,8 @@ fn format_event(bytes: &[u8]) -> Option<String> {
     }
 }
 
-/// Truncate `s` to at most `max_chars` characters, appending "..." if cut.
+/// Truncate `s` to at most `max_chars` characters (unchanged if shorter).
+/// Primary use is `cap_with_marker`; kept as a raw-truncate primitive.
 fn cap_str(s: &str, max_chars: usize) -> &str {
     // Find the byte offset of the `max_chars`-th char boundary.
     let mut chars = s.char_indices();
@@ -532,6 +534,19 @@ fn cap_str(s: &str, max_chars: usize) -> &str {
     } else {
         s
     }
+}
+
+/// Truncate with an explicit ` … +N chars` marker when content is cut, so
+/// operators see that more content exists without having to guess.
+/// Returns an owned String so callers can format without lifetime acrobatics.
+fn cap_with_marker(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    let head = cap_str(s, max_chars);
+    let extra = char_count - max_chars;
+    format!("{head} … +{extra} chars")
 }
 
 #[cfg(test)]
@@ -551,6 +566,24 @@ mod tests {
     #[test]
     fn cap_str_above_limit() {
         assert_eq!(cap_str("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn cap_with_marker_below_limit_is_unchanged() {
+        assert_eq!(cap_with_marker("hello", 10), "hello");
+    }
+
+    #[test]
+    fn cap_with_marker_above_limit_appends_count() {
+        // "hello world" is 11 chars, cap at 5 → 6 trimmed.
+        assert_eq!(cap_with_marker("hello world", 5), "hello … +6 chars");
+    }
+
+    #[test]
+    fn cap_with_marker_counts_chars_not_bytes() {
+        // Non-ASCII: each "→" is 1 char but 3 bytes.
+        let s = "→→→→→"; // 5 chars, 15 bytes
+        assert_eq!(cap_with_marker(s, 3), "→→→ … +2 chars");
     }
 
     #[test]
@@ -627,15 +660,17 @@ mod tests {
 
     #[test]
     fn format_event_truncates_long_text() {
-        let long = "a".repeat(1000);
+        // Build content longer than the cap so we know truncation fires.
+        let over = CAP_ASSISTANT_TEXT + 100;
+        let long = "a".repeat(over);
         let line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
         );
         let out = format_event(line.as_bytes()).unwrap();
-        // "> " prefix (2 chars) + at most CAP_ASSISTANT_TEXT chars of content.
-        assert!(out.chars().count() <= 2 + CAP_ASSISTANT_TEXT);
-        // Must actually have truncated (input is longer than the cap).
-        assert!(out.chars().count() < 2 + 1000);
+        // Output should contain the `… +N chars` marker and report the
+        // correct delta (100 trimmed chars).
+        assert!(out.contains("… +100 chars"), "expected marker, got: {out}");
+        assert!(out.starts_with("> "));
     }
 
     #[test]
