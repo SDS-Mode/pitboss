@@ -3,6 +3,7 @@
 //! `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
 
 pub mod leases;
+pub mod tools;
 pub use leases::{AcquireResult, Lease, LeaseRegistry};
 
 use std::collections::HashMap;
@@ -99,7 +100,7 @@ pub struct CallerIdentity {
     pub role: ActorRole,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ActorRole {
     Lead,
