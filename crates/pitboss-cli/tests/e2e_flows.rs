@@ -65,6 +65,7 @@ fn mk_state(
         budget_usd: Some(5.0),
         lead_timeout_secs: None,
         approval_policy: Some(approval_policy),
+        notifications: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(run_dir.to_path_buf()));
     // Worker-side spawner: emits a complete stream-json run then exits 0.
@@ -304,6 +305,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         budget_usd: Some(5.0),
         lead_timeout_secs: None,
         approval_policy: Some(ApprovalPolicy::Block),
+        notifications: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let hold_script = FakeScript::new().hold_until_signal();
@@ -538,6 +540,7 @@ async fn e2e_lead_reprompts_running_worker() {
         budget_usd: Some(5.0),
         lead_timeout_secs: None,
         approval_policy: Some(ApprovalPolicy::Block),
+        notifications: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     // Worker script emits init+result so session_id gets captured via the

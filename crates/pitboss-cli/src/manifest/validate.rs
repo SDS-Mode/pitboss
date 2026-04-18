@@ -242,6 +242,7 @@ mod tests {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         }
     }
 
@@ -316,6 +317,7 @@ mod tests {
             budget_usd: Some(5.0),
             lead_timeout_secs: Some(600),
             approval_policy: None,
+            notifications: vec![],
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -339,6 +341,7 @@ mod tests {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("max_workers"), "got: {err}");
@@ -359,6 +362,7 @@ mod tests {
             budget_usd: Some(1.0),
             lead_timeout_secs: Some(600),
             approval_policy: None,
+            notifications: vec![],
         };
         assert!(validate(&r).is_err());
     }
@@ -378,6 +382,7 @@ mod tests {
             budget_usd: Some(0.0),
             lead_timeout_secs: Some(600),
             approval_policy: None,
+            notifications: vec![],
         };
         assert!(validate(&r).is_err());
     }
@@ -396,6 +401,7 @@ mod tests {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");

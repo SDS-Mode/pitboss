@@ -499,6 +499,7 @@ mod tests {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -583,6 +584,7 @@ mod tests {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -680,6 +682,7 @@ mod tests {
             budget_usd: None,
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(

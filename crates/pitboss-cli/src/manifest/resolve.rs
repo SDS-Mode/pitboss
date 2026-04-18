@@ -60,6 +60,9 @@ pub struct ResolvedManifest {
     pub lead_timeout_secs: Option<u64>,
     // NEW in v0.4:
     pub approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
+    // NEW in v0.4.1:
+    #[serde(default)]
+    pub notifications: Vec<crate::notify::config::NotificationConfig>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -99,6 +102,12 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
 
     let run_dir = manifest.run.run_dir.unwrap_or_else(default_run_dir);
 
+    // Apply env-var substitution to notification URLs at resolve time.
+    let mut notifications = manifest.notification.clone();
+    for cfg in &mut notifications {
+        crate::notify::config::apply_env_substitution(cfg)?;
+    }
+
     Ok(ResolvedManifest {
         max_parallel,
         halt_on_failure: manifest.run.halt_on_failure,
@@ -111,6 +120,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         budget_usd: manifest.run.budget_usd,
         lead_timeout_secs: manifest.run.lead_timeout_secs,
         approval_policy: manifest.run.approval_policy,
+        notifications,
     })
 }
 
@@ -444,5 +454,27 @@ mod tests {
         "#);
         let r = resolve(m, None).unwrap();
         assert!(r.approval_policy.is_none());
+    }
+
+    #[test]
+    fn resolves_notifications_with_env_substitution() {
+        std::env::set_var("PITBOSS_TEST_WEBHOOK", "https://h.example/x");
+        let m = man(r#"
+[[notification]]
+kind = "webhook"
+url  = "${PITBOSS_TEST_WEBHOOK}"
+events = ["run_finished"]
+
+[[task]]
+id = "t"
+directory = "/tmp"
+prompt = "p"
+"#);
+        let r = resolve(m, None).unwrap();
+        assert_eq!(r.notifications.len(), 1);
+        assert_eq!(
+            r.notifications[0].url.as_deref(),
+            Some("https://h.example/x")
+        );
     }
 }

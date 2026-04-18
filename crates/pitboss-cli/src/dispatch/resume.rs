@@ -400,6 +400,7 @@ mod tests {
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
             approval_policy: None,
+            notifications: vec![],
         };
         std::fs::write(
             run_dir.join("resolved.json"),
