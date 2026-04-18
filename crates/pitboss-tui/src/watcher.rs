@@ -282,10 +282,16 @@ fn build_tile(
             cache_read: rec.token_usage.cache_read,
             cache_creation: rec.token_usage.cache_creation,
             exit_code: rec.exit_code,
-            log_path,
+            log_path: log_path.clone(),
             model,
             parent_task_id: rec.parent_task_id.clone(),
-            worktree_path: rec.worktree_path.clone(),
+            // Prefer TaskRecord.worktree_path (canonical for completed
+            // tasks); fall back to the sidecar if the record didn't
+            // capture it (unlikely, but defensive).
+            worktree_path: rec
+                .worktree_path
+                .clone()
+                .or_else(|| log_path.parent().and_then(read_worktree_sidecar)),
         }
     } else {
         // Decide between Pending and Running by checking log freshness.
@@ -302,6 +308,12 @@ fn build_tile(
         // Detail view showed all zeros + "model ?" for up to the full
         // worker runtime on slow tasks.
         let (live_model, live_usage) = scan_live_stats(&log_path);
+        // The task dir holds a `worktree.path` sidecar written at spawn
+        // time by the dispatcher (mcp/tools.rs + dispatch/hierarchical.rs),
+        // so the Detail view can run mid-flight git-diff against it
+        // without waiting for the TaskRecord to land on settle.
+        let task_dir = log_path.parent().map(std::path::Path::to_path_buf);
+        let worktree_path = task_dir.as_ref().and_then(|d| read_worktree_sidecar(d));
         TileState {
             id: id.to_string(),
             status,
@@ -315,7 +327,7 @@ fn build_tile(
             // Prefer the manifest-declared model (present for static tasks
             // + lead) and fall back to the log-derived one (dynamic workers).
             model: model.or(live_model),
-            worktree_path: None,
+            worktree_path,
             parent_task_id: if is_dynamic {
                 parent_task_id_fallback.map(str::to_string)
             } else {
@@ -323,6 +335,19 @@ fn build_tile(
             },
         }
     }
+}
+
+/// Read the `worktree.path` sidecar file written at spawn time.
+/// Returns `None` when the file is missing (`use_worktree=false` task,
+/// or an old run from before the sidecar was introduced) or empty.
+fn read_worktree_sidecar(task_dir: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(task_dir.join("worktree.path")).ok()?;
+    let s = String::from_utf8(bytes).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 /// Early-out scan: return the model from the first assistant message
@@ -880,6 +905,34 @@ mod tests {
     #[test]
     fn scan_first_model_missing_file_returns_none() {
         assert!(scan_first_model(Path::new("/nonexistent.log")).is_none());
+    }
+
+    #[test]
+    fn read_worktree_sidecar_returns_path_when_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("worktree.path"), "/some/worktree/path").unwrap();
+        let got = read_worktree_sidecar(dir.path()).unwrap();
+        assert_eq!(got, PathBuf::from("/some/worktree/path"));
+    }
+
+    #[test]
+    fn read_worktree_sidecar_trims_trailing_whitespace() {
+        // Dispatcher writes the raw path without a newline, but be
+        // forgiving — handwritten or shell-piped values might have one.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("worktree.path"), "/some/path\n").unwrap();
+        assert_eq!(
+            read_worktree_sidecar(dir.path()),
+            Some(PathBuf::from("/some/path"))
+        );
+    }
+
+    #[test]
+    fn read_worktree_sidecar_none_when_missing_or_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(read_worktree_sidecar(dir.path()).is_none());
+        std::fs::write(dir.path().join("worktree.path"), "").unwrap();
+        assert!(read_worktree_sidecar(dir.path()).is_none());
     }
 
     #[test]

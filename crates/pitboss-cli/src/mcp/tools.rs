@@ -326,6 +326,15 @@ async fn run_worker(
         match state.wt_mgr.prepare(&directory, &name, branch.as_deref()) {
             Ok(wt) => {
                 let p = wt.path.clone();
+                // Persist the worktree path so the TUI's Detail view can run
+                // `git diff --shortstat` against it mid-flight, not just after
+                // the TaskRecord lands. TaskRecord.worktree_path is only set
+                // on settle; writing this sidecar file closes the gap.
+                let _ = tokio::fs::write(
+                    task_dir.join("worktree.path"),
+                    p.to_string_lossy().as_bytes(),
+                )
+                .await;
                 worktree_handle = Some(wt);
                 p
             }

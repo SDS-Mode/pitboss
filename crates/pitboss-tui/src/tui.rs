@@ -92,13 +92,13 @@ const TILE_COLS: usize = 4;
 // Percentage of mid-area height for the focus log pane (roughly 40%).
 const LOG_PANE_PCT: u16 = 40;
 
-/// Format the title string for the tile at `idx` in `state.tasks`.
-///
-/// Returns `[LEAD] {id}` if the tile is the lead (no `parent_task_id` AND at
-/// least one other tile lists it as parent), otherwise just the id.
-pub fn format_tile_title(state: &crate::state::AppState, idx: usize) -> String {
+/// Single-char role glyph for the tile title. Lead = `★`, worker = `▸`.
+/// Same lead-detection rule as `format_tile_title` (no `parent_task_id`
+/// AND at least one other tile claims this id as parent). Exposed for
+/// tests.
+pub fn tile_role_glyph(state: &crate::state::AppState, idx: usize) -> &'static str {
     let Some(tile) = state.tasks.get(idx) else {
-        return String::new();
+        return "";
     };
     let id = &tile.id;
     let is_lead = tile.parent_task_id.is_none()
@@ -107,10 +107,35 @@ pub fn format_tile_title(state: &crate::state::AppState, idx: usize) -> String {
             .iter()
             .any(|t| t.parent_task_id.as_deref() == Some(id.as_str()));
     if is_lead {
-        format!("[LEAD] {id}")
+        "\u{2605}" // ★
     } else {
-        id.clone()
+        "\u{25B8}" // ▸
     }
+}
+
+/// Format the title string for the tile at `idx` in `state.tasks`.
+/// Just the id — the role glyph + model color swatch are rendered as
+/// separate styled spans in `render_tile`.
+pub fn format_tile_title(state: &crate::state::AppState, idx: usize) -> String {
+    state
+        .tasks
+        .get(idx)
+        .map(|t| t.id.clone())
+        .unwrap_or_default()
+}
+
+/// Whether the tile at `idx` represents the run's lead. Used by the
+/// render layer for border-styling and by tests.
+pub fn tile_is_lead(state: &crate::state::AppState, idx: usize) -> bool {
+    let Some(tile) = state.tasks.get(idx) else {
+        return false;
+    };
+    let id = &tile.id;
+    tile.parent_task_id.is_none()
+        && state
+            .tasks
+            .iter()
+            .any(|t| t.parent_task_id.as_deref() == Some(id.as_str()))
 }
 
 /// Format the subtitle string for the tile at `idx` in `state.tasks`.
@@ -227,12 +252,23 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 // Title bar
 // ---------------------------------------------------------------------------
 
+/// Return the most-distinguishing short form of a UUID-shaped run id.
+/// For `UUIDv7` (our format), the last hyphen-delimited segment is the
+/// random tail — sibling runs from the same minute share a common
+/// time-prefix, so showing `…146e21f77dd8` is much more useful than
+/// the lead 8 chars. Falls back to the full string when no hyphen
+/// is present (custom run ids, tests).
+fn short_run_id(run_id: &str) -> &str {
+    run_id.rsplit_once('-').map_or(run_id, |(_, tail)| tail)
+}
+
 fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
-    let short_id = if state.run_id.len() > 8 {
-        &state.run_id[..8]
-    } else {
-        &state.run_id
-    };
+    // Display the LAST segment of the UUID (random tail) rather than the
+    // leading 8 chars. UUIDv7 time-prefixes are similar across runs created
+    // close together; the tail is the actually-discriminating part, so
+    // "…146e21f77dd8" tells you which run you're looking at where
+    // "019da1b8…" looks the same as every sibling run from the same minute.
+    let short_id = short_run_id(&state.run_id);
 
     let total = state.tasks.len();
     let done = state
@@ -288,7 +324,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let title_text = format!(
-        " Pitboss TUI — run {short_id}… — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part}{workers_part} "
+        " Pitboss TUI — run …{short_id} — {done}/{total} done, {failed} failed{token_part}{cost_part}{duration_part}{workers_part} "
     );
 
     let para = Paragraph::new(title_text)
@@ -371,7 +407,8 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     let (icon, icon_color) = status_icon(&tile.status);
 
     let tile_title = format_tile_title(state, tile_idx);
-    let is_lead = tile_title.starts_with("[LEAD]");
+    let is_lead = tile_is_lead(state, tile_idx);
+    let role_glyph = tile_role_glyph(state, tile_idx);
 
     // Spec §8: focused and lead tiles both render with a distinct cyan + bold
     // border. The focused branch stays first for semantic clarity even though
@@ -382,9 +419,32 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
         theme::idle_border()
     };
 
+    // Title: `▎ ★ {id}` — color swatch (model family) + role glyph + id.
+    // The swatch is a left-half-block char (`▎`) painted in the model's
+    // family color so tiles sharing a model are glanceable as a group.
+    // The role glyph replaces the old `[LEAD]` prefix (2 chars vs 7, and
+    // visually distinct without reading text).
+    let swatch_color = theme::model_family_color(tile.model.as_deref());
+    let title_spans = vec![
+        Span::raw(" "),
+        Span::styled("\u{258E}", Style::default().fg(swatch_color)),
+        Span::raw(" "),
+        Span::styled(
+            role_glyph,
+            Style::default().fg(if is_lead {
+                theme::BORDER_FOCUSED
+            } else {
+                theme::TEXT_SECONDARY
+            }),
+        ),
+        Span::raw(" "),
+        Span::raw(tile_title.clone()),
+        Span::raw(" "),
+    ];
+
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" {tile_title} "))
+        .title(Line::from(title_spans))
         .border_style(border_style);
 
     // For worker tiles, append a dim parent annotation on the bottom border
@@ -1210,6 +1270,21 @@ mod tests {
     }
 
     #[test]
+    fn short_run_id_returns_tail_of_uuidv7() {
+        // Real UUIDv7 shape — want the last segment, not the time-prefix.
+        assert_eq!(
+            short_run_id("019da1b8-7820-7d73-92ea-146e21f77dd8"),
+            "146e21f77dd8"
+        );
+    }
+
+    #[test]
+    fn short_run_id_no_hyphen_returns_whole_string() {
+        assert_eq!(short_run_id("test-run"), "run");
+        assert_eq!(short_run_id("literal"), "literal");
+    }
+
+    #[test]
     fn run_stats_sums_done_tiles() {
         let s = state(vec![
             tile(
@@ -1398,22 +1473,26 @@ mod tests {
     }
 
     #[test]
-    fn render_tile_title_for_lead() {
+    fn tile_role_distinguishes_lead_from_worker() {
         // The lead is the tile whose parent_task_id is None and whose id
-        // appears as a parent of at least one other tile. Pitboss TUI renders
-        // its title with [LEAD] prefix.
+        // appears as a parent of at least one other tile. Replaced the old
+        // `[LEAD]` text prefix with a single glyph (`★`) that renders as a
+        // separate styled span in the title bar.
         let tiles = vec![
             tile("triage-lead", TileStatus::Running, None, 0, 0),
             tile_with_parent("worker-1", TileStatus::Running, Some("triage-lead".into())),
         ];
         let s = state(tiles);
-        let title = crate::tui::format_tile_title(&s, 0);
-        assert!(title.contains("[LEAD]"));
-        assert!(title.contains("triage-lead"));
 
-        let worker_title = crate::tui::format_tile_title(&s, 1);
-        assert!(!worker_title.contains("[LEAD]"));
-        assert!(worker_title.contains("worker-1"));
+        // Title is just the id now — role is communicated via glyph span.
+        assert_eq!(crate::tui::format_tile_title(&s, 0), "triage-lead");
+        assert_eq!(crate::tui::format_tile_title(&s, 1), "worker-1");
+
+        assert!(crate::tui::tile_is_lead(&s, 0));
+        assert!(!crate::tui::tile_is_lead(&s, 1));
+
+        assert_eq!(crate::tui::tile_role_glyph(&s, 0), "\u{2605}"); // ★
+        assert_eq!(crate::tui::tile_role_glyph(&s, 1), "\u{25B8}"); // ▸
     }
 
     #[test]

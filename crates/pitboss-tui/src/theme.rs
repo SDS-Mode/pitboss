@@ -68,6 +68,35 @@ pub fn idle_border() -> Style {
     Style::default().fg(BORDER)
 }
 
+// ---------- Model-family palette ----------
+// Colors the title swatch on each tile so operators can tell at a glance
+// which model family is running where. Family matched by name prefix
+// (case-insensitive) — keep in sync with `model_family_color`.
+pub const MODEL_OPUS: Color = Color::Magenta;
+pub const MODEL_SONNET: Color = Color::Blue;
+pub const MODEL_HAIKU: Color = Color::Green;
+pub const MODEL_UNKNOWN: Color = Color::DarkGray;
+
+/// Given a model string (e.g. `"claude-opus-4-7"`), return the color
+/// for its family. Unknown families (nil, empty, non-Claude) fall back
+/// to dark-gray. Matching is substring + case-insensitive because the
+/// same family has many tags (`claude-opus-4-7`, `opus-4.7`, etc).
+pub fn model_family_color(model: Option<&str>) -> Color {
+    let Some(m) = model else {
+        return MODEL_UNKNOWN;
+    };
+    let lc = m.to_ascii_lowercase();
+    if lc.contains("opus") {
+        MODEL_OPUS
+    } else if lc.contains("sonnet") {
+        MODEL_SONNET
+    } else if lc.contains("haiku") {
+        MODEL_HAIKU
+    } else {
+        MODEL_UNKNOWN
+    }
+}
+
 // ---------- Log-line event palette ----------
 pub const LOG_ASSISTANT_TEXT: Color = Color::White; // Primary output
 pub const LOG_TOOL_USE: Color = Color::Cyan; // Model reaching out
@@ -104,6 +133,26 @@ pub fn log_line_style(line: &str) -> Style {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn model_family_color_maps_opus_sonnet_haiku() {
+        assert_eq!(model_family_color(Some("claude-opus-4-7")), MODEL_OPUS);
+        assert_eq!(model_family_color(Some("claude-sonnet-4-6")), MODEL_SONNET);
+        assert_eq!(model_family_color(Some("claude-haiku-4-5")), MODEL_HAIKU);
+    }
+
+    #[test]
+    fn model_family_color_is_case_insensitive() {
+        assert_eq!(model_family_color(Some("CLAUDE-OPUS-4-7")), MODEL_OPUS);
+        assert_eq!(model_family_color(Some("Sonnet-Beta")), MODEL_SONNET);
+    }
+
+    #[test]
+    fn model_family_color_unknown_falls_back() {
+        assert_eq!(model_family_color(None), MODEL_UNKNOWN);
+        assert_eq!(model_family_color(Some("")), MODEL_UNKNOWN);
+        assert_eq!(model_family_color(Some("some-other-model")), MODEL_UNKNOWN);
+    }
 
     #[test]
     fn log_line_style_maps_event_variants() {
