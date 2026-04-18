@@ -740,10 +740,18 @@ fn render_detail_metadata(
 /// log-line indices — so long wrapped lines don't eat scroll budget and
 /// the "jump to bottom" position actually shows the end of the log
 /// regardless of how much content wraps.
+///
+/// We paint via `Buffer::set_stringn` directly rather than wrapping through
+/// `Paragraph`. Ratatui 0.29's Paragraph render loop has no `x < area.width`
+/// guard, so any over-measurement by its wrapping/truncating composers
+/// (triggered by certain graphemes or style modifiers in our log) paints
+/// past the pane's right edge and bleeds into the neighbouring metadata
+/// pane. `set_stringn` takes an explicit `max_width` and clips to both that
+/// and buffer bounds, so there's nowhere for overflow to land.
 fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: usize) {
-    // Clear first. Belt-and-suspenders — the manual slice below should only
-    // paint cells inside the pane, but Clear guards against any stale cells
-    // beneath us from a prior frame.
+    // Clear + block first. Clear blanks every cell in the pane so that any
+    // row we don't paint below (short log, or viewport > content) shows as
+    // empty rather than showing stale content from a previous frame.
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -754,27 +762,24 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
 
     let visible_rows = inner.height as usize;
     let pane_width = inner.width as usize;
+    if pane_width == 0 || visible_rows == 0 {
+        return;
+    }
 
     // Pre-wrap each log line ourselves into chunks of at most `pane_width`
-    // chars, then render with NO wrap. Rationale: ratatui 0.29's Paragraph
-    // with `.wrap(...).scroll(...)` has no `x < area.width` guard in its
-    // render loop — if the internal WordWrapper ever emits a wrapped row
-    // wider than the pane (triggered by certain non-ASCII graphemes in
-    // our log, e.g. "√" / "—"), cells paint past the pane's right edge and
-    // bleed into the neighbouring metadata pane. Chunking by char count
-    // here caps every line at `pane_width`, so no wrap logic runs in
-    // ratatui and there is nowhere for overflow characters to land.
-    let mut wrapped: Vec<Line> = Vec::with_capacity(state.focus_log.len() * 2);
+    // chars. Each chunk becomes a single painted row. We track the row's
+    // style alongside so set_stringn can color it consistently.
+    let mut wrapped: Vec<(String, Style)> =
+        Vec::with_capacity(state.focus_log.len().saturating_mul(2));
     for raw in &state.focus_log {
         let style = crate::theme::log_line_style(raw);
-        if raw.is_empty() || pane_width == 0 {
-            wrapped.push(Line::from(Span::styled(raw.clone(), style)));
+        if raw.is_empty() {
+            wrapped.push((String::new(), style));
             continue;
         }
         let chars: Vec<char> = raw.chars().collect();
         for chunk in chars.chunks(pane_width) {
-            let s: String = chunk.iter().collect();
-            wrapped.push(Line::from(Span::styled(s, style)));
+            wrapped.push((chunk.iter().collect(), style));
         }
     }
     let total_visual_rows = wrapped.len();
@@ -790,9 +795,19 @@ fn render_detail_log(frame: &mut Frame, area: Rect, state: &AppState, scroll: us
     let max_scroll = total_visual_rows.saturating_sub(visible_rows);
     let clamped_scroll = scroll.min(max_scroll);
     let end = (clamped_scroll + visible_rows).min(total_visual_rows);
-    let visible: Vec<Line> = wrapped[clamped_scroll..end].to_vec();
-    let para = Paragraph::new(visible);
-    frame.render_widget(para, inner);
+
+    let buf = frame.buffer_mut();
+    let left = inner.left();
+    let top = inner.top();
+    for (row_idx, (line, style)) in wrapped[clamped_scroll..end].iter().enumerate() {
+        // row_idx < visible_rows ≤ inner.height, which is already a u16.
+        let y = top + u16::try_from(row_idx).unwrap_or(u16::MAX);
+        // `set_stringn` returns the (x, y) of the first cell after the
+        // painted string — we ignore it; clipping is handled internally.
+        // The `max_width` is pane_width so the string is truncated at the
+        // right edge regardless of what's in `line`.
+        buf.set_stringn(left, y, line, pane_width, *style);
+    }
 }
 
 /// Simple `  key  value` two-column line for the metadata pane.
