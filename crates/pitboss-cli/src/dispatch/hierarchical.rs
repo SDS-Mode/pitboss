@@ -137,7 +137,7 @@ pub async fn run_hierarchical(
 
     // 2. Build the --mcp-config file for the lead.
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
-    write_mcp_config(&mcp_config_path, &socket).await?;
+    write_mcp_config(&mcp_config_path, &socket, &lead.id, "lead").await?;
 
     // 3. Prepare lead worktree + spawn.
     let mut lead_worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
@@ -338,13 +338,19 @@ pub async fn run_hierarchical(
 
 /// Emit a `--mcp-config` file that tells claude to launch our own pitboss
 /// binary as a stdio MCP server, passing the socket path as an argument.
-/// `pitboss mcp-bridge <socket>` then proxies bytes between claude's stdio
-/// pair and the pitboss MCP server's unix socket.
+/// `pitboss mcp-bridge --actor-id <id> --actor-role <role> <socket>` proxies
+/// bytes between claude's stdio pair and the pitboss MCP server's unix socket,
+/// stamping every inbound tool call with the caller's identity.
 ///
 /// This avoids relying on a non-standard `transport: { type: "unix", ... }`
 /// field that claude's MCP client may not honor. The generated config uses
 /// only the documented `command` + `args` (stdio transport) shape.
-async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> Result<()> {
+async fn write_mcp_config(
+    path: &std::path::Path,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str, // "lead" or "worker"
+) -> Result<()> {
     // Find the pitboss binary path (the one running us now) so the lead can
     // re-exec the same build for the bridge subcommand.
     let pitboss_exe =
@@ -354,7 +360,12 @@ async fn write_mcp_config(path: &std::path::Path, socket: &std::path::Path) -> R
         "mcpServers": {
             "pitboss": {
                 "command": pitboss_exe.to_string_lossy(),
-                "args": ["mcp-bridge", socket.to_string_lossy()],
+                "args": [
+                    "mcp-bridge",
+                    "--actor-id", actor_id,
+                    "--actor-role", actor_role,
+                    socket.to_string_lossy(),
+                ],
             }
         }
     });
