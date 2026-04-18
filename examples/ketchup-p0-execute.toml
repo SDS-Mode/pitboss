@@ -1,0 +1,196 @@
+# Execute the 5 P0 items from the Ketchup REFACTOR-PLAN.md in parallel,
+# using the worker shared store for context sharing and cross-worker
+# observability.
+#
+# Context: an earlier pitboss run audited the Ketchup skill and produced
+# refactor-analysis/REFACTOR-PLAN.md with 5 P0 items (token footprint
+# reduction). This run executes those items by fanning out one worker per
+# item.
+#
+# How the shared store is used:
+#   /ref/plan-summary   — lead writes a condensed version of the plan once;
+#                         all 5 workers kv_get it at start. Saves ~5K tokens
+#                         of duplicated context per worker.
+#   /ref/conventions    — repo-wide style / formatting conventions pulled
+#                         from CHANGELOG + SKILL.md. Same savings pattern.
+#   /shared/findings/*  — workers write any cross-cutting findings here as
+#                         they go ("noticed this helper is also used in
+#                         two other files"). Other workers read before
+#                         editing. Loose coordination, not a hard lock.
+#   /peer/<id>/completed — each worker writes a structured summary at the
+#                         end (files touched, branch name, test status,
+#                         risks, follow-ups). Lead reads all of them and
+#                         composes a merge plan + combined PR description
+#                         without re-reading every stdout.log.
+#
+# Worktree isolation:
+#   use_worktree = true means each worker edits its own branch off main.
+#   No file-level collision risk; no leases needed for this job. The
+#   shared store here buys shared context + fan-in summary, not mutual
+#   exclusion. (Leases earn their keep on runs where workers share a
+#   branch or contend for an external resource — see AGENTS.md.)
+#
+# After the run:
+#   1. Inspect <run-dir>/shared-store.json for the full store snapshot.
+#   2. Each worker's branch is named demo/ketchup-p0-N (N = item number).
+#   3. The lead's final message includes the merge plan.
+#
+# Cost estimate: ~$1-2 on Haiku for all 5 workers + lead synthesis.
+# Wall-clock estimate: 3-6 minutes (workers run in parallel).
+
+[run]
+max_workers = 5
+budget_usd = 5.00
+lead_timeout_secs = 3600
+worktree_cleanup = "never"
+dump_shared_store = true
+
+[defaults]
+model = "claude-haiku-4-5"
+use_worktree = true
+
+[[lead]]
+id = "ketchup-p0-coordinator"
+directory = "/run/media/system/Dos/Projects/ketchup"
+branch = "demo/ketchup-p0-lead"
+# Opus for the coordinator: it needs to synthesize a plan summary from a
+# multi-file spec, route 5 worker prompts correctly, and compose a
+# structured merge plan from 5 heterogeneous completion reports. Haiku
+# workers handle the bounded refactors underneath.
+model = "claude-opus-4-7"
+prompt = """
+You are coordinating the execution of 5 P0 refactor items on the Ketchup
+repository. Your MCP toolbelt includes spawn_worker / wait_for_worker /
+wait_for_any / kv_set / kv_get / kv_list / kv_wait / kv_cas /
+lease_acquire / lease_release.
+
+STEP 1 — Publish shared context.
+
+Read refactor-analysis/REFACTOR-PLAN.md. Condense the "Prioritized Changes"
+P0 section into a compact summary (items, target files, approach,
+risk callouts) and publish it via mcp__pitboss__kv_set:
+
+    path = "/ref/plan-summary"
+    value = <your condensed plan, UTF-8 bytes>
+
+Also publish repo conventions to /ref/conventions — glean from
+CHANGELOG.md and README.md:
+  - formatting style the skill uses
+  - how citations/references are structured
+  - output-format conventions
+
+STEP 2 — Spawn 5 workers in parallel.
+
+One mcp__pitboss__spawn_worker call per P0 item. Do NOT wait between
+spawns — fire all 5 back-to-back so they start in parallel. Use the
+worker prompt template below, with {N}, {TITLE}, and {FILES} substituted.
+
+Items and starting file scopes:
+  P0.1  Extract Pipeline          → skills/ketchup/SKILL.md
+                                    skills/ketchup/SKILL-PIPELINE-GUIDE.md (NEW)
+  P0.2  Consolidate Citations     → skills/ketchup/SKILL.md
+                                    skills/ketchup/cite-and-tag.md
+  P0.3  Collapse Parsing Rules    → skills/ketchup/SKILL.md (Parsing Rules section)
+  P0.4  Reorganize Mistakes       → skills/ketchup/SKILL.md (Common Mistakes section)
+  P0.5  Consolidate Plugins       → skills/ketchup/plugin-registry.yaml
+                                    skills/ketchup/SKILL.md (plugin references)
+
+Note: workers P0.1 / P0.2 / P0.3 / P0.4 / P0.5 all touch SKILL.md but
+each is in its OWN git worktree (branch demo/ketchup-p0-N) — no actual
+file collision. When merging, the operator will resolve conflicts.
+Workers DO NOT need to acquire leases for this job.
+
+WORKER PROMPT TEMPLATE:
+---
+You are worker P0.{N} in a 5-worker Ketchup refactor execution.
+You have access to these pitboss MCP tools: kv_get, kv_set, kv_cas,
+kv_list, kv_wait, lease_acquire, lease_release. Plus filesystem tools
+(Read, Write, Edit, Bash, Glob, Grep).
+
+1. Call mcp__pitboss__kv_get path="/ref/plan-summary" to read the
+   shared plan. Call mcp__pitboss__kv_get path="/ref/conventions" to
+   read repo conventions.
+
+2. Your assignment: {TITLE}. Target files: {FILES}.
+
+3. Execute the refactor in your git worktree (you are already `cd`'d
+   into it). Make the changes specified for your P0 item in the plan.
+   - Read the target files first.
+   - Apply the refactor.
+   - Keep the existing style/conventions.
+   - If you notice something that affects OTHER P0 items (e.g.,
+     "I renamed this helper that P0.3 also references"), write a
+     cross-cutting finding to /shared/findings/{N}-<short-slug> via
+     mcp__pitboss__kv_set.
+
+4. Verify: run `ls skills/ketchup/` and confirm file sizes look
+   reasonable. If there's a test command in the repo, run it.
+
+5. Before exiting, write a completion summary to
+   /peer/<your-task-id>/completed via mcp__pitboss__kv_set. Value is
+   a JSON object with: item_id (e.g., "P0.1"), files_touched (array),
+   branch (your current git branch), test_status ("passed"/"skipped"/
+   "failed"), summary (1-2 sentence what you did), risks (array of
+   strings), follow_ups (array of strings for P1/P2 handoffs).
+
+6. Exit. Do NOT commit or push — the operator will review your
+   worktree's diff and merge if satisfied.
+---
+
+Substitutions:
+  Worker P0.1: TITLE="Extract SKILL-PIPELINE-GUIDE.md from SKILL.md"
+               FILES="skills/ketchup/SKILL.md (remove pipeline section), skills/ketchup/SKILL-PIPELINE-GUIDE.md (new file)"
+  Worker P0.2: TITLE="Consolidate citations: replace embedded quotes with references"
+               FILES="skills/ketchup/SKILL.md (citations section), skills/ketchup/cite-and-tag.md"
+  Worker P0.3: TITLE="Collapse 16 parsing rules into 8"
+               FILES="skills/ketchup/SKILL.md (Parsing Rules section only)"
+  Worker P0.4: TITLE="Reorganize mistakes: remove phase-based duplication"
+               FILES="skills/ketchup/SKILL.md (Common Mistakes section only)"
+  Worker P0.5: TITLE="Consolidate plugin references — single source of truth"
+               FILES="skills/ketchup/plugin-registry.yaml, skills/ketchup/SKILL.md (remove duplicate plugin listings)"
+
+STEP 3 — Wait for all workers.
+
+Use mcp__pitboss__wait_for_worker on each task_id returned by
+spawn_worker. As each settles, log the outcome to your own output but
+do NOT read their files yet.
+
+STEP 4 — Aggregate findings.
+
+Call mcp__pitboss__kv_list glob="/shared/findings/*" to see any
+cross-cutting findings workers reported. For each, call
+mcp__pitboss__kv_get on the path and note the finding.
+
+Call mcp__pitboss__kv_list glob="/peer/*/completed" to list the 5
+completion summaries. For each, call mcp__pitboss__kv_get and parse
+the JSON.
+
+STEP 5 — Compose the merge plan and PR description.
+
+Your final output MUST be printed in this exact format:
+
+  === Merge Plan ===
+  Branch: demo/ketchup-p0-N → target: main
+
+  P0.1 (branch=demo/ketchup-p0-1): <1-sentence summary>
+    Files: <files_touched>
+    Test: <test_status>
+    Risks: <risks joined by ; or "none">
+
+  P0.2 ...
+  P0.3 ...
+  P0.4 ...
+  P0.5 ...
+
+  === Cross-cutting findings ===
+  <each finding from /shared/findings/*>
+  OR "(none reported)"
+
+  === Merge Order Recommendation ===
+  <suggested order based on risk and dependencies>
+
+  === Follow-ups for P1/P2 ===
+  <consolidated follow_ups from all workers>
+
+Then exit.
+"""
