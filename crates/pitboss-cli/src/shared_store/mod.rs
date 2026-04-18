@@ -117,18 +117,25 @@ fn authorize_write(
     let namespace = path.split('/').nth(1).unwrap_or("");
     match (namespace, caller.role) {
         ("ref", ActorRole::Lead) => Ok(()),
-        ("ref", ActorRole::Worker) => Err(StoreError::Forbidden("/ref is lead-write-only".into())),
+        ("ref", ActorRole::Worker) => Err(StoreError::Forbidden(format!(
+            "/ref is lead-write-only (your actor_id={}, role=worker); \
+             write to /peer/self/... or /shared/... instead",
+            caller.id
+        ))),
         ("peer", _) => {
             let actor_seg = path.split('/').nth(2).unwrap_or("");
             match (actor_seg == caller.id, caller.role, override_flag) {
                 (true, _, _) => Ok(()),
                 (_, ActorRole::Lead, true) => Ok(()),
-                (_, ActorRole::Lead, false) => Err(StoreError::Forbidden(
-                    "lead may write /peer/<other>/* only with override=true".into(),
-                )),
-                (_, ActorRole::Worker, _) => Err(StoreError::Forbidden(
-                    "workers may write only their own /peer/<self>/*".into(),
-                )),
+                (_, ActorRole::Lead, false) => Err(StoreError::Forbidden(format!(
+                    "lead (actor_id={}) may write /peer/{}/* only with override=true",
+                    caller.id, actor_seg
+                ))),
+                (_, ActorRole::Worker, _) => Err(StoreError::Forbidden(format!(
+                    "worker tried to write /peer/{}/* but your actor_id is {}; \
+                     use /peer/self/... (auto-resolves) or /peer/{}/... explicitly",
+                    actor_seg, caller.id, caller.id
+                ))),
             }
         }
         ("shared", _) => Ok(()),
@@ -136,7 +143,7 @@ fn authorize_write(
             "use lease_acquire, not kv_set on /leases/*".into(),
         )),
         _ => Err(StoreError::Forbidden(format!(
-            "unknown namespace: /{namespace}"
+            "unknown namespace: /{namespace} (valid: /ref, /peer/<id>, /shared, /leases)"
         ))),
     }
 }
@@ -814,7 +821,22 @@ mod tests {
             .authorized_set("/peer/w2/out", b"v".to_vec(), &worker("w1"), false)
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Forbidden(_)));
+        // Message must call out BOTH the target path's actor segment AND
+        // the caller's actual actor_id so workers can self-correct without
+        // a separate round-trip. Earlier message ("workers may write only
+        // their own /peer/<self>/*") left workers guessing what <self>
+        // resolves to — they burned turns experimenting with paths.
+        let StoreError::Forbidden(msg) = err else {
+            panic!("expected Forbidden, got {:?}", err);
+        };
+        assert!(
+            msg.contains("w2") && msg.contains("w1"),
+            "message must include target peer id (w2) and caller actor_id (w1): {msg}"
+        );
+        assert!(
+            msg.contains("/peer/self"),
+            "message should suggest /peer/self/... alias: {msg}"
+        );
     }
 
     #[tokio::test]

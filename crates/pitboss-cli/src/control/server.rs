@@ -301,6 +301,18 @@ async fn dispatch_op(
             }
         }
         ControlOp::CancelRun => {
+            // Cascade the cancel into every live worker's own token FIRST, then
+            // flip the run-level flag. The run-level `state.cancel` is only
+            // observed by the lead's SessionHandle; workers have independent
+            // per-task tokens and would otherwise keep running after the lead
+            // dies. Without this cascade, users saw "kill run" ack but ps
+            // still showed live claude workers.
+            {
+                let cancels = state.worker_cancels.read().await;
+                for tok in cancels.values() {
+                    tok.terminate();
+                }
+            }
             state.cancel.terminate();
             ControlEvent::OpAcked {
                 op: "cancel_run".into(),
@@ -840,6 +852,70 @@ mod tests {
                 if op == "cancel_worker" && tid == "w-1"
         ));
         assert!(worker_token.is_terminated());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn cancel_run_op_cascades_to_every_worker_token() {
+        // Regression: `CancelRun` used to only fire state.cancel (lead-only
+        // token). Workers have per-task tokens in state.worker_cancels;
+        // without cascading, workers stayed alive after a kill-run and the
+        // TUI showed the run as dead while `ps` showed live claude procs.
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        let w1 = pitboss_core::session::CancelToken::new();
+        let w2 = pitboss_core::session::CancelToken::new();
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-1".into(), w1.clone());
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-2".into(), w2.clone());
+
+        let sock = dir.path().join("cancel-run-cascade.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "flat".into(),
+            state,
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"cancel_run\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "cancel_run"
+        ));
+        assert!(
+            w1.is_terminated(),
+            "worker 1 cancel token must be terminated"
+        );
+        assert!(
+            w2.is_terminated(),
+            "worker 2 cancel token must be terminated"
+        );
         drop(handle);
     }
 

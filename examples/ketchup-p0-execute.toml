@@ -17,7 +17,7 @@
 #                         they go ("noticed this helper is also used in
 #                         two other files"). Other workers read before
 #                         editing. Loose coordination, not a hard lock.
-#   /peer/<id>/completed — each worker writes a structured summary at the
+#   /peer/self/completed  — each worker writes a structured summary at the
 #                         end (files touched, branch name, test status,
 #                         risks, follow-ups). Lead reads all of them and
 #                         composes a merge plan + combined PR description
@@ -40,7 +40,11 @@
 
 [run]
 max_workers = 5
-budget_usd = 5.00
+# Generous budget so the full 5-worker spread completes. Last run at $5
+# stopped at 2/5 workers because Opus lead + 5 Opus-tier workers (per
+# defaults) is expensive. This is a recurring dogfood, not user-facing
+# sample — adjust if you mirror this into your own manifest.
+budget_usd = 100.00
 lead_timeout_secs = 3600
 worktree_cleanup = "never"
 dump_shared_store = true
@@ -127,7 +131,7 @@ kv_list, kv_wait, lease_acquire, lease_release. Plus filesystem tools
    reasonable. If there's a test command in the repo, run it.
 
 5. Before exiting, write a completion summary to
-   /peer/<your-task-id>/completed via mcp__pitboss__kv_set. Value is
+   /peer/self/completed via mcp__pitboss__kv_set. Value is
    a JSON object with: item_id (e.g., "P0.1"), files_touched (array),
    branch (your current git branch), test_status ("passed"/"skipped"/
    "failed"), summary (1-2 sentence what you did), risks (array of

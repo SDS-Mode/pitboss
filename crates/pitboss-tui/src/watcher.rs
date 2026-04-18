@@ -13,8 +13,10 @@ use serde::Deserialize;
 use crate::state::{AppSnapshot, TileState, TileStatus};
 
 const POLL_INTERVAL_MS: u64 = 250;
-/// Number of parsed focus-pane lines to keep.
-const TAIL_LINES: usize = 500;
+/// Number of parsed focus-pane lines to keep. Deep scroll-back on long
+/// runs is worth a few extra megabytes of in-memory state per focus
+/// change (each line is ~1 KB on average).
+const TAIL_LINES: usize = 2000;
 /// Maximum bytes to read off the end of a log file when tailing. Chosen so
 /// that even a verbose stream-json run has >> `TAIL_LINES` rendered events
 /// within this window, without re-parsing multi-megabyte logs every poll.
@@ -264,6 +266,13 @@ fn build_tile(
             }
             _ => {}
         }
+        // Dynamic workers aren't in resolved.json, and TaskRecord doesn't
+        // carry the model. For those the model_map returns None and the
+        // Detail view would render "model ?". Pull the model out of the
+        // first assistant event via an early-out scan — cheap relative
+        // to the full scan_live_stats (which sums usage across every
+        // assistant message and scales with log size).
+        let model = model.or_else(|| scan_first_model(&log_path));
         TileState {
             id: id.to_string(),
             status: TileStatus::Done(rec.status.clone()),
@@ -287,17 +296,25 @@ fn build_tile(
                 TileStatus::Pending
             }
         });
+        // Mid-flight tiles don't have a summary record yet. Scan the log
+        // directly to surface running token totals and (for dynamic
+        // workers not in resolved.json) the model. Without this scan the
+        // Detail view showed all zeros + "model ?" for up to the full
+        // worker runtime on slow tasks.
+        let (live_model, live_usage) = scan_live_stats(&log_path);
         TileState {
             id: id.to_string(),
             status,
             duration_ms: None,
-            token_usage_input: 0,
-            token_usage_output: 0,
-            cache_read: 0,
-            cache_creation: 0,
+            token_usage_input: live_usage.input,
+            token_usage_output: live_usage.output,
+            cache_read: live_usage.cache_read,
+            cache_creation: live_usage.cache_creation,
             exit_code: None,
             log_path,
-            model,
+            // Prefer the manifest-declared model (present for static tasks
+            // + lead) and fall back to the log-derived one (dynamic workers).
+            model: model.or(live_model),
             worktree_path: None,
             parent_task_id: if is_dynamic {
                 parent_task_id_fallback.map(str::to_string)
@@ -306,6 +323,93 @@ fn build_tile(
             },
         }
     }
+}
+
+/// Early-out scan: return the model from the first assistant message
+/// in the log, or `None`. O(prefix-of-file) — stops as soon as the
+/// first usable `{"type":"assistant", ...}` line is seen. Used for
+/// completed tiles where the full usage is already in the `TaskRecord`
+/// but the model wasn't carried.
+fn scan_first_model(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(m) = val
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(m.to_string());
+        }
+    }
+    None
+}
+
+/// Full-file scan of a worker's stdout.log for mid-flight stats:
+///   - model: from the first assistant message's `message.model`
+///   - usage: summed token counts across every assistant message's
+///     `message.usage` (each entry is per-turn, not cumulative).
+///
+/// O(log-size) on every snapshot tick — typical worker logs are well
+/// under 1 MB so this stays in the tens of microseconds. If logs ever
+/// grow past ~10 MB this should be promoted to a streaming scan with
+/// a per-tile watermark so we only parse new bytes each tick.
+fn scan_live_stats(path: &Path) -> (Option<String>, pitboss_core::parser::TokenUsage) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return (None, pitboss_core::parser::TokenUsage::default());
+    };
+    let reader = BufReader::new(file);
+    let mut model: Option<String> = None;
+    let mut usage = pitboss_core::parser::TokenUsage::default();
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(msg) = val.get("message") else {
+            continue;
+        };
+        if model.is_none() {
+            if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
+                model = Some(m.to_string());
+            }
+        }
+        if let Some(u) = msg.get("usage") {
+            usage.input += u
+                .get("input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage.output += u
+                .get("output_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage.cache_read += u
+                .get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage.cache_creation += u
+                .get("cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+        }
+    }
+    (model, usage)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,14 +506,13 @@ fn tail_log(path: &Path, n: usize) -> Vec<String> {
 }
 
 /// Per-event display caps. Originally tight for pre-word-wrap terminals;
-/// the v0.4.1.x word-wrap pass means long lines take more visual rows
-/// instead of falling off the right edge, so it's safe to show more per
-/// event. Snap-in mode (`Enter` to full-screen the focus log) uses the
-/// same formatter; if you need the untruncated stream-json, read
-/// `<run-dir>/tasks/<id>/stdout.log` directly.
-const CAP_ASSISTANT_TEXT: usize = 400;
-const CAP_TOOL_INPUT: usize = 240;
-const CAP_TOOL_RESULT: usize = 480;
+/// word-wrap + visual-row scroll now handle long lines correctly, so the
+/// caps can be generous. Truncated events get a `… +N chars` marker so
+/// operators know there's more content than shown — full untruncated
+/// stream-json is always in `<run-dir>/tasks/<id>/stdout.log`.
+const CAP_ASSISTANT_TEXT: usize = 2000;
+const CAP_TOOL_INPUT: usize = 1000;
+const CAP_TOOL_RESULT: usize = 3000;
 
 /// Parse one stream-json line and return a display string, or `None` to skip.
 fn format_event(bytes: &[u8]) -> Option<String> {
@@ -417,18 +520,18 @@ fn format_event(bytes: &[u8]) -> Option<String> {
     match event {
         Event::AssistantText { text } => {
             let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(&text);
-            let capped = cap_str(first_line, CAP_ASSISTANT_TEXT);
+            let capped = cap_with_marker(first_line, CAP_ASSISTANT_TEXT);
             Some(format!("> {capped}"))
         }
         Event::AssistantToolUse {
             tool_name,
             input_summary,
         } => {
-            let summary = cap_str(&input_summary, CAP_TOOL_INPUT);
+            let summary = cap_with_marker(&input_summary, CAP_TOOL_INPUT);
             Some(format!("* {tool_name} {summary}"))
         }
         Event::ToolResult { content_summary } => {
-            let capped = cap_str(&content_summary, CAP_TOOL_RESULT);
+            let capped = cap_with_marker(&content_summary, CAP_TOOL_RESULT);
             Some(format!("< {capped}"))
         }
         Event::Result {
@@ -458,7 +561,8 @@ fn format_event(bytes: &[u8]) -> Option<String> {
     }
 }
 
-/// Truncate `s` to at most `max_chars` characters, appending "..." if cut.
+/// Truncate `s` to at most `max_chars` characters (unchanged if shorter).
+/// Primary use is `cap_with_marker`; kept as a raw-truncate primitive.
 fn cap_str(s: &str, max_chars: usize) -> &str {
     // Find the byte offset of the `max_chars`-th char boundary.
     let mut chars = s.char_indices();
@@ -467,6 +571,19 @@ fn cap_str(s: &str, max_chars: usize) -> &str {
     } else {
         s
     }
+}
+
+/// Truncate with an explicit ` … +N chars` marker when content is cut, so
+/// operators see that more content exists without having to guess.
+/// Returns an owned String so callers can format without lifetime acrobatics.
+fn cap_with_marker(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    let head = cap_str(s, max_chars);
+    let extra = char_count - max_chars;
+    format!("{head} … +{extra} chars")
 }
 
 #[cfg(test)]
@@ -486,6 +603,24 @@ mod tests {
     #[test]
     fn cap_str_above_limit() {
         assert_eq!(cap_str("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn cap_with_marker_below_limit_is_unchanged() {
+        assert_eq!(cap_with_marker("hello", 10), "hello");
+    }
+
+    #[test]
+    fn cap_with_marker_above_limit_appends_count() {
+        // "hello world" is 11 chars, cap at 5 → 6 trimmed.
+        assert_eq!(cap_with_marker("hello world", 5), "hello … +6 chars");
+    }
+
+    #[test]
+    fn cap_with_marker_counts_chars_not_bytes() {
+        // Non-ASCII: each "→" is 1 char but 3 bytes.
+        let s = "→→→→→"; // 5 chars, 15 bytes
+        assert_eq!(cap_with_marker(s, 3), "→→→ … +2 chars");
     }
 
     #[test]
@@ -562,15 +697,17 @@ mod tests {
 
     #[test]
     fn format_event_truncates_long_text() {
-        let long = "a".repeat(1000);
+        // Build content longer than the cap so we know truncation fires.
+        let over = CAP_ASSISTANT_TEXT + 100;
+        let long = "a".repeat(over);
         let line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
         );
         let out = format_event(line.as_bytes()).unwrap();
-        // "> " prefix (2 chars) + at most CAP_ASSISTANT_TEXT chars of content.
-        assert!(out.chars().count() <= 2 + CAP_ASSISTANT_TEXT);
-        // Must actually have truncated (input is longer than the cap).
-        assert!(out.chars().count() < 2 + 1000);
+        // Output should contain the `… +N chars` marker and report the
+        // correct delta (100 trimmed chars).
+        assert!(out.contains("… +100 chars"), "expected marker, got: {out}");
+        assert!(out.starts_with("> "));
     }
 
     #[test]
@@ -691,6 +828,78 @@ mod tests {
         );
         let live_tile = snap.tasks.iter().find(|t| t.id == "worker-live").unwrap();
         assert_eq!(live_tile.parent_task_id.as_deref(), Some("lead"));
+    }
+
+    #[test]
+    fn scan_live_stats_extracts_model_and_summed_usage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stdout.log");
+        // Two assistant turns with per-turn usage — expect sum. Model
+        // taken from the first assistant message.
+        let body = [
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":3}}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":2,"output_tokens":4,"cache_read_input_tokens":200,"cache_creation_input_tokens":1}}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+
+        let (model, usage) = scan_live_stats(&path);
+        assert_eq!(model.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(usage.input, 12);
+        assert_eq!(usage.output, 9);
+        assert_eq!(usage.cache_read, 300);
+        assert_eq!(usage.cache_creation, 4);
+    }
+
+    #[test]
+    fn scan_live_stats_missing_file_returns_defaults() {
+        let (model, usage) = scan_live_stats(Path::new("/nonexistent/file.log"));
+        assert!(model.is_none());
+        assert_eq!(usage.input, 0);
+        assert_eq!(usage.output, 0);
+    }
+
+    #[test]
+    fn scan_first_model_returns_first_seen_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stdout.log");
+        let body = [
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[]}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+        assert_eq!(
+            scan_first_model(&path).as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn scan_first_model_missing_file_returns_none() {
+        assert!(scan_first_model(Path::new("/nonexistent.log")).is_none());
+    }
+
+    #[test]
+    fn scan_live_stats_skips_malformed_and_non_assistant_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stdout.log");
+        let body = [
+            "not json at all",
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"user","message":{"content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[],"usage":{"input_tokens":7,"output_tokens":3}}}"#,
+            "",
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+
+        let (model, usage) = scan_live_stats(&path);
+        assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(usage.input, 7);
+        assert_eq!(usage.output, 3);
     }
 
     #[test]
