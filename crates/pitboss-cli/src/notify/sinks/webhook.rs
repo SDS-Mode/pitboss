@@ -39,8 +39,13 @@ impl NotificationSink for WebhookSink {
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            status if status.is_client_error() => Err(response.error_for_status().unwrap_err().into()),
-            _ => Err(anyhow::anyhow!("webhook POST failed with status {}", response.status())),
+            status if status.is_client_error() => {
+                Err(response.error_for_status().unwrap_err().into())
+            }
+            _ => Err(anyhow::anyhow!(
+                "webhook POST failed with status {}",
+                response.status()
+            )),
         }
     }
 }
