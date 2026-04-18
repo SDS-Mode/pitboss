@@ -45,6 +45,18 @@ This project uses [Semantic Versioning](https://semver.org/).
   for system/unknown, magenta for result events, yellow for rate
   limits. Driven by the new `pitboss_tui::theme::log_line_style`
   helper. Unparseable lines fall back to gray.
+- **Aborted run status.** `RunStatus` enum in `pitboss-tui::runs`
+  distinguishes `Complete` (summary.json finalized), `Running`
+  (task records in summary.jsonl, no summary.json yet), and `Aborted`
+  (dispatcher wrote manifest + resolved but never produced any task
+  records). Run picker overlay and `pitboss-tui list` both use the
+  new label — orphaned run dirs no longer masquerade as running.
+- **Refreshed TUI legends.** Statusbar hint now lists the full v0.4
+  keybinding ladder (`hjkl`, `Enter`, `L`, `x/X`, `p/c`, `r`, `o`,
+  `?`, `q`). Help overlay reorganized into Navigation / Views /
+  Control / System sections and sized up to 70% × 80% to fit the
+  v0.4 additions. Stale "OBSERVE mode" + "r = force refresh"
+  footer lines removed.
 
 ### Fixed
 - Control-socket `approve` op now writes the `approval_response` event
@@ -71,6 +83,15 @@ This project uses [Semantic Versioning](https://semver.org/).
   literals scattered across `tui.rs`. No user-visible change in most
   views; fixes accidental drift where the same semantic state
   rendered in different colors in different contexts (#131).
+- **TUI event loop handles `Event::Resize` + tracks layout-changing
+  transitions.** Previously the loop matched only on `Event::Key`
+  and silently dropped Resize events, so ratatui's autoresize
+  shuffled buffer content when width changed and the diff left stale
+  physical cells. A new `dirty` flag triggers `terminal.clear()`
+  on resize, focus change, mode transition, and `SwitchRun` — one
+  frame of flicker per transition in exchange for reliably clean
+  redraws across terminal emulators. Common-case leakage fixed;
+  occasional emulator-specific cells remain a known follow-up.
 
 ## [0.4.0] — 2026-04-17
 

@@ -224,11 +224,13 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-`v0.3.1`. Crate + binary rebrand landed; hierarchical dispatch exercised
-end-to-end against real `claude` including a multi-worker self-documentation
-run and a budget-stress test that caught (and fixed) a spawn-burst TOCTOU in
-the budget guard. 219 tests pass under
-`cargo test --workspace --features pitboss-core/test-support`. See
+Last release `v0.4.0` (live control plane). Unreleased on `main`: v0.4.1
+prerequisites (MCP-client fake-claude + e2e flows, `reprompt_worker` MCP
+tool), the notifications plugin system (LogSink / WebhookSink / SlackSink
+/ DiscordSink routed via `[[notification]]` config), and a v0.4.1.x TUI
+polish pass (grid-clear, 250ms poll, word-wrap, theme module, semantic
+log-line coloring, aborted-run status, refreshed legends). 335 tests pass
+under `cargo test --workspace --features pitboss-core/test-support`. See
 [`CHANGELOG.md`](CHANGELOG.md) for the per-version history.
 
 ## Manual smoke testing
@@ -246,7 +248,7 @@ Requires `claude` authenticated via its normal subscription config (no
 
 ```bash
 cargo build --workspace
-cargo test --workspace --features pitboss-core/test-support    # 219 tests
+cargo test --workspace --features pitboss-core/test-support    # 335 tests
 cargo lint                                                     # clippy -D warnings
 cargo fmt --all -- --check
 ```

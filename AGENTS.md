@@ -322,6 +322,16 @@ branch conflict, non-git directory). Check the stderr log.
 
 ## Operator keybindings (pitboss-tui, v0.4.0+)
 
+Navigation / views:
+- `h j k l` / arrows — navigate tiles
+- `Enter` — snap-in to focused tile (full-screen log)
+- `L` — log overlay for focused tile
+- `o` — run picker (switch to another run)
+- `?` — help overlay (full keybinding reference)
+- `q` / `Ctrl-C` — quit
+- `Esc` — close any overlay / modal
+
+Control plane:
 - `x` — confirm+cancel focused worker
 - `X` — confirm+cancel entire run
 - `p` — pause focused worker (requires initialized session)

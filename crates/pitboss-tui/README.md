@@ -1,6 +1,7 @@
 # Pitboss TUI
 
-Terminal observer for Pitboss runs. v0.2-alpha — read-only tile grid.
+Terminal floor-view for Pitboss runs. Tile grid + live log tail + live
+control plane (cancel / pause / continue / reprompt / approve).
 
 ## Quick start
 
@@ -24,62 +25,89 @@ cargo build --release -p pitboss-tui
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘              │
 │                                                                       │
 │  ── Focus: lint (running) ──────────────────────────────────────────  │
-│  > Checking crates/pitboss-core/src/parser/mod.rs                    │
+│  * Bash cargo clippy --workspace -- -D warnings                      │
+│  < Checking crates/pitboss-core/src/parser/mod.rs                    │
 │  > Linting workspace...                                              │
-│  > ...                                                                │
 │                                                                       │
-│ [h/j/k/l] nav  [L] log  [r] refresh  [?] help  [q] quit              │
+│ [hjkl] nav  [Enter] snap  [L] log  [x/X] kill wrk/run  …             │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
+Focus-log lines are colored by event type: white for assistant text
+(`> `), cyan for tool use (`* `), green for tool results (`< `),
+magenta for result events (`v `), yellow for rate limits (`! `), gray
+for unparseable / system / unknown.
+
 ## Keybindings
 
-| Key                | Action                                |
-|--------------------|---------------------------------------|
-| `h j k l` / arrows | Navigate tiles (wraps horizontally)   |
-| `L`                | Toggle full-log overlay of focused tile |
-| `r`                | Force redraw (watcher still polls 500ms) |
-| `?`                | Help overlay                          |
-| `q` / `Ctrl-C`     | Quit                                  |
-| `Esc`              | Close any overlay                     |
+| Key                | Action                                               |
+|--------------------|------------------------------------------------------|
+| `h j k l` / arrows | Navigate tiles (wraps horizontally)                  |
+| `Enter`            | Snap-in to focused tile (full-screen log view)       |
+| `L`                | Toggle full-log overlay of focused tile              |
+| `o`                | Run picker — switch to another run by id             |
+| `x`                | Cancel focused worker (confirm modal)                |
+| `X`                | Cancel entire run (confirm modal)                    |
+| `p`                | Pause focused worker (preserves `claude_session_id`) |
+| `c`                | Continue paused worker (`claude --resume`)           |
+| `r`                | Reprompt focused worker (textarea, Ctrl+Enter send)  |
+| `?`                | Help overlay                                         |
+| `q` / `Ctrl-C`     | Quit                                                 |
+| `Esc`              | Close any overlay / modal                            |
+
+Approval modal (triggered by `mcp__pitboss__request_approval`): `y`
+approve, `n` reject (with comment), `e` edit summary (Ctrl+Enter to
+submit, Esc to cancel).
 
 ## How it works
 
-Pitboss TUI does not launch or manage sessions in v0.2-alpha — it only **observes** runs
-created by `pitboss`. Every 500 ms a background thread re-reads:
+Every 250 ms a background thread re-reads:
 
-- `<run-dir>/resolved.json` to get the full list of tasks
-- `<run-dir>/summary.jsonl` for completed task records
-- `<run-dir>/tasks/<focused-id>/stdout.log` to tail the focus pane
+- `<run-dir>/resolved.json` — full list of tasks
+- `<run-dir>/summary.jsonl` — completed task records
+- `<run-dir>/summary.json` — on clean finalize, replaces jsonl records
+- `<run-dir>/tasks/<focused-id>/stdout.log` — tailed for the focus pane
 
-Task status rules:
+Control keys speak to the dispatcher through a per-run
+`<run-dir>/control.sock` unix socket; push events (approval requests,
+worker state transitions) come back the same way.
+
+### Tile status
 
 - **Pending** — in `resolved.json`, no `stdout.log` yet
-- **Running** — `stdout.log` exists and was touched within the last 5 seconds
-- **Done(Success|Failed|TimedOut|Cancelled|SpawnFailed)** — recorded in `summary.jsonl`
+- **Running** — `stdout.log` exists and was touched recently
+- **Done(Success|Failed|TimedOut|Cancelled|SpawnFailed)** — recorded in
+  `summary.jsonl` / `summary.json`
 
-If you launch `pitboss-tui` while a `pitboss dispatch` is still running, you'll see tasks
-flip Pending → Running → Done live. Focus survives across snapshots by task id, so
-the focused tile doesn't jump when new tasks complete.
+### Run status (in the picker + `list`)
 
-## Deferred to v0.2.1+
+- **complete** — `summary.json` parsed cleanly
+- **running** — task records in `summary.jsonl`, no `summary.json` yet
+- **aborted** — dispatcher wrote `manifest.snapshot.toml` +
+  `resolved.json` but no task records (orphaned / killed-at-setup
+  invocation)
 
-- Snap-in / Enter (keystroke passthrough to a running session)
-- `n` to launch a new session from within the TUI
-- `x` to kill a running session
-- `r` to resume (`claude --resume <session-id>`)
-- SQLite-backed cross-restart session state
-- Run picker (currently: latest run or specified id)
+Focus survives across snapshots by task id, so tiles don't jump when
+new tasks complete.
 
 ## Troubleshooting
 
-**"No runs directory found"** — You haven't run `pitboss dispatch` yet. The runs
-directory is `~/.local/share/pitboss/runs/` unless overridden by a manifest's
-`[run] run_dir` or the `--run-dir` flag.
+**"No runs directory found"** — You haven't run `pitboss dispatch` yet.
+The runs directory is `~/.local/share/pitboss/runs/` unless overridden
+by a manifest's `[run] run_dir` or the `--run-dir` flag.
 
-**TUI renders garbage or hangs on input** — Your terminal may not support the
-alternate screen buffer or raw mode. Try a different terminal emulator.
+**TUI renders garbage or hangs on input** — Your terminal may not
+support the alternate screen buffer or raw mode. Try a different
+terminal emulator.
 
-**"Error: No such device or address"** — You launched `pitboss-tui` without a real
-terminal attached (e.g., under `bash -c` without a TTY). `pitboss-tui list` works in
-non-TTY contexts; the interactive TUI requires a real terminal.
+**Occasional character leak on transitions** — Ratatui's diff is clean
+at the buffer level (covered by a regression test); some emulators
+don't reliably apply every cell update crossterm emits. A `dirty` flag
+in the event loop forces `terminal.clear()` on focus change, mode
+transition, resize, and SwitchRun to wipe stale cells. Residual cases
+remain a known follow-up — see the CHANGELOG.
+
+**"Error: No such device or address"** — You launched `pitboss-tui`
+without a real terminal attached (e.g., under `bash -c` without a TTY).
+`pitboss-tui list` works in non-TTY contexts; the interactive TUI
+requires a real terminal.
