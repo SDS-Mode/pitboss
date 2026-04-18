@@ -7,6 +7,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Worker shared store.** Per-run, in-memory, hub-mediated coordination
+  surface for the lead and workers. Seven new MCP tools
+  (`mcp__pitboss__kv_get`, `kv_set`, `kv_cas`, `kv_list`, `kv_wait`,
+  `lease_acquire`, `lease_release`) exposed on the existing dispatcher
+  MCP server. Workers now get their own narrow `mcp-config.json`
+  (shared-store tools only — not spawn/cancel). Four namespaces:
+  `/ref/*` (lead write), `/peer/<actor-id>/*` (actor write + lead
+  override), `/shared/*` (all write), `/leases/*` (managed). Identity
+  injection via extended `pitboss mcp-bridge --actor-id` / `--actor-role`
+  flags stamping `_meta` into each forwarded MCP tool call. Ephemeral
+  per run; optional finalize-time dump to `<run-dir>/shared-store.json`
+  via `[run] dump_shared_store = true`. See
+  `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
+
 ## [0.4.1] — 2026-04-18
 
 ### Added
