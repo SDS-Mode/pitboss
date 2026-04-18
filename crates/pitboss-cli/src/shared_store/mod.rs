@@ -26,6 +26,14 @@ pub enum StoreError {
     InvalidArg(String),
 }
 
+/// Outcome of a compare-and-swap. `ok=true` means the write happened;
+/// `current_version` is the version after the op (or unchanged if `ok=false`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CasResult {
+    pub ok: bool,
+    pub current_version: u64,
+}
+
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
 }
@@ -62,6 +70,39 @@ impl SharedStore {
             },
         );
         Ok(version)
+    }
+
+    pub async fn cas(
+        &self,
+        path: &str,
+        expected_version: u64,
+        new_value: Vec<u8>,
+        written_by: &str,
+    ) -> Result<CasResult, StoreError> {
+        validate_path(path)?;
+        let key = PathBuf::from(path);
+        let mut entries = self.entries.write().await;
+        let current_version = entries.get(&key).map_or(0, |e| e.version);
+        if current_version != expected_version {
+            return Ok(CasResult {
+                ok: false,
+                current_version,
+            });
+        }
+        let new_version = current_version + 1;
+        entries.insert(
+            key,
+            Entry {
+                value: new_value,
+                version: new_version,
+                written_by: written_by.to_string(),
+                written_at: Utc::now(),
+            },
+        );
+        Ok(CasResult {
+            ok: true,
+            current_version: new_version,
+        })
     }
 }
 
@@ -128,5 +169,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidArg(_)));
+    }
+
+    #[tokio::test]
+    async fn cas_succeeds_when_version_matches() {
+        let s = SharedStore::new();
+        s.set("/ref/k", b"v1".to_vec(), "lead").await.unwrap();
+        let res = s.cas("/ref/k", 1, b"v2".to_vec(), "lead").await.unwrap();
+        assert!(res.ok);
+        assert_eq!(res.current_version, 2);
+        let entry = s.get("/ref/k").await.unwrap();
+        assert_eq!(entry.value, b"v2");
+        assert_eq!(entry.version, 2);
+    }
+
+    #[tokio::test]
+    async fn cas_fails_when_version_mismatches() {
+        let s = SharedStore::new();
+        s.set("/ref/k", b"v1".to_vec(), "lead").await.unwrap();
+        let res = s.cas("/ref/k", 99, b"v2".to_vec(), "lead").await.unwrap();
+        assert!(!res.ok);
+        assert_eq!(res.current_version, 1);
+        let entry = s.get("/ref/k").await.unwrap();
+        assert_eq!(entry.value, b"v1");
+    }
+
+    #[tokio::test]
+    async fn cas_with_expected_zero_creates_if_missing() {
+        let s = SharedStore::new();
+        let res = s.cas("/ref/k", 0, b"v1".to_vec(), "lead").await.unwrap();
+        assert!(res.ok);
+        assert_eq!(res.current_version, 1);
+    }
+
+    #[tokio::test]
+    async fn cas_with_expected_zero_fails_if_present() {
+        let s = SharedStore::new();
+        s.set("/ref/k", b"v1".to_vec(), "lead").await.unwrap();
+        let res = s.cas("/ref/k", 0, b"v2".to_vec(), "lead").await.unwrap();
+        assert!(!res.ok);
+        assert_eq!(res.current_version, 1);
     }
 }
