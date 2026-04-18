@@ -1,0 +1,88 @@
+# Live demo of the worker shared store — "haiku composition by committee".
+#
+# The lead writes a theme to /ref/theme via mcp__pitboss__kv_set.
+# Three Haiku workers each read /ref/theme, compose one line of a haiku on
+# that theme, and write their line to /shared/haiku/line{1,2,3} via
+# mcp__pitboss__kv_set. The lead reads all three lines back and prints the
+# combined poem.
+#
+# Covers every shared-store touchpoint:
+#   - Lead writing /ref (authz: lead-only)
+#   - Workers reading /ref (authz: unrestricted reads)
+#   - Workers writing /shared (authz: all actors can write)
+#   - Lead reading /shared at the end (aggregation)
+#   - Finalize dump to <run-dir>/shared-store.json (dump_shared_store=true)
+#
+# Watch it live in pitboss-tui:
+#   (terminal 1) pitboss dispatch examples/shared-store-haiku-demo.toml
+#   (terminal 2) pitboss-tui
+#
+# Cost: ~$0.10-$0.20 on Haiku for the whole run.
+
+[run]
+max_workers = 3
+budget_usd = 0.30
+lead_timeout_secs = 600
+worktree_cleanup = "never"
+dump_shared_store = true
+
+[defaults]
+model = "claude-haiku-4-5"
+use_worktree = false
+
+[[lead]]
+id = "haiku-director"
+directory = "/tmp/pitboss-shared-store-demo"
+prompt = """
+You are directing a 3-worker haiku composition through the pitboss shared
+store. You have access to these pitboss MCP tools: `spawn_worker`,
+`wait_for_worker`, `wait_for_any`, `list_workers`, `kv_set`, `kv_get`,
+`kv_list`, `kv_wait`, `kv_cas`, `lease_acquire`, `lease_release`.
+
+STEP 1 — Publish the theme.
+Call mcp__pitboss__kv_set with:
+  path = "/ref/theme"
+  value = the UTF-8 bytes of "spring rain on concrete"
+
+STEP 2 — Spawn three workers IN PARALLEL (one mcp__pitboss__spawn_worker
+call each, then move on — don't wait between them). Each worker should
+receive a prompt that matches the template below, with {N} replaced by the
+worker's number and {SYLLABLES} replaced by the required syllable count.
+
+WORKER PROMPT TEMPLATE:
+---
+You are worker {N} in a haiku composition. You have access to these pitboss
+MCP tools: `kv_get`, `kv_set`, `kv_cas`, `kv_list`, `kv_wait`,
+`lease_acquire`, `lease_release`.
+
+1. Call mcp__pitboss__kv_get with path="/ref/theme" to read the theme.
+2. Compose exactly ONE line of a haiku about that theme. Line {N} must have
+   exactly {SYLLABLES} syllables. Do not write the full haiku — only line {N}.
+3. Call mcp__pitboss__kv_set with path="/shared/haiku/line{N}" and value set
+   to the UTF-8 bytes of your composed line.
+4. Exit. Do not write any files. Do not use any other tools.
+---
+
+Workers and syllable counts:
+  - Worker 1: N=1, SYLLABLES=5
+  - Worker 2: N=2, SYLLABLES=7
+  - Worker 3: N=3, SYLLABLES=5
+
+STEP 3 — Wait for all three workers to finish. Use
+mcp__pitboss__wait_for_worker on each task_id returned by spawn_worker.
+
+STEP 4 — Read the three lines back via mcp__pitboss__kv_get on
+"/shared/haiku/line1", "/shared/haiku/line2", and "/shared/haiku/line3".
+
+STEP 5 — Print the combined haiku as your final output, using this exact
+format:
+
+  === Combined haiku ===
+  <line 1>
+  <line 2>
+  <line 3>
+  ======================
+
+Then exit.
+"""
+branch = "demo/shared-store-haiku"

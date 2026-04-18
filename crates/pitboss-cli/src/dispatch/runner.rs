@@ -411,10 +411,13 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     args
 }
 
-/// The six MCP tool names the lead needs permission to call.
+/// MCP tool names the lead needs permission to call. Pre-approved via the
+/// lead's `--allowedTools` flag so claude never stalls at the interactive
+/// permission prompt (which can't be answered in `-p` non-interactive mode).
 /// Format: `mcp__<server-name>__<tool>`, where `pitboss` is the server name
 /// we emit in `write_mcp_config`.
 pub const PITBOSS_MCP_TOOLS: &[&str] = &[
+    // Worker orchestration tools (v0.3+).
     "mcp__pitboss__spawn_worker",
     "mcp__pitboss__worker_status",
     "mcp__pitboss__wait_for_worker",
@@ -425,6 +428,17 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__continue_worker",
     "mcp__pitboss__request_approval",
     "mcp__pitboss__reprompt_worker",
+    // Shared-store tools (v0.5+). Leads can read/write the per-run
+    // coordination surface alongside workers; without these in the
+    // allowlist, claude stalls at the permission prompt the first time
+    // the lead tries kv_set / lease_acquire / etc.
+    "mcp__pitboss__kv_get",
+    "mcp__pitboss__kv_set",
+    "mcp__pitboss__kv_cas",
+    "mcp__pitboss__kv_list",
+    "mcp__pitboss__kv_wait",
+    "mcp__pitboss__lease_acquire",
+    "mcp__pitboss__lease_release",
 ];
 
 /// Builds the argv for spawning the lead subprocess, including the

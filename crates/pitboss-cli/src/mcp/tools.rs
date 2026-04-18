@@ -513,6 +513,21 @@ async fn release_reservation(state: &Arc<DispatchState>, task_id: &str) {
     }
 }
 
+/// MCP tool names workers need permission to call. Narrower than the lead's
+/// `PITBOSS_MCP_TOOLS` — workers only get the shared-store surface, never
+/// the orchestration tools (spawn_worker / cancel_worker / request_approval
+/// / etc.). Pre-approved via `--allowedTools` so claude doesn't stall at
+/// the interactive permission prompt.
+pub const PITBOSS_WORKER_MCP_TOOLS: &[&str] = &[
+    "mcp__pitboss__kv_get",
+    "mcp__pitboss__kv_set",
+    "mcp__pitboss__kv_cas",
+    "mcp__pitboss__kv_list",
+    "mcp__pitboss__kv_wait",
+    "mcp__pitboss__lease_acquire",
+    "mcp__pitboss__lease_release",
+];
+
 fn worker_spawn_args(
     prompt: &str,
     model: &str,
@@ -524,9 +539,19 @@ fn worker_spawn_args(
         "stream-json".into(),
         "--verbose".into(),
     ];
-    if !tools.is_empty() {
+    // Workers always get the shared-store MCP tools in their allowlist when
+    // an mcp-config is supplied, alongside their user-declared tools. Without
+    // this, kv_set / lease_acquire / etc. hit the permission prompt which
+    // can't be answered in non-interactive mode.
+    let mut allowed: Vec<String> = tools.to_vec();
+    if mcp_config.is_some() {
+        for t in PITBOSS_WORKER_MCP_TOOLS {
+            allowed.push((*t).to_string());
+        }
+    }
+    if !allowed.is_empty() {
         args.push("--allowedTools".into());
-        args.push(tools.join(","));
+        args.push(allowed.join(","));
     }
     args.push("--model".into());
     args.push(model.to_string());
