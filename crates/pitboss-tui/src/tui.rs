@@ -1079,6 +1079,19 @@ fn render_run_picker_overlay(frame: &mut Frame, area: Rect, state: &AppState, se
     list_state.select(Some(selected));
 
     frame.render_stateful_widget(list, inner, &mut list_state);
+
+    // Populate the picker hit-cache so mouse clicks resolve to row
+    // indices. Rows are laid out top-to-bottom starting at `inner.y`;
+    // we clip to the inner height so clicks below the last run land
+    // on no row (returns None from `picker_row_at`).
+    if let Ok(mut cache) = state.picker_hit_rects.lock() {
+        cache.clear();
+        let max_rows = inner.height as usize;
+        for (idx, _) in state.run_list.iter().enumerate().take(max_rows) {
+            let y = inner.y + u16::try_from(idx).unwrap_or(u16::MAX);
+            cache.push((idx, ratatui::layout::Rect::new(inner.x, y, inner.width, 1)));
+        }
+    }
 }
 
 fn render_confirm_kill(frame: &mut Frame, area: Rect, target: &crate::state::KillTarget) {
@@ -1257,6 +1270,7 @@ mod tests {
             runtime_handle: None,
             store_activity: std::collections::HashMap::new(),
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
+            picker_hit_rects: std::sync::Mutex::new(Vec::new()),
         }
     }
 

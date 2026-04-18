@@ -154,6 +154,11 @@ pub struct AppState {
     /// (which has `&AppState`) can update it via interior mutability —
     /// same pattern as `detail_log_viewport`.
     pub tile_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
+    /// Bounding rectangles of each run-picker row (y coords are absolute
+    /// terminal rows). Populated by `render_run_picker_overlay` whenever
+    /// the picker is visible; used by the mouse click handler to open
+    /// a run with one click.
+    pub picker_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
 }
 
 /// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
@@ -193,7 +198,23 @@ impl AppState {
             runtime_handle: None,
             store_activity: std::collections::HashMap::new(),
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
+            picker_hit_rects: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Hit-test: find the picker row index whose render rect contains
+    /// `(col, row)`. Same shape as `tile_at`. Returns `None` when the
+    /// picker isn't open or the click fell on empty space (run list
+    /// shorter than the picker area).
+    pub fn picker_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let rects = self.picker_hit_rects.lock().ok()?;
+        rects.iter().find_map(|(idx, r)| {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                Some(*idx)
+            } else {
+                None
+            }
+        })
     }
 
     /// Hit-test: find the tile index whose render rect contains `(col, row)`.
@@ -1044,6 +1065,25 @@ mod tests {
         let state = make_state();
         assert!(state.tile_hit_rects.lock().unwrap().is_empty());
         assert_eq!(state.tile_at(0, 0), None);
+    }
+
+    #[test]
+    fn picker_row_at_returns_row_index() {
+        use ratatui::layout::Rect;
+        let state = make_state();
+        // Three picker rows stacked vertically: y=5,6,7.
+        *state.picker_hit_rects.lock().unwrap() = vec![
+            (0, Rect::new(2, 5, 40, 1)),
+            (1, Rect::new(2, 6, 40, 1)),
+            (2, Rect::new(2, 7, 40, 1)),
+        ];
+        assert_eq!(state.picker_row_at(10, 5), Some(0));
+        assert_eq!(state.picker_row_at(10, 6), Some(1));
+        assert_eq!(state.picker_row_at(10, 7), Some(2));
+        // Below last row.
+        assert_eq!(state.picker_row_at(10, 8), None);
+        // Left of picker.
+        assert_eq!(state.picker_row_at(0, 5), None);
     }
 
     // -----------------------------------------------------------------------
