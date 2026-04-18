@@ -17,7 +17,12 @@ use tokio::net::UnixStream;
 /// Connect to the pitboss MCP server on `socket` and bidirectionally copy
 /// bytes between claude's stdio pair and that unix socket. Returns when
 /// either direction closes.
-pub async fn run_bridge(socket: &Path) -> Result<i32> {
+pub async fn run_bridge(
+    socket: &Path,
+    _actor_id: &str,
+    _actor_role: crate::cli::ActorRoleArg,
+) -> Result<i32> {
+    // Byte-level passthrough — identity injection lands in Task 11.
     let mut stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("connect to pitboss mcp socket at {}", socket.display()))?;
