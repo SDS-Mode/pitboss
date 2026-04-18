@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod config;
+
 /// Severity levels for `NotificationEnvelope`. Matches syslog heritage +
 /// PagerDuty/Opsgenie conventions. Ordered so filters can say
 /// `severity_min = "warning"` and include Error + Critical.
