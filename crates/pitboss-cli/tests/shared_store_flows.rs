@@ -29,6 +29,13 @@ fn worker_meta(id: &str) -> MetaField {
     }
 }
 
+fn lead_meta(id: &str) -> MetaField {
+    MetaField {
+        actor_id: id.to_string(),
+        actor_role: ActorRole::Lead,
+    }
+}
+
 /// Simulates use case B from the spec: worker A writes its output to
 /// `/peer/worker-A/output`; worker B blocks on `kv_wait` for that key
 /// and reads it when worker A finishes. End-to-end test of the
@@ -214,6 +221,83 @@ async fn lease_release_by_non_holder_is_forbidden() {
     )
     .await
     .unwrap_err();
+    assert!(matches!(
+        err,
+        pitboss_cli::shared_store::StoreError::Forbidden(_)
+    ));
+}
+
+/// A write-path tool call arriving without `_meta` (bridge not involved
+/// or misconfigured) must fail deserialization. serde handles this as
+/// a missing-field error at the MCP parameter layer, which the dispatcher
+/// surfaces as a parse error — semantically equivalent to unauthenticated.
+#[tokio::test]
+async fn write_args_without_meta_fail_to_deserialize() {
+    // KvSetArgs has meta: MetaField (required — not Option). Missing field
+    // should fail in serde.
+    let payload = serde_json::json!({
+        "path": "/ref/foo",
+        "value": [1, 2, 3],
+    });
+    let result = serde_json::from_value::<KvSetArgs>(payload);
+    assert!(
+        result.is_err(),
+        "missing _meta must fail deserialization; got {result:?}"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("_meta") || err_msg.contains("meta"),
+        "error should mention the missing _meta field, got: {err_msg}"
+    );
+}
+
+/// Lead with override_flag=true can write to any worker's /peer/* namespace.
+#[tokio::test]
+async fn lead_override_writes_any_peer() {
+    let store = Arc::new(SharedStore::new());
+    let args = KvSetArgs {
+        path: "/peer/worker-B/override-by-lead".into(),
+        value: b"lead-injected".to_vec(),
+        override_flag: true,
+        meta: lead_meta("lead-X"),
+    };
+    let res = handle_kv_set(&store, args).await.unwrap();
+    assert_eq!(res.version, 1);
+    // Read back to confirm.
+    let entry = store.get("/peer/worker-B/override-by-lead").await.unwrap();
+    assert_eq!(entry.value, b"lead-injected");
+    assert_eq!(entry.written_by, "lead-X");
+}
+
+/// Worker cannot use override_flag=true to escape its /peer/<self>/ namespace.
+/// Override is lead-only.
+#[tokio::test]
+async fn worker_override_flag_is_ignored_and_still_forbidden() {
+    let store = Arc::new(SharedStore::new());
+    let args = KvSetArgs {
+        path: "/peer/worker-B/sneaky".into(),
+        value: b"no".to_vec(),
+        override_flag: true, // worker setting the flag; should not help
+        meta: worker_meta("worker-A"),
+    };
+    let err = handle_kv_set(&store, args).await.unwrap_err();
+    assert!(matches!(
+        err,
+        pitboss_cli::shared_store::StoreError::Forbidden(_)
+    ));
+}
+
+/// Lead without override_flag cannot write another worker's /peer/*.
+#[tokio::test]
+async fn lead_without_override_cannot_write_other_peer() {
+    let store = Arc::new(SharedStore::new());
+    let args = KvSetArgs {
+        path: "/peer/worker-Z/lead-tried".into(),
+        value: b"denied".to_vec(),
+        override_flag: false,
+        meta: lead_meta("lead-X"),
+    };
+    let err = handle_kv_set(&store, args).await.unwrap_err();
     assert!(matches!(
         err,
         pitboss_cli::shared_store::StoreError::Forbidden(_)
