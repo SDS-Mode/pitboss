@@ -3,16 +3,14 @@
 #![allow(dead_code)]
 
 pub mod log;
+pub mod slack;
+pub mod webhook;
+pub mod discord;
 
 pub use log::LogSink;
-
-// Other sinks wired up in later tasks:
-// pub mod discord;
-pub mod slack;
-// pub mod webhook;
-// pub use discord::DiscordSink;
 pub use slack::SlackSink;
-// pub use webhook::WebhookSink;
+pub use webhook::WebhookSink;
+pub use discord::DiscordSink;
 
 use std::sync::Arc;
 
@@ -30,12 +28,20 @@ pub fn build(
 ) -> Result<Arc<dyn NotificationSink>> {
     match cfg.kind {
         SinkKind::Log => Ok(Arc::new(LogSink::new(idx))),
-        SinkKind::Webhook => anyhow::bail!("WebhookSink not yet implemented"),
+        SinkKind::Webhook => Ok(Arc::new(WebhookSink::new(
+            idx,
+            cfg.url.clone().expect("validated earlier"),
+            Arc::clone(http),
+        ))),
         SinkKind::Slack => Ok(Arc::new(SlackSink::new(
             idx,
             cfg.url.clone().expect("validated earlier"),
             Arc::clone(http),
         ))),
-        SinkKind::Discord => anyhow::bail!("DiscordSink not yet implemented"),
+        SinkKind::Discord => Ok(Arc::new(DiscordSink::new(
+            idx,
+            cfg.url.clone().expect("validated earlier"),
+            Arc::clone(http),
+        ))),
     }
 }
