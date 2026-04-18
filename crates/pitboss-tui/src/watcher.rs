@@ -266,6 +266,13 @@ fn build_tile(
             }
             _ => {}
         }
+        // Dynamic workers aren't in resolved.json, and TaskRecord doesn't
+        // carry the model. For those the model_map returns None and the
+        // Detail view would render "model ?". Pull the model out of the
+        // first assistant event via an early-out scan — cheap relative
+        // to the full scan_live_stats (which sums usage across every
+        // assistant message and scales with log size).
+        let model = model.or_else(|| scan_first_model(&log_path));
         TileState {
             id: id.to_string(),
             status: TileStatus::Done(rec.status.clone()),
@@ -316,6 +323,36 @@ fn build_tile(
             },
         }
     }
+}
+
+/// Early-out scan: return the model from the first assistant message
+/// in the log, or `None`. O(prefix-of-file) — stops as soon as the
+/// first usable `{"type":"assistant", ...}` line is seen. Used for
+/// completed tiles where the full usage is already in the `TaskRecord`
+/// but the model wasn't carried.
+fn scan_first_model(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(m) = val
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(m.to_string());
+        }
+    }
+    None
 }
 
 /// Full-file scan of a worker's stdout.log for mid-flight stats:
@@ -821,6 +858,28 @@ mod tests {
         assert!(model.is_none());
         assert_eq!(usage.input, 0);
         assert_eq!(usage.output, 0);
+    }
+
+    #[test]
+    fn scan_first_model_returns_first_seen_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stdout.log");
+        let body = [
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[]}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+        assert_eq!(
+            scan_first_model(&path).as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn scan_first_model_missing_file_returns_none() {
+        assert!(scan_first_model(Path::new("/nonexistent.log")).is_none());
     }
 
     #[test]
