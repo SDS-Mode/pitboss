@@ -500,6 +500,15 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
         .split(area);
 
     let total_lines = state.focus_log.len();
+    let visible_rows = chunks[1].height as usize;
+
+    // Clamp the incoming scroll into a valid range. snap_auto_scroll /
+    // snap_jump_bottom may pin scroll past the end (the state side can't
+    // know the real viewport height); without clamping the slice below
+    // is empty and the pane renders blank.
+    let max_scroll = total_lines.saturating_sub(visible_rows);
+    let scroll = scroll.min(max_scroll);
+    let n = (scroll + visible_rows).min(total_lines);
 
     // Status of the snapped tile (if it still exists).
     let status_str = state
@@ -509,8 +518,7 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
         .map_or("?", |t| status_label(&t.status));
 
     // --- Title bar ---
-    let title_text =
-        format!(" Snap-in: {task_id} ({status_str}) — {total_lines} log lines — offset {scroll} ");
+    let title_text = format!(" Snap-in: {task_id} ({status_str}) — line {n}/{total_lines} ");
     // Intentional: inverted text on highlight bar — selection highlight pairing,
     // not a palette color. Keep inline.
     let title_para = Paragraph::new(title_text).style(
@@ -522,19 +530,24 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
     frame.render_widget(title_para, chunks[0]);
 
     // --- Log body ---
-    // Pass ALL log lines to the Paragraph and let ratatui's Paragraph::scroll
-    // handle the vertical offset. Works correctly with word-wrap (line-index
-    // slicing got confused when one log line wrapped to multiple visual rows).
-    let lines: Vec<Line> = state
-        .focus_log
+    // Line-index slicing: pass the visible slice to Paragraph with wrap
+    // enabled. Wrap can expand the slice to more visual rows than fit;
+    // Paragraph clips the tail in that case. Simpler than Paragraph::scroll
+    // because `scroll` is already in log-line units.
+    let log_slice = if state.focus_log.is_empty() {
+        &[][..]
+    } else {
+        let start = scroll.min(state.focus_log.len());
+        let end = (scroll + visible_rows).min(state.focus_log.len());
+        &state.focus_log[start..end]
+    };
+
+    let lines: Vec<Line> = log_slice
         .iter()
         .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let scroll_u16 = u16::try_from(scroll).unwrap_or(u16::MAX);
-    let log_para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_u16, 0));
+    let log_para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(log_para, chunks[1]);
 
     // --- Status bar ---
@@ -544,9 +557,15 @@ fn render_snap_in(frame: &mut Frame, area: Rect, state: &AppState, task_id: &str
 }
 
 fn render_log_overlay(frame: &mut Frame, area: Rect, state: &AppState, scroll: u16) {
-    let overlay_area = centered_rect(90, 85, area);
+    // Wipe the ENTIRE frame first. Without this, the 5% margins outside
+    // the centered overlay keep showing tile-grid content from the
+    // earlier render_body pass — visible as character bleed along the
+    // left/right edges especially during scroll. The second Clear on
+    // `overlay_area` below is kept for safety even though it's redundant
+    // after the full-frame wipe.
+    frame.render_widget(Clear, area);
 
-    // Clear background
+    let overlay_area = centered_rect(90, 85, area);
     frame.render_widget(Clear, overlay_area);
 
     let focused_id = state.focused_tile().map_or("—", |t| t.id.as_str());
