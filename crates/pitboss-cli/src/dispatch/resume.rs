@@ -143,6 +143,24 @@ pub fn build_resume_hierarchical(run_dir: &Path) -> Result<ResolvedManifest> {
         .clone()
         .ok_or_else(|| anyhow!("lead has no claude_session_id — cannot resume"))?;
 
+    // Guard: if the prior run used a worktree that's since been cleaned,
+    // `claude --resume` will fail to find its session data (claude keys
+    // session storage by cwd hash). Fail fast with a clear message that
+    // points at `worktree_cleanup = "never"` — otherwise the user would
+    // see a cryptic claude-level error after we've already re-spawned.
+    if let Some(wt) = &lead_record.worktree_path {
+        if !wt.exists() {
+            anyhow::bail!(
+                "cannot resume: the lead's worktree was cleaned ({}).\n\
+                 claude --resume needs the original worktree directory to\n\
+                 find its session data. Re-run the original manifest with\n\
+                 `[run] worktree_cleanup = \"never\"` so future resumes\n\
+                 stay possible.",
+                wt.display()
+            );
+        }
+    }
+
     lead.resume_session_id = Some(session_id);
 
     // Workers are dispatched dynamically by the lead — the `tasks` vec
@@ -456,5 +474,106 @@ mod tests {
 
         // Silence unused warning on the un-reserialized resolved.
         let _ = resolved.lead.take();
+    }
+
+    /// Regression: when the lead's worktree has been cleaned, resume must
+    /// fail fast with a clear error rather than respawning claude in a
+    /// new directory and letting `claude --resume <session>` mysteriously
+    /// fail to find its session data.
+    #[test]
+    fn resume_fails_clearly_when_lead_worktree_missing() {
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use std::path::PathBuf;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path();
+
+        // Write a bare-bones resolved.json.
+        let resolved = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: run_dir.to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(ResolvedLead {
+                id: "triage".into(),
+                directory: PathBuf::from("/tmp"),
+                prompt: "original".into(),
+                branch: None,
+                model: "claude-haiku-4-5".into(),
+                effort: Effort::High,
+                tools: vec![],
+                timeout_secs: 600,
+                use_worktree: true,
+                env: Default::default(),
+                resume_session_id: None,
+            }),
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+        };
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec_pretty(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        // Lead record points at a worktree path that does NOT exist — as
+        // if cleanup fired and removed it.
+        let missing_wt = tmp.path().join("already-gone");
+        assert!(!missing_wt.exists());
+        let lead_record = TaskRecord {
+            task_id: "triage".into(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 0,
+            worktree_path: Some(missing_wt.clone()),
+            log_path: PathBuf::new(),
+            token_usage: Default::default(),
+            claude_session_id: Some("session-gone".into()),
+            final_message_preview: None,
+            parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+        };
+        let summary = RunSummary {
+            run_id: Uuid::now_v7(),
+            manifest_path: PathBuf::new(),
+            pitboss_version: "0.4.3".into(),
+            claude_version: None,
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            total_duration_ms: 0,
+            tasks_total: 1,
+            tasks_failed: 0,
+            was_interrupted: false,
+            tasks: vec![lead_record],
+        };
+        std::fs::write(
+            run_dir.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).unwrap(),
+        )
+        .unwrap();
+
+        let err = build_resume_hierarchical(run_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("worktree was cleaned"),
+            "expected worktree-cleaned guidance, got: {msg}"
+        );
+        assert!(
+            msg.contains("worktree_cleanup = \"never\""),
+            "expected remediation hint, got: {msg}"
+        );
     }
 }

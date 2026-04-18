@@ -14,32 +14,39 @@ struct Rates {
     cache_write: f64,
 }
 
-/// Pricing as of 2026-04 for supported Claude Code models. Unknown models
-/// return `None` — callers should treat that as "cost unknown" in the UI.
+/// Pricing as of 2026-04 for supported Claude Code models. Match on
+/// family prefix (opus / sonnet / haiku) rather than exact revision
+/// strings — same-family revisions share pricing, so a new "claude-opus-4-8"
+/// dropping tomorrow should still cost-estimate correctly without a
+/// code change. Unknown families return `None` — callers render "—".
+///
+/// If Anthropic ever splits pricing within a family, add a more specific
+/// branch BEFORE the generic family match.
 fn rates_for(model: &str) -> Option<Rates> {
-    // Normalize: trim any trailing "-20NN1001"-style revision suffix.
-    // Model names have 4 segments (e.g. "claude-haiku-4-5"); take exactly 4.
-    let base = model.split('-').take(4).collect::<Vec<_>>().join("-");
-    match base.as_str() {
-        "claude-opus-4-7" => Some(Rates {
+    let lc = model.to_ascii_lowercase();
+    if lc.contains("opus") {
+        Some(Rates {
             input: 15.0,
             output: 75.0,
             cache_read: 1.50,
             cache_write: 18.75,
-        }),
-        "claude-sonnet-4-6" => Some(Rates {
+        })
+    } else if lc.contains("sonnet") {
+        Some(Rates {
             input: 3.0,
             output: 15.0,
             cache_read: 0.30,
             cache_write: 3.75,
-        }),
-        "claude-haiku-4-5" => Some(Rates {
+        })
+    } else if lc.contains("haiku") {
+        Some(Rates {
             input: 0.80,
             output: 4.0,
             cache_read: 0.08,
             cache_write: 1.00,
-        }),
-        _ => None,
+        })
+    } else {
+        None
     }
 }
 
@@ -102,13 +109,34 @@ mod tests {
 
     #[test]
     fn unknown_model_returns_none() {
-        assert!(cost_usd("claude-unknown-x-y", &usage(100, 200)).is_none());
+        assert!(cost_usd("gpt-4", &usage(100, 200)).is_none());
+        assert!(cost_usd("llama-3", &usage(100, 200)).is_none());
     }
 
     #[test]
     fn dated_model_suffix_normalizes() {
         // e.g., "claude-haiku-4-5-20251001" should match the base rate.
         assert!(cost_usd("claude-haiku-4-5-20251001", &usage(100, 200)).is_some());
+    }
+
+    #[test]
+    fn any_family_revision_matches_same_rates() {
+        // Older + hypothetical-newer revisions should resolve to family
+        // rates without needing code updates per-release.
+        let c1 = cost_usd("claude-opus-4-7", &usage(1_000_000, 0)).unwrap();
+        let c2 = cost_usd("claude-opus-4-5", &usage(1_000_000, 0)).unwrap();
+        let c3 = cost_usd("claude-opus-4-9", &usage(1_000_000, 0)).unwrap();
+        assert!((c1 - c2).abs() < 1e-9 && (c1 - c3).abs() < 1e-9);
+
+        let s1 = cost_usd("claude-sonnet-4-6", &usage(1_000_000, 0)).unwrap();
+        let s2 = cost_usd("claude-sonnet-4-4", &usage(1_000_000, 0)).unwrap();
+        assert!((s1 - s2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn case_insensitive_family_match() {
+        assert!(cost_usd("CLAUDE-OPUS-4-7", &usage(100, 200)).is_some());
+        assert!(cost_usd("Haiku-Beta", &usage(100, 200)).is_some());
     }
 
     #[test]
