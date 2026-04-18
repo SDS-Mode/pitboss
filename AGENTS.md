@@ -511,6 +511,6 @@ dispatch first and have to ask follow-ups, you've probably wasted budget.
 
 ## Version
 
-Written for pitboss `v0.3.3`. Schema may evolve; `pitboss validate` is the
+Written for pitboss `v0.4.1`. Schema may evolve; `pitboss validate` is the
 source of truth. This document should stay self-contained — if something
 here conflicts with the actual binary, the binary wins. File a PR.

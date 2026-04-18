@@ -6,9 +6,13 @@
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
 
-**v0.4.0** ships a live control plane: cancel/pause/continue/reprompt
-and operator-approval interrupts. See CHANGELOG + AGENTS.md for
-keybindings and the three new MCP tools.
+**v0.4.1** ships the notifications plugin system (webhook / Slack /
+Discord sinks, `[[notification]]` config), plus a v0.4.1.x TUI polish
+pass (word-wrap, semantic log-line coloring, theme module, refreshed
+keybinding legends). Builds on v0.4.0's live control plane:
+cancel/pause/continue/reprompt and operator-approval interrupts. See
+CHANGELOG + AGENTS.md for keybindings, MCP tools, and notification
+config.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
@@ -39,7 +43,7 @@ Pre-built binaries are attached to every GitHub release.
 ```bash
 # x86_64 Linux
 mkdir -p ~/.local/bin
-curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.3.1-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.4.1-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz -C ~/.local/bin
 
 pitboss version
@@ -224,13 +228,13 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-Last release `v0.4.0` (live control plane). Unreleased on `main`: v0.4.1
-prerequisites (MCP-client fake-claude + e2e flows, `reprompt_worker` MCP
-tool), the notifications plugin system (LogSink / WebhookSink / SlackSink
-/ DiscordSink routed via `[[notification]]` config), and a v0.4.1.x TUI
-polish pass (grid-clear, 250ms poll, word-wrap, theme module, semantic
-log-line coloring, aborted-run status, refreshed legends). 335 tests pass
-under `cargo test --workspace --features pitboss-core/test-support`. See
+`v0.4.1` — v0.4.1 prerequisites (MCP-client fake-claude + e2e flows,
+`reprompt_worker` MCP tool), notifications plugin system (LogSink /
+WebhookSink / SlackSink / DiscordSink routed via `[[notification]]`
+config), and a v0.4.1.x TUI polish pass (grid-clear, 250ms poll,
+word-wrap, theme module, semantic log-line coloring, aborted-run
+status, refreshed legends). 335 tests pass under `cargo test
+--workspace --features pitboss-core/test-support`. See
 [`CHANGELOG.md`](CHANGELOG.md) for the per-version history.
 
 ## Manual smoke testing

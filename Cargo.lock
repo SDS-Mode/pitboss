@@ -1355,7 +1355,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pitboss-cli"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-core"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-tui"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "chrono",

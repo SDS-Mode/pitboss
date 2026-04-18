@@ -7,6 +7,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-18
+
 ### Added
 - **`fake-claude` MCP-client mode.** When `PITBOSS_FAKE_MCP_SOCKET` is
   set, the test-support `fake-claude` binary connects to a pitboss MCP
@@ -341,7 +343,8 @@ This project uses [Semantic Versioning](https://semver.org/).
   SIGINT terminates.
 - Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
 
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/SDS-Mode/pitboss/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/SDS-Mode/pitboss/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/SDS-Mode/pitboss/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/SDS-Mode/pitboss/compare/v0.3.2...v0.3.3
