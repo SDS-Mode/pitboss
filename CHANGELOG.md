@@ -27,6 +27,18 @@ This project uses [Semantic Versioning](https://semver.org/).
   preserving the worker's claude session via `--resume`. Matches the
   control-socket op's state machine, event writes, and counter semantics
   exactly; prompt is required (not optional like `ContinueWorkerArgs`).
+- **Notifications plugin system.** Trait-based `NotificationSink`
+  abstraction in `pitboss-cli::notify` with four concrete sinks:
+  `LogSink`, `WebhookSink`, `SlackSink`, `DiscordSink`. Routed via
+  `NotificationRouter` with per-sink event filters (`events =
+  [...]`) and `severity_min`. Typed `PitbossEvent` enum with three
+  variants (`approval_request`, `run_finished`, `budget_exceeded`).
+  Config via new `[[notification]]` manifest section; env-var
+  substitution (`${FOO}`) for URLs. Fire-and-forget per sink via
+  `tokio::spawn`, 3-attempt exponential backoff (100ms → 300ms →
+  900ms), LRU dedup cache (size 64) prevents retry storms. New
+  `TaskEvent::NotificationFailed` variant records delivery failures
+  in `events.jsonl`.
 
 ### Fixed
 - Control-socket `approve` op now writes the `approval_response` event
