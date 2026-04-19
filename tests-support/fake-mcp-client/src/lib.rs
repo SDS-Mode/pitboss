@@ -16,12 +16,22 @@ use rmcp::ServiceExt;
 /// `ClientHandler` with default client info, which is all tests need.
 pub struct FakeMcpClient {
     inner: RunningService<RoleClient, ()>,
+    actor_id: Option<String>,
+    actor_role: Option<String>,
 }
 
 impl FakeMcpClient {
     /// Connect to a pitboss MCP server on a unix socket and complete the MCP
-    /// initialization handshake.
+    /// initialization handshake. Defaults to root_lead identity for backward
+    /// compatibility with tests that don't specify an actor role.
     pub async fn connect(socket: &Path) -> Result<Self> {
+        Self::connect_as(socket, "root", "root_lead").await
+    }
+
+    /// Connect to a pitboss MCP server with a recorded actor identity. Subsequent
+    /// `call_tool` invocations will inject `_meta: {actor_id, actor_role}` into
+    /// the request parameters (simulating what `mcp-bridge` does in production).
+    pub async fn connect_as(socket: &Path, actor_id: &str, actor_role: &str) -> Result<Self> {
         let stream = tokio::net::UnixStream::connect(socket)
             .await
             .with_context(|| format!("connect to {}", socket.display()))?;
@@ -29,7 +39,11 @@ impl FakeMcpClient {
             .serve(stream)
             .await
             .with_context(|| format!("mcp client init handshake on {}", socket.display()))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            actor_id: Some(actor_id.to_string()),
+            actor_role: Some(actor_role.to_string()),
+        })
     }
 
     /// Call a tool and return the tool's structured content as JSON.
@@ -39,8 +53,11 @@ impl FakeMcpClient {
     /// field. If it's missing (e.g. a tool returned only text content), we
     /// fall back to serializing the full `CallToolResult` as JSON so callers
     /// can still inspect it.
+    ///
+    /// If this client was created with `connect_as`, injects `_meta` into
+    /// the arguments before sending.
     pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
-        let arguments = match args {
+        let mut arguments = match args {
             Value::Null => None,
             Value::Object(map) => Some(map),
             other => {
@@ -50,6 +67,20 @@ impl FakeMcpClient {
                 ));
             }
         };
+
+        // Inject _meta if identity is recorded
+        if let (Some(ref actor_id), Some(ref actor_role)) = (&self.actor_id, &self.actor_role) {
+            if let Some(ref mut args_obj) = arguments {
+                args_obj.insert(
+                    "_meta".to_string(),
+                    serde_json::json!({
+                        "actor_id": actor_id,
+                        "actor_role": actor_role,
+                    }),
+                );
+            }
+        }
+
         let param = CallToolRequestParam {
             name: name.to_owned().into(),
             arguments,

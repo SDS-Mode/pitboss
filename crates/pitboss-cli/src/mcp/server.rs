@@ -49,6 +49,18 @@ struct SpawnSubleadRequest {
     /// max_workers).
     #[serde(default)]
     read_down: bool,
+    /// Caller identity injected by mcp-bridge (actor_id + actor_role).
+    #[serde(rename = "_meta", default)]
+    #[schemars(skip)]
+    meta: Option<CallerMeta>,
+}
+
+/// Caller identity metadata injected into tool requests by the MCP bridge.
+#[allow(dead_code)]
+#[derive(serde::Deserialize, Debug, Clone)]
+struct CallerMeta {
+    actor_id: String,
+    actor_role: String,
 }
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -152,6 +164,9 @@ impl PitbossHandler {
         Parameters(req): Parameters<SpawnSubleadRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         use crate::dispatch::sublead::{spawn_sublead as do_spawn, SubleadSpawnRequest};
+
+        // Role check: only root_lead (or "lead" for v0.5 compat) may spawn sub-leads.
+        extract_and_check_root_lead(&req.meta)?;
 
         let spawn_req = SubleadSpawnRequest {
             prompt: req.prompt,
@@ -438,6 +453,29 @@ impl ServerHandler for PitbossHandler {
             ..Default::default()
         }
     }
+}
+
+/// Extract the caller's actor_role from the request's _meta field.
+/// Rejects if _meta is missing or actor_role is not "root_lead" or "lead".
+fn extract_and_check_root_lead(meta: &Option<CallerMeta>) -> Result<(), ErrorData> {
+    let Some(m) = meta else {
+        return Err(ErrorData::invalid_request(
+            String::from("spawn_sublead requires caller identity (missing _meta)"),
+            None,
+        ));
+    };
+
+    if m.actor_role != "root_lead" && m.actor_role != "lead" {
+        return Err(ErrorData::invalid_request(
+            format!(
+                "spawn_sublead is only available to the root lead (got role: {}; depth-2 invariant: workers and sub-leads cannot spawn sub-leads)",
+                m.actor_role
+            ),
+            None,
+        ));
+    }
+
+    Ok(())
 }
 
 /// Serialize a value to `CallToolResult::structured(json)`. Used for the

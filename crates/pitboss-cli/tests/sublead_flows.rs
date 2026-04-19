@@ -102,8 +102,7 @@ async fn spawn_sublead_creates_isolated_layer() {
         .await
         .unwrap();
 
-    // Task 2.3 adds role-based authz (connect_as). For Task 2.2 we simply
-    // connect with the default identity — the role check is not yet enforced.
+    // Plain connect() defaults to root_lead identity, which passes the role check.
     let mut client = FakeMcpClient::connect(&socket).await.unwrap();
     let resp = client
         .call_tool(
@@ -147,4 +146,38 @@ async fn spawn_sublead_creates_isolated_layer() {
 
     // Root's reservation should reflect the sub-lead's envelope.
     assert_eq!(*state.root.reserved_usd.lock().await, 5.0);
+}
+
+#[tokio::test]
+async fn sublead_cannot_call_spawn_sublead() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Connect as a sub-lead actor (the fake client simulates what mcp-bridge
+    // would do in production, injecting _meta into the call_tool request).
+    let mut client = FakeMcpClient::connect_as(&socket, "sublead-x", "sublead")
+        .await
+        .unwrap();
+    let result = client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 1.0, "max_workers": 1}),
+        )
+        .await;
+
+    // The call should fail because the sublead role is not allowed
+    assert!(
+        result.is_err(),
+        "sub-lead should not be able to call spawn_sublead"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("depth-2") || err_msg.contains("only available to the root lead"),
+        "error message should mention depth-2 invariant, got: {err_msg}"
+    );
 }
