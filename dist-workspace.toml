@@ -35,3 +35,13 @@ install-path = "CARGO_HOME"
 # Both top-level apps (pitboss, pitboss-tui) need to be installable.
 # Leaving this unset defaults to "all bins found in the workspace" which
 # is what we want.
+
+# Pin aarch64-apple-darwin to a native Apple Silicon runner (`macos-14`)
+# instead of letting cargo-dist default to `macos-13` (Intel). The default
+# cross-compiles from x86_64, which (a) is slower than a native build
+# and (b) shares a public runner pool that experienced a ~2h queue
+# backup during v0.5.2 validation with no clear root cause. `macos-14`
+# runs the build natively on M1 hardware with its own queue pool; builds
+# take ~minutes and queue times are typically shorter.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-14"

@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version     = "0.5.2"
+version     = "0.5.3"
 edition     = "2021"
 rust-version = "1.82"
 license     = "MIT OR Apache-2.0"
@@ -27,7 +27,7 @@ serde_json         = "1"
 toml               = "0.8"
 uuid               = { version = "1", features = ["v7","serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
-git2               = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
+git2               = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 thiserror          = "1"
 anyhow             = "1"
 tracing            = "0.1"

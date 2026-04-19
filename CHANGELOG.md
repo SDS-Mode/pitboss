@@ -7,23 +7,25 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.5.2] — 2026-04-19
+## [0.5.3] — 2026-04-19
 
 ### Fixed
 
-- **Unblocked `aarch64-unknown-linux-gnu` release builds.** Added
-  `vendored-openssl` to the `git2` feature set so libgit2's OpenSSL
-  dependency is statically bundled instead of linked against the host
-  sysroot. The cargo-dist aarch64-linux job cross-compiles from
-  x86_64 GitHub runners where no aarch64 OpenSSL sysroot is present;
-  v0.5.1 failed at this step and was never released.
-
-## [0.5.1] — 2026-04-19 [YANKED]
-
-Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
-(missing OpenSSL sysroot). No artifacts published. Superseded by
-0.5.2. Notes below describe the intended contents, which landed in
-0.5.2.
+- **Unblocked release pipeline on aarch64 targets.** Two related build
+  fixes that together unblock both the cargo-dist aarch64-linux
+  cross-compile and the multi-arch container build:
+  1. `git2` dependency switched to `default-features = false, features = ["vendored-libgit2"]`,
+     disabling the HTTPS + SSH features that pulled in OpenSSL and
+     libssh2 transitively. pitboss's git2 usage is local-only (worktree
+     management, repo discovery, branch enumeration), so dropping these
+     is safe. Eliminates the OpenSSL sysroot requirement for
+     aarch64-linux cross-compile *and* the perl requirement in the slim
+     container builder.
+  2. `dist-workspace.toml` grows a `[dist.github-custom-runners]` block
+     pinning `aarch64-apple-darwin` to `macos-14` (native Apple Silicon)
+     instead of cross-compiling from `macos-13` (Intel). Faster native
+     build, shorter queue times, and dodges the ~2h public `macos-13`
+     runner queue anomaly observed during v0.5.2 validation.
 
 ### Changed
 
@@ -32,12 +34,12 @@ Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
   `dist-workspace.toml` config + auto-generated workflow. Produces
   `curl | sh` shell installers, Homebrew formulae (published to the
   [`SDS-Mode/homebrew-pitboss`][tap] tap on every release), and
-  `tar.xz` tarballs with SHA-256 checksums. Target matrix expanded to
-  add `aarch64-unknown-linux-gnu` alongside the existing
-  `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`. Requires a
-  `HOMEBREW_TAP_TOKEN` repo secret + the tap repo to be created before
-  the `publish-homebrew-formula` job will succeed; other release jobs
-  (tarballs, installers) work without it.
+  `tar.xz` tarballs with SHA-256 checksums. Target matrix adds
+  `aarch64-unknown-linux-gnu` alongside `x86_64-unknown-linux-gnu` and
+  `aarch64-apple-darwin` (the latter pinned to native M1 runners).
+  Requires a `HOMEBREW_TAP_TOKEN` repo secret + the tap repo to be
+  created before the `publish-homebrew-formula` job will succeed; other
+  release jobs (tarballs, installers) work without it.
 - **Added `description` / `repository` / `homepage` metadata to all
   workspace crates** so the published artifacts (and future
   `cargo publish` runs) carry proper provenance.
@@ -50,9 +52,6 @@ Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
   `v*` tag. Debian-slim runtime with `git` and `ca-certificates`
   preinstalled; ~212 MB uncompressed. Claude binary is not bundled —
   mount it from the host or layer it in.
-
-### Fixed
-
 - **Deflaked `freeze_then_resume_flips_proc_state`** — test now polls
   `/proc/<pid>/status` for the expected `State:` transition instead of
   racing a fixed sleep, eliminating intermittent CI failures on loaded
@@ -60,6 +59,22 @@ Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
 
 [cargo-dist]: https://github.com/astral-sh/cargo-dist
 [tap]: https://github.com/SDS-Mode/homebrew-pitboss
+
+## [0.5.2] — 2026-04-19 [YANKED]
+
+Release pipeline stalled on the `aarch64-apple-darwin` macOS runner
+queue (~2h wait on GitHub's public `macos-13` pool with no runner
+assignment) before the build job could start. No artifacts published.
+Superseded by 0.5.3, which pins the darwin job to native M1 runners
+(`macos-14`) and replaces the `vendored-openssl` fix with a cleaner
+`default-features = false` change on `git2` that removes the need for
+OpenSSL at all.
+
+## [0.5.1] — 2026-04-19 [YANKED]
+
+Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
+(missing OpenSSL sysroot on the `ubuntu-22.04` runner). No artifacts
+published. Superseded by 0.5.3.
 
 ## [0.5.0] — 2026-04-19
 
