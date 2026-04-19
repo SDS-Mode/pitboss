@@ -181,6 +181,16 @@ pub async fn spawn_sublead(
             .await
             .insert(sublead_id.clone(), sub_layer.clone());
 
+        // I-1: If root has entered cascade-drain phase AFTER this read-lock snapshot,
+        // immediately drain the new sub-tree's cancel token before spawning the session.
+        // This guarantees any sub-lead spawned post-drain inherits the cancellation
+        // synchronously, avoiding the race where the cascade watcher's snapshot would
+        // miss this sub-lead entirely.
+        if state.root.cancel.is_draining() {
+            sub_layer.cancel.drain();
+            tracing::info!(sublead_id = %sublead_id, "spawned during cascade drain; immediate cascade applied");
+        }
+
         // 9. Spawn the sub-lead's Claude session (stub — full wiring in Task 2.3).
         spawn_sublead_session(
             state.clone(),

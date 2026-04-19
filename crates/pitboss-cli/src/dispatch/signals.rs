@@ -85,6 +85,15 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
 /// cancel token in the sub-tree is drained too — giving depth-first
 /// drain-then-terminate across the whole tree.
 ///
+/// **Idempotency:** Call exactly once per dispatch run. Subsequent calls spawn
+/// additional watcher tasks; the result is benign (drain is idempotent on the
+/// watch::Sender) but creates duplicate tracing output and is not a substitute
+/// for a missed wakeup.
+///
+/// **Post-drain registration:** The watcher self-terminates after one cascade
+/// fire — re-installing after the cascade has fired will not catch sub-trees
+/// registered post-cascade. For that, see the spawn-time check in `spawn_sublead`.
+///
 /// Returns immediately after spawning the watcher task; the watcher
 /// terminates when the root drain signal fires AND all sub-trees
 /// have been signaled.
@@ -117,6 +126,12 @@ pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
                 tok.drain();
             }
         }
+        // TODO(Phase 4): Currently only drain cascades; terminate does not.
+        // When Phase 4+ wires real sub-tree workers, sub-tree workers will
+        // receive drain but no terminate cascade — they'd hang waiting for
+        // terminate that never comes. Either add a parallel terminate cascade
+        // OR move worker cancellation into per-sub-tree runners that observe
+        // both their cancel and the run-level escalation.
     });
 }
 
