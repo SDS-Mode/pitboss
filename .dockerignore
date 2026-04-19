@@ -1,0 +1,18 @@
+# Artifacts that don't belong in the build context.
+target/
+**/target/
+.git/
+.github/
+*.log
+*.md
+!README.md
+!CHANGELOG.md
+docs/
+.cache/
+scripts/smoke-logs/
+.vscode/
+.idea/
+# Don't ship the shipped tarballs back into the build.
+*.tar.gz
+*.tar.xz
+dist/

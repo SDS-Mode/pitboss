@@ -4,6 +4,9 @@ version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
+description  = "Shared runtime primitives for pitboss (process, session, store, worktree)."
+repository   = { workspace = true }
+homepage     = { workspace = true }
 
 [features]
 default = []
