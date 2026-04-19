@@ -7,6 +7,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-19
+
 ### Added
 
 - **`pitboss attach <run-id> <task-id>`.** Follow-mode log viewer for a
