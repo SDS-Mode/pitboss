@@ -70,6 +70,10 @@ pub struct ResolvedManifest {
     // plan submitted via the `propose_plan` MCP tool.
     #[serde(default)]
     pub require_plan_approval: bool,
+    // NEW in v0.6 — declarative approval policy rules resolved from
+    // [[approval_policy]] manifest blocks. Empty vec means no policy.
+    #[serde(default)]
+    pub approval_rules: Vec<crate::mcp::policy::ApprovalRule>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -115,6 +119,13 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         crate::notify::config::apply_env_substitution(cfg)?;
     }
 
+    // Resolve [[approval_policy]] TOML specs into typed ApprovalRule values.
+    let approval_rules = manifest
+        .approval_policy_rules
+        .iter()
+        .map(resolve_approval_rule)
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(ResolvedManifest {
         max_parallel,
         halt_on_failure: manifest.run.halt_on_failure,
@@ -130,6 +141,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         notifications,
         dump_shared_store: manifest.run.dump_shared_store,
         require_plan_approval: manifest.run.require_plan_approval,
+        approval_rules,
     })
 }
 
@@ -255,6 +267,47 @@ fn default_run_dir() -> PathBuf {
 
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Convert a TOML `ApprovalRuleSpec` into a typed `ApprovalRule`.
+/// Returns an error if `action` or `match.category` is an unrecognised string.
+fn resolve_approval_rule(
+    spec: &super::schema::ApprovalRuleSpec,
+) -> Result<crate::mcp::policy::ApprovalRule> {
+    use crate::mcp::approval::ApprovalCategory;
+    use crate::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule};
+
+    let action = match spec.action.as_str() {
+        "auto_approve" => ApprovalAction::AutoApprove,
+        "auto_reject" => ApprovalAction::AutoReject,
+        "block" => ApprovalAction::Block,
+        other => anyhow::bail!(
+            "unknown approval_policy action '{}'; expected auto_approve, auto_reject, or block",
+            other
+        ),
+    };
+
+    let category = match spec.match_clause.category.as_deref() {
+        None => None,
+        Some("tool_use") => Some(ApprovalCategory::ToolUse),
+        Some("plan") => Some(ApprovalCategory::Plan),
+        Some("cost") => Some(ApprovalCategory::Cost),
+        Some("other") => Some(ApprovalCategory::Other),
+        Some(other) => anyhow::bail!(
+            "unknown approval_policy match.category '{}'; expected tool_use, plan, cost, or other",
+            other
+        ),
+    };
+
+    Ok(ApprovalRule {
+        r#match: ApprovalMatch {
+            actor: spec.match_clause.actor.clone(),
+            category,
+            tool_name: spec.match_clause.tool_name.clone(),
+            cost_over: spec.match_clause.cost_over,
+        },
+        action,
+    })
 }
 
 #[cfg(test)]

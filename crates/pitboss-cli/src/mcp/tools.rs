@@ -1268,6 +1268,65 @@ pub async fn handle_request_approval(
     state: &Arc<DispatchState>,
     args: RequestApprovalArgs,
 ) -> Result<ApprovalToolResponse> {
+    use crate::dispatch::actor::ActorPath;
+    use crate::dispatch::state::PendingApproval;
+    use crate::mcp::approval::{ApprovalCategory, ApprovalFallback};
+    use crate::mcp::policy::ApprovalAction;
+
+    // Build a PendingApproval for policy evaluation. Actor path is constructed
+    // from the requesting lead_id (root or sub-lead). Tool_name and cost are
+    // not available in RequestApprovalArgs, so policy rules using those fields
+    // will not match here — that is intentional for the v0.6 scope.
+    let pending = PendingApproval {
+        id: uuid::Uuid::now_v7(),
+        requesting_actor_id: state.lead_id.clone(),
+        actor_path: ActorPath::new([state.lead_id.as_str()]),
+        category: ApprovalCategory::ToolUse,
+        summary: args.summary.clone(),
+        plan: args.plan.clone(),
+        blocks: vec![state.lead_id.clone()],
+        created_at: chrono::Utc::now(),
+        ttl_secs: args
+            .timeout_secs
+            .or(state.manifest.lead_timeout_secs)
+            .unwrap_or(3600),
+        fallback: ApprovalFallback::AutoReject,
+    };
+
+    // Evaluate operator-declared policy before falling through to the legacy queue.
+    {
+        let matcher_guard = state.root.policy_matcher.lock().await;
+        if let Some(matcher) = matcher_guard.as_ref() {
+            match matcher.evaluate(&pending, None, None) {
+                Some(ApprovalAction::AutoApprove) => {
+                    tracing::info!(
+                        actor = %pending.requesting_actor_id,
+                        "auto-approved by policy"
+                    );
+                    return Ok(ApprovalToolResponse {
+                        approved: true,
+                        comment: Some("auto-approved by policy".into()),
+                        edited_summary: None,
+                    });
+                }
+                Some(ApprovalAction::AutoReject) => {
+                    tracing::info!(
+                        actor = %pending.requesting_actor_id,
+                        "auto-rejected by policy"
+                    );
+                    return Ok(ApprovalToolResponse {
+                        approved: false,
+                        comment: Some("auto-rejected by policy".into()),
+                        edited_summary: None,
+                    });
+                }
+                Some(ApprovalAction::Block) | None => {
+                    // fall through to operator queue
+                }
+            }
+        }
+    }
+
     let timeout = Duration::from_secs(
         args.timeout_secs
             .or(state.manifest.lead_timeout_secs)
@@ -1305,6 +1364,65 @@ pub async fn handle_propose_plan(
     state: &Arc<DispatchState>,
     args: ProposePlanArgs,
 ) -> Result<ApprovalToolResponse> {
+    use crate::dispatch::actor::ActorPath;
+    use crate::dispatch::state::PendingApproval;
+    use crate::mcp::approval::{ApprovalCategory, ApprovalFallback};
+    use crate::mcp::policy::ApprovalAction;
+
+    // Build a PendingApproval for policy evaluation.
+    let pending = PendingApproval {
+        id: uuid::Uuid::now_v7(),
+        requesting_actor_id: state.lead_id.clone(),
+        actor_path: ActorPath::new([state.lead_id.as_str()]),
+        category: ApprovalCategory::Plan,
+        summary: args.plan.summary.clone(),
+        plan: Some(args.plan.clone()),
+        blocks: vec![state.lead_id.clone()],
+        created_at: chrono::Utc::now(),
+        ttl_secs: args
+            .timeout_secs
+            .or(state.manifest.lead_timeout_secs)
+            .unwrap_or(3600),
+        fallback: ApprovalFallback::AutoReject,
+    };
+
+    // Evaluate operator-declared policy before falling through to the legacy queue.
+    {
+        let matcher_guard = state.root.policy_matcher.lock().await;
+        if let Some(matcher) = matcher_guard.as_ref() {
+            match matcher.evaluate(&pending, None, None) {
+                Some(ApprovalAction::AutoApprove) => {
+                    tracing::info!(
+                        actor = %pending.requesting_actor_id,
+                        "plan auto-approved by policy"
+                    );
+                    state
+                        .plan_approved
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return Ok(ApprovalToolResponse {
+                        approved: true,
+                        comment: Some("auto-approved by policy".into()),
+                        edited_summary: None,
+                    });
+                }
+                Some(ApprovalAction::AutoReject) => {
+                    tracing::info!(
+                        actor = %pending.requesting_actor_id,
+                        "plan auto-rejected by policy"
+                    );
+                    return Ok(ApprovalToolResponse {
+                        approved: false,
+                        comment: Some("auto-rejected by policy".into()),
+                        edited_summary: None,
+                    });
+                }
+                Some(ApprovalAction::Block) | None => {
+                    // fall through to operator queue
+                }
+            }
+        }
+    }
+
     let timeout = Duration::from_secs(
         args.timeout_secs
             .or(state.manifest.lead_timeout_secs)
@@ -1503,6 +1621,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1879,6 +1998,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -2467,6 +2587,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();
@@ -2552,6 +2673,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();

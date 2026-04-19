@@ -21,6 +21,29 @@ pub struct Manifest {
     /// Notification sinks (v0.4.1+). Parsed as [[notification]] sections.
     #[serde(default, rename = "notification")]
     pub notification: Vec<crate::notify::config::NotificationConfig>,
+    /// Approval policy rules (v0.6+). Parsed as [[approval_policy]] sections.
+    /// Rules are evaluated in declaration order; first match wins.
+    #[serde(default, rename = "approval_policy")]
+    pub approval_policy_rules: Vec<ApprovalRuleSpec>,
+}
+
+/// TOML schema for a single `[[approval_policy]]` rule.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApprovalRuleSpec {
+    #[serde(default, rename = "match")]
+    pub match_clause: ApprovalMatchSpec,
+    /// Action to take when the rule matches.
+    /// One of: "auto_approve", "auto_reject", "block".
+    pub action: String,
+}
+
+/// TOML schema for the `[match]` sub-table within an `[[approval_policy]]` rule.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ApprovalMatchSpec {
+    pub actor: Option<String>,
+    pub category: Option<String>,
+    pub tool_name: Option<String>,
+    pub cost_over: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

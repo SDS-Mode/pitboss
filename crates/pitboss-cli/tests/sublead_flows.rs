@@ -51,6 +51,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -573,6 +574,62 @@ async fn sublead_termination_releases_run_global_leases() {
 
     // Lease should be released
     assert_eq!(state.run_leases.snapshot().await.len(), 0);
+}
+
+// ── Task 4.2: TOML approval policy matcher ───────────────────────────────────
+
+/// Policy auto-approves a matching actor: set up a policy that auto-approves
+/// the "root" actor (the lead in mk_state_with_subleads), simulate a
+/// request_approval call, assert it short-circuits without queuing.
+#[tokio::test]
+async fn policy_auto_approves_matching_actor() {
+    use pitboss_cli::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule, PolicyMatcher};
+    use pitboss_cli::mcp::tools::{handle_request_approval, RequestApprovalArgs};
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Inject a policy that auto-approves anything from "root" (the lead_id).
+    let rule = ApprovalRule {
+        r#match: ApprovalMatch {
+            actor: Some("root".into()),
+            ..Default::default()
+        },
+        action: ApprovalAction::AutoApprove,
+    };
+    state
+        .root
+        .set_policy_matcher(PolicyMatcher::new(vec![rule]))
+        .await;
+
+    // Request approval — should be auto-approved by the policy, not queued.
+    let resp = handle_request_approval(
+        &state,
+        RequestApprovalArgs {
+            summary: "run rm -rf /tmp/foo".into(),
+            timeout_secs: Some(1),
+            plan: None,
+        },
+    )
+    .await
+    .expect("handle_request_approval should succeed");
+
+    assert!(
+        resp.approved,
+        "policy should auto-approve the matching actor"
+    );
+    assert_eq!(
+        resp.comment.as_deref(),
+        Some("auto-approved by policy"),
+        "comment should indicate policy auto-approval"
+    );
+
+    // Verify no approval was queued (the legacy block-mode path was bypassed).
+    let queue = state.root.approval_queue.lock().await;
+    assert!(
+        queue.is_empty(),
+        "policy short-circuit should not enqueue approval; queue has {} items",
+        queue.len()
+    );
 }
 
 // ── Task 4.1: Rich approval record fields ────────────────────────────────────

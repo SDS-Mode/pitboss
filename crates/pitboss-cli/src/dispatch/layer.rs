@@ -22,6 +22,7 @@ use crate::dispatch::state::{
     ApprovalPolicy, ApprovalResponse, QueuedApproval, WorkerCounters, WorkerState,
 };
 use crate::manifest::resolve::ResolvedManifest;
+use crate::mcp::policy::PolicyMatcher;
 
 /// All state owned by a single coordination layer (root layer or a
 /// sub-tree layer).
@@ -82,6 +83,14 @@ pub struct LayerState {
     /// Original reservation amount (USD) at sub-lead spawn time.
     /// Only set for sub-leads; None for root layer.
     pub original_reservation_usd: Option<f64>,
+    /// Operator-declared approval policy matcher. Loaded from manifest
+    /// `[[approval_policy]]` blocks at run startup. `None` means no
+    /// declarative rules; every approval falls through to the legacy
+    /// ApprovalPolicy / operator queue path.
+    ///
+    /// NOTE: This is a run-level (root-layer) policy for v0.6. Per-sub-lead
+    /// policy is deferred to Phase 4.x.
+    pub policy_matcher: Mutex<Option<PolicyMatcher>>,
 }
 
 impl std::fmt::Debug for LayerState {
@@ -151,7 +160,15 @@ impl LayerState {
             worker_pids: RwLock::new(HashMap::new()),
             plan_approved: std::sync::atomic::AtomicBool::new(false),
             original_reservation_usd,
+            policy_matcher: Mutex::new(None),
         }
+    }
+
+    /// Install a `PolicyMatcher` on this layer. Called at run startup after
+    /// resolving `[[approval_policy]]` blocks from the manifest. Can also be
+    /// called in tests to inject policy without manifests.
+    pub async fn set_policy_matcher(&self, matcher: PolicyMatcher) {
+        *self.policy_matcher.lock().await = Some(matcher);
     }
 
     pub async fn active_worker_count(&self) -> usize {
@@ -206,6 +223,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(FakeScript::new()));

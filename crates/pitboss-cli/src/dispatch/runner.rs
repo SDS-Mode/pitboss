@@ -568,6 +568,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -655,6 +656,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -755,6 +757,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(

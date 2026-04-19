@@ -123,6 +123,13 @@ pub async fn run_hierarchical(
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
+    // Load declarative approval policy from the manifest into the root layer.
+    // Empty approval_rules → no PolicyMatcher is installed (legacy path unchanged).
+    if !resolved.approval_rules.is_empty() {
+        let matcher = crate::mcp::policy::PolicyMatcher::new(resolved.approval_rules.clone());
+        state.root.set_policy_matcher(matcher).await;
+    }
+
     // Install cascade cancel watcher: when root drains, all registered
     // sub-trees and their workers are drained automatically.
     crate::dispatch::signals::install_cascade_cancel_watcher(state.clone());
