@@ -7,6 +7,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-04-19
+
 ### Changed
 
 - **Release infrastructure migrated to [`cargo-dist`][cargo-dist].** The
@@ -32,6 +34,13 @@ This project uses [Semantic Versioning](https://semver.org/).
   `v*` tag. Debian-slim runtime with `git` and `ca-certificates`
   preinstalled; ~212 MB uncompressed. Claude binary is not bundled —
   mount it from the host or layer it in.
+
+### Fixed
+
+- **Deflaked `freeze_then_resume_flips_proc_state`** — test now polls
+  `/proc/<pid>/status` for the expected `State:` transition instead of
+  racing a fixed sleep, eliminating intermittent CI failures on loaded
+  runners (#28).
 
 [cargo-dist]: https://github.com/astral-sh/cargo-dist
 [tap]: https://github.com/SDS-Mode/homebrew-pitboss
