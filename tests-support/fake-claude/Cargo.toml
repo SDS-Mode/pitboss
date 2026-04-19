@@ -11,6 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = { workspace = true }
-rmcp       = { workspace = true, features = ["client", "transport-io"] }
+rmcp       = { workspace = true, features = ["client", "transport-io", "transport-child-process"] }
 tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "process", "fs", "time"] }
 anyhow     = { workspace = true }
