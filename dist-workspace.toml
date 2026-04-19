@@ -5,6 +5,13 @@ members = ["cargo:."]
 [dist]
 # Pin the cargo-dist version to use in CI (Cargo.toml SemVer syntax).
 cargo-dist-version = "0.28.7"
+# Allow manual divergence on the CI workflow file. cargo-dist 0.28.7
+# generates `release.yml` with `persist-credentials: false` on the
+# tap-repo checkout, which breaks the final `git push` in the
+# `publish-homebrew-formula` job. We manually remove that flag; this
+# setting tells `dist host` to accept the divergence instead of
+# failing its consistency check. Upstream issue to be filed.
+allow-dirty = ["ci"]
 # CI backends.
 ci = "github"
 # Installers to generate for each app.
