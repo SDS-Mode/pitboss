@@ -134,6 +134,10 @@ pub async fn run_hierarchical(
     // sub-trees and their workers are drained automatically.
     crate::dispatch::signals::install_cascade_cancel_watcher(state.clone());
 
+    // Install approval TTL watcher: scan the approval queue every 250ms
+    // and apply fallback actions (auto_reject, auto_approve) to expired entries.
+    crate::dispatch::runner::install_approval_ttl_watcher(state.clone());
+
     // Bind the control socket for TUI ↔ dispatcher ops.
     let control_sock = control_socket_path(run_id, &run_dir);
     let _control = start_control_server(

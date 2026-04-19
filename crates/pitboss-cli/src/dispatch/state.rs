@@ -152,6 +152,15 @@ pub struct QueuedApproval {
     /// the right modal header when the queue drains.
     pub kind: crate::control::protocol::ApprovalKind,
     pub responder: oneshot::Sender<ApprovalResponse>,
+    /// Seconds after `created_at` before the fallback fires (Task 4.4).
+    /// `None` means never expires (preserves v0.5 behavior).
+    pub ttl_secs: Option<u64>,
+    /// What to do when `ttl_secs` elapses with no operator response (Task 4.4).
+    /// `None` means Block (never expires, preserves v0.5 behavior).
+    pub fallback: Option<crate::mcp::approval::ApprovalFallback>,
+    /// Wall-clock time the request was created (Task 4.4, for age computation).
+    /// Used only when `ttl_secs` is Some.
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ── DispatchState ────────────────────────────────────────────────────────────

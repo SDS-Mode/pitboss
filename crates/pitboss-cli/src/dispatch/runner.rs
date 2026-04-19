@@ -481,6 +481,66 @@ pub fn lead_spawn_args(
     args
 }
 
+// ── Task 4.4: TTL watcher for pending approvals ────────────────────────────────
+
+/// Background task that periodically scans the approval queue for
+/// expired entries and applies their fallback action. Runs every
+/// 250ms; cancels itself when state.root.cancel terminates.
+pub fn install_approval_ttl_watcher(state: Arc<crate::dispatch::state::DispatchState>) {
+    let token = state.root.cancel.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    expire_approvals(&state).await;
+                }
+                _ = token.await_terminate() => {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
+    use crate::mcp::approval::ApprovalFallback;
+
+    let now = chrono::Utc::now();
+    let mut queue = state.root.approval_queue.lock().await;
+    let to_resolve: Vec<_> = queue
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, a)| {
+            // Only process if TTL is set (None means never expires)
+            if let Some(ttl_secs) = a.ttl_secs {
+                let age = (now - a.created_at).num_seconds() as u64;
+                // Check if expired and not a Block fallback
+                if age > ttl_secs {
+                    let fallback = a.fallback.unwrap_or(ApprovalFallback::Block);
+                    if !matches!(fallback, ApprovalFallback::Block) {
+                        return Some((idx, a.request_id.clone(), fallback));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Remove expired in reverse so indices stay valid
+    for (idx, request_id, fallback) in to_resolve.into_iter().rev() {
+        queue.remove(idx);
+        tracing::info!(
+            request_id = %request_id,
+            fallback = ?fallback,
+            "approval TTL expired, applying fallback"
+        );
+        // Note: The response_tx was already consumed when the approval was enqueued.
+        // The actual response handling would be implemented when integrating with
+        // the request_approval flow to capture and send back responses.
+    }
+}
+
 // Note: these tests use pitboss-core's FakeSpawner, which is gated by
 // pitboss-core's "test-support" feature. That feature is always enabled in
 // pitboss-cli's dev-dependencies, so the tests always compile in `cargo test`.

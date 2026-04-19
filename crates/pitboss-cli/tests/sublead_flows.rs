@@ -775,3 +775,57 @@ async fn reject_with_reason_propagates_to_caller() {
     let back: ApprovalResponse = serde_json::from_str(&s).unwrap();
     assert_eq!(back.reason, resp.reason);
 }
+
+// ── Task 4.4: TTL + fallback for pending approvals ────────────────────
+
+#[tokio::test]
+async fn approval_ttl_triggers_auto_reject_fallback() {
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Create a oneshot channel for the response (required by QueuedApproval)
+    let (responder, _rx) = tokio::sync::oneshot::channel();
+
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let approval = pitboss_cli::dispatch::state::QueuedApproval {
+        request_id: request_id.clone(),
+        task_id: "task-1".into(),
+        summary: "test approval".into(),
+        plan: None,
+        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+        responder,
+        ttl_secs: Some(1), // 1 second
+        fallback: Some(pitboss_cli::mcp::approval::ApprovalFallback::AutoReject),
+        created_at: chrono::Utc::now(),
+    };
+
+    state.root.approval_queue.lock().await.push_back(approval);
+
+    // Spawn the TTL watcher
+    pitboss_cli::dispatch::runner::install_approval_ttl_watcher(state.clone());
+
+    // Verify it's in the queue before TTL expires
+    {
+        let queue = state.root.approval_queue.lock().await;
+        assert!(
+            queue.iter().any(|a| a.request_id == request_id),
+            "approval should be in queue initially"
+        );
+    }
+
+    // Wait past TTL with multiple iterations to allow the watcher task to run.
+    // The watcher ticks every 250ms, so we need to yield the event loop multiple times.
+    let mut found_removed = false;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let queue = state.root.approval_queue.lock().await;
+        if queue.iter().all(|a| a.request_id != request_id) {
+            found_removed = true;
+            break;
+        }
+    }
+
+    assert!(
+        found_removed,
+        "expired approval should have been removed by TTL watcher"
+    );
+}

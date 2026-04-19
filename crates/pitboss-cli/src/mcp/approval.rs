@@ -181,6 +181,9 @@ impl ApprovalBridge {
                             plan,
                             kind,
                             responder: tx,
+                            ttl_secs: None, // v0.5 compat: no expiration by default
+                            fallback: None, // v0.5 compat: Block fallback
+                            created_at: chrono::Utc::now(),
                         });
                 }
             }
