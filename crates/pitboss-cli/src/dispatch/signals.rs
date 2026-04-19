@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
 use pitboss_core::session::CancelToken;
+
+use crate::dispatch::state::DispatchState;
 
 const SECOND_SIGINT_WINDOW: Duration = Duration::from_secs(5);
 
@@ -71,6 +74,47 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
                     tracing::info!("drain window expired; continuing in drain mode");
                     // Loop again: if another Ctrl-C arrives later, start a new window.
                 }
+            }
+        }
+    });
+}
+
+/// Spawn a background task that listens for root cancellation and
+/// cascades the drain signal into every sub-tree LayerState. Each
+/// sub-tree's `cancel` token is drained, and every registered worker
+/// cancel token in the sub-tree is drained too — giving depth-first
+/// drain-then-terminate across the whole tree.
+///
+/// Returns immediately after spawning the watcher task; the watcher
+/// terminates when the root drain signal fires AND all sub-trees
+/// have been signaled.
+///
+/// Two-phase drain semantics are preserved at each layer: the existing
+/// per-layer logic respects its grace window before forceful termination.
+pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
+    let root_cancel = state.root.cancel.clone();
+    tokio::spawn(async move {
+        // Wait for the root layer to drain.
+        root_cancel.await_drain().await;
+        // Cascade to every registered sub-tree.
+        let subleads = state.subleads.read().await;
+        for (sublead_id, sub_layer) in subleads.iter() {
+            tracing::info!(sublead_id = %sublead_id, "cascading cancel to sub-tree");
+            // Trip the sub-tree's own cancel token so its runner stops
+            // spawning new work.
+            sub_layer.cancel.drain();
+            // Also drain every worker cancel token registered in the
+            // sub-tree so in-flight workers receive the signal promptly.
+            // (The existing CancelToken type has no parent-child relationship,
+            // so we cascade explicitly rather than relying on inheritance.)
+            let worker_cancels = sub_layer.worker_cancels.read().await;
+            for (worker_id, tok) in worker_cancels.iter() {
+                tracing::debug!(
+                    sublead_id = %sublead_id,
+                    worker_id = %worker_id,
+                    "cascading cancel to sub-tree worker"
+                );
+                tok.drain();
             }
         }
     });

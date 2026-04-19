@@ -149,6 +149,68 @@ async fn spawn_sublead_creates_isolated_layer() {
 }
 
 #[tokio::test]
+async fn root_cancel_cascades_to_sublead_workers() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Install the cascade watcher for this test run (in production this is
+    // called inside run_hierarchical after the MCP server starts).
+    pitboss_cli::dispatch::signals::install_cascade_cancel_watcher(state.clone());
+
+    let mut client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp = client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 1.0, "max_workers": 2}),
+        )
+        .await
+        .unwrap();
+    let sublead_id = resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field")
+        .to_string();
+
+    // Sub-lead spawns a worker into its own layer. Simulate by
+    // reaching into the sub-tree's layer directly (in production
+    // this happens via the sub-lead's MCP session).
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(sublead_id.as_str()).unwrap();
+        sub.workers.write().await.insert(
+            "worker-A".into(),
+            pitboss_cli::dispatch::state::WorkerState::Pending,
+        );
+        sub.worker_cancels
+            .write()
+            .await
+            .insert("worker-A".into(), CancelToken::new());
+    }
+
+    // Cancel root (drain triggers cascade)
+    state.root.cancel.drain();
+
+    // Wait for cascade to settle
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Sub-tree's worker cancel token should be tripped
+    let subleads = state.subleads.read().await;
+    let sub = subleads.get(sublead_id.as_str()).unwrap();
+    let toks = sub.worker_cancels.read().await;
+    let tok = toks.get("worker-A").unwrap();
+    assert!(
+        tok.is_draining(),
+        "sub-tree worker should be cancelled by root cascade"
+    );
+}
+
+#[tokio::test]
 async fn sublead_cannot_call_spawn_sublead() {
     use serde_json::json;
 
