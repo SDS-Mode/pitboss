@@ -162,6 +162,13 @@ pub struct WaitForWorkerArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WaitActorRequest {
+    pub actor_id: String,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForAnyArgs {
     pub task_ids: Vec<String>,
     #[serde(default)]
@@ -1316,19 +1323,19 @@ pub async fn handle_propose_plan(
     }
 }
 
-pub async fn handle_wait_for_worker(
+async fn wait_for_actor_internal(
     state: &Arc<DispatchState>,
-    task_id: &str,
+    actor_id: &str,
     timeout_secs: Option<u64>,
 ) -> Result<TaskRecord> {
     // Fast path: already Done.
     {
         let workers = state.workers.read().await;
-        if let Some(WorkerState::Done(rec)) = workers.get(task_id) {
+        if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
             return Ok(rec.clone());
         }
-        if !workers.contains_key(task_id) {
-            bail!("unknown task_id: {task_id}");
+        if !workers.contains_key(actor_id) {
+            bail!("unknown actor_id: {actor_id}");
         }
     }
 
@@ -1339,25 +1346,41 @@ pub async fn handle_wait_for_worker(
     loop {
         let result = tokio::time::timeout(wait_duration, rx.recv()).await;
         match result {
-            Err(_) => bail!("wait_for_worker timed out for {task_id}"),
+            Err(_) => bail!("wait_for_actor timed out for {actor_id}"),
             Ok(Err(_)) => bail!("completion channel closed"),
             Ok(Ok(completed_id)) => {
-                if completed_id == task_id {
+                if completed_id == actor_id {
                     let workers = state.workers.read().await;
-                    if let Some(WorkerState::Done(rec)) = workers.get(task_id) {
+                    if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
                         return Ok(rec.clone());
                     }
-                    bail!("internal: task_id marked done but record not present");
+                    bail!("internal: actor_id marked done but record not present");
                 }
                 // Defensive: our target may actually be Done now; re-check.
                 let workers = state.workers.read().await;
-                if let Some(WorkerState::Done(rec)) = workers.get(task_id) {
+                if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
                     return Ok(rec.clone());
                 }
-                // Not our task and target not yet done — keep waiting.
+                // Not our actor and target not yet done — keep waiting.
             }
         }
     }
+}
+
+pub async fn handle_wait_for_worker(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+    timeout_secs: Option<u64>,
+) -> Result<TaskRecord> {
+    wait_for_actor_internal(state, task_id, timeout_secs).await
+}
+
+pub async fn handle_wait_for_actor(
+    state: &Arc<DispatchState>,
+    actor_id: &str,
+    timeout_secs: Option<u64>,
+) -> Result<TaskRecord> {
+    wait_for_actor_internal(state, actor_id, timeout_secs).await
 }
 
 pub async fn handle_wait_for_any(

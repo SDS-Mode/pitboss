@@ -19,9 +19,9 @@ use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
     handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
     handle_propose_plan, handle_reprompt_worker, handle_request_approval, handle_spawn_worker,
-    handle_wait_for_any, handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs,
-    PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs,
-    TaskIdArgs, WaitForAnyArgs, WaitForWorkerArgs,
+    handle_wait_for_actor, handle_wait_for_any, handle_wait_for_worker, handle_worker_status,
+    ContinueWorkerArgs, PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs,
+    SpawnWorkerArgs, TaskIdArgs, WaitActorRequest, WaitForAnyArgs, WaitForWorkerArgs,
 };
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -133,6 +133,19 @@ impl PitbossHandler {
         Parameters(args): Parameters<WaitForWorkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match handle_wait_for_worker(&self.state, &args.task_id, args.timeout_secs).await {
+            Ok(rec) => to_structured_result(&rec),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Block until the named actor (worker or sub-lead) emits a terminal event."
+    )]
+    async fn wait_actor(
+        &self,
+        Parameters(req): Parameters<WaitActorRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_wait_for_actor(&self.state, &req.actor_id, req.timeout_secs).await {
             Ok(rec) => to_structured_result(&rec),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
