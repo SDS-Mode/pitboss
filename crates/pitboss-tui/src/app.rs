@@ -307,6 +307,12 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
         // Quit
         KeyCode::Char('q') => return Action::Quit,
 
+        // Tab: cycle grouped-grid focus across containers (root → S1 → S2 → root…).
+        // Only meaningful for depth-2 runs; no-op cost for depth-1.
+        KeyCode::Tab => {
+            state.cycle_focus_to_next_subtree();
+        }
+
         // Navigation
         KeyCode::Char('h') | KeyCode::Left => state.focus_left(),
         KeyCode::Char('l') | KeyCode::Right => state.focus_right(),
@@ -318,6 +324,14 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
 
         // Run picker
         KeyCode::Char('o') => state.enter_picker(),
+
+        // Enter: toggle sub-tree collapse if a header is focused; otherwise snap-in.
+        KeyCode::Enter if state.focused_subtree_header() => {
+            if let Some(sublead_id) = state.focused_sublead_id() {
+                let cur = state.expanded.get(&sublead_id).copied().unwrap_or(true);
+                state.expanded.insert(sublead_id, !cur);
+            }
+        }
 
         // Snap-in: enter full-screen view for the focused tile.
         KeyCode::Enter => state.enter_detail(),
@@ -467,6 +481,7 @@ fn handle_picking_run(state: &mut AppState, code: KeyCode) -> Action {
 /// Apply a single control-socket event to the app state. Called for each event
 /// drained from the async-to-sync bridge channel once per event-loop tick.
 fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol::ControlEvent) {
+    use crate::state::SubtreeView;
     use pitboss_cli::control::protocol::ControlEvent as E;
     match ev {
         E::ApprovalRequest {
@@ -503,6 +518,30 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
                     )
                 })
                 .collect();
+        }
+        // Sub-lead lifecycle: create/destroy grouped-grid containers.
+        E::SubleadSpawned {
+            sublead_id,
+            budget_usd,
+            read_down,
+            ..
+        } => {
+            state.subtrees.insert(
+                sublead_id.clone(),
+                SubtreeView {
+                    workers: std::collections::HashMap::new(),
+                    spent_usd: 0.0,
+                    budget_usd,
+                    pending_approvals: 0,
+                    read_down,
+                },
+            );
+            // Expand by default on spawn.
+            state.expanded.insert(sublead_id, true);
+        }
+        E::SubleadTerminated { sublead_id, .. } => {
+            state.subtrees.remove(&sublead_id);
+            state.expanded.remove(&sublead_id);
         }
         _ => {}
     }

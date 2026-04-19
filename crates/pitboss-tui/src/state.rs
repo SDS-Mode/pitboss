@@ -1,5 +1,6 @@
 //! Application state types for the Pitboss TUI.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -81,6 +82,17 @@ pub enum TileStatus {
     Pending,
     Running,
     Done(TaskStatus),
+}
+
+/// View state for one sub-lead's tree, populated by `SubleadSpawned` events
+/// from the control socket. Workers are keyed by their task id.
+#[derive(Debug, Clone, Default)]
+pub struct SubtreeView {
+    pub workers: HashMap<String, TileState>,
+    pub spent_usd: f64,
+    pub budget_usd: Option<f64>,
+    pub pending_approvals: u32,
+    pub read_down: bool,
 }
 
 /// State for one task tile.
@@ -169,6 +181,15 @@ pub struct AppState {
     /// the picker is visible; used by the mouse click handler to open
     /// a run with one click.
     pub picker_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
+    /// Sub-tree views keyed by `sublead_id`. Empty in depth-1 runs.
+    pub subtrees: HashMap<String, SubtreeView>,
+    /// Collapse state for each sub-tree container. `true` = expanded (default
+    /// on spawn). Subtrees absent from this map are treated as expanded.
+    pub expanded: HashMap<String, bool>,
+    /// Index into the ordered list `[root, sublead_0, sublead_1, …]` that
+    /// currently has the grouped-grid header focus. 0 = root tile grid.
+    /// Used by Tab cycling and Enter toggle-collapse.
+    pub focused_subtree_idx: usize,
 }
 
 /// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
@@ -209,6 +230,9 @@ impl AppState {
             store_activity: std::collections::HashMap::new(),
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
             picker_hit_rects: std::sync::Mutex::new(Vec::new()),
+            subtrees: HashMap::new(),
+            expanded: HashMap::new(),
+            focused_subtree_idx: 0,
         }
     }
 
@@ -463,6 +487,41 @@ impl AppState {
             // doesn't introduce an invalid-scroll interval.
             *scroll = max_scroll;
         }
+    }
+
+    /// Sorted sublead ids for stable ordering in the grouped grid.
+    pub fn sorted_sublead_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.subtrees.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Cycle focus across containers: index 0 = root tile grid,
+    /// index 1..N = sub-lead containers in sorted order. Wraps around.
+    pub fn cycle_focus_to_next_subtree(&mut self) {
+        // Total containers = 1 (root) + number of sub-trees.
+        let total = 1 + self.subtrees.len();
+        if total == 0 {
+            return;
+        }
+        self.focused_subtree_idx = (self.focused_subtree_idx + 1) % total;
+    }
+
+    /// Returns `true` when the current grouped-grid focus is on a sub-tree
+    /// header (i.e., `focused_subtree_idx > 0`).
+    pub fn focused_subtree_header(&self) -> bool {
+        self.focused_subtree_idx > 0 && !self.subtrees.is_empty()
+    }
+
+    /// Returns the sublead id currently focused by the grouped-grid header
+    /// focus, or `None` when focus is on the root row or there are no subtrees.
+    pub fn focused_sublead_id(&self) -> Option<String> {
+        if !self.focused_subtree_header() {
+            return None;
+        }
+        let ids = self.sorted_sublead_ids();
+        // focused_subtree_idx 1 maps to ids[0], etc.
+        ids.get(self.focused_subtree_idx.saturating_sub(1)).cloned()
     }
 
     /// Enter the run picker: snapshot the run list and switch to `PickingRun` mode.

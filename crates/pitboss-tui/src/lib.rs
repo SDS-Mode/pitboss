@@ -11,6 +11,7 @@
 
 pub mod app;
 pub mod control;
+pub mod grouped_grid;
 pub mod runs;
 pub mod state;
 pub mod theme;
