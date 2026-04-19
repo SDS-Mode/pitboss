@@ -34,6 +34,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   operators can tell the two kinds apart. On rejection, the plan gate
   stays closed so the lead can revise and retry. Runs without the
   opt-in flag behave identically to before.
+- **fake-claude ↔ mcp-bridge end-to-end test coverage.** fake-claude
+  now supports an opt-in bridge mode
+  (`PITBOSS_FAKE_MCP_BRIDGE_CMD` + `PITBOSS_FAKE_ACTOR_ID` +
+  `PITBOSS_FAKE_ACTOR_ROLE`) that spawns `pitboss mcp-bridge` as a
+  child and speaks stdio JSON-RPC to it — the same path a real
+  claude subprocess takes. New integration tests exercise:
+  - `_meta` injection end-to-end (bridge → dispatcher) via `kv_set`;
+  - pre-flight `propose_plan` gate with a real lead subprocess + real
+    control-socket operator;
+  - `pause_worker(mode="freeze")` / `continue_worker` with an actual
+    worker subprocess (via a test-only `FakeClaudeWorkerSpawner` that
+    rewrites `spawn_worker`'s command to fake-claude with the right
+    env overlay).
+  Closes the v0.3 Task 26 placeholder in `hierarchical_flows.rs` —
+  the empty `#[tokio::test]` stub has been removed.
 
 ## [0.4.4] — 2026-04-18
 

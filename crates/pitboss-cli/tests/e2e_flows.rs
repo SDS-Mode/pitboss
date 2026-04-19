@@ -24,7 +24,7 @@ use pitboss_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
 use pitboss_cli::manifest::schema::{Effort, WorktreeCleanup};
 use pitboss_cli::mcp::{socket_path_for_run, McpServer};
 use pitboss_core::process::fake::{FakeScript, FakeSpawner};
-use pitboss_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
+use pitboss_core::process::{ChildProcess, ProcessSpawner, SpawnCmd, TokioSpawner};
 use pitboss_core::session::{CancelToken, SessionHandle, SessionOutcome};
 use pitboss_core::store::{JsonFileStore, SessionStore};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
@@ -107,6 +107,45 @@ async fn run_fake_claude_lead(
     cancel: CancelToken,
     timeout: Duration,
 ) -> SessionOutcome {
+    run_fake_claude_lead_impl(cwd, script_path, mcp_sock, None, cancel, timeout).await
+}
+
+/// Variant of `run_fake_claude_lead` that wires fake-claude through a
+/// spawned `pitboss mcp-bridge` subprocess instead of connecting to the
+/// socket directly. `actor_id` / `actor_role` get injected into every
+/// `tools/call` via `_meta` by the bridge.
+async fn run_fake_claude_lead_via_bridge(
+    cwd: &std::path::Path,
+    script_path: &std::path::Path,
+    mcp_sock: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+    cancel: CancelToken,
+    timeout: Duration,
+) -> SessionOutcome {
+    run_fake_claude_lead_impl(
+        cwd,
+        script_path,
+        mcp_sock,
+        Some((
+            support::pitboss_binary(),
+            actor_id.into(),
+            actor_role.into(),
+        )),
+        cancel,
+        timeout,
+    )
+    .await
+}
+
+async fn run_fake_claude_lead_impl(
+    cwd: &std::path::Path,
+    script_path: &std::path::Path,
+    mcp_sock: &std::path::Path,
+    bridge: Option<(PathBuf, String, String)>,
+    cancel: CancelToken,
+    timeout: Duration,
+) -> SessionOutcome {
     let mut env = HashMap::new();
     env.insert(
         "PITBOSS_FAKE_SCRIPT".to_string(),
@@ -116,6 +155,14 @@ async fn run_fake_claude_lead(
         "PITBOSS_FAKE_MCP_SOCKET".to_string(),
         mcp_sock.to_string_lossy().to_string(),
     );
+    if let Some((pitboss_bin, actor_id, actor_role)) = bridge {
+        env.insert(
+            "PITBOSS_FAKE_MCP_BRIDGE_CMD".to_string(),
+            pitboss_bin.to_string_lossy().to_string(),
+        );
+        env.insert("PITBOSS_FAKE_ACTOR_ID".to_string(), actor_id);
+        env.insert("PITBOSS_FAKE_ACTOR_ROLE".to_string(), actor_role);
+    }
     let cmd = SpawnCmd {
         program: fake_claude_path(),
         args: vec![],
@@ -686,4 +733,411 @@ async fn e2e_run_finished_notifies_webhook() {
     // Fire-and-forget — wait briefly for the tokio::spawn'd emit.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     mock.verify().await;
+}
+
+/// End-to-end plan-approval flow with a real lead subprocess.
+/// `require_plan_approval = true` means spawn_worker fails until an
+/// operator approves a plan via the TUI. We drive it as a real lead
+/// (fake-claude) + a real control-socket client: lead calls
+/// `propose_plan`, background FCC auto-approves, lead then calls
+/// `spawn_worker` successfully.
+#[tokio::test]
+async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+
+    // Build a state with `require_plan_approval = true`.
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "lead prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(5.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: true,
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let worker_script = FakeScript::new()
+        .stdout_line(r#"{"type":"system","subtype":"init","session_id":"worker-sess"}"#)
+        .stdout_line(
+            r#"{"type":"result","session_id":"worker-sess","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .exit_code(0);
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(worker_script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    let mcp_sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
+        .await
+        .unwrap();
+    let ctrl_sock = pitboss_cli::control::control_socket_path(run_id, &state.manifest.run_dir);
+    let _ctrl_server = pitboss_cli::control::server::start_control_server(
+        ctrl_sock.clone(),
+        "0.4.5".into(),
+        run_id.to_string(),
+        "hierarchical".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+
+    // Background FCC: poll for queued plan approval, connect, approve.
+    let ctrl_sock_bg = ctrl_sock.clone();
+    let state_for_fcc = state.clone();
+    let fcc_task = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if !state_for_fcc.approval_queue.lock().await.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("FCC timed out waiting for queued plan approval");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut client =
+            fake_control_client::FakeControlClient::connect(&ctrl_sock_bg, "0.4.5-fcc")
+                .await
+                .unwrap();
+        match client.recv_timeout(Duration::from_secs(5)).await.unwrap() {
+            Some(pitboss_cli::control::protocol::ControlEvent::ApprovalRequest {
+                request_id,
+                kind,
+                ..
+            }) => {
+                assert_eq!(
+                    kind,
+                    pitboss_cli::control::protocol::ApprovalKind::Plan,
+                    "expected kind=Plan for propose_plan request"
+                );
+                client
+                    .send(&pitboss_cli::control::protocol::ControlOp::Approve {
+                        request_id,
+                        approved: true,
+                        comment: None,
+                        edited_summary: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            other => panic!("expected ApprovalRequest, got {other:?}"),
+        }
+    });
+
+    // Lead script: propose_plan, then spawn_worker. The spawn_worker
+    // line would fail with "plan approval required" if it came before
+    // the plan approval; success here proves the full flow works.
+    let script = dir.path().join("script.jsonl");
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"propose_plan","args":{"plan":{"summary":"phase-1","rationale":"prep work","resources":["worktrees"],"risks":[],"rollback":"drop worktrees"},"timeout_secs":10},"bind":"plan"}}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"go"},"bind":"w1"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &mcp_sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    fcc_task.await.expect("FCC task panicked");
+
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "lead exit non-zero: outcome={outcome:?}"
+    );
+
+    // plan_approved latched true, one worker spawned successfully.
+    assert!(state
+        .plan_approved
+        .load(std::sync::atomic::Ordering::Acquire));
+    let workers = state.workers.read().await;
+    assert_eq!(
+        workers.len(),
+        1,
+        "expected one worker post-approval, got {}",
+        workers.len()
+    );
+
+    state.cancel.terminate();
+}
+
+/// Full-stack bridge test: fake-claude lead spawns `pitboss mcp-bridge`
+/// and speaks stdio JSON-RPC to it. The bridge injects `_meta` on every
+/// `tools/call` and forwards to the unix socket. We call `kv_set` with
+/// a value and then verify the stored entry's `written_by` field equals
+/// the actor_id the bridge was launched with — proving the whole
+/// lead → bridge (subprocess) → unix-socket → dispatcher → tool-handler
+/// path works end-to-end, including the `_meta` injection that the
+/// existing direct-socket e2e tests skip.
+#[tokio::test]
+async fn e2e_lead_through_mcp_bridge_injects_meta() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
+
+    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+
+    // Lead script: init, kv_set on /shared/bridge_probe, result.
+    // kv_set carries `_meta` as a required field — the bridge's job is
+    // to populate it, so a direct-socket fake-claude would fail this
+    // call. Bridge mode succeeds; the stored entry's `written_by` is
+    // the actor_id the bridge was configured with.
+    let script = dir.path().join("script.jsonl");
+    // kv_set's `value` is a Vec<u8>; serde_json encodes byte-arrays as a
+    // JSON array of numbers by default. "ok" => [111, 107].
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"kv_set","args":{"path":"/shared/bridge_probe","value":[111,107]},"bind":"res"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead_via_bridge(
+        dir.path(),
+        &script,
+        &sock,
+        "lead", // actor_id the bridge will inject
+        "lead", // actor_role
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "fake-claude via bridge exited non-zero: outcome={outcome:?}"
+    );
+    assert!(matches!(
+        outcome.final_state,
+        pitboss_core::session::SessionState::Completed
+    ));
+
+    // Assertion: the stored entry MUST reflect the bridge's injected
+    // actor_id. If _meta failed to arrive, kv_set would either reject
+    // the call (missing required _meta) or write with a different
+    // actor_id — both caught here.
+    let entry = state
+        .shared_store
+        .get("/shared/bridge_probe")
+        .await
+        .expect("kv_set should have persisted the entry");
+    assert_eq!(
+        entry.written_by, "lead",
+        "bridge-injected actor_id did not reach the tool handler; \
+         written_by = {:?}",
+        entry.written_by
+    );
+
+    state.cancel.terminate();
+}
+
+/// Test-only ProcessSpawner that rewrites each spawn to run fake-claude
+/// with a specific env overlay. Needed because the MCP `spawn_worker`
+/// path builds `SpawnCmd { env: HashMap::new(), ... }` (no per-worker
+/// env plumbing), but fake-claude needs `PITBOSS_FAKE_SCRIPT` +
+/// `PITBOSS_FAKE_HOLD` to act as a long-lived worker. This spawner
+/// rewrites `program` to fake-claude and drops the claude-shaped `args`
+/// (fake-claude ignores them).
+struct FakeClaudeWorkerSpawner {
+    inner: TokioSpawner,
+    fake_claude: PathBuf,
+    env_overlay: HashMap<String, String>,
+}
+
+#[async_trait::async_trait]
+impl ProcessSpawner for FakeClaudeWorkerSpawner {
+    async fn spawn(
+        &self,
+        mut cmd: SpawnCmd,
+    ) -> Result<Box<dyn ChildProcess>, pitboss_core::error::SpawnError> {
+        cmd.program = self.fake_claude.clone();
+        cmd.args = vec![];
+        for (k, v) in &self.env_overlay {
+            cmd.env.insert(k.clone(), v.clone());
+        }
+        self.inner.spawn(cmd).await
+    }
+}
+
+/// Real-subprocess freeze-pause e2e. Workers are spawned as actual
+/// fake-claude processes (via FakeClaudeWorkerSpawner) so `worker_pids`
+/// gets populated and `pause_worker(Freeze)` can send SIGSTOP.
+#[tokio::test]
+async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
+    support::ensure_built();
+
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+
+    // Worker script: emit init + result, then hold. init drives
+    // session_id capture (required for pause_worker); HOLD=1 keeps
+    // the process alive so freeze has something to SIGSTOP.
+    let worker_script_path = dir.path().join("worker-script.jsonl");
+    tokio::fs::write(
+        &worker_script_path,
+        r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"worker-sess\"}"}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"worker-sess\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"}
+"#,
+    )
+    .await
+    .unwrap();
+
+    let mut env_overlay = HashMap::new();
+    env_overlay.insert(
+        "PITBOSS_FAKE_SCRIPT".into(),
+        worker_script_path.to_string_lossy().to_string(),
+    );
+    env_overlay.insert("PITBOSS_FAKE_HOLD".into(), "1".into());
+
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "lead prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(5.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeClaudeWorkerSpawner {
+        inner: TokioSpawner::new(),
+        fake_claude: fake_claude_path(),
+        env_overlay,
+    });
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        // claude_binary placeholder: the FakeClaudeWorkerSpawner
+        // rewrites `program` to fake-claude on every spawn.
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    let mcp_sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(mcp_sock.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Lead script: spawn, wait for init, freeze, continue, cancel.
+    let script = dir.path().join("lead-script.jsonl");
+    let script_body = r#"{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"lead-sess\"}"}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"do a thing"},"bind":"w1"}}
+{"sleep_ms":500}
+{"mcp_call":{"name":"pause_worker","args":{"task_id":"$w1.task_id","mode":"freeze"},"bind":"pause_res"}}
+{"sleep_ms":200}
+{"mcp_call":{"name":"continue_worker","args":{"task_id":"$w1.task_id"},"bind":"cont_res"}}
+{"sleep_ms":200}
+{"mcp_call":{"name":"cancel_worker","args":{"task_id":"$w1.task_id"},"bind":"cancel_res"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"lead-sess\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"}
+"#;
+    tokio::fs::write(&script, script_body).await.unwrap();
+
+    let outcome = run_fake_claude_lead(
+        dir.path(),
+        &script,
+        &mcp_sock,
+        CancelToken::new(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "lead exit non-zero: outcome={outcome:?}"
+    );
+
+    // Proof of a working freeze→continue→cancel cycle: the lead
+    // subprocess exited 0 above, which means *every* mcp_call
+    // succeeded (pause_worker with mode=freeze, continue_worker,
+    // cancel_worker). Any failure would have bubbled out of fake-claude
+    // as exit code 5. The pause_worker call in particular requires a
+    // live worker pid, which requires a real TokioSpawner subprocess
+    // — so this test also proves the FakeClaudeWorkerSpawner wiring
+    // populates `worker_pids` correctly. No further assertions needed.
+    //
+    // We do wait a tick for the worker background task to settle so
+    // the test's Drop teardown doesn't race a live subprocess.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    state.cancel.terminate();
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }
