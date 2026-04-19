@@ -6,13 +6,16 @@
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
 
-**v0.4.4** tightens the shared-store primitives and dev-infra on top of
-v0.4.3: MCP leases now release instantly on connection drop instead of
-waiting for TTL, `pitboss resume` fails fast if the lead worktree was
-cleaned (rather than letting `claude --resume` cryptically fail later),
-the price table matches by model family so future revisions cost
-correctly without a code change, and Dependabot keeps cargo + actions
-deps current. See `CHANGELOG.md` for the full list and `AGENTS.md` for
+**v0.5.0** ships the flagship operator-control bucket: `pitboss attach
+<run-id> <task-id>` for a follow-mode log viewer on a single worker;
+SIGSTOP freeze-pause as an opt-in alternative to cancel-with-resume;
+structured `ApprovalPlan` (rationale / resources / risks / rollback)
+rendered as labeled sections in the TUI modal; a new `propose_plan`
+MCP tool + `[run].require_plan_approval` flag that gates `spawn_worker`
+on operator pre-flight approval; and `fake-claude` end-to-end test
+coverage through `pitboss mcp-bridge` that closes the v0.3 Task 26
+placeholder. 455 tests, zero flakes, full flagship bucket delivered.
+See `CHANGELOG.md` for the per-version history and `AGENTS.md` for
 MCP tool reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
@@ -44,7 +47,11 @@ Pre-built binaries are attached to every GitHub release.
 ```bash
 # x86_64 Linux
 mkdir -p ~/.local/bin
-curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.4.4-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.5.0-x86_64-unknown-linux-gnu.tar.gz \
+  | tar xz -C ~/.local/bin
+
+# aarch64 macOS (Apple Silicon)
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.5.0-aarch64-apple-darwin.tar.gz \
   | tar xz -C ~/.local/bin
 
 pitboss version
@@ -52,8 +59,8 @@ pitboss-tui --version
 ```
 
 The tarball contains both `pitboss` and `pitboss-tui`. Put them anywhere on
-`$PATH`. Swap `x86_64-unknown-linux-gnu` for your target when more builds
-land in the matrix.
+`$PATH`. Current release matrix: `x86_64-unknown-linux-gnu` and
+`aarch64-apple-darwin` — other targets require a source build.
 
 ### From source
 
@@ -67,13 +74,19 @@ cargo install --path crates/pitboss-tui
 ## Subcommands
 
 ```
-pitboss validate <manifest>       parse + resolve + validate, exit non-zero on error
-pitboss dispatch <manifest>       deal a run
-pitboss resume <run-id>           re-deal a prior run, reusing claude_session_id
-pitboss diff <run-a> <run-b>      compare two runs side-by-side
-pitboss completions <shell>       print shell completion script
-pitboss version                   print version
+pitboss validate <manifest>          parse + resolve + validate, exit non-zero on error
+pitboss dispatch <manifest>          deal a run
+pitboss resume <run-id>              re-deal a prior run, reusing claude_session_id
+pitboss attach <run-id> <task-id>    follow-mode log viewer for a single worker
+pitboss diff <run-a> <run-b>         compare two runs side-by-side
+pitboss completions <shell>          print shell completion script
+pitboss version                      print version
 ```
+
+`pitboss attach` accepts a run-id prefix (first 8 chars are plenty when
+it's unique). `--raw` streams the raw stream-json jsonl; without it,
+lines render like the TUI focus pane. Exits on Ctrl-C or when the
+worker emits its terminal `Event::Result`.
 
 ### Shell completions
 
@@ -162,6 +175,16 @@ The lead has these MCP tools, auto-allowed in its `--allowedTools`:
 | `mcp__pitboss__wait_for_any` | Block until any of a list of workers settles |
 | `mcp__pitboss__list_workers` | Snapshot of active + completed workers |
 | `mcp__pitboss__cancel_worker` | Signal a per-worker `CancelToken` |
+| `mcp__pitboss__pause_worker` | Pause a worker — `mode="cancel"` (default, terminates + snapshots session) or `mode="freeze"` (SIGSTOPs the subprocess in place) |
+| `mcp__pitboss__continue_worker` | Resume a paused/frozen worker (`claude --resume` or SIGCONT respectively) |
+| `mcp__pitboss__reprompt_worker` | Mid-flight redirect: kill + `claude --resume <sid>` with a new prompt |
+| `mcp__pitboss__request_approval` | Gate a single in-flight action on operator approval; accepts an optional typed `ApprovalPlan` |
+| `mcp__pitboss__propose_plan` | Pre-flight gate: submit an execution plan for approval; required before `spawn_worker` when `[run].require_plan_approval = true` |
+
+Workers additionally get the 7 shared-store tools (`kv_get`, `kv_set`,
+`kv_cas`, `kv_list`, `kv_wait`, `lease_acquire`, `lease_release`) for
+hub-mediated coordination without breaking the depth-1 invariant. See
+`AGENTS.md` for full schemas.
 
 ### House rules
 
@@ -229,14 +252,15 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-`v0.4.4` — shared-store + resume polish: leases free on MCP
-disconnect, resume-guard against cleaned worktrees, family-based
-pricing, Dependabot. Builds on v0.4.3's worker shared store, TUI
-Detail view, and mouse affordances, and v0.4.1's control plane
-(cancel/pause/continue/reprompt, operator approvals, notification
-sinks). 431 tests pass under `cargo test --workspace --features
-pitboss-core/test-support`. See [`CHANGELOG.md`](CHANGELOG.md) for
-the per-version history.
+`v0.5.0` — the flagship operator-control bucket shipped:
+`pitboss attach` follow-mode viewer, SIGSTOP freeze-pause, structured
+`ApprovalPlan`, pre-flight `propose_plan` gate, and a full
+fake-claude-through-`mcp-bridge` e2e test harness. Builds on v0.4.4's
+shared-store + resume polish, v0.4.3's worker shared store, and
+v0.4.1's control plane (cancel/pause/continue/reprompt, operator
+approvals, notification sinks). 455 tests pass under `cargo test
+--workspace --features pitboss-core/test-support`. See
+[`CHANGELOG.md`](CHANGELOG.md) for the per-version history.
 
 ## Manual smoke testing
 
@@ -253,7 +277,7 @@ Requires `claude` authenticated via its normal subscription config (no
 
 ```bash
 cargo build --workspace
-cargo test --workspace --features pitboss-core/test-support    # 431 tests
+cargo test --workspace --features pitboss-core/test-support    # 455 tests
 cargo lint                                                     # clippy -D warnings
 cargo fmt --all -- --check
 ```
@@ -286,6 +310,7 @@ scripts/smoke-part3-tui.sh      # 7 non-interactive TUI tests
 The tag push triggers `.github/workflows/release.yml`, which builds release
 binaries for every target in the matrix, packages them as
 `pitboss-vX.Y.Z-<target>.tar.gz`, and attaches them to the auto-created
-GitHub release. Current matrix: `x86_64-unknown-linux-gnu`. Adding more
-targets (macOS, Windows, aarch64) is a matrix-entry addition in the
-workflow.
+GitHub release. Current matrix: `x86_64-unknown-linux-gnu` and
+`aarch64-apple-darwin` (Apple Silicon). Adding more targets (Windows,
+`x86_64-apple-darwin` for older Intel Macs, aarch64 linux) is a
+matrix-entry addition in the workflow.

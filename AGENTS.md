@@ -74,7 +74,7 @@ hierarchical.**
 |---|---|
 | **Pitboss** | The `pitboss` binary you invoke. |
 | **Run** | One `pitboss dispatch` invocation. Produces `~/.local/share/pitboss/runs/<run-id>/`. |
-| **Lead** | In hierarchical mode, the first claude subprocess. Receives the operator's prompt + six MCP tools. Decides how many workers to spawn. |
+| **Lead** | In hierarchical mode, the first claude subprocess. Receives the operator's prompt + the full MCP orchestration toolset. Decides how many workers to spawn. |
 | **Worker** | A claude subprocess executing a single task, either declared in `[[task]]` (flat) or dynamically spawned by the lead (hierarchical). |
 | **House rules** | Hierarchical guardrails: `max_workers` (≤16), `budget_usd`, `lead_timeout_secs`. |
 | **Worktree** | A per-task git worktree under a fresh branch, isolating concurrent work. `use_worktree = true` by default. |
@@ -97,6 +97,9 @@ TOML, typically named `pitboss.toml`. Every field annotated below.
 | `max_workers` | int | only if `[[lead]]` present | unset | Hierarchical: hard cap on concurrent + queued workers (1–16). |
 | `budget_usd` | float | only if `[[lead]]` present | unset | Hierarchical: soft cap with reservation accounting. Worker spawns fail with `budget exceeded` once `spent + reserved + next_estimate > budget`. |
 | `lead_timeout_secs` | int | only if `[[lead]]` present | 3600 (fallback) | Hierarchical: wall-clock cap on the lead. No upper bound — set generously for multi-hour orchestration plans (e.g. `21600` for a 6-hour plan executor). The 3600s fallback is tuned for single-task leads, not plan drivers. |
+| `approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: how `request_approval` / `propose_plan` behave when no TUI is attached. See the `approval_policy` section below. |
+| `require_plan_approval` | bool | no | false | Hierarchical (v0.5.0+): when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. Opt-in; runs without it behave identically to v0.4.x. |
+| `dump_shared_store` | bool | no | false | Hierarchical: at run finalize, write `shared-store.json` into the run dir for post-mortem inspection. |
 
 ### `[defaults]`
 
@@ -167,6 +170,21 @@ original `claude_session_id`. For hierarchical runs, only the lead resumes
 **Gotcha:** if the original run used `worktree_cleanup = "on_success"` (the
 default), the worktrees are gone — claude can't find its sessions by cwd.
 Use `worktree_cleanup = "never"` on runs you know you want to resume.
+
+### Attach (v0.5.0+)
+
+```bash
+pitboss attach <run-id> <task-id>
+pitboss attach <run-id> <task-id> --raw            # stream raw stream-json
+pitboss attach <run-id> <task-id> --lines 200      # larger backfill
+```
+
+Follow-mode log viewer for a single worker. Run-id is resolved by
+prefix; first 8 chars are plenty when unique. Formatted output matches
+the TUI focus pane; `--raw` dumps the underlying jsonl. Exits on
+Ctrl-C or when the worker emits its terminal `Event::Result`. Use
+this when you want to watch one worker interactively without pulling
+up the whole TUI.
 
 ### Diff
 
@@ -241,10 +259,12 @@ Lead records have `parent_task_id: null`. Worker records have
 
 ---
 
-## The 6 MCP tools the lead has
+## The MCP tools the lead has
 
 When running hierarchical, the lead's `--allowedTools` is automatically
 populated with these. You (the operator) don't list them explicitly.
+
+### Orchestration tools
 
 | Tool | Args | Returns |
 |---|---|---|
@@ -254,7 +274,11 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__wait_for_any` | `{task_ids: [...], timeout_secs?}` | `{task_id, record}` on first settle |
 | `mcp__pitboss__list_workers` | `{}` | `{workers: [{task_id, state, prompt_preview, started_at}, ...]}` |
 | `mcp__pitboss__cancel_worker` | `{task_id}` | `{ok: bool}` |
+| `mcp__pitboss__pause_worker` | `{task_id, mode?}` — `mode` is `"cancel"` (default) or `"freeze"` | `{ok: bool}` |
+| `mcp__pitboss__continue_worker` | `{task_id, prompt?}` | `{ok: bool}` |
 | `mcp__pitboss__reprompt_worker` | `{task_id, prompt}` | `{ok: bool}` — mid-flight course-correct via `claude --resume` |
+| `mcp__pitboss__request_approval` | `{summary, timeout_secs?, plan?: ApprovalPlan}` | `{approved, comment?, edited_summary?}` |
+| `mcp__pitboss__propose_plan` | `{plan: ApprovalPlan, timeout_secs?}` | `{approved, comment?, edited_summary?}` |
 
 All tool responses returning a collection are wrapped in a record
 (`{workers: [...]}`, `{entries: [...]}`, `{entry: ...}`) — MCP spec
@@ -298,22 +322,70 @@ layer.
 
 ### `mcp__pitboss__pause_worker`
 
-Pause a running worker. Snapshots its `claude_session_id` so
-`continue_worker` can resume. Args: `{task_id: string}`.
-Fails if worker is not in `Running` state with an initialized session.
+Pause a running worker. Two modes, distinguished by `mode`:
+
+- `mode: "cancel"` (default, v0.4.1+) — terminates the subprocess and
+  snapshots `claude_session_id` so `continue_worker` can respawn via
+  `claude --resume`. Zero context loss on Anthropic's side; some
+  reload cost on resume.
+- `mode: "freeze"` (v0.5.0+) — SIGSTOPs the subprocess in place.
+  `continue_worker` SIGCONTs to resume. No state loss at all, but
+  long freezes risk Anthropic dropping the HTTP session on their
+  side — use for short pauses only.
+
+Args: `{task_id: string, mode?: "cancel" | "freeze"}`. Fails if
+worker is not in `Running` state with an initialized session.
 
 ### `mcp__pitboss__continue_worker`
 
-Continue a previously-paused worker. Spawns `claude --resume <id>`
-under the hood. Args: `{task_id: string, prompt?: string}` (default
-prompt "continue").
+Continue a previously-paused or frozen worker. For paused workers,
+spawns `claude --resume <id>`; for frozen workers, SIGCONTs. Args:
+`{task_id: string, prompt?: string}` (prompt ignored for frozen
+workers — use `reprompt_worker` after continue if you want to
+redirect a frozen worker).
 
 ### `mcp__pitboss__request_approval`
 
-Block the lead until the operator approves, rejects, or edits.
-Args: `{summary: string, timeout_secs?: number}`. Returns
-`{approved: bool, comment?: string, edited_summary?: string}`.
+Gate a *single in-flight action* on operator approval. Block the lead
+until the operator approves, rejects, or edits. Args:
+`{summary: string, timeout_secs?: number, plan?: ApprovalPlan}`.
+Returns `{approved: bool, comment?: string, edited_summary?: string}`.
 Policy-gated: see `approval_policy` below.
+
+`ApprovalPlan` (v0.5.0+) is a typed structured schema that the TUI
+renders as labeled sections:
+
+```
+{
+  summary: string,              // required; appears in the modal title
+  rationale?: string,           // why this action should be taken
+  resources?: [string, ...],    // files / APIs / PRs that will be touched
+  risks?: [string, ...],        // known failure modes; TUI highlights in warning color
+  rollback?: string,            // how to undo if something goes wrong
+}
+```
+
+Populate `plan` for any non-trivial approval (deletions, multi-file
+edits, irreversible ops). The bare `summary` form still works for
+simple approvals.
+
+### `mcp__pitboss__propose_plan`
+
+Gate the *entire run* on operator pre-flight approval. Distinct from
+`request_approval`, which gates individual actions mid-run. Args:
+`{plan: ApprovalPlan, timeout_secs?: number}`. Returns the same
+shape as `request_approval`.
+
+When `[run].require_plan_approval = true`, `spawn_worker` refuses
+with `plan approval required: call propose_plan ...` until a plan
+submitted via this tool has been operator-approved. The TUI modal
+shows `[PRE-FLIGHT PLAN]` in its title (vs `[IN-FLIGHT ACTION]` for
+`request_approval`) so operators can tell them apart at a glance. On
+rejection, the gate stays closed so the lead can revise and retry.
+
+When `require_plan_approval = false` (the default), calling
+`propose_plan` is still valid but purely informational — `spawn_worker`
+never checks the result.
 
 ---
 
@@ -354,7 +426,7 @@ branch conflict, non-git directory). Check the stderr log.
 
 ---
 
-## Operator keybindings (pitboss-tui, v0.4.4+)
+## Operator keybindings (pitboss-tui, v0.5.0+)
 
 Navigation / views:
 - `h j k l` / arrows — navigate tiles
@@ -557,6 +629,6 @@ dispatch first and have to ask follow-ups, you've probably wasted budget.
 
 ## Version
 
-Written for pitboss `v0.4.4`. Schema may evolve; `pitboss validate` is the
+Written for pitboss `v0.5.0`. Schema may evolve; `pitboss validate` is the
 source of truth. This document should stay self-contained — if something
 here conflicts with the actual binary, the binary wins. File a PR.
