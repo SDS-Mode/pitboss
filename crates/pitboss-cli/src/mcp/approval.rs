@@ -157,6 +157,7 @@ impl ApprovalBridge {
                         approved: true,
                         comment: None,
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 ApprovalPolicy::AutoReject => {
@@ -164,6 +165,7 @@ impl ApprovalBridge {
                         approved: false,
                         comment: Some("no operator available".into()),
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 ApprovalPolicy::Block => {

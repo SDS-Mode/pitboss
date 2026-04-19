@@ -70,11 +70,18 @@ pub enum WorkerState {
 }
 
 /// Response returned to a lead that called `request_approval`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalResponse {
     pub approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_summary: Option<String>,
+    /// Optional corrective context for rejected approvals. Returned
+    /// to the requesting actor's MCP call so its Claude session can
+    /// adapt without a separate reprompt round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Default, Clone, Debug)]

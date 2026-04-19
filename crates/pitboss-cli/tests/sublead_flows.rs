@@ -749,3 +749,29 @@ async fn approval_record_carries_actor_path_and_age() {
     assert_eq!(approval.category, ApprovalCategory::ToolUse);
     assert!(approval.ttl_secs > 0);
 }
+
+// ── Task 4.3: Reject-with-reason approval response ────────────────────────
+
+/// Verify that `ApprovalResponse` carries an optional `reason` field
+/// and round-trips correctly through JSON serialization.
+#[tokio::test]
+async fn reject_with_reason_propagates_to_caller() {
+    use pitboss_cli::dispatch::state::ApprovalResponse;
+
+    let resp = ApprovalResponse {
+        approved: false,
+        comment: None,
+        edited_summary: None,
+        reason: Some("output should be CSV not JSON".into()),
+    };
+    assert!(!resp.approved);
+    assert_eq!(
+        resp.reason.as_deref(),
+        Some("output should be CSV not JSON")
+    );
+
+    // Round-trip via JSON to verify wire compat
+    let s = serde_json::to_string(&resp).unwrap();
+    let back: ApprovalResponse = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.reason, resp.reason);
+}

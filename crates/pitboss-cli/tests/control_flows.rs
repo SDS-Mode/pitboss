@@ -213,6 +213,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
             approved: true,
             comment: None,
             edited_summary: None,
+            reason: None,
         })
         .await
         .unwrap();
@@ -473,6 +474,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
             approved: true,
             comment: None,
             edited_summary: None,
+            reason: None,
         })
         .await
         .unwrap();

@@ -493,6 +493,7 @@ async fn e2e_lead_request_approval_round_trip() {
                         approved: true,
                         comment: None,
                         edited_summary: None,
+                        reason: None,
                     })
                     .await
                     .unwrap();
@@ -859,6 +860,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
                         approved: true,
                         comment: None,
                         edited_summary: None,
+                        reason: None,
                     })
                     .await
                     .unwrap();

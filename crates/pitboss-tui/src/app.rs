@@ -706,6 +706,7 @@ fn send_approve(
             approved,
             comment,
             edited_summary,
+            reason: None,
         },
     );
 }

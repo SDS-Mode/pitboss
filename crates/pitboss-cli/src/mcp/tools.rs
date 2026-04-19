@@ -261,10 +261,12 @@ pub struct RequestApprovalArgs {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalToolResponse {
     pub approved: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Arguments for `propose_plan`: the lead submits a full execution plan
@@ -1392,6 +1394,7 @@ pub async fn handle_request_approval(
                         approved: true,
                         comment: Some("auto-approved by policy".into()),
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 Some(ApprovalAction::AutoReject) => {
@@ -1403,6 +1406,7 @@ pub async fn handle_request_approval(
                         approved: false,
                         comment: Some("auto-rejected by policy".into()),
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 Some(ApprovalAction::Block) | None => {
@@ -1432,6 +1436,7 @@ pub async fn handle_request_approval(
             approved: resp.approved,
             comment: resp.comment,
             edited_summary: resp.edited_summary,
+            reason: resp.reason,
         }),
         Err(e) => anyhow::bail!("approval failed: {e}"),
     }
@@ -1493,6 +1498,7 @@ pub async fn handle_propose_plan(
                         approved: true,
                         comment: Some("auto-approved by policy".into()),
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 Some(ApprovalAction::AutoReject) => {
@@ -1504,6 +1510,7 @@ pub async fn handle_propose_plan(
                         approved: false,
                         comment: Some("auto-rejected by policy".into()),
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 Some(ApprovalAction::Block) | None => {
@@ -1543,6 +1550,7 @@ pub async fn handle_propose_plan(
                 approved: resp.approved,
                 comment: resp.comment,
                 edited_summary: resp.edited_summary,
+                reason: resp.reason,
             })
         }
         Err(e) => anyhow::bail!("plan approval failed: {e}"),

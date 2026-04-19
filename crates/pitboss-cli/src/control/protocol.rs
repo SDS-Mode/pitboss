@@ -99,6 +99,8 @@ pub enum ControlOp {
         comment: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edited_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ListWorkers,
 }
@@ -266,6 +268,7 @@ mod tests {
             approved: true,
             comment: Some("LGTM".into()),
             edited_summary: Some("spawn 2 workers".into()),
+            reason: None,
         };
         assert_eq!(roundtrip_op(&op), op);
     }
