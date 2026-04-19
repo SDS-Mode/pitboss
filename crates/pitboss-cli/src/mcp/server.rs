@@ -68,9 +68,12 @@ struct CallerMeta {
 /// Request for `cancel_worker` — extends Task-4.5 with an optional `reason`
 /// field. Existing callers that omit `reason` continue to work unchanged
 /// (the field is skipped if absent on the wire).
+/// Accepts both `target` (new) and `task_id` (v0.5 wire compat) as field names.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct CancelWorkerRequest {
     /// The actor id (worker task_id or sub-lead id) to cancel.
+    /// Accepts both `target` and `task_id` parameter names for wire compatibility.
+    #[serde(alias = "task_id")]
     target: String,
     /// Optional corrective context. When supplied, delivered to the killed
     /// actor's parent lead as a synthetic `[SYSTEM]` reprompt so the lead
