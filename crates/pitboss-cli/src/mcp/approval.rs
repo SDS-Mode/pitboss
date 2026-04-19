@@ -176,8 +176,8 @@ impl ApprovalBridge {
                         .await
                         .push_back(QueuedApproval {
                             request_id: request_id.clone(),
-                            task_id,
-                            summary,
+                            task_id: task_id.clone(),
+                            summary: summary.clone(),
                             plan,
                             kind,
                             responder: tx,
@@ -185,6 +185,21 @@ impl ApprovalBridge {
                             fallback: None, // v0.5 compat: Block fallback
                             created_at: chrono::Utc::now(),
                         });
+
+                    // Fire approval_pending notification
+                    if let Some(router) = self.state.notification_router.clone() {
+                        let envelope = crate::notify::NotificationEnvelope::new(
+                            &self.state.run_id.to_string(),
+                            crate::notify::Severity::Warning,
+                            crate::notify::PitbossEvent::ApprovalPending {
+                                request_id: request_id.clone(),
+                                task_id: task_id.clone(),
+                                summary: summary.clone(),
+                            },
+                            chrono::Utc::now(),
+                        );
+                        let _ = router.dispatch(envelope).await;
+                    }
                 }
             }
         }
