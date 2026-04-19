@@ -277,3 +277,55 @@ async fn spawn_sublead_session(
     // binding.
     Ok(())
 }
+
+/// Called when a sub-lead emits its terminal Event::Result (or when
+/// it's cancelled / times out). Reconciles the sub-tree's actual spend
+/// against the original reservation: spend is moved into root's
+/// spent_usd, and any unspent reservation is released back to root's
+/// reservable pool.
+///
+/// Idempotent: calling twice for the same sublead_id is a no-op the
+/// second time (sub-tree LayerState is removed on first call).
+///
+/// TODO(Task 2.3/Task 3.x): Wire the call site in the dispatch event loop
+/// (hierarchical.rs or runner.rs). When a sub-lead's Claude subprocess emits
+/// its terminal Done event and flows through wait_actor, call this function
+/// with the sub-lead's id and the original_reservation_usd stored in the
+/// sub-tree's LayerState.original_reservation_usd field. For Phase 2 (no real
+/// sub-lead session yet), the test calls the helper directly; the integration
+/// lands when full sub-lead session wiring (Task 2.3) is complete.
+pub async fn reconcile_terminated_sublead(
+    state: &Arc<DispatchState>,
+    sublead_id: &str,
+    original_reservation_usd: f64,
+) -> Result<()> {
+    let sub_layer_opt = state.subleads.write().await.remove(sublead_id);
+    let Some(sub_layer) = sub_layer_opt else {
+        // Already reconciled or never existed.
+        return Ok(());
+    };
+
+    let actual_spend = *sub_layer.spent_usd.lock().await;
+    let unspent = (original_reservation_usd - actual_spend).max(0.0);
+
+    // Release the original reservation in full
+    {
+        let mut reserved = state.root.reserved_usd.lock().await;
+        *reserved = (*reserved - original_reservation_usd).max(0.0);
+    }
+    // Then record the actual spend
+    {
+        let mut spent = state.root.spent_usd.lock().await;
+        *spent += actual_spend;
+    }
+
+    let _ = unspent; // logged for observability
+    tracing::info!(
+        sublead_id = %sublead_id,
+        reserved = original_reservation_usd,
+        spent = actual_spend,
+        returned = unspent,
+        "sub-lead budget reconciled"
+    );
+    Ok(())
+}

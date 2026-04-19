@@ -243,3 +243,49 @@ async fn sublead_cannot_call_spawn_sublead() {
         "error message should mention depth-2 invariant, got: {err_msg}"
     );
 }
+
+#[tokio::test]
+async fn unspent_sublead_envelope_returns_to_root_pool() {
+    let (_dir, state) = mk_state_with_subleads();
+    // Reserve $5 envelope for a sub-lead
+    *state.root.reserved_usd.lock().await = 5.0;
+    assert_eq!(*state.root.reserved_usd.lock().await, 5.0);
+
+    // Simulate sub-lead spending only $2 then terminating.
+    // (In production this happens automatically as the sub-lead's
+    // workers complete and accumulate spend in the sub-tree's
+    // LayerState.spent_usd; the reconciliation is triggered by the
+    // sub-lead's terminal Event::Result.)
+    let sublead_id = "sublead-x";
+    let sub_layer = std::sync::Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
+        state.root.run_id,
+        state.root.manifest.clone(),
+        state.root.store.clone(),
+        pitboss_core::session::CancelToken::new(),
+        sublead_id.into(),
+        state.root.spawner.clone(),
+        state.root.claude_binary.clone(),
+        state.root.wt_mgr.clone(),
+        pitboss_core::worktree::CleanupPolicy::Never,
+        state.root.run_subdir.clone(),
+        pitboss_cli::dispatch::state::ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    *sub_layer.spent_usd.lock().await = 2.0;
+    state
+        .subleads
+        .write()
+        .await
+        .insert(sublead_id.into(), sub_layer);
+
+    // Trigger reconciliation
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, sublead_id, 5.0)
+        .await
+        .unwrap();
+
+    // After: root's reserved_usd dropped by $5, spent_usd rose by $2,
+    // releasing $3 to reservable pool.
+    assert_eq!(*state.root.reserved_usd.lock().await, 0.0);
+    assert_eq!(*state.root.spent_usd.lock().await, 2.0);
+}

@@ -79,6 +79,9 @@ pub struct LayerState {
     pub worker_pids: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
     /// Plan-approval gate.
     pub plan_approved: std::sync::atomic::AtomicBool,
+    /// Original reservation amount (USD) at sub-lead spawn time.
+    /// Only set for sub-leads; None for root layer.
+    pub original_reservation_usd: Option<f64>,
 }
 
 impl std::fmt::Debug for LayerState {
@@ -144,6 +147,7 @@ impl LayerState {
             shared_store,
             worker_pids: RwLock::new(HashMap::new()),
             plan_approved: std::sync::atomic::AtomicBool::new(false),
+            original_reservation_usd: None,
         }
     }
 
