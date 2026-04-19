@@ -342,7 +342,10 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
             if let Some(tile) = state.focused_tile().cloned() {
                 spawn_control_op(
                     state,
-                    pitboss_cli::control::protocol::ControlOp::PauseWorker { task_id: tile.id },
+                    pitboss_cli::control::protocol::ControlOp::PauseWorker {
+                        task_id: tile.id,
+                        mode: pitboss_cli::control::protocol::PauseMode::default(),
+                    },
                 );
             }
         }

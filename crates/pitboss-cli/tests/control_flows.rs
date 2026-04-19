@@ -96,6 +96,7 @@ async fn pause_op_writes_events_jsonl() {
     client
         .send(&ControlOp::PauseWorker {
             task_id: "w-1".into(),
+            mode: pitboss_cli::control::protocol::PauseMode::default(),
         })
         .await
         .unwrap();

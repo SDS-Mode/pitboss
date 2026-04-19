@@ -36,6 +36,21 @@ pub enum WorkerState {
         /// TaskRecord knows what the prior subprocess cost.
         prior_token_usage: pitboss_core::parser::TokenUsage,
     },
+    /// Frozen by SIGSTOP — claude subprocess is still alive but
+    /// suspended at the kernel level. Distinct from Paused because
+    /// `continue_worker` just SIGCONT's instead of respawning via
+    /// `claude --resume`. Suitable for short pauses; long freezes risk
+    /// Anthropic dropping the HTTP session on their side.
+    Frozen {
+        /// Session id captured at freeze time (same field semantics as
+        /// Paused). Populated so `worker_status` still reports it and
+        /// so callers that want to fall back to cancel-style resume can.
+        session_id: String,
+        frozen_at: chrono::DateTime<chrono::Utc>,
+        /// Saved `started_at` from the Running state so `continue_worker`
+        /// can transition back to Running without losing elapsed time.
+        started_at: chrono::DateTime<chrono::Utc>,
+    },
     Done(TaskRecord),
 }
 
@@ -139,6 +154,13 @@ pub struct DispatchState {
     pub notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
     /// In-memory shared store for hub-mediated lead ↔ worker coordination.
     pub shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
+    /// Per-worker OS pid, published by the SessionHandle as soon as the
+    /// child is spawned. Used by the SIGSTOP freeze-pause path to
+    /// signal the process directly without going through the
+    /// `ChildProcess` interface (the Box lives inside the session task
+    /// after we've already moved the handle). Value 0 means "not yet
+    /// spawned" (pre-init) — callers skip signaling in that state.
+    pub worker_pids: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
 }
 
 impl DispatchState {
@@ -185,6 +207,7 @@ impl DispatchState {
             worker_counters: RwLock::new(HashMap::new()),
             notification_router,
             shared_store,
+            worker_pids: RwLock::new(HashMap::new()),
         }
     }
 
@@ -196,7 +219,10 @@ impl DispatchState {
             .filter(|w| {
                 matches!(
                     w,
-                    WorkerState::Pending | WorkerState::Running { .. } | WorkerState::Paused { .. }
+                    WorkerState::Pending
+                        | WorkerState::Running { .. }
+                        | WorkerState::Paused { .. }
+                        | WorkerState::Frozen { .. }
                 )
             })
             .count()

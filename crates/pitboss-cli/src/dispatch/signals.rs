@@ -1,8 +1,53 @@
 use std::time::Duration;
 
+use anyhow::{bail, Result};
 use pitboss_core::session::CancelToken;
 
 const SECOND_SIGINT_WINDOW: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------
+// SIGSTOP / SIGCONT for freeze-pause
+// ---------------------------------------------------------------------
+//
+// `pause_worker` supports two modes: the classic `cancel` (which
+// terminates the claude subprocess and snapshots the session so
+// `continue_worker` can re-spawn via `claude --resume`) and the newer
+// `freeze` (which SIGSTOP's the process in place and SIGCONT's it
+// back). Freeze preserves in-flight state (no token replay, no session
+// re-init) but risks Anthropic dropping the HTTP session if the pause
+// runs past their server-side idle window. Use cancel for long pauses,
+// freeze for quick ones.
+//
+// We use raw libc::kill rather than the `nix` crate — libc is already a
+// transitive dep and this is a two-function use case. Pitboss is
+// Linux/macOS only so POSIX signal semantics are available
+// unconditionally.
+
+/// Suspend the process with `pid` using SIGSTOP. Returns an error for
+/// `pid == 0` (slot not yet populated) or if the syscall fails
+/// (process already exited, permission denied, etc).
+pub fn freeze(pid: u32) -> Result<()> {
+    send_signal(pid, libc::SIGSTOP, "SIGSTOP")
+}
+
+/// Resume a previously-frozen process with SIGCONT.
+pub fn resume_stopped(pid: u32) -> Result<()> {
+    send_signal(pid, libc::SIGCONT, "SIGCONT")
+}
+
+fn send_signal(pid: u32, sig: libc::c_int, name: &'static str) -> Result<()> {
+    if pid == 0 {
+        bail!("{name}: pid is 0 (worker not yet spawned?)");
+    }
+    // SAFETY: `kill(2)` accepts any pid_t + valid signo; no memory is
+    // dereferenced. The cast is libc's expected pid_t shape.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    bail!("{name} to pid {pid} failed: {err}")
+}
 
 /// Spawn a task that watches for Ctrl-C in two phases:
 ///   1st SIGINT within window → drain
@@ -29,4 +74,65 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_rejects_pid_zero() {
+        let err = freeze(0).unwrap_err();
+        assert!(err.to_string().contains("pid is 0"));
+    }
+
+    #[test]
+    fn resume_rejects_pid_zero() {
+        let err = resume_stopped(0).unwrap_err();
+        assert!(err.to_string().contains("pid is 0"));
+    }
+
+    /// End-to-end: spawn a sleeping child, SIGSTOP it, confirm
+    /// /proc reports stopped state, SIGCONT, confirm runnable,
+    /// then clean up. Linux-only because /proc isn't available on
+    /// macOS CI.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn freeze_then_resume_flips_proc_state() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+
+        freeze(pid).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let state = read_proc_state(pid);
+        assert!(
+            matches!(state, Some('T' | 't')),
+            "expected stopped state, got {state:?}"
+        );
+
+        resume_stopped(pid).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let state = read_proc_state(pid);
+        assert!(
+            matches!(state, Some('S' | 'R')),
+            "expected sleeping/running after SIGCONT, got {state:?}"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_proc_state(pid: u32) -> Option<char> {
+        let s = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("State:") {
+                return rest.trim().chars().next();
+            }
+        }
+        None
+    }
 }
