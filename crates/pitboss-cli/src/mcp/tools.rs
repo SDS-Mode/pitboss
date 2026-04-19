@@ -366,6 +366,16 @@ pub async fn handle_spawn_worker(
         workers.insert(task_id.clone(), WorkerState::Pending);
     }
 
+    // Register in the worker_layer_index so KV routing can look up this
+    // worker's layer in O(1). Workers spawned via this handler always land
+    // in the root layer (None = root). Sub-tree wiring (Task 2.3) will
+    // extend this path.
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert(task_id.clone(), None);
+
     let worker_cancel = pitboss_core::session::CancelToken::new();
     state
         .worker_cancels
@@ -679,6 +689,9 @@ async fn run_worker(
         .write()
         .await
         .insert(task_id.clone(), WorkerState::Done(rec));
+    // Clean up the worker_layer_index entry — the worker is done, no more
+    // KV routing lookups will target it.
+    state.worker_layer_index.write().await.remove(&task_id);
     let _ = state.done_tx.send(task_id);
 }
 

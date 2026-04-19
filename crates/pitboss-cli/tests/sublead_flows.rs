@@ -76,6 +76,127 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
     (dir, state)
 }
 
+// ── Task 3.1: Per-layer KvStore + strict peer visibility ─────────────────────
+
+/// Sub-lead's KV writes go to its own layer's `SharedStore`, NOT the root
+/// layer's. After a sub-lead writes `/shared/key`, the root lead reading the
+/// same path from the root layer's store should see `null` (key doesn't exist
+/// in the root layer's store). Verifies per-layer KvStore isolation.
+#[tokio::test]
+async fn sublead_kv_writes_isolated_from_root() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Root lead spawns a sub-lead.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 1.0, "max_workers": 1}),
+        )
+        .await
+        .unwrap();
+    let sublead_id = resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field")
+        .to_string();
+
+    // Sub-lead writes /shared/key = "from_sub" into its own sub-tree layer.
+    let mut sub_client = FakeMcpClient::connect_as(&socket, &sublead_id, "sublead")
+        .await
+        .unwrap();
+    sub_client
+        .call_tool(
+            "kv_set",
+            json!({"path": "/shared/key", "value": [102, 114, 111, 109, 95, 115, 117, 98]}), // "from_sub" as bytes
+        )
+        .await
+        .unwrap();
+
+    // Root reads /shared/key from the ROOT layer's store — should see null
+    // because the sub-lead's write went to the sub-tree's store, not root's.
+    let root_read = root_client
+        .call_tool("kv_get", json!({"path": "/shared/key"}))
+        .await
+        .unwrap();
+    assert!(
+        root_read["entry"].is_null(),
+        "root should not see sub-tree writes (different KvStore per layer); got: {root_read}"
+    );
+
+    // Confirm the sub-lead CAN read back its own write (same layer).
+    let sub_read = sub_client
+        .call_tool("kv_get", json!({"path": "/shared/key"}))
+        .await
+        .unwrap();
+    assert!(
+        !sub_read["entry"].is_null(),
+        "sub-lead should be able to read its own write; got: {sub_read}"
+    );
+}
+
+/// Strict peer-visibility: within any layer, `/peer/<X>/*` is readable only
+/// by X itself or the layer's lead. Workers (and sub-leads acting as peers in
+/// a layer) CANNOT read sibling peer slots.
+///
+/// This test uses two workers in the ROOT layer. Worker A writes its peer slot;
+/// Worker B attempts to read it — must be rejected.
+///
+/// Note: the `worker_a_publishes_worker_b_consumes` test in shared_store_flows
+/// calls `handle_kv_wait` directly, bypassing the MCP server authz layer, and
+/// is testing a lower-level plumbing concern. The strict peer visibility rule
+/// applies at the MCP transport layer (mcp/server.rs), not the store layer.
+#[tokio::test]
+async fn sublead_workers_cannot_read_sibling_peer_slots() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Worker A writes its peer slot.
+    // (worker_meta uses ActorRole::Worker → "worker" role → root layer)
+    let mut worker_a = FakeMcpClient::connect_as(&socket, "worker-A", "worker")
+        .await
+        .unwrap();
+    worker_a
+        .call_tool(
+            "kv_set",
+            json!({"path": "/peer/self/status", "value": [104, 97, 108, 102, 119, 97, 121]}), // "halfway" as bytes
+        )
+        .await
+        .unwrap();
+
+    // Worker B tries to read Worker A's peer slot — must be rejected.
+    // (strict peer visibility: only worker-A itself or the layer lead can read /peer/worker-A/*)
+    let mut worker_b = FakeMcpClient::connect_as(&socket, "worker-B", "worker")
+        .await
+        .unwrap();
+    let result = worker_b
+        .call_tool("kv_get", json!({"path": "/peer/worker-A/status"}))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "sibling peer-slot reads must be rejected under strict visibility; got: {:?}",
+        result
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("strict peer visibility") || err_msg.contains("forbidden"),
+        "error should mention peer visibility; got: {err_msg}"
+    );
+}
+
 #[tokio::test]
 async fn spawn_sublead_tool_is_exposed_to_root() {
     let (_dir, state) = mk_state_with_subleads();

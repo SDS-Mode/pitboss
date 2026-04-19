@@ -15,6 +15,7 @@ use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo
 use rmcp::service::ServiceExt;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
+use crate::dispatch::layer::LayerState;
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
     handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
@@ -76,6 +77,89 @@ pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
     let p = run_dir.join(run_id.to_string());
     let _ = std::fs::create_dir_all(&p);
     p.join("mcp.sock")
+}
+
+// ── Per-layer KV routing helpers (Phase 3.1) ────────────────────────────────
+
+use crate::shared_store::ActorRole;
+
+/// Resolve the `LayerState` whose KvStore should service a KV operation.
+///
+/// - `Lead` (root lead) → always the root layer.
+/// - `Sublead` with id S → the sub-tree layer for S.
+/// - `Worker` → look up which layer registered this worker at spawn time via
+///   `DispatchState::worker_layer_index`. `None` (root-layer worker) returns
+///   the root layer; `Some(sublead_id)` returns that sub-tree's layer.
+///
+/// The `subleads_guard` is passed in so the caller can hold the read-lock
+/// across the full KV operation (single lock acquisition per MCP tool call).
+fn resolve_layer_for_caller<'a>(
+    state: &'a DispatchState,
+    actor_id: &str,
+    actor_role: ActorRole,
+    subleads_guard: &'a tokio::sync::RwLockReadGuard<
+        'a,
+        std::collections::HashMap<String, Arc<LayerState>>,
+    >,
+) -> Result<&'a Arc<LayerState>, ErrorData> {
+    match actor_role {
+        ActorRole::Lead => Ok(&state.root),
+        ActorRole::Sublead => subleads_guard.get(actor_id).ok_or_else(|| {
+            ErrorData::invalid_request(format!("unknown sublead_id: {actor_id}"), None)
+        }),
+        ActorRole::Worker => {
+            // Use the worker_layer_index for O(1) lookup. We use try_read()
+            // since we already hold a write-free path (this is called under
+            // the subleads read-lock, not a write-lock).
+            let layer_opt = state
+                .worker_layer_index
+                .try_read()
+                .ok()
+                .and_then(|idx| idx.get(actor_id).cloned());
+            match layer_opt {
+                // None (or missing from index) → root layer.
+                None | Some(None) => Ok(&state.root),
+                // Some(sublead_id) → sub-tree layer.
+                Some(Some(sublead_id)) => subleads_guard.get(&sublead_id).ok_or_else(|| {
+                    ErrorData::invalid_request(
+                        format!("worker {actor_id} registered in unknown sub-tree {sublead_id}"),
+                        None,
+                    )
+                }),
+            }
+        }
+    }
+}
+
+/// Returns the peer-slot owner id if `key` is under `/peer/<id>/...`,
+/// or `None` for other namespaces.
+fn parse_peer_path(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("/peer/")?;
+    // Exclude the /peer/self/... alias — it should be resolved before this
+    // point, but guard defensively.
+    if rest.starts_with("self/") || rest == "self" {
+        return None;
+    }
+    let id = rest.split('/').next()?;
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Strict peer-visibility predicate (spec §4.2).
+///
+/// `/peer/<X>/*` is readable at `layer` by:
+/// - X itself (the slot owner).
+/// - The layer's lead (`layer.lead_id`).
+///
+/// Workers within the same layer CANNOT read each other's peer slots.
+/// Sibling sub-leads CANNOT read each other's peer slots.
+/// The TUI / operator bypasses this predicate entirely (it reads directly
+/// from the `SharedStore` without going through this MCP handler).
+fn can_read_peer_slot(layer: &LayerState, caller_id: &str, target_id: &str) -> bool {
+    caller_id == target_id || caller_id == layer.lead_id
 }
 
 pub struct McpServer {
@@ -333,7 +417,36 @@ impl PitbossHandler {
         if let Some(m) = &args.meta {
             self.note_actor(&m.actor_id).await;
         }
-        match crate::shared_store::tools::handle_kv_get(&self.state.shared_store, args).await {
+
+        // Per-layer routing: resolve which LayerState's KvStore to target.
+        // Falls back to the root-layer store when no identity is present
+        // (backward-compatible with callers that omit _meta on reads).
+        let subleads = self.state.subleads.read().await;
+        let (layer, caller_id) = if let Some(m) = &args.meta {
+            let layer =
+                resolve_layer_for_caller(&self.state, &m.actor_id, m.actor_role, &subleads)?;
+            (layer, m.actor_id.clone())
+        } else {
+            (&self.state.root, String::new())
+        };
+
+        // Strict peer-visibility check: /peer/<X>/* is readable only by X or
+        // the layer's lead. Applied before the store lookup (fast-reject).
+        if !caller_id.is_empty() {
+            if let Some(target_id) = parse_peer_path(&args.path) {
+                if !can_read_peer_slot(layer, &caller_id, target_id) {
+                    return Err(shared_store_err(
+                        &crate::shared_store::StoreError::Forbidden(format!(
+                            "strict peer visibility: {caller_id} cannot read /peer/{target_id}/*; \
+                             only {target_id} itself or the layer lead ({}) may read this slot",
+                            layer.lead_id,
+                        )),
+                    ));
+                }
+            }
+        }
+
+        match crate::shared_store::tools::handle_kv_get(&layer.shared_store, args).await {
             // Wrap Option<Entry> in an object so structuredContent is a
             // record (per MCP spec). A bare null was rejected by the
             // client's schema validator in early dogfood runs.
@@ -350,7 +463,15 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::KvSetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_kv_set(&self.state.shared_store, args).await {
+        // Per-layer routing: writes go to the caller's layer's KvStore.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )?;
+        match crate::shared_store::tools::handle_kv_set(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -364,7 +485,15 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::KvCasArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_kv_cas(&self.state.shared_store, args).await {
+        // Per-layer routing: CAS goes to the caller's layer's KvStore.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )?;
+        match crate::shared_store::tools::handle_kv_cas(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -380,7 +509,35 @@ impl PitbossHandler {
         if let Some(m) = &args.meta {
             self.note_actor(&m.actor_id).await;
         }
-        match crate::shared_store::tools::handle_kv_list(&self.state.shared_store, args).await {
+
+        // Per-layer routing.
+        let subleads = self.state.subleads.read().await;
+        let (layer, caller_id) = if let Some(m) = &args.meta {
+            let layer =
+                resolve_layer_for_caller(&self.state, &m.actor_id, m.actor_role, &subleads)?;
+            (layer, m.actor_id.clone())
+        } else {
+            (&self.state.root, String::new())
+        };
+
+        // Strict peer-visibility check for /peer/<X>/* globs.
+        // Only exact /peer/<id>/... prefix patterns are checked — a broad
+        // glob like /peer/** is rejected unless the caller is the layer lead.
+        if !caller_id.is_empty() {
+            if let Some(target_id) = parse_peer_path(&args.glob) {
+                if !can_read_peer_slot(layer, &caller_id, target_id) {
+                    return Err(shared_store_err(
+                        &crate::shared_store::StoreError::Forbidden(format!(
+                            "strict peer visibility: {caller_id} cannot list /peer/{target_id}/*; \
+                             only {target_id} itself or the layer lead ({}) may list this slot",
+                            layer.lead_id,
+                        )),
+                    ));
+                }
+            }
+        }
+
+        match crate::shared_store::tools::handle_kv_list(&layer.shared_store, args).await {
             // Wrap Vec<ListMetadata> in an object — MCP spec requires
             // structuredContent to be a record.
             Ok(v) => to_structured_result(&serde_json::json!({ "entries": v })),
@@ -398,7 +555,14 @@ impl PitbossHandler {
         if let Some(m) = &args.meta {
             self.note_actor(&m.actor_id).await;
         }
-        match crate::shared_store::tools::handle_kv_wait(&self.state.shared_store, args).await {
+        // Per-layer routing: wait on the caller's layer's KvStore.
+        let subleads = self.state.subleads.read().await;
+        let layer = if let Some(m) = &args.meta {
+            resolve_layer_for_caller(&self.state, &m.actor_id, m.actor_role, &subleads)?
+        } else {
+            &self.state.root
+        };
+        match crate::shared_store::tools::handle_kv_wait(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -412,8 +576,15 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::LeaseAcquireArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_lease_acquire(&self.state.shared_store, args).await
-        {
+        // Per-layer routing: acquire from the caller's layer's LeaseRegistry.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )?;
+        match crate::shared_store::tools::handle_lease_acquire(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -427,8 +598,15 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::LeaseReleaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_lease_release(&self.state.shared_store, args).await
-        {
+        // Per-layer routing: release from the caller's layer's LeaseRegistry.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )?;
+        match crate::shared_store::tools::handle_lease_release(&layer.shared_store, args).await {
             Ok(()) => Ok(CallToolResult::structured(serde_json::json!({"ok": true}))),
             Err(e) => Err(shared_store_err(&e)),
         }

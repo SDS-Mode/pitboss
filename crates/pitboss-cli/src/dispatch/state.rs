@@ -124,6 +124,15 @@ pub struct DispatchState {
     /// Sub-tree layers keyed by sub-lead id. Empty in the depth-1 case.
     /// Populated by `spawn_sublead` in Phase 2.
     pub subleads: RwLock<HashMap<String, Arc<LayerState>>>,
+    /// Worker-id → layer-id index for O(1) KV routing.
+    ///
+    /// - Root-layer workers map to `None`.
+    /// - Sub-tree workers map to `Some(sublead_id)`.
+    ///
+    /// Populated by `spawn_worker` at registration time; cleaned up when a
+    /// worker is reaped. Consulted by `resolve_layer_for_caller` in the KV
+    /// tool handlers to route each operation to the correct `LayerState`.
+    pub worker_layer_index: RwLock<HashMap<String, Option<String>>>,
 }
 
 /// CAUTION: This Deref always resolves to the root layer, which is correct
@@ -144,6 +153,10 @@ impl std::fmt::Debug for DispatchState {
         f.debug_struct("DispatchState")
             .field("root", &self.root)
             .field("subleads", &self.subleads.try_read().map(|g| g.len()).ok())
+            .field(
+                "worker_layer_index",
+                &self.worker_layer_index.try_read().map(|g| g.len()).ok(),
+            )
             .finish()
     }
 }
@@ -186,6 +199,7 @@ impl DispatchState {
         Self {
             root,
             subleads: RwLock::new(HashMap::new()),
+            worker_layer_index: RwLock::new(HashMap::new()),
         }
     }
 
