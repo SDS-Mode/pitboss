@@ -3,8 +3,10 @@
 //! `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
 
 pub mod leases;
+pub mod run_leases;
 pub mod tools;
 pub use leases::{AcquireResult, Lease, LeaseRegistry};
+pub use run_leases::{LeaseHandle, LeaseRegistry as RunLeaseRegistry};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

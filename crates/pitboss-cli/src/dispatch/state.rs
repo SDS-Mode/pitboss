@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::dispatch::layer::LayerState;
 use crate::manifest::resolve::ResolvedManifest;
+use crate::shared_store::RunLeaseRegistry;
 
 // ── Re-exported public types (keep in this module for back-compat) ──────────
 //
@@ -133,6 +134,9 @@ pub struct DispatchState {
     /// worker is reaped. Consulted by `resolve_layer_for_caller` in the KV
     /// tool handlers to route each operation to the correct `LayerState`.
     pub worker_layer_index: RwLock<HashMap<String, Option<String>>>,
+    /// Run-global lease registry for cross-sub-tree resource coordination.
+    /// Distinct from per-layer /leases/* stored in each layer's KvStore.
+    pub run_leases: Arc<RunLeaseRegistry>,
 }
 
 /// CAUTION: This Deref always resolves to the root layer, which is correct
@@ -157,6 +161,7 @@ impl std::fmt::Debug for DispatchState {
                 "worker_layer_index",
                 &self.worker_layer_index.try_read().map(|g| g.len()).ok(),
             )
+            .field("run_leases", &self.run_leases)
             .finish()
     }
 }
@@ -200,6 +205,7 @@ impl DispatchState {
             root,
             subleads: RwLock::new(HashMap::new()),
             worker_layer_index: RwLock::new(HashMap::new()),
+            run_leases: Arc::new(RunLeaseRegistry::new()),
         }
     }
 
