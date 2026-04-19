@@ -27,6 +27,28 @@ pub struct ApprovalBridge {
     state: Arc<DispatchState>,
 }
 
+/// Convert the MCP-tool-layer `ApprovalPlan` into the control-protocol
+/// wire shape. Field layout is identical; the duplication exists so
+/// `control::protocol` stays independent of `mcp::tools`.
+pub(crate) fn approval_plan_to_wire(
+    p: crate::mcp::tools::ApprovalPlan,
+) -> crate::control::protocol::ApprovalPlanWire {
+    let crate::mcp::tools::ApprovalPlan {
+        summary,
+        rationale,
+        resources,
+        risks,
+        rollback,
+    } = p;
+    crate::control::protocol::ApprovalPlanWire {
+        summary,
+        rationale,
+        resources,
+        risks,
+        rollback,
+    }
+}
+
 impl ApprovalBridge {
     pub fn new(state: Arc<DispatchState>) -> Self {
         Self { state }
@@ -34,10 +56,13 @@ impl ApprovalBridge {
 
     /// Request operator approval. Blocks until either (a) the operator
     /// responds, (b) the policy auto-resolves, or (c) `timeout` elapses.
+    /// `plan` carries the typed structured fields (rationale, resources,
+    /// risks, rollback); pass `None` for simple summary-only approvals.
     pub async fn request(
         &self,
         task_id: String,
         summary: String,
+        plan: Option<crate::mcp::tools::ApprovalPlan>,
         timeout: Duration,
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
@@ -83,6 +108,7 @@ impl ApprovalBridge {
                     request_id: request_id.clone(),
                     task_id,
                     summary,
+                    plan: plan.map(approval_plan_to_wire),
                 };
                 // Best-effort send.
                 let _ = w.send(ev);
@@ -114,6 +140,7 @@ impl ApprovalBridge {
                             request_id: request_id.clone(),
                             task_id,
                             summary,
+                            plan,
                             responder: tx,
                         });
                 }
@@ -236,7 +263,12 @@ mod tests {
         let state = mk_state(ApprovalPolicy::AutoApprove).await;
         let bridge = ApprovalBridge::new(state);
         let resp = bridge
-            .request("lead".into(), "spawn 2".into(), Duration::from_secs(1))
+            .request(
+                "lead".into(),
+                "spawn 2".into(),
+                None,
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         assert!(resp.approved);
@@ -247,7 +279,12 @@ mod tests {
         let state = mk_state(ApprovalPolicy::AutoReject).await;
         let bridge = ApprovalBridge::new(state);
         let resp = bridge
-            .request("lead".into(), "spawn 2".into(), Duration::from_secs(1))
+            .request(
+                "lead".into(),
+                "spawn 2".into(),
+                None,
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         assert!(!resp.approved);
@@ -259,7 +296,12 @@ mod tests {
         let state = mk_state(ApprovalPolicy::Block).await;
         let bridge = ApprovalBridge::new(state);
         let err = bridge
-            .request("lead".into(), "spawn 2".into(), Duration::from_millis(50))
+            .request(
+                "lead".into(),
+                "spawn 2".into(),
+                None,
+                Duration::from_millis(50),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ApprovalError::Timeout));

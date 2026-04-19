@@ -39,10 +39,15 @@ pub enum Mode {
         draft: String,
     },
     /// v0.4: approval modal. Driven by an `approval_request` event.
+    /// `plan` carries the structured fields (rationale / resources /
+    /// risks / rollback) for v0.4.5+ leads that ship typed approvals;
+    /// `None` for simple summary-only approvals, in which case the
+    /// modal renders just the summary.
     ApprovalModal {
         request_id: String,
         task_id: String,
         summary: String,
+        plan: Option<pitboss_cli::control::protocol::ApprovalPlanWire>,
         sub_mode: ApprovalSubMode,
     },
 }
@@ -1169,9 +1174,31 @@ mod tests {
             request_id: "req-1".into(),
             task_id: "lead".into(),
             summary: "spawn 3".into(),
+            plan: None,
             sub_mode: ApprovalSubMode::Overview,
         };
         assert!(matches!(m, Mode::ApprovalModal { .. }));
+
+        // Structured-plan form carries through.
+        let plan = pitboss_cli::control::protocol::ApprovalPlanWire {
+            summary: "delete idx".into(),
+            rationale: Some("obsolete".into()),
+            resources: vec!["db".into()],
+            risks: vec!["slow reads".into()],
+            rollback: Some("snapshot".into()),
+        };
+        let m2 = Mode::ApprovalModal {
+            request_id: "req-2".into(),
+            task_id: "lead".into(),
+            summary: "delete idx".into(),
+            plan: Some(plan),
+            sub_mode: ApprovalSubMode::Overview,
+        };
+        if let Mode::ApprovalModal { plan, .. } = m2 {
+            assert_eq!(plan.unwrap().resources, vec!["db".to_string()]);
+        } else {
+            panic!("expected ApprovalModal");
+        }
     }
 
     #[test]
@@ -1198,6 +1225,7 @@ mod tests {
             request_id: "req-1".into(),
             task_id: "lead".into(),
             summary: "spawn 3".into(),
+            plan: None,
             sub_mode: ApprovalSubMode::Overview,
         };
         // Direct transition — we don't call into app::handle_* here to avoid

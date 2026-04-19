@@ -473,11 +473,13 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
             request_id,
             task_id,
             summary,
+            plan,
         } => {
             state.mode = Mode::ApprovalModal {
                 request_id,
                 task_id,
                 summary,
+                plan,
                 sub_mode: crate::state::ApprovalSubMode::Overview,
             };
         }
@@ -566,6 +568,7 @@ struct ApprovalCtx {
     request_id: String,
     task_id: String,
     summary: String,
+    plan: Option<pitboss_cli::control::protocol::ApprovalPlanWire>,
 }
 
 fn handle_approval_modal(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Action {
@@ -574,6 +577,7 @@ fn handle_approval_modal(state: &mut AppState, code: KeyCode, modifiers: KeyModi
         request_id,
         task_id,
         summary,
+        plan,
         sub_mode,
     } = state.mode.clone()
     else {
@@ -583,6 +587,7 @@ fn handle_approval_modal(state: &mut AppState, code: KeyCode, modifiers: KeyModi
         request_id,
         task_id,
         summary,
+        plan,
     };
 
     match sub_mode {
@@ -609,6 +614,7 @@ fn handle_approval_overview(state: &mut AppState, code: KeyCode, ctx: ApprovalCt
                 request_id: ctx.request_id,
                 task_id: ctx.task_id,
                 summary: ctx.summary,
+                plan: ctx.plan,
                 sub_mode: ApprovalSubMode::Rejecting {
                     draft: String::new(),
                 },
@@ -620,6 +626,7 @@ fn handle_approval_overview(state: &mut AppState, code: KeyCode, ctx: ApprovalCt
                 request_id: ctx.request_id,
                 task_id: ctx.task_id,
                 summary: ctx.summary,
+                plan: ctx.plan,
                 sub_mode: ApprovalSubMode::Editing { draft },
             };
         }
@@ -672,6 +679,7 @@ fn handle_approval_draft(
         request_id: ctx.request_id,
         task_id: ctx.task_id,
         summary: ctx.summary,
+        plan: ctx.plan,
         sub_mode,
     };
 }

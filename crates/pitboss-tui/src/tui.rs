@@ -242,8 +242,17 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             request_id,
             task_id,
             summary,
+            plan,
             sub_mode,
-        } => render_approval_modal(frame, area, request_id, task_id, summary, sub_mode),
+        } => render_approval_modal(
+            frame,
+            area,
+            request_id,
+            task_id,
+            summary,
+            plan.as_ref(),
+            sub_mode,
+        ),
         Mode::Normal | Mode::Detail { .. } => {}
     }
 }
@@ -1140,6 +1149,7 @@ fn render_approval_modal(
     _request_id: &str,
     task_id: &str,
     summary: &str,
+    plan: Option<&pitboss_cli::control::protocol::ApprovalPlanWire>,
     sub_mode: &crate::state::ApprovalSubMode,
 ) {
     use crate::state::ApprovalSubMode;
@@ -1149,26 +1159,117 @@ fn render_approval_modal(
     let y = area.y + area.height.saturating_sub(modal_h) / 2;
     let modal = Rect::new(x, y, modal_w, modal_h);
     frame.render_widget(Clear, modal);
-    let (title, body) = match sub_mode {
-        ApprovalSubMode::Overview => (
-            format!(" Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel "),
-            summary.to_string(),
-        ),
-        ApprovalSubMode::Editing { draft } => (
-            " Edit summary — Ctrl+Enter to submit  Esc cancel ".to_string(),
-            draft.clone(),
-        ),
-        ApprovalSubMode::Rejecting { draft } => (
-            " Rejection comment — Ctrl+Enter to send  Esc cancel ".to_string(),
-            draft.clone(),
-        ),
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let para = Paragraph::new(body)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .style(theme::primary_style());
-    frame.render_widget(para, modal);
+    match sub_mode {
+        ApprovalSubMode::Overview => {
+            // When a typed plan is present, render structured fields as
+            // a multi-section view. Plain summary otherwise.
+            let title =
+                format!(" Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel ");
+            let block = Block::default().borders(Borders::ALL).title(title);
+            let lines = plan.map_or_else(
+                || {
+                    vec![Line::from(Span::styled(
+                        summary.to_string(),
+                        theme::primary_style(),
+                    ))]
+                },
+                |p| build_approval_plan_lines(summary, p),
+            );
+            let para = Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(para, modal);
+        }
+        ApprovalSubMode::Editing { draft } => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Edit summary — Ctrl+Enter to submit  Esc cancel ");
+            let para = Paragraph::new(draft.clone())
+                .block(block)
+                .wrap(Wrap { trim: false })
+                .style(theme::primary_style());
+            frame.render_widget(para, modal);
+        }
+        ApprovalSubMode::Rejecting { draft } => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Rejection comment — Ctrl+Enter to send  Esc cancel ");
+            let para = Paragraph::new(draft.clone())
+                .block(block)
+                .wrap(Wrap { trim: false })
+                .style(theme::primary_style());
+            frame.render_widget(para, modal);
+        }
+    }
+}
+
+/// Render a typed `ApprovalPlan` as labeled sections. Section headers are
+/// bold secondary; body rows are primary text; risks are highlighted in
+/// the warning color so reviewers see them before approving.
+fn build_approval_plan_lines(
+    summary: &str,
+    plan: &pitboss_cli::control::protocol::ApprovalPlanWire,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        summary.to_string(),
+        theme::primary_style().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    if let Some(rationale) = &plan.rationale {
+        lines.push(Line::from(Span::styled(
+            "RATIONALE",
+            theme::secondary_style().add_modifier(Modifier::BOLD),
+        )));
+        for r in rationale.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {r}"),
+                theme::primary_style(),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+    if !plan.resources.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "RESOURCES",
+            theme::secondary_style().add_modifier(Modifier::BOLD),
+        )));
+        for r in &plan.resources {
+            lines.push(Line::from(Span::styled(
+                format!("  • {r}"),
+                theme::primary_style(),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+    if !plan.risks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "RISKS",
+            Style::default()
+                .fg(theme::OVERLAY_ACCENT_WARNING)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for r in &plan.risks {
+            lines.push(Line::from(Span::styled(
+                format!("  ! {r}"),
+                Style::default().fg(theme::OVERLAY_ACCENT_WARNING),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+    if let Some(rollback) = &plan.rollback {
+        lines.push(Line::from(Span::styled(
+            "ROLLBACK",
+            theme::secondary_style().add_modifier(Modifier::BOLD),
+        )));
+        for r in rollback.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {r}"),
+                theme::primary_style(),
+            )));
+        }
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------

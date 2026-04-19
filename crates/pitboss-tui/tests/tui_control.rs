@@ -66,6 +66,7 @@ fn approval_modal_overview_renders_summary() {
         request_id: "req-1".into(),
         task_id: "lead".into(),
         summary: "SPAWN THREE HOBBITS".into(),
+        plan: None,
         sub_mode: ApprovalSubMode::Overview,
     };
 
