@@ -291,9 +291,14 @@ jobs:
       GITHUB_EMAIL: "admin+bot@axo.dev"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
+      # NOTE: diverges from cargo-dist 0.28.7 autogeneration — we remove
+      # `persist-credentials: false` so the token is saved into git config
+      # and the subsequent `git push` can authenticate. Without this, the
+      # push fails with "could not read Username for 'https://github.com'"
+      # (exit 128). If `dist init` is ever re-run, this fix must be
+      # reapplied. Upstream issue should be filed with cargo-dist.
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
           repository: "SDS-Mode/homebrew-pitboss"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       # So we have access to the formula
