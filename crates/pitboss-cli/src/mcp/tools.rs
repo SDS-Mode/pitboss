@@ -245,6 +245,24 @@ pub struct ApprovalToolResponse {
     pub edited_summary: Option<String>,
 }
 
+/// Arguments for `propose_plan`: the lead submits a full execution plan
+/// for operator pre-flight approval. Gated by `[run].require_plan_approval`.
+/// When that flag is off, calling `propose_plan` is harmless — the plan
+/// is approved via the usual modal/policy path, but `spawn_worker` never
+/// checks the result.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProposePlanArgs {
+    /// The typed plan to review. `summary` is required; the rest
+    /// (rationale / resources / risks / rollback) is optional but
+    /// strongly recommended — the whole point of pre-flight approval is
+    /// that the operator can evaluate *before* workers start.
+    pub plan: ApprovalPlan,
+    /// Optional per-request timeout override. Falls back to
+    /// `lead_timeout_secs`.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -261,6 +279,22 @@ pub async fn handle_spawn_worker(
     // Guard 1: draining
     if state.cancel.is_draining() || state.cancel.is_terminated() {
         bail!("run is draining: no new workers accepted");
+    }
+
+    // Guard 1b: plan approval. When the manifest opts in with
+    // `[run].require_plan_approval = true`, the lead must call
+    // `propose_plan` and get operator approval before any worker
+    // dispatches. The check happens here rather than earlier so draining
+    // runs still short-circuit with their clearer error.
+    if state.manifest.require_plan_approval
+        && !state
+            .plan_approved
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        bail!(
+            "plan approval required: call `propose_plan` and wait for \
+             operator approval before spawning workers"
+        );
     }
 
     // Guard 2: worker cap
@@ -1216,7 +1250,13 @@ pub async fn handle_request_approval(
     );
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
-        .request(state.lead_id.clone(), args.summary, args.plan, timeout)
+        .request(
+            state.lead_id.clone(),
+            args.summary,
+            args.plan,
+            crate::control::protocol::ApprovalKind::Action,
+            timeout,
+        )
         .await
     {
         Ok(resp) => Ok(ApprovalToolResponse {
@@ -1225,6 +1265,54 @@ pub async fn handle_request_approval(
             edited_summary: resp.edited_summary,
         }),
         Err(e) => anyhow::bail!("approval failed: {e}"),
+    }
+}
+
+/// Handle `propose_plan`: the lead submits a full execution plan for
+/// pre-flight operator approval, distinct from `request_approval`'s
+/// in-flight per-action gating. Flips `state.plan_approved` to true on
+/// approval; leaves it false on rejection (lead can revise and retry).
+///
+/// Returns the same `ApprovalToolResponse` shape as `request_approval`
+/// so leads can share response-handling code — they just dispatch on
+/// the tool name.
+pub async fn handle_propose_plan(
+    state: &Arc<DispatchState>,
+    args: ProposePlanArgs,
+) -> Result<ApprovalToolResponse> {
+    let timeout = Duration::from_secs(
+        args.timeout_secs
+            .or(state.manifest.lead_timeout_secs)
+            .unwrap_or(3600),
+    );
+    // Reuse the summary from the plan as the modal headline — a plan
+    // approval without the structured fields would be useless, but the
+    // summary still anchors the audit trail.
+    let summary = args.plan.summary.clone();
+    let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
+    match bridge
+        .request(
+            state.lead_id.clone(),
+            summary,
+            Some(args.plan),
+            crate::control::protocol::ApprovalKind::Plan,
+            timeout,
+        )
+        .await
+    {
+        Ok(resp) => {
+            if resp.approved {
+                state
+                    .plan_approved
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok(ApprovalToolResponse {
+                approved: resp.approved,
+                comment: resp.comment,
+                edited_summary: resp.edited_summary,
+            })
+        }
+        Err(e) => anyhow::bail!("plan approval failed: {e}"),
     }
 }
 
@@ -1373,6 +1461,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1748,6 +1837,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -2335,6 +2425,7 @@ mod tests {
             approval_policy: Some(ApprovalPolicy::AutoApprove),
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();
@@ -2369,5 +2460,185 @@ mod tests {
         .await
         .unwrap();
         assert!(resp.approved);
+    }
+
+    /// Build a `DispatchState` with the specified approval policy and
+    /// `require_plan_approval` flag. Mirrors `handle_request_approval_auto_approves`
+    /// test scaffolding but parameterized so plan-approval tests can share it.
+    async fn mk_plan_state(
+        policy: crate::dispatch::state::ApprovalPolicy,
+        require_plan_approval: bool,
+    ) -> Arc<DispatchState> {
+        use crate::dispatch::state::ApprovalPolicy;
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::process::ProcessSpawner;
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+        let _ = ApprovalPolicy::Block; // silence unused-variant warning on import
+
+        let dir = TempDir::new().unwrap();
+        let lead = ResolvedLead {
+            id: "lead".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: Effort::High,
+            tools: vec![],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: None,
+            approval_policy: Some(policy),
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval,
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_id = Uuid::now_v7();
+        let run_subdir = dir.path().join(run_id.to_string());
+        std::mem::forget(dir);
+        Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            policy,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+        ))
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_blocks_when_plan_not_approved() {
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, true).await;
+        // plan_approved starts false; even with AutoApprove policy for
+        // per-action approvals, spawn_worker must refuse until a plan
+        // has actually been approved.
+        let err = handle_spawn_worker(
+            &state,
+            SpawnWorkerArgs {
+                prompt: "do work".into(),
+                directory: None,
+                branch: None,
+                tools: None,
+                timeout_secs: None,
+                model: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("plan approval required"),
+            "expected plan-approval error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_allowed_when_require_plan_approval_off() {
+        // Default behavior: runs without the opt-in flag never gate on
+        // plan_approved. Whether the spawn ultimately succeeds or fails
+        // depends on unrelated state we don't exercise here — we only
+        // assert that the plan-approval guard itself doesn't fire.
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, false).await;
+        let res = handle_spawn_worker(
+            &state,
+            SpawnWorkerArgs {
+                prompt: "do work".into(),
+                directory: None,
+                branch: None,
+                tools: None,
+                timeout_secs: None,
+                model: None,
+            },
+        )
+        .await;
+        match res {
+            Ok(_) => {} // guard correctly skipped
+            Err(e) => assert!(
+                !e.to_string().contains("plan approval required"),
+                "plan-approval guard should not fire when require_plan_approval=false, got: {e}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn propose_plan_auto_approve_flips_flag() {
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, true).await;
+        assert!(!state
+            .plan_approved
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        let resp = handle_propose_plan(
+            &state,
+            ProposePlanArgs {
+                plan: ApprovalPlan {
+                    summary: "phase-1".into(),
+                    rationale: Some("prep".into()),
+                    resources: vec!["3 worktrees".into()],
+                    risks: vec![],
+                    rollback: Some("none".into()),
+                },
+                timeout_secs: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(resp.approved);
+        assert!(state
+            .plan_approved
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn propose_plan_auto_reject_leaves_flag_false() {
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoReject, true).await;
+        let resp = handle_propose_plan(
+            &state,
+            ProposePlanArgs {
+                plan: ApprovalPlan {
+                    summary: "phase-1".into(),
+                    ..Default::default()
+                },
+                timeout_secs: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!resp.approved);
+        assert!(
+            !state
+                .plan_approved
+                .load(std::sync::atomic::Ordering::Acquire),
+            "rejected plan must not flip plan_approved — lead should be able to retry"
+        );
     }
 }

@@ -213,6 +213,7 @@ async fn serve_connection(
                 task_id: q.task_id,
                 summary: q.summary,
                 plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
+                kind: q.kind,
             });
         }
     }
@@ -822,6 +823,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

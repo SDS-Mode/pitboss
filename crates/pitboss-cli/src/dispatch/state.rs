@@ -91,6 +91,10 @@ pub struct QueuedApproval {
     /// for simple summary-only approvals, so pre-v0.4.5 queuers still
     /// round-trip through this struct without issue.
     pub plan: Option<crate::mcp::tools::ApprovalPlan>,
+    /// Discriminator between in-flight action approvals and pre-flight
+    /// plan approvals. Carried through the queue so the TUI renders
+    /// the right modal header when the queue drains.
+    pub kind: crate::control::protocol::ApprovalKind,
     pub responder: oneshot::Sender<ApprovalResponse>,
 }
 
@@ -165,6 +169,13 @@ pub struct DispatchState {
     /// after we've already moved the handle). Value 0 means "not yet
     /// spawned" (pre-init) — callers skip signaling in that state.
     pub worker_pids: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
+    /// Plan-approval gate. Starts `false`. Flipped to `true` when
+    /// `propose_plan` returns an approved response. `spawn_worker`
+    /// checks this atomic when `manifest.require_plan_approval` is set
+    /// and bails with a helpful error until the operator approves.
+    /// Always `false` when `require_plan_approval` is off; nothing
+    /// reads it in that case.
+    pub plan_approved: std::sync::atomic::AtomicBool,
 }
 
 impl DispatchState {
@@ -212,6 +223,7 @@ impl DispatchState {
             notification_router,
             shared_store,
             worker_pids: RwLock::new(HashMap::new()),
+            plan_approved: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -264,6 +276,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();

@@ -66,6 +66,10 @@ pub struct ResolvedManifest {
     // NEW in v0.4.2:
     #[serde(default)]
     pub dump_shared_store: bool,
+    // NEW in v0.4.5 — when true, gate `spawn_worker` on an approved
+    // plan submitted via the `propose_plan` MCP tool.
+    #[serde(default)]
+    pub require_plan_approval: bool,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -125,6 +129,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         approval_policy: manifest.run.approval_policy,
         notifications,
         dump_shared_store: manifest.run.dump_shared_store,
+        require_plan_approval: manifest.run.require_plan_approval,
     })
 }
 

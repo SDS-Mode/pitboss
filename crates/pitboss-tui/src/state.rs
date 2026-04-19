@@ -48,6 +48,11 @@ pub enum Mode {
         task_id: String,
         summary: String,
         plan: Option<pitboss_cli::control::protocol::ApprovalPlanWire>,
+        /// `Action` = in-flight approval from `request_approval`;
+        /// `Plan` = pre-flight approval from `propose_plan`. Drives the
+        /// modal header badge so operators can tell them apart without
+        /// reading the summary.
+        kind: pitboss_cli::control::protocol::ApprovalKind,
         sub_mode: ApprovalSubMode,
     },
 }
@@ -1175,6 +1180,7 @@ mod tests {
             task_id: "lead".into(),
             summary: "spawn 3".into(),
             plan: None,
+            kind: pitboss_cli::control::protocol::ApprovalKind::Action,
             sub_mode: ApprovalSubMode::Overview,
         };
         assert!(matches!(m, Mode::ApprovalModal { .. }));
@@ -1192,6 +1198,7 @@ mod tests {
             task_id: "lead".into(),
             summary: "delete idx".into(),
             plan: Some(plan),
+            kind: pitboss_cli::control::protocol::ApprovalKind::Action,
             sub_mode: ApprovalSubMode::Overview,
         };
         if let Mode::ApprovalModal { plan, .. } = m2 {
@@ -1226,6 +1233,7 @@ mod tests {
             task_id: "lead".into(),
             summary: "spawn 3".into(),
             plan: None,
+            kind: pitboss_cli::control::protocol::ApprovalKind::Action,
             sub_mode: ApprovalSubMode::Overview,
         };
         // Direct transition — we don't call into app::handle_* here to avoid

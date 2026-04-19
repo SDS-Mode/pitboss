@@ -48,6 +48,7 @@ async fn pause_op_writes_events_jsonl() {
         approval_policy: Some(ApprovalPolicy::Block),
         notifications: vec![],
         dump_shared_store: false,
+        require_plan_approval: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -135,6 +136,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         approval_policy: Some(ApprovalPolicy::Block),
         notifications: vec![],
         dump_shared_store: false,
+        require_plan_approval: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -165,6 +167,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
                 "lead".into(),
                 "spawn 3".into(),
                 None,
+                pitboss_cli::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(5),
             )
             .await
@@ -240,6 +243,7 @@ async fn auto_approve_policy_responds_without_tui() {
         approval_policy: Some(ApprovalPolicy::AutoApprove),
         notifications: vec![],
         dump_shared_store: false,
+        require_plan_approval: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -267,6 +271,7 @@ async fn auto_approve_policy_responds_without_tui() {
             "lead".into(),
             "spawn".into(),
             None,
+            pitboss_cli::control::protocol::ApprovalKind::Action,
             Duration::from_millis(200),
         )
         .await
@@ -293,6 +298,7 @@ async fn auto_reject_policy_responds_without_tui() {
         approval_policy: Some(ApprovalPolicy::AutoReject),
         notifications: vec![],
         dump_shared_store: false,
+        require_plan_approval: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -320,10 +326,180 @@ async fn auto_reject_policy_responds_without_tui() {
             "lead".into(),
             "spawn".into(),
             None,
+            pitboss_cli::control::protocol::ApprovalKind::Action,
             Duration::from_millis(200),
         )
         .await
         .unwrap();
     assert!(!resp.approved);
     assert_eq!(resp.comment.as_deref(), Some("no operator available"));
+}
+
+#[tokio::test]
+async fn propose_plan_end_to_end_unblocks_spawn_gate() {
+    use pitboss_cli::control::protocol::{ApprovalKind, ApprovalPlanWire};
+    use pitboss_cli::mcp::tools::{
+        handle_propose_plan, handle_spawn_worker, ApprovalPlan, ProposePlanArgs, SpawnWorkerArgs,
+    };
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: true,
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    // Baseline: spawn_worker is gated.
+    let err = handle_spawn_worker(
+        &state,
+        SpawnWorkerArgs {
+            prompt: "early work".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("plan approval required"));
+
+    // Boot the control server so an operator can attach.
+    let sock = dir.path().join("plan-approval.sock");
+    let _h = pitboss_cli::control::server::start_control_server(
+        sock.clone(),
+        "0.4.5".into(),
+        run_id.to_string(),
+        "hierarchical".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    let mut client = fake_control_client::FakeControlClient::connect(&sock, "0.4.5")
+        .await
+        .unwrap();
+
+    // Drive the lead's propose_plan call on a background task.
+    let state_for_plan = state.clone();
+    let plan_handle = tokio::spawn(async move {
+        handle_propose_plan(
+            &state_for_plan,
+            ProposePlanArgs {
+                plan: ApprovalPlan {
+                    summary: "phase-1 migration".into(),
+                    rationale: Some("prep worktrees before fan-out".into()),
+                    resources: vec!["3 worktrees off main".into()],
+                    risks: vec![],
+                    rollback: Some("drop worktrees; nothing committed".into()),
+                },
+                timeout_secs: Some(5),
+            },
+        )
+        .await
+    });
+
+    // Expect the TUI to receive an ApprovalRequest with kind=Plan.
+    let ev = client
+        .recv_timeout(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .expect("approval_request event");
+    let (request_id, kind, plan) = match ev {
+        ControlEvent::ApprovalRequest {
+            request_id,
+            kind,
+            plan,
+            ..
+        } => (request_id, kind, plan),
+        other => panic!("expected ApprovalRequest, got {other:?}"),
+    };
+    assert_eq!(kind, ApprovalKind::Plan);
+    let plan = plan.expect("plan-kind requests must carry a structured plan");
+    assert_eq!(
+        plan,
+        ApprovalPlanWire {
+            summary: "phase-1 migration".into(),
+            rationale: Some("prep worktrees before fan-out".into()),
+            resources: vec!["3 worktrees off main".into()],
+            risks: vec![],
+            rollback: Some("drop worktrees; nothing committed".into()),
+        }
+    );
+
+    // Operator approves.
+    client
+        .send(&ControlOp::Approve {
+            request_id,
+            approved: true,
+            comment: None,
+            edited_summary: None,
+        })
+        .await
+        .unwrap();
+
+    let resp = tokio::time::timeout(Duration::from_secs(3), plan_handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(resp.approved);
+    assert!(state
+        .plan_approved
+        .load(std::sync::atomic::Ordering::Acquire));
+
+    // Now spawn_worker no longer hits the plan-approval gate. It may
+    // fail downstream (no git worktree set up) but the failure must not
+    // be the plan-approval one.
+    let res = handle_spawn_worker(
+        &state,
+        SpawnWorkerArgs {
+            prompt: "post-approval work".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+        },
+    )
+    .await;
+    if let Err(e) = &res {
+        assert!(
+            !e.to_string().contains("plan approval required"),
+            "plan-approval gate still firing after approval: {e}"
+        );
+    }
 }

@@ -42,6 +42,28 @@ fn is_default_pause_mode(m: &PauseMode) -> bool {
     matches!(m, PauseMode::Cancel)
 }
 
+/// Discriminator on an approval request: does the operator's y/n gate
+/// a single in-flight action, or the whole run's pre-flight plan?
+///
+/// `Action` (default) = `request_approval` tool. Mid-run, per-action.
+/// `Plan` = `propose_plan` tool. Pre-flight, gates `spawn_worker` when
+/// `[run].require_plan_approval = true`.
+///
+/// Field is `#[serde(default)]` so pre-v0.4.5 TUI clients that don't
+/// know about `kind` still parse `ApprovalRequest` events and render
+/// the modal exactly as before (as `Action`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalKind {
+    #[default]
+    Action,
+    Plan,
+}
+
+fn is_default_approval_kind(k: &ApprovalKind) -> bool {
+    matches!(k, ApprovalKind::Action)
+}
+
 /// An operation sent from the TUI (client) to the dispatcher (server).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -120,6 +142,10 @@ pub enum ControlEvent {
         /// pre-v0.4.5 dispatchers + simple approvals still work.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<ApprovalPlanWire>,
+        /// Action (in-flight) vs Plan (pre-flight). Defaults to Action
+        /// on the wire when absent, so pre-v0.4.5 dispatchers roundtrip.
+        #[serde(default, skip_serializing_if = "is_default_approval_kind")]
+        kind: ApprovalKind,
     },
     WorkersSnapshot {
         workers: Vec<WorkerSnapshotEntry>,
@@ -304,6 +330,7 @@ mod tests {
             task_id: "lead".into(),
             summary: "spawn 3 workers".into(),
             plan: None,
+            kind: ApprovalKind::default(),
         };
         assert_eq!(roundtrip_event(&ev), ev);
 
@@ -319,8 +346,63 @@ mod tests {
                 risks: vec!["slow to rebuild if live reads hit it".into()],
                 rollback: Some("restore from nightly snapshot".into()),
             }),
+            kind: ApprovalKind::Action,
         };
         assert_eq!(roundtrip_event(&ev2), ev2);
+
+        // Plan-kind form — pre-flight approval.
+        let ev3 = ControlEvent::ApprovalRequest {
+            request_id: "req-3".into(),
+            task_id: "lead".into(),
+            summary: "phase-1 migration plan".into(),
+            plan: Some(ApprovalPlanWire {
+                summary: "phase-1 migration plan".into(),
+                rationale: Some("prep before workers fan out".into()),
+                resources: vec!["3 worktrees".into()],
+                risks: vec![],
+                rollback: Some("no changes land yet".into()),
+            }),
+            kind: ApprovalKind::Plan,
+        };
+        assert_eq!(roundtrip_event(&ev3), ev3);
+    }
+
+    #[test]
+    fn approval_kind_defaults_and_omits_on_serialize() {
+        // Absence of `kind` on the wire must deserialize to Action.
+        let raw = r#"{"event":"approval_request","request_id":"r","task_id":"lead","summary":"s"}"#;
+        let ev: ControlEvent = serde_json::from_str(raw).unwrap();
+        match ev {
+            ControlEvent::ApprovalRequest { kind, .. } => {
+                assert_eq!(kind, ApprovalKind::Action);
+            }
+            _ => panic!("expected ApprovalRequest"),
+        }
+
+        // Default Action must be omitted on serialize (backward compat).
+        let ev = ControlEvent::ApprovalRequest {
+            request_id: "r".into(),
+            task_id: "lead".into(),
+            summary: "s".into(),
+            plan: None,
+            kind: ApprovalKind::Action,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(!s.contains("\"kind\""), "default kind must be elided: {s}");
+
+        // Non-default Plan must appear.
+        let ev = ControlEvent::ApprovalRequest {
+            request_id: "r".into(),
+            task_id: "lead".into(),
+            summary: "s".into(),
+            plan: None,
+            kind: ApprovalKind::Plan,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(
+            s.contains("\"kind\":\"plan\""),
+            "plan kind must be set: {s}"
+        );
     }
 
     #[test]

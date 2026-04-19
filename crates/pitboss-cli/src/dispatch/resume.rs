@@ -421,6 +421,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -515,6 +516,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
