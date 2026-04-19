@@ -448,3 +448,82 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         "sub-tree should be removed after reconciliation"
     );
 }
+
+#[tokio::test]
+async fn run_lease_blocks_cross_subtree_acquisition() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp1 = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt":"p","model":"claude-haiku-4-5","budget_usd":1.0,"max_workers":1}),
+        )
+        .await
+        .unwrap();
+    let s1 = resp1["sublead_id"]
+        .as_str()
+        .expect("sublead_id")
+        .to_string();
+    let resp2 = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt":"p","model":"claude-haiku-4-5","budget_usd":1.0,"max_workers":1}),
+        )
+        .await
+        .unwrap();
+    let s2 = resp2["sublead_id"]
+        .as_str()
+        .expect("sublead_id")
+        .to_string();
+
+    // S1 acquires the lease
+    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1, "sublead")
+        .await
+        .unwrap();
+    let acq1 = s1_client
+        .call_tool(
+            "run_lease_acquire",
+            json!({"key":"output.json","ttl_secs":60}),
+        )
+        .await;
+    assert!(acq1.is_ok(), "s1 should acquire");
+
+    // S2 tries the same key — must fail with holder info
+    let mut s2_client = FakeMcpClient::connect_as(&socket, &s2, "sublead")
+        .await
+        .unwrap();
+    let acq2 = s2_client
+        .call_tool(
+            "run_lease_acquire",
+            json!({"key":"output.json","ttl_secs":60}),
+        )
+        .await;
+    assert!(acq2.is_err(), "s2 should be blocked by s1's lease");
+    let err = format!("{:?}", acq2.unwrap_err());
+    assert!(
+        err.contains(&s1),
+        "error should mention current holder: {err}"
+    );
+
+    // S1 releases; S2 can now acquire
+    let _rel1 = s1_client
+        .call_tool("run_lease_release", json!({"key":"output.json"}))
+        .await
+        .unwrap();
+    let acq3 = s2_client
+        .call_tool(
+            "run_lease_acquire",
+            json!({"key":"output.json","ttl_secs":60}),
+        )
+        .await;
+    assert!(acq3.is_ok(), "s2 should acquire after s1 releases");
+}

@@ -64,6 +64,27 @@ struct CallerMeta {
     actor_role: String,
 }
 
+#[allow(dead_code)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct RunLeaseAcquireRequest {
+    key: String,
+    ttl_secs: u64,
+    /// Caller identity injected by mcp-bridge (actor_id + actor_role).
+    #[serde(rename = "_meta", default)]
+    #[schemars(skip)]
+    meta: Option<CallerMeta>,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct RunLeaseReleaseRequest {
+    key: String,
+    /// Caller identity injected by mcp-bridge (actor_id + actor_role).
+    #[serde(rename = "_meta", default)]
+    #[schemars(skip)]
+    meta: Option<CallerMeta>,
+}
+
 /// Compute the socket path for a given run. Falls back to the run_dir if
 /// $XDG_RUNTIME_DIR is unset or non-writable.
 pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
@@ -631,6 +652,49 @@ impl PitbossHandler {
             Err(e) => Err(shared_store_err(&e)),
         }
     }
+
+    #[tool(
+        name = "run_lease_acquire",
+        description = "Acquire a run-global lease for cross-sub-tree resource coordination. Use for resources accessed from multiple sub-trees (e.g., operator's filesystem). Use per-layer /leases/* for sub-tree-internal coordination."
+    )]
+    async fn run_lease_acquire(
+        &self,
+        Parameters(req): Parameters<RunLeaseAcquireRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor_id = extract_actor_id(&req.meta)?;
+        let ttl = std::time::Duration::from_secs(req.ttl_secs);
+        match self
+            .state
+            .run_leases
+            .try_acquire(&req.key, &actor_id, ttl)
+            .await
+        {
+            Ok(handle) => to_structured_result(&serde_json::json!({
+                "acquired": true,
+                "key": handle.key,
+                "holder": handle.holder
+            })),
+            Err(current_holder) => Err(ErrorData::invalid_request(
+                format!("lease '{}' currently held by {}", req.key, current_holder),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
+        name = "run_lease_release",
+        description = "Release a run-global lease previously acquired via run_lease_acquire. No-op if not held by caller."
+    )]
+    async fn run_lease_release(
+        &self,
+        Parameters(req): Parameters<RunLeaseReleaseRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor_id = extract_actor_id(&req.meta)?;
+        let released = self.state.run_leases.release(&req.key, &actor_id).await;
+        to_structured_result(&serde_json::json!({
+            "released": released
+        }))
+    }
 }
 
 #[tool_handler]
@@ -674,6 +738,18 @@ fn extract_and_check_root_lead(meta: &Option<CallerMeta>) -> Result<(), ErrorDat
     }
 
     Ok(())
+}
+
+/// Extract the caller's actor_id from the request's _meta field.
+/// Available to all actors (root lead, sub-leads, workers).
+fn extract_actor_id(meta: &Option<CallerMeta>) -> Result<String, ErrorData> {
+    let Some(m) = meta else {
+        return Err(ErrorData::invalid_request(
+            String::from("caller identity required (missing _meta)"),
+            None,
+        ));
+    };
+    Ok(m.actor_id.clone())
 }
 
 /// Serialize a value to `CallToolResult::structured(json)`. Used for the
