@@ -10,7 +10,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::dispatch::actor::ActorId;
+use crate::control::protocol::{ControlEvent, EventEnvelope};
+use crate::dispatch::actor::{ActorId, ActorPath};
 use crate::dispatch::layer::LayerState;
 use crate::dispatch::state::DispatchState;
 use crate::manifest::resolve::ResolvedManifest;
@@ -182,6 +183,28 @@ pub async fn spawn_sublead(
             .await
             .insert(sublead_id.clone(), sub_layer.clone());
 
+        // Emit SubleadSpawned lifecycle event to the control plane.
+        {
+            let (budget_usd_val, max_workers_val) = match &envelope {
+                ResolvedEnvelope::Owned {
+                    budget_usd,
+                    max_workers,
+                    ..
+                } => (Some(*budget_usd), Some(*max_workers)),
+                ResolvedEnvelope::SharedPool => (None, None),
+            };
+            let ev = EventEnvelope {
+                actor_path: ActorPath::new(["root", sublead_id.as_str()]),
+                event: ControlEvent::SubleadSpawned {
+                    sublead_id: sublead_id.clone(),
+                    budget_usd: budget_usd_val,
+                    max_workers: max_workers_val,
+                    read_down: req.read_down,
+                },
+            };
+            state.root.broadcast_control_event(ev).await;
+        }
+
         // I-1: If root has entered cascade-drain phase AFTER this read-lock snapshot,
         // immediately drain the new sub-tree's cancel token before spawning the session.
         // This guarantees any sub-lead spawned post-drain inherits the cancellation
@@ -323,7 +346,6 @@ pub async fn reconcile_terminated_sublead(
         *spent += actual_spend;
     }
 
-    let _ = unspent; // logged for observability
     tracing::info!(
         sublead_id = %sublead_id,
         reserved = original_reservation_usd,
@@ -331,6 +353,24 @@ pub async fn reconcile_terminated_sublead(
         returned = unspent,
         "sub-lead budget reconciled"
     );
+
+    // Emit SubleadTerminated lifecycle event to the control plane.
+    // TODO(Task 2.3): thread the actual terminal outcome ("success" |
+    // "cancel" | "timeout" | "error") from the sub-lead's Claude session
+    // exit status. For now we default to "success" since reconcile is
+    // only called on clean completion in the current stub.
+    {
+        let ev = EventEnvelope {
+            actor_path: ActorPath::new(["root", sublead_id]),
+            event: ControlEvent::SubleadTerminated {
+                sublead_id: sublead_id.to_string(),
+                spent_usd: actual_spend,
+                unspent_usd: unspent,
+                outcome: "success".to_string(),
+            },
+        };
+        state.root.broadcast_control_event(ev).await;
+    }
 
     // Release any run-global leases the sub-lead was holding
     let released_count = state.run_leases.release_all_held_by(sublead_id).await;

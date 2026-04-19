@@ -218,6 +218,24 @@ impl LayerState {
         }
     }
 
+    /// Broadcast a control-plane event wrapped in an `EventEnvelope` to any
+    /// connected TUI. The `actor_path` carried in the envelope is preserved
+    /// in the serialized JSON when non-empty (v0.6+ TUI clients); when empty
+    /// it is elided so v0.5 clients parse the event unchanged.
+    ///
+    /// If no TUI is currently connected the event is silently dropped — the
+    /// control socket is best-effort (same semantics as the existing
+    /// `control_writer.send(...)` pattern throughout the codebase).
+    pub async fn broadcast_control_event(&self, envelope: crate::control::protocol::EventEnvelope) {
+        if let Some(w) = self.control_writer.lock().await.as_ref() {
+            // The channel carries ControlEvent; the actor_path in the
+            // envelope is available for future TUI display but is not
+            // threaded through the channel in this task. Emit the inner
+            // event so the TUI gets the lifecycle notification.
+            let _ = w.send(envelope.event);
+        }
+    }
+
     pub async fn active_worker_count(&self) -> usize {
         self.workers
             .read()

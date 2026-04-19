@@ -66,6 +66,14 @@ impl ActorPath {
     pub fn depth(&self) -> usize {
         self.0.len()
     }
+
+    /// Returns `true` if the path contains no segments.
+    /// Used as a `skip_serializing_if` predicate on `EventEnvelope.actor_path`
+    /// to keep the wire format backward-compatible: an empty path is simply
+    /// absent from the serialized JSON.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 #[cfg(test)]
