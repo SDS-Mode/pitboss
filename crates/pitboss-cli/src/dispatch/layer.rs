@@ -101,7 +101,9 @@ impl std::fmt::Debug for LayerState {
 impl LayerState {
     /// Constructor mirroring the existing `DispatchState::new` 13-argument
     /// signature exactly. The `lead_id` argument names the root lead (or
-    /// sub-lead) that owns this layer.
+    /// sub-lead) that owns this layer. The `original_reservation_usd`
+    /// parameter is `None` for the root layer and `Some(amount)` for
+    /// sub-tree layers (the budget reserved at spawn time).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         run_id: Uuid,
@@ -117,6 +119,7 @@ impl LayerState {
         approval_policy: ApprovalPolicy,
         notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
         shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
+        original_reservation_usd: Option<f64>,
     ) -> Self {
         let (done_tx, _) = broadcast::channel(64);
         Self {
@@ -147,7 +150,7 @@ impl LayerState {
             shared_store,
             worker_pids: RwLock::new(HashMap::new()),
             plan_approved: std::sync::atomic::AtomicBool::new(false),
-            original_reservation_usd: None,
+            original_reservation_usd,
         }
     }
 
@@ -220,6 +223,7 @@ mod tests {
             ApprovalPolicy::Block,
             None,
             Arc::new(crate::shared_store::SharedStore::new()),
+            None,
         );
         (dir, layer)
     }

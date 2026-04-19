@@ -181,6 +181,7 @@ impl DispatchState {
             approval_policy,
             notification_router,
             shared_store,
+            None,
         ));
         Self {
             root,

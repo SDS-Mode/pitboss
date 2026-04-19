@@ -172,6 +172,7 @@ pub async fn spawn_sublead(
             // No notification router for sub-trees — root router handles run events.
             None,
             sub_store,
+            reserved_amount,
         ));
 
         // 8. Register sub-tree LayerState on root DispatchState.
@@ -287,17 +288,19 @@ async fn spawn_sublead_session(
 /// Idempotent: calling twice for the same sublead_id is a no-op the
 /// second time (sub-tree LayerState is removed on first call).
 ///
+/// The original reservation amount is read from `sub_layer.original_reservation_usd`,
+/// which was set when the sub-layer was constructed by `spawn_sublead`.
+///
 /// TODO(Task 2.3/Task 3.x): Wire the call site in the dispatch event loop
 /// (hierarchical.rs or runner.rs). When a sub-lead's Claude subprocess emits
 /// its terminal Done event and flows through wait_actor, call this function
-/// with the sub-lead's id and the original_reservation_usd stored in the
+/// with the sub-lead's id. The original reservation is now read from the
 /// sub-tree's LayerState.original_reservation_usd field. For Phase 2 (no real
 /// sub-lead session yet), the test calls the helper directly; the integration
 /// lands when full sub-lead session wiring (Task 2.3) is complete.
 pub async fn reconcile_terminated_sublead(
     state: &Arc<DispatchState>,
     sublead_id: &str,
-    original_reservation_usd: f64,
 ) -> Result<()> {
     let sub_layer_opt = state.subleads.write().await.remove(sublead_id);
     let Some(sub_layer) = sub_layer_opt else {
@@ -306,6 +309,7 @@ pub async fn reconcile_terminated_sublead(
     };
 
     let actual_spend = *sub_layer.spent_usd.lock().await;
+    let original_reservation_usd = sub_layer.original_reservation_usd.unwrap_or(0.0);
     let unspent = (original_reservation_usd - actual_spend).max(0.0);
 
     // Release the original reservation in full

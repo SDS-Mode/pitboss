@@ -246,9 +246,24 @@ async fn sublead_cannot_call_spawn_sublead() {
 
 #[tokio::test]
 async fn unspent_sublead_envelope_returns_to_root_pool() {
+    use pitboss_cli::dispatch::sublead::SubleadSpawnRequest;
+
     let (_dir, state) = mk_state_with_subleads();
-    // Reserve $5 envelope for a sub-lead
-    *state.root.reserved_usd.lock().await = 5.0;
+    // Spawn a sub-lead with $5.0 budget via spawn_sublead (the real path).
+    let req = SubleadSpawnRequest {
+        prompt: "test prompt".into(),
+        model: "claude-haiku-4-5".into(),
+        budget_usd: Some(5.0),
+        max_workers: Some(2),
+        lead_timeout_secs: Some(1800),
+        initial_ref: Default::default(),
+        read_down: false,
+    };
+    let sublead_id = pitboss_cli::dispatch::sublead::spawn_sublead(&state, req)
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // Verify the reservation was made
     assert_eq!(*state.root.reserved_usd.lock().await, 5.0);
 
     // Simulate sub-lead spending only $2 then terminating.
@@ -256,31 +271,14 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
     // workers complete and accumulate spend in the sub-tree's
     // LayerState.spent_usd; the reconciliation is triggered by the
     // sub-lead's terminal Event::Result.)
-    let sublead_id = "sublead-x";
-    let sub_layer = std::sync::Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
-        state.root.run_id,
-        state.root.manifest.clone(),
-        state.root.store.clone(),
-        pitboss_core::session::CancelToken::new(),
-        sublead_id.into(),
-        state.root.spawner.clone(),
-        state.root.claude_binary.clone(),
-        state.root.wt_mgr.clone(),
-        pitboss_core::worktree::CleanupPolicy::Never,
-        state.root.run_subdir.clone(),
-        pitboss_cli::dispatch::state::ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
-    *sub_layer.spent_usd.lock().await = 2.0;
-    state
-        .subleads
-        .write()
-        .await
-        .insert(sublead_id.into(), sub_layer);
+    {
+        let subleads = state.subleads.read().await;
+        let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
+        *sub_layer.spent_usd.lock().await = 2.0;
+    }
 
-    // Trigger reconciliation
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, sublead_id, 5.0)
+    // Trigger reconciliation (now without the original_reservation parameter)
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, &sublead_id)
         .await
         .unwrap();
 
@@ -288,4 +286,9 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
     // releasing $3 to reservable pool.
     assert_eq!(*state.root.reserved_usd.lock().await, 0.0);
     assert_eq!(*state.root.spent_usd.lock().await, 2.0);
+    // Verify sub-layer was removed during reconciliation
+    assert!(
+        state.subleads.read().await.get(&sublead_id).is_none(),
+        "sub-tree should be removed after reconciliation"
+    );
 }
