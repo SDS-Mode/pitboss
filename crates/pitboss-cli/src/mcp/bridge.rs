@@ -22,10 +22,39 @@ use tokio::net::UnixStream;
 
 use crate::cli::ActorRoleArg;
 
+const ALLOWED_ROLES: &[&str] = &["root_lead", "lead", "sublead", "worker"];
+
 fn role_str(role: ActorRoleArg) -> &'static str {
     match role {
         ActorRoleArg::Lead => "lead",
         ActorRoleArg::Worker => "worker",
+    }
+}
+
+/// Inject `_meta: {actor_id, actor_role}` into a JSON-RPC request's
+/// `params` if it is a `tools/call` request.
+/// The actor_role must be one of the allowed roles: "root_lead", "lead", "sublead", "worker".
+/// For non-`tools/call` requests, the request is left unchanged.
+pub fn inject_meta(request: &mut Value, actor_id: &str, actor_role: &str) {
+    if !ALLOWED_ROLES.contains(&actor_role) {
+        return; // silently ignore disallowed roles
+    }
+
+    if let Value::Object(obj) = request {
+        let method = obj.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        if method != "tools/call" {
+            return; // not a tools/call, leave unchanged
+        }
+
+        // tools/call — mutate params._meta
+        let params = obj.entry("params").or_insert(Value::Object(Map::new()));
+        if let Value::Object(params_obj) = params {
+            let meta = serde_json::json!({
+                "actor_id": actor_id,
+                "actor_role": actor_role,
+            });
+            params_obj.insert("_meta".to_string(), meta);
+        }
     }
 }
 
@@ -49,6 +78,11 @@ pub(crate) fn inject_meta_line(line: &[u8], actor_id: &str, actor_role: &str) ->
     let Value::Object(mut obj) = parsed else {
         return Ok(line.to_vec());
     };
+
+    // Validate actor_role against allowed roles
+    if !ALLOWED_ROLES.contains(&actor_role) {
+        return Ok(line.to_vec()); // reject disallowed roles
+    }
 
     let method = obj.get("method").and_then(|v| v.as_str()).unwrap_or("");
     if method != "tools/call" {

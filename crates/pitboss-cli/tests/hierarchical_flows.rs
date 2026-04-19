@@ -290,3 +290,20 @@ async fn wait_actor_alias_resolves_worker_id() {
 
     client.close().await.unwrap();
 }
+
+#[test]
+fn mcp_bridge_accepts_sublead_role_in_meta() {
+    use pitboss_cli::mcp::bridge::inject_meta;
+    use serde_json::json;
+
+    let mut request = json!({
+        "method": "tools/call",
+        "params": { "name": "spawn_worker", "arguments": {} }
+    });
+    inject_meta(&mut request, "sublead-1", "sublead");
+    let meta = request
+        .pointer("/params/_meta")
+        .expect("_meta should be injected");
+    assert_eq!(meta["actor_id"], "sublead-1");
+    assert_eq!(meta["actor_role"], "sublead");
+}
