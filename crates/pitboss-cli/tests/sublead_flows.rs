@@ -91,3 +91,60 @@ async fn spawn_sublead_tool_is_exposed_to_root() {
         "spawn_sublead should be in the root lead's MCP toolset"
     );
 }
+
+#[tokio::test]
+async fn spawn_sublead_creates_isolated_layer() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Task 2.3 adds role-based authz (connect_as). For Task 2.2 we simply
+    // connect with the default identity — the role check is not yet enforced.
+    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let resp = client
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "execute phase 1",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 5.0,
+                "max_workers": 4,
+                "lead_timeout_secs": 1800,
+                "initial_ref": { "plan": "do thing" },
+                "read_down": false
+            }),
+        )
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // Response should include the new sublead_id.
+    let sublead_id = resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field");
+    assert!(sublead_id.starts_with("sublead-"), "got id: {sublead_id}");
+
+    // The sub-tree LayerState should now exist on DispatchState.
+    let subleads = state.subleads.read().await;
+    assert!(
+        subleads.contains_key(sublead_id),
+        "sub-tree layer should be registered"
+    );
+
+    // The sub-tree's /ref/plan should be seeded.
+    let layer = subleads.get(sublead_id).unwrap();
+    let entry = layer
+        .shared_store
+        .get("/ref/plan")
+        .await
+        .expect("layer shared_store should have /ref/plan");
+    let plan_value: serde_json::Value =
+        serde_json::from_slice(&entry.value).expect("value should be valid JSON");
+    assert_eq!(plan_value, json!("do thing"));
+
+    // Root's reservation should reflect the sub-lead's envelope.
+    assert_eq!(*state.root.reserved_usd.lock().await, 5.0);
+}

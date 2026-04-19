@@ -7,6 +7,7 @@ pub mod resume;
 pub mod runner;
 pub mod signals;
 pub mod state;
+pub mod sublead;
 pub mod summary;
 
 pub use probe::probe_claude;

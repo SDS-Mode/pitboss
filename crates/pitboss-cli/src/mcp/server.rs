@@ -145,17 +145,30 @@ impl PitbossHandler {
 
     #[tool(
         name = "spawn_sublead",
-        description = "Create a new sub-tree with its own envelope. Only available to the root lead when allow_subleads=true. Returns the sublead_id."
+        description = "Create a new sub-tree with its own envelope. Only available to the root lead when allow_subleads=true. Returns {sublead_id}."
     )]
     async fn spawn_sublead(
         &self,
-        Parameters(_req): Parameters<SpawnSubleadRequest>,
+        Parameters(req): Parameters<SpawnSubleadRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Phase 2 stub — full implementation in Task 2.2.
-        Err(ErrorData::internal_error(
-            "spawn_sublead not yet implemented".to_string(),
-            None,
-        ))
+        use crate::dispatch::sublead::{spawn_sublead as do_spawn, SubleadSpawnRequest};
+
+        let spawn_req = SubleadSpawnRequest {
+            prompt: req.prompt,
+            model: req.model,
+            budget_usd: req.budget_usd,
+            max_workers: req.max_workers,
+            lead_timeout_secs: req.lead_timeout_secs,
+            initial_ref: req.initial_ref,
+            read_down: req.read_down,
+        };
+
+        match do_spawn(&self.state, spawn_req).await {
+            Ok(sublead_id) => {
+                to_structured_result(&serde_json::json!({ "sublead_id": sublead_id }))
+            }
+            Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
+        }
     }
 
     #[tool(description = "Non-blocking status poll for a worker. Returns state + partial data.")]
