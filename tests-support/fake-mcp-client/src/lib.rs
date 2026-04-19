@@ -68,16 +68,20 @@ impl FakeMcpClient {
             }
         };
 
-        // Inject _meta if identity is recorded
+        // Inject _meta if identity is recorded AND not already present in arguments.
+        // This allows tests to explicitly pass _meta (e.g., for shared_store tests
+        // that pass specific actor roles) to override the default.
         if let (Some(ref actor_id), Some(ref actor_role)) = (&self.actor_id, &self.actor_role) {
             if let Some(ref mut args_obj) = arguments {
-                args_obj.insert(
-                    "_meta".to_string(),
-                    serde_json::json!({
-                        "actor_id": actor_id,
-                        "actor_role": actor_role,
-                    }),
-                );
+                if !args_obj.contains_key("_meta") {
+                    args_obj.insert(
+                        "_meta".to_string(),
+                        serde_json::json!({
+                            "actor_id": actor_id,
+                            "actor_role": actor_role,
+                        }),
+                    );
+                }
             }
         }
 
