@@ -247,6 +247,13 @@ In the TUI, leads render with `[LEAD] <id>` in a cyan border; workers show
 `— N workers spawned`. As workers complete, their tiles mark done without
 clearing — full history stays visible for the run.
 
+### Depth-2 sub-leads (v0.6+)
+
+A root lead can spawn sub-leads at runtime, each with its own envelope
+(budget, worker cap, timeout) and isolated coordination layer. Useful
+when a project decomposes into orthogonal phases that each need their
+own clean context. See `AGENTS.md` for the full model.
+
 ### Resume
 
 `pitboss resume <run-id>` re-deals any prior run.

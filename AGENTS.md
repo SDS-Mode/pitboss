@@ -607,6 +607,85 @@ spend envelope.
 
 ---
 
+## Depth-2 sub-leads (v0.6+)
+
+Pitboss supports a single optional level of nesting beyond the original
+hierarchical mode. A root lead with `allow_subleads = true` can spawn
+sub-leads at runtime via `spawn_sublead`. Each sub-lead is itself a
+Claude session with its own workers. Workers remain terminal — they
+cannot spawn anything.
+
+### When to use sub-leads
+
+Use sub-leads when the root lead's plan would otherwise require holding
+context for orthogonal sub-tasks simultaneously (e.g., "phase 1 and
+phase 2 both need their own decomposition tree, but they don't share
+implementation details"). Each sub-lead gets a clean Claude session
+focused on its own slice.
+
+Use plain workers (no sub-leads) when each unit of work is a single
+self-contained task. Sub-leads add coordination overhead; workers are
+cheaper.
+
+### Manifest
+
+```toml
+[lead]
+prompt = "..."
+allow_subleads = true
+max_subleads = 8                # optional cap
+max_sublead_budget_usd = 5.00   # optional cap on per-sub-lead envelope
+max_workers_across_tree = 20    # optional cap on total live workers
+
+[lead.sublead_defaults]         # optional defaults inherited by spawn_sublead
+budget_usd = 2.00
+max_workers = 4
+lead_timeout_secs = 1800
+read_down = false
+```
+
+### `spawn_sublead` MCP tool
+
+```
+spawn_sublead(
+  prompt: string,
+  model: string,
+  budget_usd: float,           # required unless read_down=true
+  max_workers: u32,            # required unless read_down=true
+  lead_timeout_secs: u64?,
+  initial_ref: { string: any }?,
+  read_down: bool = false,
+)
+→ sublead_id: string
+```
+
+### Authz model
+
+- **Strict tree by default.** Root cannot read into a sub-tree unless `read_down = true` was passed at spawn time.
+- **Strict peer visibility.** At any layer, `/peer/<X>` is readable only by X itself, that layer's lead, or the operator (TUI). Workers within a sub-tree do NOT see each other's peer slots — coordinate via `/shared/*` or leases.
+- **Operator (TUI) is super-user.** Read/write across all layers regardless of read-down.
+
+### Lease scope-selection guidance
+
+- Use `/leases/*` (per-layer KV namespace) for resources internal to the sub-tree (e.g., a worker-coordinated counter for "next chunk to process within S1").
+- Use `run_lease_acquire(key, ttl)` (run-global, separate primitive) for resources that span sub-trees (e.g., a path on the operator's filesystem that any sub-tree might write to).
+- When in doubt: prefer `run_lease_acquire`. Over-serializing is safer than silent cross-tree collision.
+
+### Approval routing
+
+- All approvals route to the operator via TUI. Root lead is not an approval authority.
+- Set `[[approval_policy]]` rules in the manifest to auto-approve/auto-reject categories of approvals before they reach the operator. The matcher is deterministic — never evaluated by an LLM.
+
+### Kill-with-reason
+
+`cancel_worker(target, reason)` — when invoked with a reason, the killed actor's direct parent lead receives a synthetic reprompt with the reason text. Use this to correct a misbehaving sub-tree without a separate reprompt round-trip.
+
+### Cancel cascade
+
+Cancellation is depth-first. Root cancel → sub-leads → their workers, with the existing two-phase drain at each layer.
+
+---
+
 ## Writing manifests from natural-language requests
 
 When a human asks you (the agent) to "run claude on each X in Y and
