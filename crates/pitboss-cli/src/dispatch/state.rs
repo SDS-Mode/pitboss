@@ -1,8 +1,16 @@
-//! Shared state for a single hierarchical run. Held in an Arc and shared
-//! between the dispatch runner (which writes TaskRecords) and the MCP server
-//! (which reads worker status, enforces caps, enqueues spawns).
+//! Run-level dispatch state. Wraps a root `LayerState` (always present)
+//! plus a map of sub-tree `LayerState`s (empty in depth-1 runs;
+//! populated as the root lead spawns sub-leads). The run-global
+//! `LeaseRegistry` lives here too — added in Phase 3.
+//!
+//! Backward-compatible constructor signature: depth-1 callers continue
+//! to use `DispatchState::new(...)` with the existing 13 arguments.
+//!
+//! `DispatchState` implements `Deref<Target = LayerState>` so every
+//! existing field access (e.g. `state.workers`, `state.cancel`) continues
+//! to work without callers knowing about the indirection.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,10 +18,18 @@ use pitboss_core::process::ProcessSpawner;
 use pitboss_core::session::CancelToken;
 use pitboss_core::store::{SessionStore, TaskRecord};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
+use crate::dispatch::layer::LayerState;
 use crate::manifest::resolve::ResolvedManifest;
+
+// ── Re-exported public types (keep in this module for back-compat) ──────────
+//
+// Downstream code that does `use pitboss_cli::dispatch::state::WorkerState`
+// etc. continues to compile unchanged.
+
+pub use crate::dispatch::layer::LayerState as _LayerState;
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -98,87 +114,31 @@ pub struct QueuedApproval {
     pub responder: oneshot::Sender<ApprovalResponse>,
 }
 
+// ── DispatchState ────────────────────────────────────────────────────────────
+
+/// Run-level wrapper. Holds the root `LayerState` plus (in Phase 2+) a map
+/// of sub-tree `LayerState`s keyed by sub-lead id.
+///
+/// Implements `Deref<Target = LayerState>` so all existing callsites that
+/// access fields like `state.workers`, `state.cancel`, etc. compile unchanged.
 pub struct DispatchState {
-    pub run_id: Uuid,
-    pub manifest: ResolvedManifest,
-    pub store: Arc<dyn SessionStore>,
-    pub cancel: CancelToken,
-    pub lead_id: String,
-    /// Map of task_id → worker state. Lead is also tracked here for convenience.
-    pub workers: RwLock<HashMap<String, WorkerState>>,
-    /// Total USD cost spent so far (updated after each worker completes).
-    pub spent_usd: Mutex<f64>,
-    /// USD reserved for in-flight workers at spawn time. Incremented when a
-    /// worker is spawned (with its per-model cost estimate), decremented when
-    /// the worker completes and its actual cost is added to `spent_usd`.
-    /// The budget guard checks `spent + reserved + estimate > budget` so a
-    /// burst of spawns can't all pass before any completion updates state.
-    pub reserved_usd: Mutex<f64>,
-    /// Broadcast channel that emits a `task_id` whenever a worker transitions
-    /// to `Done`. Subscribed to by `wait_for_worker` handlers.
-    pub done_tx: broadcast::Sender<String>,
-    /// Per-worker CancelToken, keyed by task_id. Registered on spawn,
-    /// terminated by `cancel_worker`.
-    pub worker_cancels: RwLock<HashMap<String, CancelToken>>,
-    /// Per-worker prompt preview (first 80 chars of the worker's prompt).
-    /// Populated at spawn time; surfaced by `list_workers` / `worker_status`.
-    pub worker_prompts: RwLock<HashMap<String, String>>,
-    /// Per-worker resolved model, keyed by task_id. Populated at spawn time so
-    /// `estimate_new_worker_cost` and cost accumulation know the right rate.
-    pub worker_models: RwLock<HashMap<String, String>>,
-    /// Per-worker reserved cost (USD) at spawn time. On completion, the
-    /// reservation is removed from `reserved_usd` and the worker's *actual*
-    /// cost is added to `spent_usd`.
-    pub worker_reservations: RwLock<HashMap<String, f64>>,
-    /// Dependencies needed to actually launch worker subprocesses. These are
-    /// threaded from `run_hierarchical` so the MCP tool handlers can call
-    /// into the same SessionHandle/WorktreeManager pipeline used by the flat
-    /// dispatcher.
-    pub spawner: Arc<dyn ProcessSpawner>,
-    pub claude_binary: PathBuf,
-    pub wt_mgr: Arc<WorktreeManager>,
-    pub cleanup_policy: CleanupPolicy,
-    /// The per-run subdirectory where worker logs/artifacts land (`run_dir/<run_id>/`).
-    pub run_subdir: PathBuf,
-    /// Approval bridge: maps request_id → sender that completes when the
-    /// TUI responds to an approval request. Seeded by `ApprovalBridge::request`,
-    /// drained by the `approve` control op.
-    pub approval_bridge: Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>,
-    /// Queued approval requests waiting for a TUI to attach.
-    pub approval_queue: Mutex<VecDeque<QueuedApproval>>,
-    /// Approval policy from the manifest.
-    pub approval_policy: ApprovalPolicy,
-    /// Outbound control-socket event channel. Set when a TUI is connected; the
-    /// control server clears it on disconnect.
-    pub control_writer:
-        Mutex<Option<mpsc::UnboundedSender<crate::control::protocol::ControlEvent>>>,
-    /// Per-task event counters. Mutated by pause/continue/reprompt/approval
-    /// paths; read when building the final `TaskRecord`.
-    pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
-    /// v0.4.1: notification router, `None` when manifest has no
-    /// `[[notification]]` sections. Cloned into every call-site scope
-    /// where events fire (`approval_request`, `run_finished`,
-    /// `budget_exceeded`).
-    pub notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
-    /// In-memory shared store for hub-mediated lead ↔ worker coordination.
-    pub shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
-    /// Per-worker OS pid, published by the SessionHandle as soon as the
-    /// child is spawned. Used by the SIGSTOP freeze-pause path to
-    /// signal the process directly without going through the
-    /// `ChildProcess` interface (the Box lives inside the session task
-    /// after we've already moved the handle). Value 0 means "not yet
-    /// spawned" (pre-init) — callers skip signaling in that state.
-    pub worker_pids: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
-    /// Plan-approval gate. Starts `false`. Flipped to `true` when
-    /// `propose_plan` returns an approved response. `spawn_worker`
-    /// checks this atomic when `manifest.require_plan_approval` is set
-    /// and bails with a helpful error until the operator approves.
-    /// Always `false` when `require_plan_approval` is off; nothing
-    /// reads it in that case.
-    pub plan_approved: std::sync::atomic::AtomicBool,
+    pub root: Arc<LayerState>,
+    /// Sub-tree layers keyed by sub-lead id. Empty in the depth-1 case.
+    /// Populated by `spawn_sublead` in Phase 2.
+    pub subleads: RwLock<HashMap<String, Arc<LayerState>>>,
+}
+
+impl std::ops::Deref for DispatchState {
+    type Target = LayerState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.root
+    }
 }
 
 impl DispatchState {
+    /// Create a new run-level state. Argument order and types are identical
+    /// to v0.5 so every existing callsite compiles unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         run_id: Uuid,
@@ -195,59 +155,31 @@ impl DispatchState {
         notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
         shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
     ) -> Self {
-        let (done_tx, _) = broadcast::channel(64);
-        Self {
+        let root = Arc::new(LayerState::new(
             run_id,
             manifest,
             store,
             cancel,
             lead_id,
-            workers: RwLock::new(HashMap::new()),
-            spent_usd: Mutex::new(0.0),
-            reserved_usd: Mutex::new(0.0),
-            done_tx,
-            worker_cancels: RwLock::new(HashMap::new()),
-            worker_prompts: RwLock::new(HashMap::new()),
-            worker_models: RwLock::new(HashMap::new()),
-            worker_reservations: RwLock::new(HashMap::new()),
             spawner,
             claude_binary,
             wt_mgr,
             cleanup_policy,
             run_subdir,
-            approval_bridge: Mutex::new(HashMap::new()),
-            approval_queue: Mutex::new(VecDeque::new()),
             approval_policy,
-            control_writer: Mutex::new(None),
-            worker_counters: RwLock::new(HashMap::new()),
             notification_router,
             shared_store,
-            worker_pids: RwLock::new(HashMap::new()),
-            plan_approved: std::sync::atomic::AtomicBool::new(false),
+        ));
+        Self {
+            root,
+            subleads: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn active_worker_count(&self) -> usize {
-        self.workers
-            .read()
-            .await
-            .values()
-            .filter(|w| {
-                matches!(
-                    w,
-                    WorkerState::Pending
-                        | WorkerState::Running { .. }
-                        | WorkerState::Paused { .. }
-                        | WorkerState::Frozen { .. }
-                )
-            })
-            .count()
-    }
-
-    pub async fn budget_remaining(&self) -> Option<f64> {
-        let budget = self.manifest.budget_usd?;
-        let spent = *self.spent_usd.lock().await;
-        Some((budget - spent).max(0.0))
+    /// Accessor for the root layer. Used where callers need an explicit
+    /// `Arc<LayerState>` rather than transparent field access.
+    pub fn root_layer(&self) -> &Arc<LayerState> {
+        &self.root
     }
 }
 
@@ -282,7 +214,7 @@ mod tests {
         let run_id = Uuid::now_v7();
         let cancel = CancelToken::new();
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-        let wt_mgr = Arc::new(WorktreeManager::new());
+        let wt_mgr = Arc::new(pitboss_core::worktree::WorktreeManager::new());
         let run_subdir = dir.path().join(run_id.to_string());
         let state = Arc::new(DispatchState::new(
             run_id,

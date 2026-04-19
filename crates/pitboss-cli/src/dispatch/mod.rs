@@ -1,6 +1,7 @@
 pub mod actor;
 pub mod events;
 pub mod hierarchical;
+pub mod layer;
 pub mod probe;
 pub mod resume;
 pub mod runner;
