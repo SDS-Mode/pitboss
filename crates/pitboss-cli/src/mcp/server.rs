@@ -24,6 +24,33 @@ use crate::mcp::tools::{
     SpawnWorkerArgs, TaskIdArgs, WaitActorRequest, WaitForAnyArgs, WaitForWorkerArgs,
 };
 
+#[allow(dead_code)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct SpawnSubleadRequest {
+    /// The prompt the sub-lead's Claude session will start with.
+    prompt: String,
+    /// Model name for the sub-lead.
+    model: String,
+    /// Hard budget cap for this sub-tree, USD. Required unless
+    /// read_down=true (then None means "share root's pool").
+    #[serde(default)]
+    budget_usd: Option<f64>,
+    /// Hard worker count cap for this sub-tree.
+    #[serde(default)]
+    max_workers: Option<u32>,
+    /// Wall-clock cap on the sub-lead's Claude session, seconds.
+    #[serde(default)]
+    lead_timeout_secs: Option<u64>,
+    /// Snapshot data copied into the sub-tree's /ref/* at spawn time.
+    #[serde(default)]
+    initial_ref: std::collections::HashMap<String, serde_json::Value>,
+    /// If true, root gets read-only visibility into the sub-tree's
+    /// store; required for shared-pool resource mode (omitted budget/
+    /// max_workers).
+    #[serde(default)]
+    read_down: bool,
+}
+
 /// Compute the socket path for a given run. Falls back to the run_dir if
 /// $XDG_RUNTIME_DIR is unset or non-writable.
 pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
@@ -114,6 +141,21 @@ impl PitbossHandler {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
+    }
+
+    #[tool(
+        name = "spawn_sublead",
+        description = "Create a new sub-tree with its own envelope. Only available to the root lead when allow_subleads=true. Returns the sublead_id."
+    )]
+    async fn spawn_sublead(
+        &self,
+        Parameters(_req): Parameters<SpawnSubleadRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Phase 2 stub — full implementation in Task 2.2.
+        Err(ErrorData::internal_error(
+            "spawn_sublead not yet implemented".to_string(),
+            None,
+        ))
     }
 
     #[tool(description = "Non-blocking status poll for a worker. Returns state + partial data.")]

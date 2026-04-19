@@ -66,6 +66,19 @@ impl FakeMcpClient {
         }
     }
 
+    /// List all tools exposed by the server.
+    pub async fn list_tools(&mut self) -> Result<Vec<ToolInfo>> {
+        let result = self.inner.list_tools(None).await.context("list_tools")?;
+        Ok(result
+            .tools
+            .into_iter()
+            .map(|t| ToolInfo {
+                name: t.name.to_string(),
+                description: t.description.map(|d| d.to_string()),
+            })
+            .collect())
+    }
+
     /// Shut down the client, closing the MCP session cleanly.
     pub async fn close(self) -> Result<()> {
         // `cancel` drives the client to `QuitReason::Cancelled` and drops the
@@ -76,6 +89,12 @@ impl FakeMcpClient {
             .context("cancel mcp client session")?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: Option<String>,
 }
 
 #[cfg(test)]
