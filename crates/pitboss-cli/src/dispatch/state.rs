@@ -29,8 +29,6 @@ use crate::manifest::resolve::ResolvedManifest;
 // Downstream code that does `use pitboss_cli::dispatch::state::WorkerState`
 // etc. continues to compile unchanged.
 
-pub use crate::dispatch::layer::LayerState as _LayerState;
-
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum WorkerState {
@@ -128,11 +126,25 @@ pub struct DispatchState {
     pub subleads: RwLock<HashMap<String, Arc<LayerState>>>,
 }
 
+/// CAUTION: This Deref always resolves to the root layer, which is correct
+/// for depth-1 code. Phase 2+ code dispatching on `_meta.actor_role` MUST
+/// explicitly look up the correct layer: root-lead callers use `&state.root`,
+/// while sub-lead callers must call `state.subleads.read().await.get(sublead_id)`.
+/// See Phase 3.1's `resolve_layer_for_caller` helper for canonical resolution.
 impl std::ops::Deref for DispatchState {
     type Target = LayerState;
 
     fn deref(&self) -> &Self::Target {
         &self.root
+    }
+}
+
+impl std::fmt::Debug for DispatchState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchState")
+            .field("root", &self.root)
+            .field("subleads", &self.subleads.try_read().map(|g| g.len()).ok())
+            .finish()
     }
 }
 

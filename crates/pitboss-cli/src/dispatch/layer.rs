@@ -81,6 +81,20 @@ pub struct LayerState {
     pub plan_approved: std::sync::atomic::AtomicBool,
 }
 
+impl std::fmt::Debug for LayerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerState")
+            .field("run_id", &self.run_id)
+            .field("lead_id", &self.lead_id)
+            .field("workers", &self.workers.try_read().map(|g| g.len()).ok())
+            .field(
+                "worker_cancels",
+                &self.worker_cancels.try_read().map(|g| g.len()).ok(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl LayerState {
     /// Constructor mirroring the existing `DispatchState::new` 13-argument
     /// signature exactly. The `lead_id` argument names the root lead (or
