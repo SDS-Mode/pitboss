@@ -1216,7 +1216,13 @@ pub async fn handle_request_approval(
     );
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
-        .request(state.lead_id.clone(), args.summary, args.plan, timeout)
+        .request(
+            state.lead_id.clone(),
+            args.summary,
+            args.plan,
+            crate::control::protocol::ApprovalKind::Action,
+            timeout,
+        )
         .await
     {
         Ok(resp) => Ok(ApprovalToolResponse {

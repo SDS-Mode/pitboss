@@ -58,11 +58,15 @@ impl ApprovalBridge {
     /// responds, (b) the policy auto-resolves, or (c) `timeout` elapses.
     /// `plan` carries the typed structured fields (rationale, resources,
     /// risks, rollback); pass `None` for simple summary-only approvals.
+    /// `kind` distinguishes `request_approval` (in-flight, `Action`) from
+    /// `propose_plan` (pre-flight, `Plan`) — passed through to the TUI
+    /// modal so the operator can tell them apart.
     pub async fn request(
         &self,
         task_id: String,
         summary: String,
         plan: Option<crate::mcp::tools::ApprovalPlan>,
+        kind: crate::control::protocol::ApprovalKind,
         timeout: Duration,
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
@@ -109,6 +113,7 @@ impl ApprovalBridge {
                     task_id,
                     summary,
                     plan: plan.map(approval_plan_to_wire),
+                    kind,
                 };
                 // Best-effort send.
                 let _ = w.send(ev);
@@ -141,6 +146,7 @@ impl ApprovalBridge {
                             task_id,
                             summary,
                             plan,
+                            kind,
                             responder: tx,
                         });
                 }
@@ -268,6 +274,7 @@ mod tests {
                 "lead".into(),
                 "spawn 2".into(),
                 None,
+                crate::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(1),
             )
             .await
@@ -284,6 +291,7 @@ mod tests {
                 "lead".into(),
                 "spawn 2".into(),
                 None,
+                crate::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(1),
             )
             .await
@@ -301,6 +309,7 @@ mod tests {
                 "lead".into(),
                 "spawn 2".into(),
                 None,
+                crate::control::protocol::ApprovalKind::Action,
                 Duration::from_millis(50),
             )
             .await

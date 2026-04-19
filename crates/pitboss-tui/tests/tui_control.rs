@@ -67,6 +67,7 @@ fn approval_modal_overview_renders_summary() {
         task_id: "lead".into(),
         summary: "SPAWN THREE HOBBITS".into(),
         plan: None,
+        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
         sub_mode: ApprovalSubMode::Overview,
     };
 
@@ -86,6 +87,66 @@ fn approval_modal_overview_renders_summary() {
     assert!(
         text.contains("SPAWN THREE HOBBITS"),
         "modal should include the summary, got:\n{text}"
+    );
+}
+
+#[test]
+fn approval_modal_shows_plan_badge_for_plan_kind() {
+    let mut state = AppState::new(std::path::PathBuf::from("/tmp"), "run-1".into());
+    state.mode = Mode::ApprovalModal {
+        request_id: "req-1".into(),
+        task_id: "lead".into(),
+        summary: "phase-1 plan".into(),
+        plan: None,
+        kind: pitboss_cli::control::protocol::ApprovalKind::Plan,
+        sub_mode: ApprovalSubMode::Overview,
+    };
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| pitboss_tui::tui::render(frame, &state))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..24 {
+        for x in 0..100 {
+            text.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        text.push('\n');
+    }
+    assert!(
+        text.contains("PRE-FLIGHT PLAN"),
+        "plan-kind modal should show the pre-flight badge, got:\n{text}"
+    );
+}
+
+#[test]
+fn approval_modal_shows_action_badge_for_default_kind() {
+    let mut state = AppState::new(std::path::PathBuf::from("/tmp"), "run-1".into());
+    state.mode = Mode::ApprovalModal {
+        request_id: "req-1".into(),
+        task_id: "lead".into(),
+        summary: "delete staging index".into(),
+        plan: None,
+        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+        sub_mode: ApprovalSubMode::Overview,
+    };
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| pitboss_tui::tui::render(frame, &state))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..24 {
+        for x in 0..100 {
+            text.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        text.push('\n');
+    }
+    assert!(
+        text.contains("IN-FLIGHT ACTION"),
+        "action-kind modal should show the in-flight badge, got:\n{text}"
     );
 }
 

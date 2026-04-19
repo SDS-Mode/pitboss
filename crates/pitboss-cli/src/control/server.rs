@@ -213,6 +213,7 @@ async fn serve_connection(
                 task_id: q.task_id,
                 summary: q.summary,
                 plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
+                kind: q.kind,
             });
         }
     }

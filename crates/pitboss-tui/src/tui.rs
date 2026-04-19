@@ -243,6 +243,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             task_id,
             summary,
             plan,
+            kind,
             sub_mode,
         } => render_approval_modal(
             frame,
@@ -251,6 +252,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             task_id,
             summary,
             plan.as_ref(),
+            *kind,
             sub_mode,
         ),
         Mode::Normal | Mode::Detail { .. } => {}
@@ -1150,6 +1152,7 @@ fn render_approval_modal(
     task_id: &str,
     summary: &str,
     plan: Option<&pitboss_cli::control::protocol::ApprovalPlanWire>,
+    kind: pitboss_cli::control::protocol::ApprovalKind,
     sub_mode: &crate::state::ApprovalSubMode,
 ) {
     use crate::state::ApprovalSubMode;
@@ -1159,12 +1162,20 @@ fn render_approval_modal(
     let y = area.y + area.height.saturating_sub(modal_h) / 2;
     let modal = Rect::new(x, y, modal_w, modal_h);
     frame.render_widget(Clear, modal);
+    // Badge distinguishes pre-flight plan approvals from in-flight action
+    // approvals. Operators reading the modal need to know whether
+    // approving unblocks the *run* (Plan) or a *single action* (Action).
+    let badge = match kind {
+        pitboss_cli::control::protocol::ApprovalKind::Plan => "PRE-FLIGHT PLAN",
+        pitboss_cli::control::protocol::ApprovalKind::Action => "IN-FLIGHT ACTION",
+    };
     match sub_mode {
         ApprovalSubMode::Overview => {
             // When a typed plan is present, render structured fields as
             // a multi-section view. Plain summary otherwise.
-            let title =
-                format!(" Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel ");
+            let title = format!(
+                " [{badge}] Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel "
+            );
             let block = Block::default().borders(Borders::ALL).title(title);
             let lines = plan.map_or_else(
                 || {

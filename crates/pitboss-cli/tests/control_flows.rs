@@ -167,6 +167,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
                 "lead".into(),
                 "spawn 3".into(),
                 None,
+                pitboss_cli::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(5),
             )
             .await
@@ -270,6 +271,7 @@ async fn auto_approve_policy_responds_without_tui() {
             "lead".into(),
             "spawn".into(),
             None,
+            pitboss_cli::control::protocol::ApprovalKind::Action,
             Duration::from_millis(200),
         )
         .await
@@ -324,6 +326,7 @@ async fn auto_reject_policy_responds_without_tui() {
             "lead".into(),
             "spawn".into(),
             None,
+            pitboss_cli::control::protocol::ApprovalKind::Action,
             Duration::from_millis(200),
         )
         .await
