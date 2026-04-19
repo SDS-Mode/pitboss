@@ -32,9 +32,10 @@ fn role_str(role: ActorRoleArg) -> &'static str {
 }
 
 /// Inject `_meta: {actor_id, actor_role}` into a JSON-RPC request's
-/// `params` if it is a `tools/call` request.
+/// `params.arguments` if it is a `tools/call` request (matching MCP wire convention).
 /// The actor_role must be one of the allowed roles: "root_lead", "lead", "sublead", "worker".
 /// For non-`tools/call` requests, the request is left unchanged.
+/// Writes to `params.arguments._meta`, not `params._meta`, to match the wire-path behavior.
 pub fn inject_meta(request: &mut Value, actor_id: &str, actor_role: &str) {
     if !ALLOWED_ROLES.contains(&actor_role) {
         return; // silently ignore disallowed roles
@@ -46,14 +47,19 @@ pub fn inject_meta(request: &mut Value, actor_id: &str, actor_role: &str) {
             return; // not a tools/call, leave unchanged
         }
 
-        // tools/call — mutate params._meta
+        // tools/call — mutate params.arguments._meta
         let params = obj.entry("params").or_insert(Value::Object(Map::new()));
         if let Value::Object(params_obj) = params {
-            let meta = serde_json::json!({
-                "actor_id": actor_id,
-                "actor_role": actor_role,
-            });
-            params_obj.insert("_meta".to_string(), meta);
+            let arguments = params_obj
+                .entry("arguments")
+                .or_insert(Value::Object(Map::new()));
+            if let Value::Object(args_obj) = arguments {
+                let meta = serde_json::json!({
+                    "actor_id": actor_id,
+                    "actor_role": actor_role,
+                });
+                args_obj.insert("_meta".to_string(), meta);
+            }
         }
     }
 }
@@ -70,45 +76,19 @@ pub(crate) fn inject_meta_line(line: &[u8], actor_id: &str, actor_role: &str) ->
         line
     };
 
-    let parsed: Value = match serde_json::from_slice::<Value>(trimmed) {
+    let mut parsed: Value = match serde_json::from_slice::<Value>(trimmed) {
         Ok(v) => v,
         Err(_) => return Ok(line.to_vec()), // pass through on malformed input
     };
 
-    let Value::Object(mut obj) = parsed else {
+    let Value::Object(_) = parsed else {
         return Ok(line.to_vec());
     };
 
-    // Validate actor_role against allowed roles
-    if !ALLOWED_ROLES.contains(&actor_role) {
-        return Ok(line.to_vec()); // reject disallowed roles
-    }
+    // Delegate to inject_meta to handle the actual injection logic
+    inject_meta(&mut parsed, actor_id, actor_role);
 
-    let method = obj.get("method").and_then(|v| v.as_str()).unwrap_or("");
-    if method != "tools/call" {
-        let mut out = serde_json::to_vec(&Value::Object(obj))?;
-        if trailing_nl {
-            out.push(b'\n');
-        }
-        return Ok(out);
-    }
-
-    // tools/call — mutate params.arguments._meta
-    let params = obj.entry("params").or_insert(Value::Object(Map::new()));
-    if let Value::Object(params_obj) = params {
-        let arguments = params_obj
-            .entry("arguments")
-            .or_insert(Value::Object(Map::new()));
-        if let Value::Object(args_obj) = arguments {
-            let meta = serde_json::json!({
-                "actor_id": actor_id,
-                "actor_role": actor_role,
-            });
-            args_obj.insert("_meta".to_string(), meta);
-        }
-    }
-
-    let mut out = serde_json::to_vec(&Value::Object(obj))?;
+    let mut out = serde_json::to_vec(&parsed)?;
     if trailing_nl {
         out.push(b'\n');
     }

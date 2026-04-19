@@ -302,8 +302,8 @@ fn mcp_bridge_accepts_sublead_role_in_meta() {
     });
     inject_meta(&mut request, "sublead-1", "sublead");
     let meta = request
-        .pointer("/params/_meta")
-        .expect("_meta should be injected");
+        .pointer("/params/arguments/_meta")
+        .expect("_meta should be injected at params.arguments._meta");
     assert_eq!(meta["actor_id"], "sublead-1");
     assert_eq!(meta["actor_role"], "sublead");
 }
