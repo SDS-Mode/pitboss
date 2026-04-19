@@ -452,6 +452,7 @@ async fn lease_released_when_mcp_connection_drops() {
         approval_policy: None,
         notifications: vec![],
         dump_shared_store: false,
+        require_plan_approval: false,
     };
     let store_trait: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().into()));
     let run_id = Uuid::now_v7();

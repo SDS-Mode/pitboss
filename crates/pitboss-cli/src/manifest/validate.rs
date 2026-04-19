@@ -247,6 +247,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         }
     }
 
@@ -269,6 +270,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         f(&mut m);
         m
@@ -347,6 +349,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -372,6 +375,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("max_workers"), "got: {err}");
@@ -394,6 +398,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         assert!(validate(&r).is_err());
     }
@@ -415,6 +420,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         assert!(validate(&r).is_err());
     }
@@ -435,6 +441,7 @@ mod tests {
             approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");

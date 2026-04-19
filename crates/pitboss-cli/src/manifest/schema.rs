@@ -50,6 +50,12 @@ pub struct RunConfig {
     // NEW in v0.4.2 — write shared-store.json on finalize for post-mortem.
     #[serde(default)]
     pub dump_shared_store: bool,
+
+    // NEW in v0.4.5 — when true, the lead must call `propose_plan` and have
+    // the resulting plan approved before any `spawn_worker` call succeeds.
+    // Default off so existing runs behave unchanged.
+    #[serde(default)]
+    pub require_plan_approval: bool,
 }
 
 impl Default for RunConfig {
@@ -65,6 +71,7 @@ impl Default for RunConfig {
             lead_timeout_secs: None,
             approval_policy: None,
             dump_shared_store: false,
+            require_plan_approval: false,
         }
     }
 }
@@ -282,6 +289,35 @@ mod tests {
             m.run.approval_policy,
             Some(crate::dispatch::state::ApprovalPolicy::AutoApprove)
         );
+    }
+
+    #[test]
+    fn parses_require_plan_approval() {
+        let toml_src = r#"
+            [run]
+            require_plan_approval = true
+
+            [[lead]]
+            id = "triage"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(m.run.require_plan_approval);
+    }
+
+    #[test]
+    fn require_plan_approval_defaults_false() {
+        let toml_src = r#"
+            [run]
+
+            [[task]]
+            id = "x"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.run.require_plan_approval);
     }
 
     #[test]

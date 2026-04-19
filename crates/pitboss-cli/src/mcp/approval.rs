@@ -235,6 +235,7 @@ mod tests {
             approval_policy: Some(policy),
             notifications: vec![],
             dump_shared_store: false,
+            require_plan_approval: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
