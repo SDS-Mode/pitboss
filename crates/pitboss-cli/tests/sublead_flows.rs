@@ -198,6 +198,41 @@ async fn sublead_workers_cannot_read_sibling_peer_slots() {
 }
 
 #[tokio::test]
+async fn sublead_workers_cannot_wait_on_sibling_peer_slots() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Worker A will write its peer slot asynchronously.
+    // Worker B tries to wait on Worker A's peer slot — must be rejected.
+    // (strict peer visibility: only worker-A itself or the layer lead can wait on /peer/worker-A/*)
+    let mut worker_b = FakeMcpClient::connect_as(&socket, "worker-B", "worker")
+        .await
+        .unwrap();
+    let result = worker_b
+        .call_tool(
+            "kv_wait",
+            json!({"path": "/peer/worker-A/status", "timeout_secs": 1}),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "sibling peer-slot waits must be rejected under strict visibility; got: {:?}",
+        result
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("strict peer visibility") || err_msg.contains("forbidden"),
+        "error should mention peer visibility; got: {err_msg}"
+    );
+}
+
+#[tokio::test]
 async fn spawn_sublead_tool_is_exposed_to_root() {
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
