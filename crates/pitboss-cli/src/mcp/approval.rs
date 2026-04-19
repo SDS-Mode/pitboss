@@ -13,6 +13,37 @@ use uuid::Uuid;
 
 use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse, DispatchState, QueuedApproval};
 
+// ── Rich approval-record types (Phase 4) ────────────────────────────────────
+
+/// Re-export of `mcp::tools::ApprovalPlan` so callers can refer to it from
+/// this module (keeps `dispatch::state::PendingApproval`'s plan field type
+/// in the same module as the other approval types).
+pub type ApprovalPlan = crate::mcp::tools::ApprovalPlan;
+
+/// Discriminator for what kind of action an approval covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalCategory {
+    ToolUse,
+    Plan,
+    Cost,
+    Other,
+}
+
+/// What happens when a `PendingApproval` exceeds its `ttl_secs` with no
+/// operator response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalFallback {
+    /// Treat as rejected when TTL elapses (safe default).
+    #[default]
+    AutoReject,
+    /// Treat as approved when TTL elapses (permissive — use with care).
+    AutoApprove,
+    /// Never auto-resolve; block until an operator acts (sticky).
+    Block,
+}
+
 #[derive(Debug, Error)]
 pub enum ApprovalError {
     #[error("approval request timed out")]

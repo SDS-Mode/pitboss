@@ -96,6 +96,40 @@ pub enum ApprovalPolicy {
     AutoReject,
 }
 
+/// Rich approval record — the canonical representation of a pending operator
+/// decision in Phase 4+. Carries actor lineage, downstream wait set, TTL,
+/// and fallback policy in addition to the human-readable summary.
+///
+/// This is distinct from `QueuedApproval` (the lightweight queueing handle
+/// used by the block-mode path). In Phase 4 the two will be unified; for now
+/// `PendingApproval` is the record-level type while `QueuedApproval` remains
+/// the transport-level handle.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PendingApproval {
+    pub id: uuid::Uuid,
+    /// Actor that raised the approval request (worker id or lead id).
+    pub requesting_actor_id: String,
+    /// Full tree path from root to the requesting actor.
+    pub actor_path: crate::dispatch::actor::ActorPath,
+    /// Classifies the action under review.
+    pub category: crate::mcp::approval::ApprovalCategory,
+    /// One-line human-readable description of what needs approval.
+    pub summary: String,
+    /// Structured plan payload (rationale, resources, risks, rollback).
+    /// `None` for simple summary-only approvals.
+    pub plan: Option<crate::mcp::approval::ApprovalPlan>,
+    /// Set of actor ids that are blocked waiting for this decision.
+    /// At minimum contains `requesting_actor_id`.
+    pub blocks: Vec<String>,
+    /// Wall-clock time the request was created (for age computation).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Seconds after `created_at` before the fallback fires.
+    /// Default: 1800 (30 min).
+    pub ttl_secs: u64,
+    /// What to do when `ttl_secs` elapses with no operator response.
+    pub fallback: crate::mcp::approval::ApprovalFallback,
+}
+
 /// An approval request that arrived before a TUI attached. Block-mode runs
 /// queue these; they drain when the next TUI connects.
 pub struct QueuedApproval {

@@ -574,3 +574,31 @@ async fn sublead_termination_releases_run_global_leases() {
     // Lease should be released
     assert_eq!(state.run_leases.snapshot().await.len(), 0);
 }
+
+// ── Task 4.1: Rich approval record fields ────────────────────────────────────
+
+/// Verify that `PendingApproval` carries all Phase 4 rich fields:
+/// actor_path, blocks, age-tracking timestamps, TTL, fallback, and category.
+#[tokio::test]
+async fn approval_record_carries_actor_path_and_age() {
+    use pitboss_cli::mcp::approval::ApprovalCategory;
+
+    let (_dir, _state) = mk_state_with_subleads();
+    // Construct a PendingApproval directly
+    let approval = pitboss_cli::dispatch::state::PendingApproval {
+        id: uuid::Uuid::now_v7(),
+        requesting_actor_id: "sublead-S1".into(),
+        actor_path: pitboss_cli::dispatch::actor::ActorPath::new(["root", "S1"]),
+        category: ApprovalCategory::ToolUse,
+        summary: "run rm -rf /tmp/foo".into(),
+        plan: None,
+        blocks: vec!["sublead-S1".into(), "worker-1".into()],
+        created_at: chrono::Utc::now(),
+        ttl_secs: 1800,
+        fallback: pitboss_cli::mcp::approval::ApprovalFallback::AutoReject,
+    };
+    assert_eq!(approval.actor_path.to_string(), "root→S1");
+    assert_eq!(approval.blocks.len(), 2);
+    assert_eq!(approval.category, ApprovalCategory::ToolUse);
+    assert!(approval.ttl_secs > 0);
+}

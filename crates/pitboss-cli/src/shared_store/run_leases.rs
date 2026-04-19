@@ -41,8 +41,7 @@ impl LeaseRegistry {
         // Auto-expire: remove any lease past its TTL before checking
         let now = Instant::now();
         if let Some(existing) = map.get(key) {
-            if now.duration_since(existing.acquired_at) <= existing.ttl
-                && existing.holder != holder
+            if now.duration_since(existing.acquired_at) <= existing.ttl && existing.holder != holder
             {
                 return Err(existing.holder.clone());
             }
