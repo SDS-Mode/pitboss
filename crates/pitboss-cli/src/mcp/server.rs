@@ -16,13 +16,14 @@ use rmcp::service::ServiceExt;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::dispatch::layer::LayerState;
+use crate::dispatch::signals::cancel_actor_with_reason;
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
-    handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
-    handle_propose_plan, handle_reprompt_worker, handle_request_approval, handle_spawn_worker,
-    handle_wait_for_actor, handle_wait_for_any, handle_wait_for_worker, handle_worker_status,
-    ContinueWorkerArgs, PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs,
-    SpawnWorkerArgs, TaskIdArgs, WaitActorRequest, WaitForAnyArgs, WaitForWorkerArgs,
+    handle_continue_worker, handle_list_workers, handle_pause_worker, handle_propose_plan,
+    handle_reprompt_worker, handle_request_approval, handle_spawn_worker, handle_wait_for_actor,
+    handle_wait_for_any, handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs,
+    PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs,
+    TaskIdArgs, WaitActorRequest, WaitForAnyArgs, WaitForWorkerArgs,
 };
 
 #[allow(dead_code)]
@@ -62,6 +63,20 @@ struct SpawnSubleadRequest {
 struct CallerMeta {
     actor_id: String,
     actor_role: String,
+}
+
+/// Request for `cancel_worker` — extends Task-4.5 with an optional `reason`
+/// field. Existing callers that omit `reason` continue to work unchanged
+/// (the field is skipped if absent on the wire).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct CancelWorkerRequest {
+    /// The actor id (worker task_id or sub-lead id) to cancel.
+    target: String,
+    /// Optional corrective context. When supplied, delivered to the killed
+    /// actor's parent lead as a synthetic `[SYSTEM]` reprompt so the lead
+    /// can adjust its plan without a separate operator round-trip.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -349,13 +364,18 @@ impl PitbossHandler {
         to_structured_result(&serde_json::json!({ "workers": summaries }))
     }
 
-    #[tool(description = "Cancel a worker by task_id. Sends SIGTERM, grace, SIGKILL.")]
+    #[tool(
+        description = "Cancel an actor (worker or sub-lead) by id. When `reason` is supplied, it is delivered to the actor's parent lead as a synthetic [SYSTEM] reprompt so the lead can adjust its plan without a separate operator round-trip. Existing callers that omit `reason` behave identically to the pre-4.5 cancel path."
+    )]
     async fn cancel_worker(
         &self,
-        Parameters(args): Parameters<TaskIdArgs>,
+        Parameters(req): Parameters<CancelWorkerRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        match handle_cancel_worker(&self.state, &args.task_id).await {
-            Ok(res) => to_structured_result(&res),
+        // Fast-path: no reason supplied — use the existing single-layer path
+        // for root-layer workers (preserves v0.5 exact behavior for that case).
+        // If the target is in a sub-tree, cancel_actor_with_reason handles it.
+        match cancel_actor_with_reason(&self.state, &req.target, req.reason).await {
+            Ok(()) => to_structured_result(&crate::mcp::tools::CancelResult { ok: true }),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
     }

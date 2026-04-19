@@ -24,6 +24,10 @@ use crate::dispatch::state::{
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::policy::PolicyMatcher;
 
+/// Callback type for test-only synthetic reprompt capture.
+/// See `LayerState::reprompt_hook` and `install_reprompt_capture`.
+type RepromptHook = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
 /// All state owned by a single coordination layer (root layer or a
 /// sub-tree layer).
 ///
@@ -91,6 +95,14 @@ pub struct LayerState {
     /// NOTE: This is a run-level (root-layer) policy for v0.6. Per-sub-lead
     /// policy is deferred to Phase 4.x.
     pub policy_matcher: Mutex<Option<PolicyMatcher>>,
+    /// Test-only hook: intercepts synthetic reprompts that would otherwise be
+    /// delivered to this layer's Claude session. `None` in production (reprompt
+    /// goes through the real MCP/subprocess path). Set via
+    /// `install_reprompt_capture` to capture messages for assertion.
+    ///
+    /// The hook is `Arc` so it can be cloned cheaply in `send_synthetic_reprompt`
+    /// without holding the lock across the async delivery path.
+    pub reprompt_hook: Mutex<Option<RepromptHook>>,
 }
 
 impl std::fmt::Debug for LayerState {
@@ -161,6 +173,7 @@ impl LayerState {
             plan_approved: std::sync::atomic::AtomicBool::new(false),
             original_reservation_usd,
             policy_matcher: Mutex::new(None),
+            reprompt_hook: Mutex::new(None),
         }
     }
 
@@ -169,6 +182,40 @@ impl LayerState {
     /// called in tests to inject policy without manifests.
     pub async fn set_policy_matcher(&self, matcher: PolicyMatcher) {
         *self.policy_matcher.lock().await = Some(matcher);
+    }
+
+    /// Install a test-only reprompt capture hook. When set, synthetic
+    /// reprompts delivered via `send_synthetic_reprompt` call this callback
+    /// instead of (or before) the real delivery path.
+    ///
+    /// Use in tests to assert that the correct message was delivered to this
+    /// layer's lead without spinning up a real Claude subprocess.
+    pub async fn install_reprompt_capture<F>(&self, hook: F)
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        *self.reprompt_hook.lock().await = Some(Arc::new(hook));
+    }
+
+    /// Deliver a synthetic reprompt message to this layer's lead. In
+    /// production (no hook installed), this is a no-op stub until Task 2.3
+    /// wires up real sub-lead Claude sessions — the message is logged at
+    /// `info` level so operators can observe it in traces.
+    ///
+    /// When a `reprompt_hook` is installed (tests only), the hook is called
+    /// with the message text so tests can assert on delivery without a real
+    /// subprocess.
+    pub async fn send_synthetic_reprompt(&self, message: &str) {
+        let hook = self.reprompt_hook.lock().await.clone();
+        if let Some(cb) = hook {
+            cb(message.to_string());
+        } else {
+            tracing::info!(
+                lead_id = %self.lead_id,
+                "synthetic reprompt (no session wired): {}",
+                message
+            );
+        }
     }
 
     pub async fn active_worker_count(&self) -> usize {

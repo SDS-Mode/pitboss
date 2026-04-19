@@ -829,3 +829,100 @@ async fn approval_ttl_triggers_auto_reject_fallback() {
         "expired approval should have been removed by TTL watcher"
     );
 }
+
+// ── Task 4.5: Kill-with-reason cascade ────────────────────────────────────────
+
+/// Root spawns sub-lead S1, a worker is injected into S1's layer, the worker
+/// is killed via `cancel_worker` with a reason, and S1 should receive a
+/// synthetic reprompt containing both the worker id and the reason text.
+#[tokio::test]
+async fn kill_worker_with_reason_reprompts_parent_sublead() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Root lead spawns sub-lead S1.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 1.0, "max_workers": 2}),
+        )
+        .await
+        .unwrap();
+    let s1 = resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field")
+        .to_string();
+
+    // Inject a worker into S1's layer (simulating what S1's Claude session
+    // would do in production via the sub-tree MCP socket).
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(s1.as_str()).unwrap();
+        sub.workers.write().await.insert(
+            "worker-A".into(),
+            pitboss_cli::dispatch::state::WorkerState::Pending,
+        );
+        sub.worker_cancels
+            .write()
+            .await
+            .insert("worker-A".into(), CancelToken::new());
+    }
+
+    // Install a capture hook on S1's layer so we can assert on the reprompt.
+    let s1_reprompts = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(s1.as_str()).unwrap();
+        let captured = s1_reprompts.clone();
+        sub.install_reprompt_capture(move |msg| {
+            let captured = captured.clone();
+            // Use tokio::spawn to avoid blocking the hook caller.
+            tokio::spawn(async move {
+                captured.lock().await.push(msg);
+            });
+        })
+        .await;
+    }
+
+    // Operator kills worker-A with a reason via the MCP cancel_worker tool.
+    root_client
+        .call_tool(
+            "cancel_worker",
+            json!({
+                "target": "worker-A",
+                "reason": "output schema wrong"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Allow the background reprompt-capture task to complete.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // S1 should receive exactly one synthetic reprompt containing both the
+    // killed worker's id and the operator-supplied reason.
+    let received = s1_reprompts.lock().await;
+    assert_eq!(
+        received.len(),
+        1,
+        "expected one reprompt to S1; got: {received:?}"
+    );
+    assert!(
+        received[0].contains("worker-A"),
+        "reprompt should name the killed worker; got: {}",
+        received[0]
+    );
+    assert!(
+        received[0].contains("output schema wrong"),
+        "reprompt should include reason; got: {}",
+        received[0]
+    );
+}
