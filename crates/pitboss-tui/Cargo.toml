@@ -4,6 +4,10 @@ version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
+description  = "TUI companion for pitboss — live tile grid, log tailing, budget counters."
+repository   = { workspace = true }
+homepage     = { workspace = true }
+readme       = "README.md"
 
 [lib]
 name = "pitboss_tui"

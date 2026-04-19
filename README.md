@@ -40,27 +40,63 @@ consistently usable output.
 
 ## Install
 
-### From release (recommended)
+### Via shell installer (recommended)
 
-Pre-built binaries are attached to every GitHub release.
+Pitboss releases ship through [`cargo-dist`][cargo-dist], which
+produces two `curl | sh` installers per release (one per binary):
 
 ```bash
-# x86_64 Linux
-mkdir -p ~/.local/bin
-curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.5.0-x86_64-unknown-linux-gnu.tar.gz \
-  | tar xz -C ~/.local/bin
-
-# aarch64 macOS (Apple Silicon)
-curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-v0.5.0-aarch64-apple-darwin.tar.gz \
-  | tar xz -C ~/.local/bin
+curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-cli-installer.sh | sh
+curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-tui-installer.sh | sh
 
 pitboss version
 pitboss-tui --version
 ```
 
-The tarball contains both `pitboss` and `pitboss-tui`. Put them anywhere on
-`$PATH`. Current release matrix: `x86_64-unknown-linux-gnu` and
-`aarch64-apple-darwin` — other targets require a source build.
+Each installer detects your platform, downloads the matching `tar.xz`
+tarball, verifies its SHA-256, and drops the binary into `~/.cargo/bin`.
+Current target matrix: `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`.
+
+### Via Homebrew
+
+```bash
+brew install SDS-Mode/pitboss/pitboss-cli
+brew install SDS-Mode/pitboss/pitboss-tui
+```
+
+Formulae are auto-published to the [`SDS-Mode/homebrew-pitboss`][tap] tap
+on every release.
+
+### Via container image
+
+Published to GitHub Container Registry on every push to `main` and
+every release tag (`linux/amd64` + `linux/arm64`):
+
+```bash
+podman pull ghcr.io/sds-mode/pitboss:latest
+podman run --rm -v $(pwd)/pitboss.toml:/run/pitboss.toml \
+    ghcr.io/sds-mode/pitboss:latest \
+    pitboss validate /run/pitboss.toml
+```
+
+The image carries `git` (needed for worktree isolation) but NOT the
+`claude` binary — mount your host's Claude Code install or build a
+derived image that layers it in.
+
+### Direct tarball download
+
+Prefer the tarball? Grab `pitboss-cli-<target>.tar.xz` or
+`pitboss-tui-<target>.tar.xz` from the [latest release][releases]:
+
+```bash
+curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-cli-x86_64-unknown-linux-gnu.tar.xz \
+  | tar xJ -C ~/.local/bin
+```
+
+[cargo-dist]: https://github.com/astral-sh/cargo-dist
+[tap]: https://github.com/SDS-Mode/homebrew-pitboss
+[releases]: https://github.com/SDS-Mode/pitboss/releases/latest
 
 ### From source
 
@@ -300,17 +336,38 @@ scripts/smoke-part3-tui.sh      # 7 non-interactive TUI tests
 
 1. Move `[Unreleased]` items in `CHANGELOG.md` into a new
    `[X.Y.Z] — YYYY-MM-DD` section. Add the compare-link at the bottom.
-2. Commit to `main`.
-3. Tag and push:
+2. Bump `version` in the root `Cargo.toml` `[workspace.package]` block.
+3. Commit to `main`.
+4. Tag and push:
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z — <short summary>"
    git push origin vX.Y.Z
    ```
 
-The tag push triggers `.github/workflows/release.yml`, which builds release
-binaries for every target in the matrix, packages them as
-`pitboss-vX.Y.Z-<target>.tar.gz`, and attaches them to the auto-created
-GitHub release. Current matrix: `x86_64-unknown-linux-gnu` and
-`aarch64-apple-darwin` (Apple Silicon). Adding more targets (Windows,
-`x86_64-apple-darwin` for older Intel Macs, aarch64 linux) is a
-matrix-entry addition in the workflow.
+The tag push triggers two workflows in parallel:
+
+- **`.github/workflows/release.yml`** (cargo-dist generated). Builds
+  `pitboss-cli-<target>.tar.xz` and `pitboss-tui-<target>.tar.xz` for
+  every target in the `dist-workspace.toml` matrix
+  (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `aarch64-apple-darwin`), produces shell installers + Homebrew
+  formulae, and publishes to the
+  [`SDS-Mode/homebrew-pitboss`][tap] tap via the
+  `HOMEBREW_TAP_TOKEN` repo secret. Attaches everything to the
+  auto-created GitHub release. Adding or removing a target triple is
+  a one-line change to `dist-workspace.toml` followed by `dist
+  generate`.
+- **`.github/workflows/container.yml`**. Builds the multi-arch image
+  (`linux/amd64` + `linux/arm64`) and pushes to
+  `ghcr.io/sds-mode/pitboss:{version, major.minor, major, latest}`.
+
+### Regenerating the release workflow
+
+`dist-workspace.toml` is the source of truth for the cargo-dist matrix.
+After editing it, regenerate the workflow:
+
+```bash
+cargo install cargo-dist --version 0.28.7    # one-time
+dist generate
+git diff .github/workflows/release.yml       # review
+```

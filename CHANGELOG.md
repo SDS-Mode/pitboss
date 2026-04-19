@@ -7,6 +7,35 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Release infrastructure migrated to [`cargo-dist`][cargo-dist].** The
+  hand-rolled `release.yml` matrix is replaced with a
+  `dist-workspace.toml` config + auto-generated workflow. Produces
+  `curl | sh` shell installers, Homebrew formulae (published to the
+  [`SDS-Mode/homebrew-pitboss`][tap] tap on every release), and
+  `tar.xz` tarballs with SHA-256 checksums. Target matrix expanded to
+  add `aarch64-unknown-linux-gnu` alongside the existing
+  `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`. Requires a
+  `HOMEBREW_TAP_TOKEN` repo secret + the tap repo to be created before
+  the `publish-homebrew-formula` job will succeed; other release jobs
+  (tarballs, installers) work without it.
+- **Added `description` / `repository` / `homepage` metadata to all
+  workspace crates** so the published artifacts (and future
+  `cargo publish` runs) carry proper provenance.
+
+### Added
+
+- **Container image.** `Dockerfile` + `.github/workflows/container.yml`
+  publish multi-arch images (`linux/amd64` + `linux/arm64`) to
+  `ghcr.io/sds-mode/pitboss` on every push to `main` and every
+  `v*` tag. Debian-slim runtime with `git` and `ca-certificates`
+  preinstalled; ~212 MB uncompressed. Claude binary is not bundled —
+  mount it from the host or layer it in.
+
+[cargo-dist]: https://github.com/astral-sh/cargo-dist
+[tap]: https://github.com/SDS-Mode/homebrew-pitboss
+
 ## [0.5.0] — 2026-04-19
 
 ### Added

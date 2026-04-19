@@ -15,6 +15,10 @@ edition     = "2021"
 rust-version = "1.82"
 license     = "MIT OR Apache-2.0"
 authors     = ["Pitboss contributors"]
+description = "Dispatcher for running and observing parallel Claude Code sessions."
+repository  = "https://github.com/SDS-Mode/pitboss"
+homepage    = "https://github.com/SDS-Mode/pitboss"
+readme      = "README.md"
 
 [workspace.dependencies]
 tokio              = { version = "1", features = ["rt-multi-thread","process","io-util","sync","time","signal","macros","fs","net"] }
@@ -47,3 +51,8 @@ wiremock           = "0.6"
 tracing-test       = "0.2"
 glob               = "0.3"
 base64             = "0.22"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

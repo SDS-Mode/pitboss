@@ -1,0 +1,37 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# Pin the cargo-dist version to use in CI (Cargo.toml SemVer syntax).
+cargo-dist-version = "0.28.7"
+# CI backends.
+ci = "github"
+# Installers to generate for each app.
+#   shell    — `curl | sh` bootstrap that downloads the right tarball.
+#   homebrew — writes a formula to the tap repo (see `tap` + `publish-jobs`).
+installers = ["shell", "homebrew"]
+# Homebrew tap repo that the release workflow will push formula updates to.
+# Requires a HOMEBREW_TAP_TOKEN secret (classic PAT with repo scope on the
+# tap repo) in the pitboss repo secrets — see .github/workflows/release.yml.
+tap = "SDS-Mode/homebrew-pitboss"
+# Post-build jobs.
+publish-jobs = ["homebrew"]
+# Target platforms to build tarballs for.
+#   Linux:  x86_64 + aarch64 (both on GitHub-hosted runners via cross-compile).
+#   macOS:  aarch64 only (Apple Silicon). Intel Macs are EOL for new binaries.
+#   Windows: out of scope — pitboss relies on unix sockets + POSIX signals.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+# Host releases as GitHub Releases (the same flow as the hand-written
+# v0.4.x workflow we're replacing).
+hosting = "github"
+# The shell installer drops binaries into $HOME/.cargo/bin by default;
+# keep that so it co-locates with other Rust tools.
+install-path = "CARGO_HOME"
+# Both top-level apps (pitboss, pitboss-tui) need to be installable.
+# Leaving this unset defaults to "all bins found in the workspace" which
+# is what we want.
