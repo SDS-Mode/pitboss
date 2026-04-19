@@ -58,6 +58,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Tail a specific worker's output live (`docker logs -f` shape).
+    /// Resolves a run id (full UUID or unique prefix) + task id against
+    /// the run directory, then streams the worker's stdout.log with
+    /// pitboss's event formatter. Exits on Ctrl-C or when the worker's
+    /// record lands in `summary.jsonl`.
+    Attach {
+        /// Run id (full UUID or unique prefix).
+        run_id: String,
+        /// Task id within the run (lead id or worker task_id).
+        task_id: String,
+        /// Emit raw stream-json instead of the formatted event stream.
+        /// Useful for piping through `jq` or capturing to a file.
+        #[arg(long)]
+        raw: bool,
+        /// Seed with the last N historical lines before following.
+        #[arg(long, default_value_t = 20)]
+        lines: usize,
+    },
     /// Print version information.
     Version,
     /// Internal: proxy stdio <-> unix-socket for a claude subprocess's MCP client.

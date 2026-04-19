@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use pitboss_cli::{cli, diff, dispatch, manifest, mcp};
+use pitboss_cli::{attach, cli, diff, dispatch, manifest, mcp};
 
 use cli::{Cli, Command};
 
@@ -27,6 +27,14 @@ fn main() -> Result<()> {
         }
         Command::Diff { run_a, run_b, json } => {
             run_diff(&run_a, &run_b, json);
+        }
+        Command::Attach {
+            run_id,
+            task_id,
+            raw,
+            lines,
+        } => {
+            std::process::exit(attach::run(&run_id, &task_id, raw, lines)?);
         }
         Command::McpBridge {
             socket,
