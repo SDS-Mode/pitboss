@@ -7,7 +7,23 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.5.1] — 2026-04-19
+## [0.5.2] — 2026-04-19
+
+### Fixed
+
+- **Unblocked `aarch64-unknown-linux-gnu` release builds.** Added
+  `vendored-openssl` to the `git2` feature set so libgit2's OpenSSL
+  dependency is statically bundled instead of linked against the host
+  sysroot. The cargo-dist aarch64-linux job cross-compiles from
+  x86_64 GitHub runners where no aarch64 OpenSSL sysroot is present;
+  v0.5.1 failed at this step and was never released.
+
+## [0.5.1] — 2026-04-19 [YANKED]
+
+Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
+(missing OpenSSL sysroot). No artifacts published. Superseded by
+0.5.2. Notes below describe the intended contents, which landed in
+0.5.2.
 
 ### Changed
 

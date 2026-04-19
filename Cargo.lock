@@ -1313,6 +1313,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
+name = "openssl-src"
+version = "300.6.0+3.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8e8cbfd3a4a8c8f089147fd7aaa33cf8c7450c4d09f8f80698a0cf093abeff4"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "openssl-sys"
 version = "0.9.113"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1320,6 +1329,7 @@ checksum = "ad2f2c0eba47118757e4c6d2bff2838f3e0523380021356e7875e858372ce644"
 dependencies = [
  "cc",
  "libc",
+ "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
@@ -1373,7 +1383,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pitboss-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1409,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1428,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-tui"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
