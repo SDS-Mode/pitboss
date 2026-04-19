@@ -6,8 +6,22 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Unique actor identifier.
+/// String is fine for depth ≤ 3; revisit if ActorPath clones show up in profiles.
 pub type ActorId = String;
 
+/// Actor role for authz in depth-2 dispatch model.
+///
+/// TODO(depth-2): This enum consolidates into `shared_store::ActorRole` once
+/// the `_meta.actor_role` plumbing extends to recognize `sublead` (Task 1.4).
+/// For now, both coexist:
+/// - `shared_store::ActorRole { Lead, Worker }` (legacy, simple)
+/// - `dispatch::ActorRole { RootLead, Sublead, Worker }` (new, rich)
+///
+/// Temporary mapping for bridging code that must convert depth-2 → legacy:
+/// - `RootLead → Lead`
+/// - `Sublead → Lead`
+/// - `Worker → Worker`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorRole {
@@ -18,7 +32,7 @@ pub enum ActorRole {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(transparent)]
-pub struct ActorPath(pub Vec<ActorId>);
+pub struct ActorPath(pub(crate) Vec<ActorId>);
 
 impl fmt::Display for ActorPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
