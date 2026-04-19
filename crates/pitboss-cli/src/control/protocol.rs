@@ -9,6 +9,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Wire-format mirror of `mcp::tools::ApprovalPlan`. Duplicated here
+/// so `control::protocol` doesn't depend on the MCP tool module.
+/// Same field names + serde layout so the two types round-trip
+/// through JSON identically.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalPlanWire {
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<String>,
+}
+
 /// Pause-mode selector shared with the MCP tool schema. Duplicated here
 /// so the control protocol doesn't depend on `mcp::tools`. Kept in sync
 /// by hand; if these diverge you'll notice because the wire values stop
@@ -97,6 +114,12 @@ pub enum ControlEvent {
         request_id: String,
         task_id: String,
         summary: String,
+        /// Typed approval plan with rationale / resources / risks /
+        /// rollback. `None` for requests that only sent a bare summary —
+        /// the TUI falls back to rendering `summary` in that case, so
+        /// pre-v0.4.5 dispatchers + simple approvals still work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<ApprovalPlanWire>,
     },
     WorkersSnapshot {
         workers: Vec<WorkerSnapshotEntry>,
@@ -275,12 +298,29 @@ mod tests {
 
     #[test]
     fn approval_request_roundtrips() {
+        // Bare-summary form (pre-v0.4.5 shape).
         let ev = ControlEvent::ApprovalRequest {
             request_id: "req-1".into(),
             task_id: "lead".into(),
             summary: "spawn 3 workers".into(),
+            plan: None,
         };
         assert_eq!(roundtrip_event(&ev), ev);
+
+        // Structured form — rationale / resources / risks / rollback.
+        let ev2 = ControlEvent::ApprovalRequest {
+            request_id: "req-2".into(),
+            task_id: "lead".into(),
+            summary: "delete staging index".into(),
+            plan: Some(ApprovalPlanWire {
+                summary: "delete staging index".into(),
+                rationale: Some("obsolete since v2".into()),
+                resources: vec!["pg://staging/idx_foo".into()],
+                risks: vec!["slow to rebuild if live reads hit it".into()],
+                rollback: Some("restore from nightly snapshot".into()),
+            }),
+        };
+        assert_eq!(roundtrip_event(&ev2), ev2);
     }
 
     #[test]

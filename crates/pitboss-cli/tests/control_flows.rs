@@ -161,7 +161,12 @@ async fn block_policy_queue_drains_on_tui_connect() {
     let bridge = ApprovalBridge::new(state.clone());
     let req_handle = tokio::spawn(async move {
         bridge
-            .request("lead".into(), "spawn 3".into(), Duration::from_secs(5))
+            .request(
+                "lead".into(),
+                "spawn 3".into(),
+                None,
+                Duration::from_secs(5),
+            )
             .await
     });
 
@@ -258,7 +263,12 @@ async fn auto_approve_policy_responds_without_tui() {
     ));
     let bridge = ApprovalBridge::new(state);
     let resp = bridge
-        .request("lead".into(), "spawn".into(), Duration::from_millis(200))
+        .request(
+            "lead".into(),
+            "spawn".into(),
+            None,
+            Duration::from_millis(200),
+        )
         .await
         .unwrap();
     assert!(resp.approved);
@@ -306,7 +316,12 @@ async fn auto_reject_policy_responds_without_tui() {
     ));
     let bridge = ApprovalBridge::new(state);
     let resp = bridge
-        .request("lead".into(), "spawn".into(), Duration::from_millis(200))
+        .request(
+            "lead".into(),
+            "spawn".into(),
+            None,
+            Duration::from_millis(200),
+        )
         .await
         .unwrap();
     assert!(!resp.approved);

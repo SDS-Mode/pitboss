@@ -87,6 +87,10 @@ pub struct QueuedApproval {
     pub request_id: String,
     pub task_id: String,
     pub summary: String,
+    /// Typed approval plan — same option as on the request path. `None`
+    /// for simple summary-only approvals, so pre-v0.4.5 queuers still
+    /// round-trip through this struct without issue.
+    pub plan: Option<crate::mcp::tools::ApprovalPlan>,
     pub responder: oneshot::Sender<ApprovalResponse>,
 }
 

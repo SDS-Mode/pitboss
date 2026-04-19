@@ -185,12 +185,55 @@ pub struct RepromptWorkerArgs {
     pub prompt: String,
 }
 
+/// Structured approval payload. One-line `summary` is still required
+/// (it's what shows in the modal's title bar and in notification sinks);
+/// every other field is optional. Leads that have non-trivial actions
+/// to approve — deletions, multi-file edits, irreversible ops — should
+/// populate the typed fields so reviewers can see plan, rationale, and
+/// rollback at a glance instead of reading a paragraph.
+///
+/// Absent fields render as "—" or get elided entirely in the TUI.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+pub struct ApprovalPlan {
+    /// One-line headline. Required. Shown in the modal title, the
+    /// notification payload, and the audit event.
+    pub summary: String,
+    /// Why the lead thinks this action should be taken. Multi-line OK.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// Resources (files, databases, external APIs, GitHub PRs, etc.)
+    /// that this action will read or modify. Rendered as a bulleted
+    /// list so reviewers can skim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
+    /// Known risks / failure modes. If non-empty the TUI highlights
+    /// the list in the warning color so the reviewer sees it before
+    /// approving.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
+    /// How to undo the action if something goes wrong. Reviewers
+    /// should reject plans that can't answer this for irreversible
+    /// operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RequestApprovalArgs {
+    /// One-line summary of the action being approved. Required. For
+    /// non-trivial approvals prefer the typed `plan` field below, which
+    /// will supersede this for display but this stays as the audit
+    /// headline.
     pub summary: String,
     /// Optional per-request timeout override. Falls back to lead_timeout_secs.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Typed plan. When set, the TUI renders structured fields
+    /// (rationale / resources / risks / rollback) instead of just the
+    /// summary blob. Leads should populate this for anything
+    /// destructive or multi-step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ApprovalPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1173,7 +1216,7 @@ pub async fn handle_request_approval(
     );
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
-        .request(state.lead_id.clone(), args.summary, timeout)
+        .request(state.lead_id.clone(), args.summary, args.plan, timeout)
         .await
     {
         Ok(resp) => Ok(ApprovalToolResponse {
@@ -1961,14 +2004,35 @@ mod tests {
 
     #[test]
     fn request_approval_args_roundtrip() {
+        // Bare form — no plan.
         let a = RequestApprovalArgs {
             summary: "spawn 3 workers".into(),
             timeout_secs: Some(60),
+            plan: None,
         };
         let s = serde_json::to_string(&a).unwrap();
         let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
         assert_eq!(back.summary, "spawn 3 workers");
         assert_eq!(back.timeout_secs, Some(60));
+        assert!(back.plan.is_none());
+
+        // Typed form.
+        let b = RequestApprovalArgs {
+            summary: "drop staging index".into(),
+            timeout_secs: None,
+            plan: Some(ApprovalPlan {
+                summary: "drop staging index".into(),
+                rationale: Some("obsolete since v2".into()),
+                resources: vec!["db/idx_foo".into()],
+                risks: vec!["slow reads if live".into()],
+                rollback: Some("restore from snapshot".into()),
+            }),
+        };
+        let s = serde_json::to_string(&b).unwrap();
+        let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
+        let plan = back.plan.unwrap();
+        assert_eq!(plan.rationale.as_deref(), Some("obsolete since v2"));
+        assert_eq!(plan.resources, vec!["db/idx_foo".to_string()]);
     }
 
     #[tokio::test]
@@ -2299,6 +2363,7 @@ mod tests {
             RequestApprovalArgs {
                 summary: "spawn 3".into(),
                 timeout_secs: Some(2),
+                plan: None,
             },
         )
         .await
