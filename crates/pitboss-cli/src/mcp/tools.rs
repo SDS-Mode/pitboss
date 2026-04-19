@@ -130,6 +130,30 @@ pub struct TaskIdArgs {
     pub task_id: String,
 }
 
+/// Pause-mode selector.
+///
+/// - `Cancel` (default): terminates the claude subprocess, snapshots
+///   its session_id. `continue_worker` re-spawns via `claude --resume`.
+///   Works for arbitrarily long pauses; loses any in-flight state.
+/// - `Freeze`: SIGSTOP's the process in place. `continue_worker` just
+///   SIGCONT's. Zero state loss + instant resume, but Anthropic may
+///   drop the HTTP session if the pause runs past their server-side
+///   idle window — prefer for quick pauses (seconds to low minutes).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PauseMode {
+    #[default]
+    Cancel,
+    Freeze,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PauseWorkerArgs {
+    pub task_id: String,
+    #[serde(default)]
+    pub mode: PauseMode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForWorkerArgs {
     pub task_id: String,
@@ -488,13 +512,25 @@ async fn run_worker(
                 }
             }
         });
+        // Register a pid slot so the SIGSTOP freeze-pause path can
+        // signal this worker directly. Populated inside
+        // `run_to_completion` right after the spawn succeeds.
+        let pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        state
+            .worker_pids
+            .write()
+            .await
+            .insert(task_id.clone(), pid_slot.clone());
         let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
             .with_log_path(log_path.clone())
             .with_stderr_log_path(stderr_path)
             .with_session_id_tx(session_id_tx)
+            .with_pid_slot(pid_slot)
             .run_to_completion(cancel, Duration::from_secs(timeout_secs))
             .await;
         promote_task.abort();
+        // Clean up the pid slot — the worker is done, the pid is stale.
+        state.worker_pids.write().await.remove(&task_id);
         outcome
     };
 
@@ -722,6 +758,14 @@ pub async fn spawn_resume_worker(
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
     let resume_model = model.clone();
+    // Register a pid slot for the resumed subprocess too, so
+    // freeze-pause works across continue_worker boundaries.
+    let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    state
+        .worker_pids
+        .write()
+        .await
+        .insert(task_id.clone(), resume_pid_slot.clone());
 
     tokio::spawn(async move {
         use pitboss_core::store::{TaskRecord, TaskStatus};
@@ -732,8 +776,11 @@ pub async fn spawn_resume_worker(
         )
         .with_log_path(log_path.clone())
         .with_stderr_log_path(stderr_path)
+        .with_pid_slot(resume_pid_slot)
         .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
         .await;
+        // Clean up the pid slot when the resumed subprocess exits.
+        state_bg.worker_pids.write().await.remove(&task_id_bg);
         let status = match outcome.final_state {
             pitboss_core::session::SessionState::Completed => TaskStatus::Success,
             pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
@@ -834,6 +881,9 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
                 WorkerState::Paused { paused_at, .. } => {
                     ("Paused".to_string(), Some(paused_at.to_rfc3339()))
                 }
+                WorkerState::Frozen { started_at, .. } => {
+                    ("Frozen".to_string(), Some(started_at.to_rfc3339()))
+                }
                 WorkerState::Done(rec) => (
                     match rec.status {
                         pitboss_core::store::TaskStatus::Success => "Completed",
@@ -888,6 +938,15 @@ pub async fn handle_worker_status(
             *prior_token_usage,
             None,
         ),
+        WorkerState::Frozen { started_at, .. } => (
+            "Frozen".to_string(),
+            Some(started_at.to_rfc3339()),
+            // The child is still alive and its counters haven't been
+            // snapshotted at freeze time (partial_usage is populated by
+            // Done records). Report zeros rather than inventing a value.
+            pitboss_core::parser::TokenUsage::default(),
+            None,
+        ),
         WorkerState::Done(rec) => (
             match rec.status {
                 pitboss_core::store::TaskStatus::Success => "Completed",
@@ -933,6 +992,7 @@ pub async fn handle_cancel_worker(
 pub async fn handle_pause_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
+    mode: PauseMode,
 ) -> Result<CancelResult> {
     let mut workers = state.workers.write().await;
     let Some(entry) = workers.get(task_id).cloned() else {
@@ -940,27 +1000,54 @@ pub async fn handle_pause_worker(
     };
     match entry {
         WorkerState::Running {
+            started_at,
             session_id: Some(sid),
-            ..
-        } => {
-            let cancels = state.worker_cancels.read().await;
-            if let Some(tok) = cancels.get(task_id) {
-                tok.terminate();
+        } => match mode {
+            PauseMode::Cancel => {
+                let cancels = state.worker_cancels.read().await;
+                if let Some(tok) = cancels.get(task_id) {
+                    tok.terminate();
+                }
+                workers.insert(
+                    task_id.to_string(),
+                    WorkerState::Paused {
+                        session_id: sid,
+                        paused_at: chrono::Utc::now(),
+                        prior_token_usage: Default::default(),
+                    },
+                );
+                Ok(CancelResult { ok: true })
             }
-            workers.insert(
-                task_id.to_string(),
-                WorkerState::Paused {
-                    session_id: sid,
-                    paused_at: chrono::Utc::now(),
-                    prior_token_usage: Default::default(),
-                },
-            );
-            Ok(CancelResult { ok: true })
-        }
+            PauseMode::Freeze => {
+                // Read the pid slot. If 0 (subprocess hasn't spawned
+                // yet), fail — freeze is meaningless without a pid.
+                let pid = state
+                    .worker_pids
+                    .read()
+                    .await
+                    .get(task_id)
+                    .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                if pid == 0 {
+                    anyhow::bail!("cannot freeze {task_id}: worker pid unknown (race with spawn?)");
+                }
+                crate::dispatch::signals::freeze(pid)?;
+                workers.insert(
+                    task_id.to_string(),
+                    WorkerState::Frozen {
+                        session_id: sid,
+                        frozen_at: chrono::Utc::now(),
+                        started_at,
+                    },
+                );
+                Ok(CancelResult { ok: true })
+            }
+        },
         WorkerState::Running {
             session_id: None, ..
         } => anyhow::bail!("worker not yet initialized (no session_id)"),
         WorkerState::Paused { .. } => anyhow::bail!("worker already paused"),
+        WorkerState::Frozen { .. } => anyhow::bail!("worker already frozen"),
         _ => anyhow::bail!("worker not in a pausable state"),
     }
 }
@@ -974,6 +1061,41 @@ pub async fn handle_continue_worker(
         Some(WorkerState::Paused { session_id, .. }) => {
             let prompt = args.prompt.unwrap_or_else(|| "continue".into());
             spawn_resume_worker(state, args.task_id, prompt, session_id).await?;
+            Ok(CancelResult { ok: true })
+        }
+        Some(WorkerState::Frozen {
+            session_id,
+            started_at,
+            ..
+        }) => {
+            // SIGCONT the process in place — no respawn, no session
+            // replay. The subprocess picks up exactly where it left
+            // off. `prompt` is silently ignored in freeze mode (it's
+            // a resume-only concept); clients that want to inject a
+            // new prompt should thaw + reprompt as two steps.
+            let pid = state
+                .worker_pids
+                .read()
+                .await
+                .get(&args.task_id)
+                .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            if pid == 0 {
+                anyhow::bail!(
+                    "cannot thaw {}: pid slot empty (race with exit?)",
+                    args.task_id
+                );
+            }
+            crate::dispatch::signals::resume_stopped(pid)?;
+            // Transition back to Running, preserving the ORIGINAL
+            // started_at so wall-clock duration stays accurate.
+            state.workers.write().await.insert(
+                args.task_id.clone(),
+                WorkerState::Running {
+                    started_at,
+                    session_id: Some(session_id),
+                },
+            );
             Ok(CancelResult { ok: true })
         }
         Some(_) => anyhow::bail!("worker not paused"),
@@ -1001,6 +1123,9 @@ pub async fn handle_reprompt_worker(
             sid
         }
         Some(WorkerState::Paused { session_id, .. }) => session_id,
+        Some(WorkerState::Frozen { .. }) => {
+            anyhow::bail!("worker is frozen; continue_worker (SIGCONT) it first before reprompting")
+        }
         Some(WorkerState::Running {
             session_id: None, ..
         }) => anyhow::bail!("worker not yet initialized (no session_id)"),
@@ -1862,7 +1987,9 @@ mod tests {
                 session_id: Some("sess".into()),
             },
         );
-        let res = handle_pause_worker(&state, "w-1").await.unwrap();
+        let res = handle_pause_worker(&state, "w-1", PauseMode::Cancel)
+            .await
+            .unwrap();
         assert!(res.ok);
         assert!(worker_token.is_terminated());
         let workers = state.workers.read().await;
@@ -1870,6 +1997,85 @@ mod tests {
             workers.get("w-1").unwrap(),
             WorkerState::Paused { .. }
         ));
+    }
+
+    /// End-to-end freeze: spawn a real sleeping child, register its pid
+    /// slot + a Running WorkerState, call handle_pause_worker(Freeze),
+    /// verify Frozen state + that /proc (on Linux) sees the process as
+    /// stopped. Then handle_continue_worker to thaw.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn freeze_and_thaw_transition_via_handler() {
+        use std::process::Command;
+
+        let state = test_state().await;
+
+        // Spawn a real long-sleep child we can safely SIGSTOP/SIGCONT.
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+
+        // Register the pid + Running state.
+        let slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(pid));
+        state
+            .worker_pids
+            .write()
+            .await
+            .insert("w-freeze".into(), slot);
+        state
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-freeze".into(), pitboss_core::session::CancelToken::new());
+        state.workers.write().await.insert(
+            "w-freeze".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess-freeze".into()),
+            },
+        );
+
+        // Freeze.
+        let res = handle_pause_worker(&state, "w-freeze", PauseMode::Freeze)
+            .await
+            .unwrap();
+        assert!(res.ok);
+        assert!(matches!(
+            state.workers.read().await.get("w-freeze").unwrap(),
+            WorkerState::Frozen { .. }
+        ));
+
+        // /proc should show 'T' (stopped).
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let state_line = status
+            .lines()
+            .find(|l| l.starts_with("State:"))
+            .unwrap_or("State: ?");
+        assert!(
+            state_line.contains('T'),
+            "expected stopped state, got {state_line}"
+        );
+
+        // Thaw via continue_worker (no prompt — freeze path ignores it).
+        let cres = handle_continue_worker(
+            &state,
+            ContinueWorkerArgs {
+                task_id: "w-freeze".into(),
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(cres.ok);
+        assert!(matches!(
+            state.workers.read().await.get("w-freeze").unwrap(),
+            WorkerState::Running { .. }
+        ));
+
+        // Cleanup.
+        let mut owned = child;
+        let _ = owned.kill();
+        let _ = owned.wait();
     }
 
     #[tokio::test]

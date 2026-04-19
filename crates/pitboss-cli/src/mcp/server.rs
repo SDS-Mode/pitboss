@@ -19,8 +19,9 @@ use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
     handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
     handle_reprompt_worker, handle_request_approval, handle_spawn_worker, handle_wait_for_any,
-    handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs, RepromptWorkerArgs,
-    RequestApprovalArgs, SpawnWorkerArgs, TaskIdArgs, WaitForAnyArgs, WaitForWorkerArgs,
+    handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs, PauseWorkerArgs,
+    RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs, TaskIdArgs, WaitForAnyArgs,
+    WaitForWorkerArgs,
 };
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -175,20 +176,20 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "Pause a running worker. Snapshots its session id so continue_worker can resume."
+        description = "Pause a running worker. Two modes: \"cancel\" (default — terminates subprocess, snapshots session_id; continue_worker re-spawns via claude --resume) or \"freeze\" (SIGSTOP the process in place; continue_worker SIGCONTs — zero state loss but risks dropped HTTP session on long pauses)."
     )]
     async fn pause_worker(
         &self,
-        Parameters(args): Parameters<TaskIdArgs>,
+        Parameters(args): Parameters<PauseWorkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match handle_pause_worker(&self.state, &args.task_id).await {
+        match handle_pause_worker(&self.state, &args.task_id, args.mode).await {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
     }
 
     #[tool(
-        description = "Continue a previously-paused worker. Spawns claude --resume under the hood."
+        description = "Continue a previously-paused worker. For Paused (cancel-mode): spawns claude --resume with prompt (default \"continue\"). For Frozen (freeze-mode): SIGCONT — prompt is ignored."
     )]
     async fn continue_worker(
         &self,

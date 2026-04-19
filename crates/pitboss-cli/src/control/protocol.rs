@@ -9,6 +9,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Pause-mode selector shared with the MCP tool schema. Duplicated here
+/// so the control protocol doesn't depend on `mcp::tools`. Kept in sync
+/// by hand; if these diverge you'll notice because the wire values stop
+/// round-tripping.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PauseMode {
+    #[default]
+    Cancel,
+    Freeze,
+}
+
+fn is_default_pause_mode(m: &PauseMode) -> bool {
+    matches!(m, PauseMode::Cancel)
+}
+
 /// An operation sent from the TUI (client) to the dispatcher (server).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -22,6 +38,11 @@ pub enum ControlOp {
     CancelRun,
     PauseWorker {
         task_id: String,
+        /// Optional pause mode: `"cancel"` (default, backward-compat) or
+        /// `"freeze"`. Absent on the wire for pre-v0.4.5 TUI clients —
+        /// `#[serde(default)]` yields `Cancel`.
+        #[serde(default, skip_serializing_if = "is_default_pause_mode")]
+        mode: PauseMode,
     },
     ContinueWorker {
         task_id: String,
@@ -166,6 +187,11 @@ mod tests {
         for op in [
             ControlOp::PauseWorker {
                 task_id: "w".into(),
+                mode: PauseMode::default(),
+            },
+            ControlOp::PauseWorker {
+                task_id: "w".into(),
+                mode: PauseMode::Freeze,
             },
             ControlOp::ContinueWorker {
                 task_id: "w".into(),

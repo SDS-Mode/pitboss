@@ -20,6 +20,7 @@ pub struct SessionHandle {
     log_path: Option<PathBuf>,
     stderr_log_path: Option<PathBuf>,
     session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    pid_slot: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 impl SessionHandle {
@@ -35,6 +36,7 @@ impl SessionHandle {
             log_path: None,
             stderr_log_path: None,
             session_id_tx: None,
+            pid_slot: None,
         }
     }
 
@@ -53,6 +55,19 @@ impl SessionHandle {
     #[must_use]
     pub fn with_session_id_tx(mut self, tx: tokio::sync::mpsc::Sender<String>) -> Self {
         self.session_id_tx = Some(tx);
+        self
+    }
+
+    /// Provide a shared atomic slot that `run_to_completion` will populate
+    /// with the child's OS pid immediately after spawn. Used by the
+    /// dispatcher's SIGSTOP freeze-pause path — it needs the raw pid
+    /// to send signals without going through the `ChildProcess`
+    /// interface (which takes `&mut self`, and we've already moved the
+    /// handle into the session task). Slot value of 0 means "not yet
+    /// spawned"; any non-zero value is the real pid.
+    #[must_use]
+    pub fn with_pid_slot(mut self, slot: Arc<std::sync::atomic::AtomicU32>) -> Self {
+        self.pid_slot = Some(slot);
         self
     }
 
@@ -82,6 +97,15 @@ impl SessionHandle {
                 };
             }
         };
+
+        // Publish the child pid so the dispatcher's SIGSTOP freeze-pause
+        // path can signal it directly. No-op if the caller didn't install
+        // a slot (tests, flat mode without pause support).
+        if let Some(slot) = &self.pid_slot {
+            if let Some(pid) = child.pid() {
+                slot.store(pid, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
 
         let stdout = child.take_stdout().expect("stdout piped");
         let reader = BufReader::new(stdout).lines();

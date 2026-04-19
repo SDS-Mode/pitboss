@@ -293,7 +293,8 @@ pub async fn run_hierarchical(
                 crate::dispatch::state::WorkerState::Done(rec) => rec.clone(),
                 crate::dispatch::state::WorkerState::Pending
                 | crate::dispatch::state::WorkerState::Running { .. }
-                | crate::dispatch::state::WorkerState::Paused { .. } => {
+                | crate::dispatch::state::WorkerState::Paused { .. }
+                | crate::dispatch::state::WorkerState::Frozen { .. } => {
                     let now = Utc::now();
                     pitboss_core::store::TaskRecord {
                         task_id: id.clone(),

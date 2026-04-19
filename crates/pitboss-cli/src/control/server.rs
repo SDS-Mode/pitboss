@@ -285,6 +285,33 @@ async fn serve_connection(
     activity_pump.abort();
 }
 
+/// Best-effort SIGCONT helper: if `task_id` is currently `Frozen`,
+/// send SIGCONT so a follow-up SIGTERM / SIGKILL can actually be
+/// delivered. No-op if the worker isn't frozen or the pid slot is
+/// empty. Errors are logged and swallowed — cancel paths must not
+/// fail because of signal cleanup.
+async fn thaw_if_frozen(state: &Arc<crate::dispatch::state::DispatchState>, task_id: &str) {
+    let is_frozen = matches!(
+        state.workers.read().await.get(task_id),
+        Some(crate::dispatch::state::WorkerState::Frozen { .. })
+    );
+    if !is_frozen {
+        return;
+    }
+    let pid = state
+        .worker_pids
+        .read()
+        .await
+        .get(task_id)
+        .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    if pid > 0 {
+        if let Err(e) = crate::dispatch::signals::resume_stopped(pid) {
+            tracing::debug!(task_id, pid, "pre-cancel SIGCONT failed: {e}");
+        }
+    }
+}
+
 /// Period between `StoreActivity` broadcasts on the control socket.
 /// Tuned for TUI poll cadence (250 ms) — faster than 1 s is noise,
 /// slower feels laggy. Constant so tests can match expected payloads.
@@ -326,6 +353,11 @@ async fn dispatch_op(
             task_id: None,
         },
         ControlOp::CancelWorker { task_id } => {
+            // If this worker is currently Frozen (SIGSTOP'd), we must
+            // SIGCONT it first so the subsequent SIGTERM is actually
+            // deliverable — a stopped process can't drain signals until
+            // it's running again. Harmless for non-frozen workers.
+            thaw_if_frozen(state, &task_id).await;
             let cancels = state.worker_cancels.read().await;
             if let Some(tok) = cancels.get(&task_id) {
                 tok.terminate();
@@ -342,12 +374,25 @@ async fn dispatch_op(
             }
         }
         ControlOp::CancelRun => {
-            // Cascade the cancel into every live worker's own token FIRST, then
-            // flip the run-level flag. The run-level `state.cancel` is only
-            // observed by the lead's SessionHandle; workers have independent
-            // per-task tokens and would otherwise keep running after the lead
-            // dies. Without this cascade, users saw "kill run" ack but ps
-            // still showed live claude workers.
+            // SIGCONT any frozen workers first — see CancelWorker above
+            // for the rationale. Also iterates every per-worker cancel
+            // token before flipping the run-level flag (run-level cancel
+            // is only observed by the lead's SessionHandle).
+            {
+                let workers = state.workers.read().await;
+                let pids = state.worker_pids.read().await;
+                for (id, w) in workers.iter() {
+                    if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
+                        let pid = pids
+                            .get(id)
+                            .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0);
+                        if pid > 0 {
+                            let _ = crate::dispatch::signals::resume_stopped(pid);
+                        }
+                    }
+                }
+            }
             {
                 let cancels = state.worker_cancels.read().await;
                 for tok in cancels.values() {
@@ -360,7 +405,7 @@ async fn dispatch_op(
                 task_id: None,
             }
         }
-        ControlOp::PauseWorker { task_id } => {
+        ControlOp::PauseWorker { task_id, mode } => {
             let mut workers = state.workers.write().await;
             let Some(entry) = workers.get(&task_id).cloned() else {
                 return ControlEvent::OpFailed {
@@ -371,21 +416,56 @@ async fn dispatch_op(
             };
             match entry {
                 crate::dispatch::state::WorkerState::Running {
+                    started_at,
                     session_id: Some(sid),
-                    ..
                 } => {
-                    let cancels = state.worker_cancels.read().await;
-                    if let Some(tok) = cancels.get(&task_id) {
-                        tok.terminate();
+                    match mode {
+                        crate::control::protocol::PauseMode::Cancel => {
+                            let cancels = state.worker_cancels.read().await;
+                            if let Some(tok) = cancels.get(&task_id) {
+                                tok.terminate();
+                            }
+                            workers.insert(
+                                task_id.clone(),
+                                crate::dispatch::state::WorkerState::Paused {
+                                    session_id: sid,
+                                    paused_at: chrono::Utc::now(),
+                                    prior_token_usage: Default::default(),
+                                },
+                            );
+                        }
+                        crate::control::protocol::PauseMode::Freeze => {
+                            let pid = state
+                                .worker_pids
+                                .read()
+                                .await
+                                .get(&task_id)
+                                .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                                .unwrap_or(0);
+                            if pid == 0 {
+                                return ControlEvent::OpFailed {
+                                    op: "pause_worker".into(),
+                                    task_id: Some(task_id),
+                                    error: "pid slot empty; cannot freeze".into(),
+                                };
+                            }
+                            if let Err(e) = crate::dispatch::signals::freeze(pid) {
+                                return ControlEvent::OpFailed {
+                                    op: "pause_worker".into(),
+                                    task_id: Some(task_id),
+                                    error: format!("freeze failed: {e}"),
+                                };
+                            }
+                            workers.insert(
+                                task_id.clone(),
+                                crate::dispatch::state::WorkerState::Frozen {
+                                    session_id: sid,
+                                    frozen_at: chrono::Utc::now(),
+                                    started_at,
+                                },
+                            );
+                        }
                     }
-                    workers.insert(
-                        task_id.clone(),
-                        crate::dispatch::state::WorkerState::Paused {
-                            session_id: sid,
-                            paused_at: chrono::Utc::now(),
-                            prior_token_usage: Default::default(),
-                        },
-                    );
                     let _ = crate::dispatch::events::append_event(
                         &state.run_subdir,
                         &task_id,
@@ -419,6 +499,13 @@ async fn dispatch_op(
                         op: "pause_worker".into(),
                         task_id,
                         current_state: "paused".into(),
+                    }
+                }
+                crate::dispatch::state::WorkerState::Frozen { .. } => {
+                    ControlEvent::OpUnknownState {
+                        op: "pause_worker".into(),
+                        task_id,
+                        current_state: "frozen".into(),
                     }
                 }
                 crate::dispatch::state::WorkerState::Pending => ControlEvent::OpUnknownState {
@@ -469,6 +556,46 @@ async fn dispatch_op(
                             task_id: Some(task_id),
                             error: e.to_string(),
                         },
+                    }
+                }
+                Some(crate::dispatch::state::WorkerState::Frozen {
+                    session_id,
+                    started_at,
+                    ..
+                }) => {
+                    // SIGCONT the frozen process. `prompt` is ignored —
+                    // freeze-mode preserves state and has no resume point.
+                    let pid = state
+                        .worker_pids
+                        .read()
+                        .await
+                        .get(&task_id)
+                        .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(0);
+                    if pid == 0 {
+                        return ControlEvent::OpFailed {
+                            op: "continue_worker".into(),
+                            task_id: Some(task_id),
+                            error: "pid slot empty; cannot thaw".into(),
+                        };
+                    }
+                    if let Err(e) = crate::dispatch::signals::resume_stopped(pid) {
+                        return ControlEvent::OpFailed {
+                            op: "continue_worker".into(),
+                            task_id: Some(task_id),
+                            error: format!("SIGCONT failed: {e}"),
+                        };
+                    }
+                    state.workers.write().await.insert(
+                        task_id.clone(),
+                        crate::dispatch::state::WorkerState::Running {
+                            started_at,
+                            session_id: Some(session_id),
+                        },
+                    );
+                    ControlEvent::OpAcked {
+                        op: "continue_worker".into(),
+                        task_id: Some(task_id),
                     }
                 }
                 Some(_) => ControlEvent::OpUnknownState {
@@ -572,6 +699,15 @@ async fn dispatch_op(
                         } => (
                             "paused".to_string(),
                             Some(paused_at.to_rfc3339()),
+                            Some(session_id.clone()),
+                        ),
+                        crate::dispatch::state::WorkerState::Frozen {
+                            frozen_at,
+                            session_id,
+                            ..
+                        } => (
+                            "frozen".to_string(),
+                            Some(frozen_at.to_rfc3339()),
                             Some(session_id.clone()),
                         ),
                         crate::dispatch::state::WorkerState::Done(rec) => (
