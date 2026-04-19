@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::schema::{Defaults, Effort, Lead, Manifest, RunConfig, Task, Template, WorktreeCleanup};
+use super::schema::{
+    Defaults, Effort, Lead, LeadSpec, Manifest, RunConfig, SingleLeadManifest, SubleadDefaultsSpec,
+    Task, Template, WorktreeCleanup,
+};
 
 /// Fully resolved task ready for dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +46,38 @@ pub struct ResolvedLead {
     /// session. Populated by `build_resume_hierarchical`; `None` for fresh runs.
     #[serde(default)]
     pub resume_session_id: Option<String>,
+
+    // ── v0.6 depth-2 cap fields ──────────────────────────────────────────────
+    /// When true, `spawn_sublead` is included in the root lead's MCP toolset.
+    /// Default false preserves v0.5 behavior.
+    #[serde(default)]
+    pub allow_subleads: bool,
+
+    /// Hard cap on total live sub-leads under this root.
+    #[serde(default)]
+    pub max_subleads: Option<u32>,
+
+    /// Hard cap on per-sub-lead budget envelope (USD).
+    #[serde(default)]
+    pub max_sublead_budget_usd: Option<f64>,
+
+    /// Hard cap on total live workers across the entire tree
+    /// (root-level workers + all sub-tree workers).
+    #[serde(default)]
+    pub max_workers_across_tree: Option<u32>,
+
+    /// Optional defaults applied when `spawn_sublead` omits a param.
+    #[serde(default)]
+    pub sublead_defaults: Option<SubleadDefaults>,
+}
+
+/// v0.6: resolved defaults for sub-lead spawn requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubleadDefaults {
+    pub budget_usd: Option<f64>,
+    pub max_workers: Option<u32>,
+    pub lead_timeout_secs: Option<u64>,
+    pub read_down: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +211,13 @@ fn resolve_lead(lead: &Lead, defaults: &Defaults, run: &RunConfig) -> Result<Res
         use_worktree: lead.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
         resume_session_id: None,
+        // v0.6 depth-2 fields: not present in [[lead]] array format; default to
+        // off/None so existing v0.5 manifests behave identically.
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     })
 }
 
@@ -224,6 +266,110 @@ fn resolve_task(
         env,
         resume_session_id: None,
     })
+}
+
+/// Resolve a v0.6 `SingleLeadManifest` (parsed from `[lead]` single-table TOML)
+/// into a `ResolvedManifest`. Used by `load_manifest_from_str`.
+///
+/// Unlike `resolve`, this path does NOT call `validate` so it can be used
+/// in unit tests that don't set up real git work-trees.
+pub fn resolve_single_lead(
+    manifest: SingleLeadManifest,
+    env_max_parallel: Option<u32>,
+) -> Result<ResolvedManifest> {
+    let lead = if let Some(spec) = manifest.lead {
+        Some(resolve_lead_spec(&spec, &manifest.run)?)
+    } else {
+        None
+    };
+
+    let max_parallel = manifest
+        .run
+        .max_parallel
+        .or(env_max_parallel)
+        .unwrap_or(DEFAULT_MAX_PARALLEL);
+
+    let run_dir = manifest.run.run_dir.unwrap_or_else(default_run_dir);
+
+    let mut notifications = manifest.notification.clone();
+    for cfg in &mut notifications {
+        crate::notify::config::apply_env_substitution(cfg)?;
+    }
+
+    let approval_rules = manifest
+        .approval_policy_rules
+        .iter()
+        .map(resolve_approval_rule)
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ResolvedManifest {
+        max_parallel,
+        halt_on_failure: manifest.run.halt_on_failure,
+        run_dir,
+        worktree_cleanup: manifest.run.worktree_cleanup,
+        emit_event_stream: manifest.run.emit_event_stream,
+        tasks: vec![],
+        lead,
+        // In the [lead] single-table format, budget_usd / max_workers /
+        // lead_timeout_secs live ON the [lead] table rather than [run].
+        // ResolvedManifest top-level fields are left None here; callers
+        // that need the per-lead values read from ResolvedLead directly.
+        max_workers: manifest.run.max_workers,
+        budget_usd: manifest.run.budget_usd,
+        lead_timeout_secs: manifest.run.lead_timeout_secs,
+        approval_policy: manifest.run.approval_policy,
+        notifications,
+        dump_shared_store: manifest.run.dump_shared_store,
+        require_plan_approval: manifest.run.require_plan_approval,
+        approval_rules,
+    })
+}
+
+/// Resolve a `LeadSpec` (single-table `[lead]`) into a `ResolvedLead`.
+fn resolve_lead_spec(spec: &LeadSpec, run: &RunConfig) -> Result<ResolvedLead> {
+    let timeout_secs = spec
+        .timeout_secs
+        .or(run.lead_timeout_secs)
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+
+    let sublead_defaults = spec.sublead_defaults.as_ref().map(resolve_sublead_defaults);
+
+    Ok(ResolvedLead {
+        // id and directory are not present in the [lead] single-table format
+        // (they come from the runtime context). Use sentinel values; callers
+        // of load_manifest_from_str that need a full run supply them separately.
+        id: String::new(),
+        directory: PathBuf::from("/"),
+        prompt: spec.prompt.clone().unwrap_or_default(),
+        branch: None,
+        model: spec
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        effort: spec.effort.unwrap_or(DEFAULT_EFFORT),
+        tools: spec.tools.clone().unwrap_or_else(default_tools),
+        timeout_secs,
+        use_worktree: spec.use_worktree.unwrap_or(true),
+        env: spec.env.clone(),
+        resume_session_id: None,
+        // v0.6 depth-2 fields:
+        allow_subleads: spec.allow_subleads,
+        max_subleads: spec.max_subleads,
+        max_sublead_budget_usd: spec.max_sublead_budget_usd,
+        max_workers_across_tree: spec.max_workers_across_tree,
+        sublead_defaults,
+    })
+}
+
+/// Convert a `SubleadDefaultsSpec` (TOML deserialized) into a `SubleadDefaults`
+/// (runtime resolved).
+fn resolve_sublead_defaults(spec: &SubleadDefaultsSpec) -> SubleadDefaults {
+    SubleadDefaults {
+        budget_usd: spec.budget_usd,
+        max_workers: spec.max_workers,
+        lead_timeout_secs: spec.lead_timeout_secs,
+        read_down: spec.read_down,
+    }
 }
 
 fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> {

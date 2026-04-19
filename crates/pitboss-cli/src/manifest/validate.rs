@@ -468,6 +468,11 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
         }
     }
 

@@ -916,6 +916,11 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
         assert!(args.iter().any(|a| a == "--verbose"));
@@ -941,6 +946,11 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();

@@ -35,6 +35,74 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: true,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 8,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(20),
+        budget_usd: Some(20.0),
+        lead_timeout_secs: None,
+        approval_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let run_id = Uuid::now_v7();
+    let script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "root".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    (dir, state)
+}
+
+/// Like `mk_state_with_subleads` but with `max_sublead_budget_usd` set to
+/// `cap`. Used by tests that need to verify budget-cap rejection.
+fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
+    let dir = TempDir::new().unwrap();
+    let lead = ResolvedLead {
+        id: "root".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "root prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+        allow_subleads: true,
+        max_subleads: None,
+        max_sublead_budget_usd: Some(cap),
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 8,
@@ -924,5 +992,75 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
         received[0].contains("output schema wrong"),
         "reprompt should include reason; got: {}",
         received[0]
+    );
+}
+
+// ── Task 5.1: Manifest schema for allow_subleads and caps ─────────────────────
+
+/// Verify that a v0.6 `[lead]` single-table TOML manifest with `allow_subleads`
+/// and cap fields parses and resolves correctly into `ResolvedManifest`.
+#[tokio::test]
+async fn manifest_allow_subleads_exposes_tool() {
+    use pitboss_cli::manifest::load::load_manifest_from_str;
+
+    let toml = r#"
+[run]
+max_parallel = 4
+
+[lead]
+prompt = "root"
+model = "claude-haiku-4-5"
+budget_usd = 20.0
+max_workers = 20
+allow_subleads = true
+max_subleads = 8
+max_sublead_budget_usd = 5.0
+max_workers_across_tree = 20
+
+[lead.sublead_defaults]
+budget_usd = 2.0
+max_workers = 4
+lead_timeout_secs = 1800
+read_down = false
+"#;
+    let manifest = load_manifest_from_str(toml).expect("manifest should parse");
+    let lead = manifest.lead.as_ref().unwrap();
+    assert!(lead.allow_subleads);
+    assert_eq!(lead.max_subleads, Some(8));
+    assert_eq!(lead.max_sublead_budget_usd, Some(5.0));
+    assert_eq!(lead.max_workers_across_tree, Some(20));
+    let defaults = lead.sublead_defaults.as_ref().unwrap();
+    assert_eq!(defaults.budget_usd, Some(2.0));
+    assert_eq!(defaults.max_workers, Some(4));
+    assert_eq!(defaults.lead_timeout_secs, Some(1800));
+    assert!(!defaults.read_down);
+}
+
+/// Verify that `spawn_sublead` is rejected when `budget_usd` exceeds the
+/// manifest's `max_sublead_budget_usd` cap.
+#[tokio::test]
+async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
+    // Build state with max_sublead_budget_usd = 3.0 baked into the manifest.
+    let (_dir, state) = mk_state_with_sublead_budget_cap(3.0);
+
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+
+    let result = root
+        .call_tool(
+            "spawn_sublead",
+            serde_json::json!({"prompt":"p","model":"m","budget_usd":5.0,"max_workers":1}),
+        )
+        .await;
+    assert!(result.is_err(), "spawn should fail when budget exceeds cap");
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds per-sublead cap"),
+        "error should mention the cap; got: {err}"
     );
 }

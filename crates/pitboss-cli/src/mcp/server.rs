@@ -13,7 +13,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::service::ServiceExt;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::{tool, tool_router, ErrorData, ServerHandler};
 
 use crate::dispatch::layer::LayerState;
 use crate::dispatch::signals::cancel_actor_with_reason;
@@ -284,6 +284,25 @@ impl PitbossHandler {
         Parameters(req): Parameters<SpawnSubleadRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         use crate::dispatch::sublead::{spawn_sublead as do_spawn, SubleadSpawnRequest};
+
+        // Manifest guard: spawn_sublead is only available when allow_subleads=true.
+        // This is the secondary line of defense; the primary gate is list_tools
+        // filtering (spawn_sublead is absent from the toolset when allow_subleads=false).
+        let allow_subleads = self
+            .state
+            .root
+            .manifest
+            .lead
+            .as_ref()
+            .is_some_and(|l| l.allow_subleads);
+        if !allow_subleads {
+            return Err(ErrorData::invalid_request(
+                String::from(
+                    "spawn_sublead requires allow_subleads=true in the manifest [lead] block",
+                ),
+                None,
+            ));
+        }
 
         // Role check: only root_lead (or "lead" for v0.5 compat) may spawn sub-leads.
         extract_and_check_root_lead(&req.meta)?;
@@ -720,7 +739,6 @@ impl PitbossHandler {
     }
 }
 
-#[tool_handler]
 impl ServerHandler for PitbossHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -737,6 +755,46 @@ impl ServerHandler for PitbossHandler {
             ),
             ..Default::default()
         }
+    }
+
+    /// Delegate all tool calls to the rmcp tool router.
+    /// Equivalent to what `#[tool_handler]` would generate automatically, but
+    /// written manually so we can add custom filtering to `list_tools` below.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParam,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
+    /// Return the tool list, conditionally excluding `spawn_sublead` when the
+    /// manifest does not have `allow_subleads = true` (v0.6 depth-2 gate).
+    ///
+    /// When `allow_subleads` is absent or false (v0.5 manifests), `spawn_sublead`
+    /// is not listed so agents never see it in their available tools.
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let allow_subleads = self
+            .state
+            .root
+            .manifest
+            .lead
+            .as_ref()
+            .is_some_and(|l| l.allow_subleads);
+
+        let tools: Vec<rmcp::model::Tool> = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| allow_subleads || t.name != "spawn_sublead")
+            .collect();
+
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
     }
 }
 

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::resolve::{resolve, ResolvedManifest};
-use super::schema::Manifest;
+use super::resolve::{resolve, resolve_single_lead, ResolvedManifest};
+use super::schema::{Manifest, SingleLeadManifest};
 use super::validate::validate;
 
 /// Load, parse, resolve, and validate a manifest from disk.
@@ -19,6 +19,18 @@ pub fn load_manifest(path: &Path, env_max_parallel: Option<u32>) -> Result<Resol
     let resolved = resolve(manifest, env_max_parallel)?;
     validate(&resolved)?;
     Ok(resolved)
+}
+
+/// Load, parse, and resolve a v0.6 single-table `[lead]` manifest from a TOML
+/// string. Skips `validate` so callers (integration tests) can work without
+/// real git work-trees and real filesystem directories.
+///
+/// Use this when testing manifest parsing/resolution in isolation. For
+/// production use, prefer `load_manifest` which also validates the result.
+pub fn load_manifest_from_str(toml_src: &str) -> Result<ResolvedManifest> {
+    let manifest: SingleLeadManifest =
+        toml::from_str(toml_src).with_context(|| "parsing single-lead manifest from string")?;
+    resolve_single_lead(manifest, None)
 }
 
 fn expand_paths(m: &mut Manifest) -> Result<()> {

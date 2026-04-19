@@ -181,6 +181,79 @@ pub struct Lead {
     pub env: HashMap<String, String>,
 }
 
+/// v0.6 single-table manifest variant. Used by `load_manifest_from_str` when
+/// the TOML author writes `[lead]` (one table) instead of `[[lead]]` (array).
+/// Carries all per-run settings under `[run]` and per-lead settings (including
+/// depth-2 caps) under `[lead]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SingleLeadManifest {
+    #[serde(default)]
+    pub run: RunConfig,
+    /// Single-table `[lead]` block.
+    pub lead: Option<LeadSpec>,
+    /// Notification sinks (v0.4.1+). Parsed as [[notification]] sections.
+    #[serde(default, rename = "notification")]
+    pub notification: Vec<crate::notify::config::NotificationConfig>,
+    /// Approval policy rules (v0.6+).
+    #[serde(default, rename = "approval_policy")]
+    pub approval_policy_rules: Vec<ApprovalRuleSpec>,
+}
+
+/// v0.6 single-table `[lead]` schema. Used when the manifest author writes
+/// `[lead]` (one table) rather than `[[lead]]` (array). Carries the new
+/// depth-2 cap fields in addition to the v0.5 per-lead fields.
+///
+/// Defaults to a "no-op" state so existing manifests without this block
+/// continue to work identically.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LeadSpec {
+    pub prompt: Option<String>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<Effort>,
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub use_worktree: Option<bool>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
+    /// v0.6: when true, root lead's MCP toolset includes `spawn_sublead`.
+    /// Defaults to false for v0.5 backward compatibility.
+    #[serde(default)]
+    pub allow_subleads: bool,
+
+    /// v0.6: hard cap on total live sub-leads under this root.
+    #[serde(default)]
+    pub max_subleads: Option<u32>,
+
+    /// v0.6: hard cap on per-sub-lead budget envelope (USD).
+    #[serde(default)]
+    pub max_sublead_budget_usd: Option<f64>,
+
+    /// v0.6: hard cap on total live workers across the entire tree
+    /// (sum of root-level workers + all sub-tree workers).
+    #[serde(default)]
+    pub max_workers_across_tree: Option<u32>,
+
+    /// v0.6: optional defaults applied when `spawn_sublead` omits a param.
+    #[serde(default)]
+    pub sublead_defaults: Option<SubleadDefaultsSpec>,
+}
+
+/// v0.6: optional `[lead.sublead_defaults]` block that supplies fallback values
+/// for `spawn_sublead` when the caller omits them.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SubleadDefaultsSpec {
+    pub budget_usd: Option<f64>,
+    pub max_workers: Option<u32>,
+    pub lead_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub read_down: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

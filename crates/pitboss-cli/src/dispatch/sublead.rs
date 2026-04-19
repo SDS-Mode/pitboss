@@ -46,38 +46,97 @@ pub enum ResolvedEnvelope {
 /// Validate the request against root's manifest caps and apply defaults.
 /// Returns `Err` if required fields are missing or caps would be exceeded.
 ///
-/// TODO(Task 5.1): wire up `manifest.lead.sublead_defaults` for default budget_usd,
-/// max_workers, and lead_timeout_secs once that field is added to `ResolvedLead`.
+/// Cap enforcement (Task 5.1):
+/// - `max_sublead_budget_usd`: per-call `budget_usd` must not exceed cap.
+/// - `max_subleads`: current sub-lead count + 1 must not exceed cap.
+/// - `max_workers_across_tree`: projected total workers must not exceed cap.
 ///
-/// TODO(Task 5.1): enforce `manifest.lead.max_sublead_budget_usd` and
-/// `manifest.lead.max_workers_across_tree` caps once those fields are added.
-pub fn resolve_envelope(
-    // _manifest: underscore prefix is intentional — per-sublead cap enforcement
-    // (max_sublead_budget_usd, max_workers_across_tree) is deferred to Task 5.1.
-    // Do NOT remove the underscore or the parameter; the signature must remain
-    // stable for when Task 5.1 wires up the cap checks.
-    _manifest: &ResolvedManifest,
+/// `sublead_defaults` fallback (Task 5.1): when `spawn_sublead` omits
+/// `budget_usd`, `max_workers`, or `lead_timeout_secs`, the values are
+/// filled from `manifest.lead.sublead_defaults` when present.
+pub async fn resolve_envelope(
+    state: &Arc<DispatchState>,
     req: &SubleadSpawnRequest,
 ) -> Result<ResolvedEnvelope> {
-    // Shared-pool mode: read_down=true with no explicit resource allocation.
-    if req.read_down && req.budget_usd.is_none() && req.max_workers.is_none() {
+    let manifest = &state.root.manifest;
+    let lead = manifest.lead.as_ref();
+
+    // ── Apply sublead_defaults for omitted fields ────────────────────────────
+    // When the caller omits budget_usd / max_workers / lead_timeout_secs /
+    // read_down, fall through to [lead.sublead_defaults] from the manifest.
+    let defaults = lead.and_then(|l| l.sublead_defaults.as_ref());
+
+    let effective_budget_usd = req
+        .budget_usd
+        .or_else(|| defaults.and_then(|d| d.budget_usd));
+    let effective_max_workers = req
+        .max_workers
+        .or_else(|| defaults.and_then(|d| d.max_workers));
+    let effective_lead_timeout_secs = req
+        .lead_timeout_secs
+        .or_else(|| defaults.and_then(|d| d.lead_timeout_secs));
+    let effective_read_down = req.read_down || defaults.is_some_and(|d| d.read_down);
+
+    // ── Shared-pool mode ─────────────────────────────────────────────────────
+    // read_down=true with no explicit resource allocation → share root's pool.
+    if effective_read_down && effective_budget_usd.is_none() && effective_max_workers.is_none() {
         return Ok(ResolvedEnvelope::SharedPool);
     }
 
-    // Otherwise every resource field must be explicitly provided.
-    // TODO(Task 5.1): fall back to sublead_defaults from [lead] block.
-    let budget_usd = req
-        .budget_usd
-        .ok_or_else(|| anyhow!("budget_usd required when read_down=false"))?;
+    // ── Resolve required fields ──────────────────────────────────────────────
+    let budget_usd =
+        effective_budget_usd.ok_or_else(|| anyhow!("budget_usd required when read_down=false"))?;
 
-    let max_workers = req
-        .max_workers
+    let max_workers = effective_max_workers
         .ok_or_else(|| anyhow!("max_workers required when read_down=false"))?;
 
-    let lead_timeout_secs = req.lead_timeout_secs.unwrap_or(3600);
+    let lead_timeout_secs = effective_lead_timeout_secs.unwrap_or(3600);
 
-    // TODO(Task 5.1): enforce manifest.lead.max_sublead_budget_usd cap.
-    // TODO(Task 5.1): enforce manifest.lead.max_workers_across_tree cap.
+    // ── Cap: max_sublead_budget_usd ──────────────────────────────────────────
+    if let Some(cap) = lead.and_then(|l| l.max_sublead_budget_usd) {
+        if budget_usd > cap {
+            return Err(anyhow!(
+                "spawn_sublead: budget_usd ${:.2} exceeds per-sublead cap ${:.2}",
+                budget_usd,
+                cap
+            ));
+        }
+    }
+
+    // ── Cap: max_subleads ────────────────────────────────────────────────────
+    if let Some(cap) = lead.and_then(|l| l.max_subleads) {
+        let current = state.subleads.read().await.len() as u32;
+        if current + 1 > cap {
+            return Err(anyhow!(
+                "spawn_sublead: max_subleads cap {} reached (current: {})",
+                cap,
+                current
+            ));
+        }
+    }
+
+    // ── Cap: max_workers_across_tree ─────────────────────────────────────────
+    if let Some(cap) = lead.and_then(|l| l.max_workers_across_tree) {
+        let root_workers = state.root.workers.read().await.len() as u32;
+        let subleads_guard = state.subleads.read().await;
+        let sub_workers: u32 = {
+            let mut total = 0u32;
+            for sub in subleads_guard.values() {
+                total += sub.workers.read().await.len() as u32;
+            }
+            total
+        };
+        let projected = root_workers + sub_workers + max_workers;
+        if projected > cap {
+            return Err(anyhow!(
+                "spawn_sublead: max_workers_across_tree cap {} would be exceeded \
+                 (current {}, requested {})",
+                cap,
+                root_workers + sub_workers,
+                max_workers
+            ));
+        }
+    }
 
     Ok(ResolvedEnvelope::Owned {
         budget_usd,
@@ -97,7 +156,7 @@ pub async fn spawn_sublead(
     req: SubleadSpawnRequest,
 ) -> Result<ActorId> {
     // 1. Resolve envelope (apply defaults, check caps).
-    let envelope = resolve_envelope(&state.root.manifest, &req)?;
+    let envelope = resolve_envelope(state, &req).await?;
 
     // 2. Reserve budget at root for Owned envelopes.
     //

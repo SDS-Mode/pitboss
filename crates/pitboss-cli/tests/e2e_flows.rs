@@ -52,6 +52,11 @@ fn mk_state(
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
@@ -344,6 +349,11 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
@@ -585,6 +595,11 @@ async fn e2e_lead_reprompts_running_worker() {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
@@ -765,6 +780,11 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
@@ -1054,6 +1074,11 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
