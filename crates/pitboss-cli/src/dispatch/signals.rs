@@ -96,29 +96,33 @@ mod tests {
     /// /proc reports stopped state, SIGCONT, confirm runnable,
     /// then clean up. Linux-only because /proc isn't available on
     /// macOS CI.
+    ///
+    /// Polls `/proc/<pid>/status` instead of a fixed sleep: the
+    /// kernel can briefly report `D` (uninterruptible disk sleep)
+    /// or `R` (running) between signal delivery and the process
+    /// actually being descheduled, especially on slow CI runners.
+    /// We only care that the state *eventually* reaches the
+    /// expected one within a generous window.
     #[cfg(target_os = "linux")]
     #[test]
     fn freeze_then_resume_flips_proc_state() {
         use std::process::Command;
-        use std::time::Duration;
 
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
         let pid = child.id();
 
         freeze(pid).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        let state = read_proc_state(pid);
         assert!(
-            matches!(state, Some('T' | 't')),
-            "expected stopped state, got {state:?}"
+            wait_for_state(pid, &['T', 't'], Duration::from_secs(2)),
+            "expected stopped state within 2s, final state: {:?}",
+            read_proc_state(pid)
         );
 
         resume_stopped(pid).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        let state = read_proc_state(pid);
         assert!(
-            matches!(state, Some('S' | 'R')),
-            "expected sleeping/running after SIGCONT, got {state:?}"
+            wait_for_state(pid, &['S', 'R'], Duration::from_secs(2)),
+            "expected sleeping/running state within 2s, final state: {:?}",
+            read_proc_state(pid)
         );
 
         let _ = child.kill();
@@ -134,5 +138,23 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Poll `/proc/<pid>/status` every 10ms until the State field is
+    /// one of `expected`, or `timeout` elapses. Returns true on match.
+    #[cfg(target_os = "linux")]
+    fn wait_for_state(pid: u32, expected: &[char], timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(c) = read_proc_state(pid) {
+                if expected.contains(&c) {
+                    return true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
