@@ -356,17 +356,27 @@ fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    // Split body vertically: grid | log pane
+    // Split body horizontally: grid (70%) | approval pane (30%)
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+
+    let grid_area = h_chunks[0];
+    let approval_area = h_chunks[1];
+
+    // Split grid area vertically: tile grid | log pane
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(100 - LOG_PANE_PCT),
             Constraint::Percentage(LOG_PANE_PCT),
         ])
-        .split(area);
+        .split(grid_area);
 
     render_tile_grid(frame, body_chunks[0], state);
     render_focus_log(frame, body_chunks[1], state);
+    render_approval_list_pane(frame, approval_area, state);
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +904,63 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Approval list pane (right-rail, 30% width)
+// ---------------------------------------------------------------------------
+
+fn render_approval_list_pane(frame: &mut Frame, area: Rect, state: &AppState) {
+    use crate::state::PaneFocus;
+
+    let focused = state.pane_focus == PaneFocus::ApprovalList;
+    let border_style = if focused {
+        theme::focused_border()
+    } else {
+        theme::idle_border()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Pending Approvals [a] ")
+        .border_style(border_style);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.approval_list.items.is_empty() {
+        let msg = Paragraph::new("No pending approvals")
+            .style(theme::secondary_style())
+            .alignment(Alignment::Center);
+        frame.render_widget(msg, inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .approval_list
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let line = state.approval_list.line_for(item);
+            let style = if i == state.approval_list.selected_idx && focused {
+                Style::default()
+                    .fg(theme::OVERLAY_ACCENT_INFO)
+                    .add_modifier(Modifier::BOLD)
+            } else if i == state.approval_list.selected_idx {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                theme::primary_style()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.approval_list.selected_idx));
+
+    let list = List::new(items);
+    frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1528,7 +1595,7 @@ fn render_approval_modal(
         ApprovalSubMode::Rejecting { draft } => {
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Rejection comment — Ctrl+Enter to send  Esc cancel ");
+                .title(" Rejection reason (optional) — Ctrl+Enter to send  Esc cancel ");
             let para = Paragraph::new(draft.clone())
                 .block(block)
                 .wrap(Wrap { trim: false })
@@ -1710,6 +1777,8 @@ mod tests {
             subtrees: std::collections::HashMap::new(),
             expanded: std::collections::HashMap::new(),
             focused_subtree_idx: 0,
+            pane_focus: crate::state::PaneFocus::Grid,
+            approval_list: crate::approval_list::ApprovalListState::default(),
         }
     }
 

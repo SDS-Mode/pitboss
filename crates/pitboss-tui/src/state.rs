@@ -76,6 +76,38 @@ pub enum ApprovalSubMode {
     Rejecting { draft: String },
 }
 
+/// Which top-level pane has keyboard focus in the normal view.
+/// Default: `Grid` (existing v0.5 behavior).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PaneFocus {
+    #[default]
+    Grid,
+    ApprovalList,
+}
+
+/// A single pending approval shown in the right-rail approval list pane.
+#[derive(Debug, Clone)]
+pub struct ApprovalListItem {
+    /// Opaque request id (forwarded to `ControlOp::Approve`).
+    pub id: uuid::Uuid,
+    /// Human-readable path to the actor that raised the request
+    /// (e.g. `"root"` or `"root→S1"`).
+    pub actor_path: String,
+    /// Free-form category tag (e.g. `"tool_use"`, `"plan"`, …).
+    pub category: String,
+    /// One-line summary of the requested action.
+    pub summary: String,
+    /// Wall-clock time when the request arrived.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ApprovalListItem {
+    /// Short human-readable category string for list-line rendering.
+    pub fn category_str(&self) -> &str {
+        &self.category
+    }
+}
+
 /// Status of a single tile.
 #[derive(Debug, Clone)]
 pub enum TileStatus {
@@ -190,6 +222,11 @@ pub struct AppState {
     /// currently has the grouped-grid header focus. 0 = root tile grid.
     /// Used by Tab cycling and Enter toggle-collapse.
     pub focused_subtree_idx: usize,
+    /// Which top-level pane has keyboard focus. Default: `Grid`.
+    /// `'a'` switches to `ApprovalList`; `Esc` returns to `Grid`.
+    pub pane_focus: PaneFocus,
+    /// Non-modal approval queue rendered in the right-rail pane (30% width).
+    pub approval_list: crate::approval_list::ApprovalListState,
 }
 
 /// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
@@ -233,6 +270,8 @@ impl AppState {
             subtrees: HashMap::new(),
             expanded: HashMap::new(),
             focused_subtree_idx: 0,
+            pane_focus: PaneFocus::Grid,
+            approval_list: crate::approval_list::ApprovalListState::default(),
         }
     }
 

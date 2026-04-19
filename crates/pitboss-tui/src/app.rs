@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
-use crate::state::{AppSnapshot, AppState, Mode};
+use crate::state::{AppSnapshot, AppState, Mode, PaneFocus};
 use crate::watcher;
 
 // ---------------------------------------------------------------------------
@@ -303,6 +303,40 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
 }
 
 fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
+    // When the approval list pane is focused, Up/Down/Enter navigate it;
+    // Esc returns focus to the grid. All other keys fall through to the
+    // grid handler below so global shortcuts (q, ?, o, …) still work.
+    if state.pane_focus == PaneFocus::ApprovalList {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.approval_list.move_selection_down();
+                return Action::Continue;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.approval_list.move_selection_up();
+                return Action::Continue;
+            }
+            KeyCode::Enter => {
+                if let Some(item) = state.approval_list.current().cloned() {
+                    state.mode = Mode::ApprovalModal {
+                        request_id: item.id.to_string(),
+                        task_id: item.actor_path.clone(),
+                        summary: item.summary.clone(),
+                        plan: None,
+                        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+                        sub_mode: crate::state::ApprovalSubMode::Overview,
+                    };
+                }
+                return Action::Continue;
+            }
+            KeyCode::Esc => {
+                state.pane_focus = PaneFocus::Grid;
+                return Action::Continue;
+            }
+            _ => {}
+        }
+    }
+
     match code {
         // Quit
         KeyCode::Char('q') => return Action::Quit,
@@ -311,6 +345,11 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
         // Only meaningful for depth-2 runs; no-op cost for depth-1.
         KeyCode::Tab => {
             state.cycle_focus_to_next_subtree();
+        }
+
+        // Focus the approval list pane.
+        KeyCode::Char('a') => {
+            state.pane_focus = PaneFocus::ApprovalList;
         }
 
         // Navigation
@@ -738,6 +777,10 @@ fn send_approve(
     comment: Option<String>,
     edited_summary: Option<String>,
 ) {
+    // When rejecting, forward the comment text also via the `reason` field
+    // introduced in Task 4.3 so the requesting actor receives the rejection
+    // rationale in `ApprovalResponse.reason`.
+    let reason = if approved { None } else { comment.clone() };
     spawn_control_op(
         state,
         pitboss_cli::control::protocol::ControlOp::Approve {
@@ -745,7 +788,7 @@ fn send_approve(
             approved,
             comment,
             edited_summary,
-            reason: None,
+            reason,
         },
     );
 }
