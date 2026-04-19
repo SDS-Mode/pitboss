@@ -18,10 +18,10 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
     handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
-    handle_reprompt_worker, handle_request_approval, handle_spawn_worker, handle_wait_for_any,
-    handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs, PauseWorkerArgs,
-    RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs, TaskIdArgs, WaitForAnyArgs,
-    WaitForWorkerArgs,
+    handle_propose_plan, handle_reprompt_worker, handle_request_approval, handle_spawn_worker,
+    handle_wait_for_any, handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs,
+    PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs,
+    TaskIdArgs, WaitForAnyArgs, WaitForWorkerArgs,
 };
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
@@ -222,6 +222,19 @@ impl PitbossHandler {
         Parameters(args): Parameters<RequestApprovalArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match handle_request_approval(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Propose a full execution plan for pre-flight operator approval. When [run].require_plan_approval=true, spawn_worker is blocked until a plan submitted via this tool is approved. Plan carries typed rationale/resources/risks/rollback for structured review. Blocks until operator responds or timeout. Distinct from request_approval, which gates individual in-flight actions."
+    )]
+    async fn propose_plan(
+        &self,
+        Parameters(args): Parameters<ProposePlanArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_propose_plan(&self.state, args).await {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }

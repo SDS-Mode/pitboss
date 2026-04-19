@@ -1145,6 +1145,7 @@ fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &
     frame.render_widget(para, modal);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_approval_modal(
     frame: &mut Frame,
     area: Rect,
