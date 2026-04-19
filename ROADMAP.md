@@ -3,46 +3,14 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: v0.4.4 (2026-04-18).** Everything shipped through
-v0.4.4 has been removed from this file — check `CHANGELOG.md` for
+**Last refresh: v0.4.5 (2026-04-19).** Everything shipped through
+v0.4.5 has been removed from this file — check `CHANGELOG.md` for
 per-version history. If you're about to add an item, slot it into one
 of the tiered sections below (biggest effort first).
 
 ---
 
 ## Flagship feature bucket (targeting v0.5.0)
-
-### `pitboss attach <run-id> <task-id>`
-
-Live TTY relay using `portable-pty`. Narrow-scope escape hatch for
-"I want to watch a worker interactively" — the one use case that the
-hierarchical dispatch model doesn't naturally cover. No persistent
-sessions, no tmux dependency; sits on top of v0.4.0 control-socket
-primitives. **Status:** designed, not started.
-
-### SIGSTOP freeze-pause
-
-Alternative / addition to the v0.4.0 cancel-with-resume pause model.
-Freezes a worker's process without tearing down + re-spawning — safer
-for very-long-running workers where losing the claude session mid-flight
-is expensive. Coexists with existing `pause_worker` semantics behind a
-flag. **Status:** parked; value depends on real-world pause frequency.
-
-### Structured approval schema
-
-Today the approval modal sends a freeform `summary` string and
-optionally an edited summary back. A typed schema (`{plan, rationale,
-resources, rollback_plan, ...}`) with in-TUI field-level editing would
-make the flow much more reviewable for non-trivial approvals.
-**Status:** parked pending design.
-
-### Plan approval flow
-
-Lead proposes a full execution plan, operator approves in the TUI (or
-via a new `pitboss plan` subcommand) BEFORE any workers dispatch —
-distinct from the in-flight `request_approval` tool, which gates
-individual actions mid-run. UX question: modal-in-TUI vs. separate
-subcommand. **Status:** parked, no design doc.
 
 ### Full end-to-end `fake-claude` integration test
 

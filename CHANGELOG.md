@@ -7,6 +7,34 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`pitboss attach <run-id> <task-id>`.** Follow-mode log viewer for a
+  single worker, resolved by run-id prefix. `--raw` streams the
+  underlying jsonl; without it, lines are formatted like the TUI focus
+  pane. Exits on Ctrl-C or when the worker's terminal `Event::Result`
+  arrives.
+- **SIGSTOP freeze-pause as opt-in pause mode.** `pause_worker` now
+  takes a `mode` ("cancel" / "freeze"). Default stays at cancel-style
+  (terminate + `claude --resume`, zero state loss on the Claude side).
+  Freeze SIGSTOPs the subprocess in place; `continue_worker` SIGCONTs
+  to resume — useful for short pauses where respawning would cost a
+  context reload, risky for long pauses (Anthropic may drop the HTTP
+  session). New `WorkerState::Frozen` variant tracked alongside Paused.
+- **Structured approval schema.** `request_approval` now accepts an
+  optional typed `ApprovalPlan` (rationale / resources / risks /
+  rollback). TUI modal renders the structured fields as labeled
+  sections, with risks in the warning color. Bare-summary approvals
+  still work unchanged.
+- **Plan approval flow (`propose_plan`).** New MCP tool the lead calls
+  *before* `spawn_worker`. When `[run].require_plan_approval = true`,
+  spawn_worker refuses until a plan submitted via propose_plan has
+  been operator-approved. Reuses the structured-approval modal with a
+  `[PRE-FLIGHT PLAN]` vs `[IN-FLIGHT ACTION]` badge in the title so
+  operators can tell the two kinds apart. On rejection, the plan gate
+  stays closed so the lead can revise and retry. Runs without the
+  opt-in flag behave identically to before.
+
 ## [0.4.4] — 2026-04-18
 
 ### Added
