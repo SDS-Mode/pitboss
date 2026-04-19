@@ -51,10 +51,14 @@ fn main() {
             .expect("build tokio runtime");
 
         // Open an MCP client if the socket env var is set. Unset => None.
+        // When PITBOSS_FAKE_MCP_BRIDGE_CMD + ACTOR_ID + ACTOR_ROLE are also
+        // set, the client spawns `pitboss mcp-bridge` as a child and speaks
+        // stdio to it — exercising the same `_meta` injection path that a
+        // real claude subprocess uses in production.
         let client = match std::env::var("PITBOSS_FAKE_MCP_SOCKET") {
             Ok(sock) => {
                 let path = std::path::PathBuf::from(sock);
-                match rt.block_on(mcp_client::McpClient::connect(&path)) {
+                match rt.block_on(mcp_client::McpClient::connect_from_env(&path)) {
                     Ok(c) => Some(c),
                     Err(e) => {
                         eprintln!("fake-claude: mcp connect {}: {e:#}", path.display());

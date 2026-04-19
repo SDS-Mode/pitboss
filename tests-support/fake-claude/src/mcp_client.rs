@@ -5,16 +5,26 @@
 //! of `fake-mcp-client/src/lib.rs` — the two crates have different roles
 //! (one drives the server as a test peer; the other emulates a lead
 //! subprocess), and inlining avoids a test-support dependency cycle.
+//!
+//! Two connection modes:
+//! - [`McpClient::connect`] — opens the pitboss unix socket directly.
+//!   Fast for test setups that don't care about the bridge layer.
+//! - [`McpClient::connect_via_bridge`] — spawns
+//!   `<pitboss> mcp-bridge <socket> --actor-id <id> --actor-role <role>`
+//!   and speaks stdio JSON-RPC to it. Exercises the `_meta` injection
+//!   path that a real claude subprocess uses in production.
 
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rmcp::model::{CallToolRequestParam, CallToolResult};
 use rmcp::service::{RoleClient, RunningService};
+use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
 use serde_json::Value;
+use tokio::process::Command;
 
 pub struct McpClient {
     inner: RunningService<RoleClient, ()>,
@@ -22,7 +32,8 @@ pub struct McpClient {
 
 impl McpClient {
     /// Connect to a pitboss MCP server on `socket` and complete the MCP
-    /// initialization handshake.
+    /// initialization handshake. Direct unix-socket mode — skips the
+    /// bridge's `_meta` injection.
     pub async fn connect(socket: &Path) -> Result<Self> {
         let stream = tokio::net::UnixStream::connect(socket)
             .await
@@ -32,6 +43,59 @@ impl McpClient {
             .await
             .with_context(|| format!("mcp init handshake on {}", socket.display()))?;
         Ok(Self { inner })
+    }
+
+    /// Connect via a spawned `pitboss mcp-bridge` subprocess. Mirrors
+    /// how a real claude subprocess talks to pitboss: the bridge reads
+    /// JSON-RPC from stdin, injects `_meta: {actor_id, actor_role}` on
+    /// every `tools/call`, and forwards to the unix socket.
+    ///
+    /// `pitboss_bin` must point at a `pitboss` binary that exposes the
+    /// `mcp-bridge` subcommand.
+    pub async fn connect_via_bridge(
+        pitboss_bin: &Path,
+        socket: &Path,
+        actor_id: &str,
+        actor_role: &str,
+    ) -> Result<Self> {
+        let mut cmd = Command::new(pitboss_bin);
+        cmd.arg("mcp-bridge")
+            .arg(socket)
+            .arg("--actor-id")
+            .arg(actor_id)
+            .arg("--actor-role")
+            .arg(actor_role);
+        let transport = TokioChildProcess::new(cmd).with_context(|| {
+            format!(
+                "spawn mcp-bridge via {} (sock={}, actor={}/{})",
+                pitboss_bin.display(),
+                socket.display(),
+                actor_id,
+                actor_role,
+            )
+        })?;
+        let inner = ()
+            .serve(transport)
+            .await
+            .with_context(|| format!("mcp init handshake via bridge on {}", socket.display()))?;
+        Ok(Self { inner })
+    }
+
+    /// Helper: read the trio of bridge env vars and pick the right
+    /// connection mode. Returns `None` if no MCP is configured at all,
+    /// the direct-socket path if only `PITBOSS_FAKE_MCP_SOCKET` is set,
+    /// and the bridge path if all three bridge vars are set.
+    pub async fn connect_from_env(socket: &Path) -> Result<Self> {
+        let bridge_cmd = std::env::var_os("PITBOSS_FAKE_MCP_BRIDGE_CMD");
+        if let Some(cmd) = bridge_cmd {
+            let actor_id = std::env::var("PITBOSS_FAKE_ACTOR_ID")
+                .context("PITBOSS_FAKE_MCP_BRIDGE_CMD set but PITBOSS_FAKE_ACTOR_ID missing")?;
+            let actor_role = std::env::var("PITBOSS_FAKE_ACTOR_ROLE")
+                .context("PITBOSS_FAKE_MCP_BRIDGE_CMD set but PITBOSS_FAKE_ACTOR_ROLE missing")?;
+            return Self::connect_via_bridge(&PathBuf::from(cmd), socket, &actor_id, &actor_role)
+                .await;
+        }
+        Self::connect(socket).await
     }
 
     /// Call a tool and return its structured content as JSON. Pitboss

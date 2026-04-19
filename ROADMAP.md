@@ -12,12 +12,9 @@ of the tiered sections below (biggest effort first).
 
 ## Flagship feature bucket (targeting v0.5.0)
 
-### Full end-to-end `fake-claude` integration test
-
-Task 26 of the v0.3 plan left a placeholder. Requires `fake-claude` to
-speak real MCP end-to-end (including streaming responses), not just
-canned JSON lines. Medium lift; pays off as more hierarchical features
-land and e2e coverage gets more valuable. **Status:** ~1-2 days.
+_Empty — all v0.5.0 flagship items have shipped. v0.5.0 release can
+cut whenever we're ready. Post-v0.5.0 items live in the tiered
+sections below._
 
 ---
 

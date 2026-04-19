@@ -218,18 +218,9 @@ async fn mcp_spawn_while_draining_returns_error() {
     client.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn hierarchical_run_with_one_worker_end_to_end() {
-    // This test doesn't spin up a real claude; it uses fake-claude as both
-    // the lead and the worker. The fake lead emits a pitboss__spawn_worker
-    // tool_use, waits for the result, then exits. The dispatcher wires the
-    // MCP tool_result back to the fake lead via a scripted transcript.
-
-    // FIXME: The full round-trip requires the fake-claude binary to
-    // interact with the pitboss MCP server through the MCP protocol. Since
-    // fake-claude doesn't speak MCP, this end-to-end case is deferred to
-    // the manual smoke test until a full MCP-aware fake lead is built.
-    //
-    // Task 26 keeps the placeholder here so the plan records the intent.
-    // Implementation of the full loop comes in v0.3.1 hardening.
-}
+// Task 26 of the v0.3 plan left a placeholder here; the full
+// hierarchical end-to-end coverage landed in v0.4.1's e2e_flows.rs and
+// was extended in v0.4.5 (`e2e_lead_spawns_worker_via_real_subprocess`,
+// `e2e_lead_propose_plan_gate_unblocks_spawn`,
+// `e2e_lead_through_mcp_bridge_injects_meta`, and others). The empty
+// placeholder test has been removed.
