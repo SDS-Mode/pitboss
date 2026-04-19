@@ -539,4 +539,68 @@ prompt = "p"
             Some("https://h.example/x")
         );
     }
+
+    /// TOML round-trip for [[approval_policy]] blocks: verifies that the
+    /// `#[serde(rename = "match")]` annotation on `match_clause` is correct,
+    /// that the action and match fields are parsed, and that the resolved
+    /// `ResolvedManifest.approval_rules` has the expected content.
+    ///
+    /// A typo in the rename attribute or a regression in `resolve_approval_rule`
+    /// would cause this test to fail even though the unit tests in policy.rs
+    /// and schema.rs might pass.
+    #[test]
+    fn toml_approval_policy_round_trips_through_resolve() {
+        use crate::mcp::approval::ApprovalCategory;
+        use crate::mcp::policy::ApprovalAction;
+
+        let m = man(r#"
+[run]
+max_parallel = 4
+
+[[lead]]
+id = "root"
+directory = "/tmp"
+prompt = "coordinate"
+model = "claude-haiku-4-5"
+
+[[approval_policy]]
+action = "auto_approve"
+[approval_policy.match]
+actor = "root→S1"
+category = "tool_use"
+"#);
+        let r = resolve(m, None).unwrap();
+
+        assert_eq!(
+            r.approval_rules.len(),
+            1,
+            "expected one approval rule, got: {:?}",
+            r.approval_rules
+        );
+
+        let rule = &r.approval_rules[0];
+        assert_eq!(
+            rule.action,
+            ApprovalAction::AutoApprove,
+            "action should be AutoApprove"
+        );
+        assert_eq!(
+            rule.r#match.actor.as_deref(),
+            Some("root→S1"),
+            "match.actor should be 'root→S1'"
+        );
+        assert_eq!(
+            rule.r#match.category,
+            Some(ApprovalCategory::ToolUse),
+            "match.category should be ToolUse"
+        );
+        assert!(
+            rule.r#match.tool_name.is_none(),
+            "match.tool_name should be absent"
+        );
+        assert!(
+            rule.r#match.cost_over.is_none(),
+            "match.cost_over should be absent"
+        );
+    }
 }

@@ -90,6 +90,9 @@ fn rule_matches(
             _ => return false,
         }
     }
+    // TODO(Phase 4.x): emit ApprovalCategory::Cost approvals so cost_over
+    // rules can fire in practice. Until then, cost_over rules only match when
+    // the caller passes an explicit cost_estimate hint via RequestApprovalArgs.
     if let Some(threshold) = m.cost_over {
         match cost {
             Some(actual) if actual > threshold => {}

@@ -225,7 +225,7 @@ pub struct ApprovalPlan {
     pub rollback: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RequestApprovalArgs {
     /// One-line summary of the action being approved. Required. For
     /// non-trivial approvals prefer the typed `plan` field below, which
@@ -241,6 +241,21 @@ pub struct RequestApprovalArgs {
     /// destructive or multi-step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<ApprovalPlan>,
+    /// Optional tool name hint for policy matching. When provided, the
+    /// policy matcher can evaluate `match.tool_name` rules against this
+    /// value. Falls through to `None` matching when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Optional cost estimate (USD) hint for policy matching. When
+    /// provided, the policy matcher can evaluate `match.cost_over` rules
+    /// against this value. Falls through to `None` matching when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimate: Option<f64>,
+    /// Caller identity injected by mcp-bridge. Used to build the correct
+    /// actor_path for policy matching (sub-lead vs root-lead).
+    #[serde(rename = "_meta", default, skip_serializing)]
+    #[schemars(skip)]
+    pub meta: Option<crate::shared_store::tools::MetaField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -257,7 +272,7 @@ pub struct ApprovalToolResponse {
 /// When that flag is off, calling `propose_plan` is harmless — the plan
 /// is approved via the usual modal/policy path, but `spawn_worker` never
 /// checks the result.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ProposePlanArgs {
     /// The typed plan to review. `summary` is required; the rest
     /// (rationale / resources / risks / rollback) is optional but
@@ -268,6 +283,11 @@ pub struct ProposePlanArgs {
     /// `lead_timeout_secs`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Caller identity injected by mcp-bridge. Used to build the correct
+    /// actor_path for policy matching (sub-lead vs root-lead).
+    #[serde(rename = "_meta", default, skip_serializing)]
+    #[schemars(skip)]
+    pub meta: Option<crate::shared_store::tools::MetaField>,
 }
 
 use std::sync::Arc;
@@ -1264,27 +1284,92 @@ pub async fn handle_reprompt_worker(
     Ok(CancelResult { ok: true })
 }
 
+/// Build the caller's `(actor_id, ActorPath)` from the optional `_meta` field.
+///
+/// Falls back to the root-lead identity when `_meta` is absent, which is
+/// correct for depth-1 runs and backward-compatible with callers that predate
+/// the `_meta` injection.
+///
+/// Path construction:
+/// - `Lead` (root lead, incl. `root_lead` alias): `[root_lead_id]`
+/// - `Sublead` with id S: `[root_lead_id, S]`
+/// - `Worker` with id W:
+///   - root-layer worker (not in any sub-tree): `[root_lead_id, W]`
+///   - sub-tree worker of sublead S: `[root_lead_id, S, W]`
+async fn build_caller_identity(
+    state: &Arc<crate::dispatch::state::DispatchState>,
+    meta: Option<&crate::shared_store::tools::MetaField>,
+) -> (String, crate::dispatch::actor::ActorPath) {
+    use crate::dispatch::actor::ActorPath;
+    use crate::shared_store::ActorRole;
+
+    let root_lead_id = state.root.lead_id.as_str();
+
+    let Some(m) = meta else {
+        // No _meta → treat as root lead (backward-compatible).
+        return (root_lead_id.to_owned(), ActorPath::new([root_lead_id]));
+    };
+
+    match m.actor_role {
+        ActorRole::Lead => {
+            // Root lead (or root_lead alias).
+            (m.actor_id.clone(), ActorPath::new([root_lead_id]))
+        }
+        ActorRole::Sublead => {
+            // Sub-lead S → path is [root_lead_id, S].
+            (
+                m.actor_id.clone(),
+                ActorPath::new([root_lead_id, m.actor_id.as_str()]),
+            )
+        }
+        ActorRole::Worker => {
+            // Look up which sub-tree (if any) this worker belongs to.
+            let layer_opt = state
+                .worker_layer_index
+                .read()
+                .await
+                .get(m.actor_id.as_str())
+                .cloned();
+            match layer_opt {
+                // Root-layer worker: [root_lead_id, worker_id]
+                None | Some(None) => (
+                    m.actor_id.clone(),
+                    ActorPath::new([root_lead_id, m.actor_id.as_str()]),
+                ),
+                // Sub-tree worker: [root_lead_id, sublead_id, worker_id]
+                Some(Some(sublead_id)) => (
+                    m.actor_id.clone(),
+                    ActorPath::new([root_lead_id, sublead_id.as_str(), m.actor_id.as_str()]),
+                ),
+            }
+        }
+    }
+}
+
 pub async fn handle_request_approval(
     state: &Arc<DispatchState>,
     args: RequestApprovalArgs,
 ) -> Result<ApprovalToolResponse> {
-    use crate::dispatch::actor::ActorPath;
     use crate::dispatch::state::PendingApproval;
     use crate::mcp::approval::{ApprovalCategory, ApprovalFallback};
     use crate::mcp::policy::ApprovalAction;
 
-    // Build a PendingApproval for policy evaluation. Actor path is constructed
-    // from the requesting lead_id (root or sub-lead). Tool_name and cost are
-    // not available in RequestApprovalArgs, so policy rules using those fields
-    // will not match here — that is intentional for the v0.6 scope.
+    // Determine the caller's identity from the _meta field injected by
+    // mcp-bridge. Falls back to treating the caller as the root lead when
+    // _meta is absent (backward-compatible with callers that omit it).
+    let (caller_id, actor_path) = build_caller_identity(state, args.meta.as_ref()).await;
+
+    // Build a PendingApproval for policy evaluation. actor_path is now
+    // correctly set based on the actual caller role (root lead, sub-lead, or
+    // worker), so per-sub-lead policy rules (e.g. actor = "root→S1") match.
     let pending = PendingApproval {
         id: uuid::Uuid::now_v7(),
-        requesting_actor_id: state.lead_id.clone(),
-        actor_path: ActorPath::new([state.lead_id.as_str()]),
+        requesting_actor_id: caller_id.clone(),
+        actor_path,
         category: ApprovalCategory::ToolUse,
         summary: args.summary.clone(),
         plan: args.plan.clone(),
-        blocks: vec![state.lead_id.clone()],
+        blocks: vec![caller_id.clone()],
         created_at: chrono::Utc::now(),
         ttl_secs: args
             .timeout_secs
@@ -1297,7 +1382,7 @@ pub async fn handle_request_approval(
     {
         let matcher_guard = state.root.policy_matcher.lock().await;
         if let Some(matcher) = matcher_guard.as_ref() {
-            match matcher.evaluate(&pending, None, None) {
+            match matcher.evaluate(&pending, args.tool_name.as_deref(), args.cost_estimate) {
                 Some(ApprovalAction::AutoApprove) => {
                     tracing::info!(
                         actor = %pending.requesting_actor_id,
@@ -1335,7 +1420,7 @@ pub async fn handle_request_approval(
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
         .request(
-            state.lead_id.clone(),
+            caller_id,
             args.summary,
             args.plan,
             crate::control::protocol::ApprovalKind::Action,
@@ -1364,20 +1449,25 @@ pub async fn handle_propose_plan(
     state: &Arc<DispatchState>,
     args: ProposePlanArgs,
 ) -> Result<ApprovalToolResponse> {
-    use crate::dispatch::actor::ActorPath;
     use crate::dispatch::state::PendingApproval;
     use crate::mcp::approval::{ApprovalCategory, ApprovalFallback};
     use crate::mcp::policy::ApprovalAction;
 
-    // Build a PendingApproval for policy evaluation.
+    // Determine the caller's identity from the _meta field injected by
+    // mcp-bridge. Falls back to treating the caller as the root lead when
+    // _meta is absent (backward-compatible with callers that omit it).
+    let (caller_id, actor_path) = build_caller_identity(state, args.meta.as_ref()).await;
+
+    // Build a PendingApproval for policy evaluation. actor_path is now
+    // correctly set based on the actual caller role.
     let pending = PendingApproval {
         id: uuid::Uuid::now_v7(),
-        requesting_actor_id: state.lead_id.clone(),
-        actor_path: ActorPath::new([state.lead_id.as_str()]),
+        requesting_actor_id: caller_id.clone(),
+        actor_path,
         category: ApprovalCategory::Plan,
         summary: args.plan.summary.clone(),
         plan: Some(args.plan.clone()),
-        blocks: vec![state.lead_id.clone()],
+        blocks: vec![caller_id.clone()],
         created_at: chrono::Utc::now(),
         ttl_secs: args
             .timeout_secs
@@ -1435,7 +1525,7 @@ pub async fn handle_propose_plan(
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
         .request(
-            state.lead_id.clone(),
+            caller_id,
             summary,
             Some(args.plan),
             crate::control::protocol::ApprovalKind::Plan,
@@ -2260,6 +2350,7 @@ mod tests {
             summary: "spawn 3 workers".into(),
             timeout_secs: Some(60),
             plan: None,
+            ..Default::default()
         };
         let s = serde_json::to_string(&a).unwrap();
         let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
@@ -2278,6 +2369,7 @@ mod tests {
                 risks: vec!["slow reads if live".into()],
                 rollback: Some("restore from snapshot".into()),
             }),
+            ..Default::default()
         };
         let s = serde_json::to_string(&b).unwrap();
         let back: RequestApprovalArgs = serde_json::from_str(&s).unwrap();
@@ -2617,6 +2709,7 @@ mod tests {
                 summary: "spawn 3".into(),
                 timeout_secs: Some(2),
                 plan: None,
+                ..Default::default()
             },
         )
         .await
@@ -2771,6 +2864,7 @@ mod tests {
                     rollback: Some("none".into()),
                 },
                 timeout_secs: Some(2),
+                ..Default::default()
             },
         )
         .await
@@ -2792,6 +2886,7 @@ mod tests {
                     ..Default::default()
                 },
                 timeout_secs: Some(2),
+                ..Default::default()
             },
         )
         .await

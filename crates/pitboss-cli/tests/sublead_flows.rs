@@ -608,6 +608,7 @@ async fn policy_auto_approves_matching_actor() {
             summary: "run rm -rf /tmp/foo".into(),
             timeout_secs: Some(1),
             plan: None,
+            ..Default::default()
         },
     )
     .await
@@ -628,6 +629,95 @@ async fn policy_auto_approves_matching_actor() {
     assert!(
         queue.is_empty(),
         "policy short-circuit should not enqueue approval; queue has {} items",
+        queue.len()
+    );
+}
+
+/// Sub-lead-specific auto-approval: set up a policy that auto-approves the
+/// sub-lead "root→S1" actor path, spawn sub-lead S1, then have S1 call
+/// `request_approval` via MCP. The `_meta` injected by FakeMcpClient causes
+/// the server to build the correct actor_path `"root→S1"` rather than `"root"`,
+/// so the policy matches and the approval is auto-approved without operator
+/// interaction.
+///
+/// This test FAILS before the C1 fix (actor_path was always stamped as "root")
+/// and passes after the fix.
+#[tokio::test]
+async fn policy_auto_approves_sublead_actor() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Root lead spawns sub-lead S1.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let spawn_resp = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "coordinate sub-tasks", "model": "claude-haiku-4-5", "budget_usd": 5.0, "max_workers": 4}),
+        )
+        .await
+        .unwrap();
+    let s1_id = spawn_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead must return sublead_id")
+        .to_string();
+
+    // Inject a policy that auto-approves requests from "root→S1".
+    // The policy actor string must match the actor_path Display format.
+    {
+        use pitboss_cli::mcp::policy::{
+            ApprovalAction, ApprovalMatch, ApprovalRule, PolicyMatcher,
+        };
+        let expected_path = format!("root→{}", s1_id);
+        let rule = ApprovalRule {
+            r#match: ApprovalMatch {
+                actor: Some(expected_path),
+                ..Default::default()
+            },
+            action: ApprovalAction::AutoApprove,
+        };
+        state
+            .root
+            .set_policy_matcher(PolicyMatcher::new(vec![rule]))
+            .await;
+    }
+
+    // Sub-lead S1 calls request_approval. FakeMcpClient::connect_as with role
+    // "sublead" causes _meta injection of {actor_id: s1_id, actor_role: "sublead"},
+    // which build_caller_identity converts to actor_path "root→<s1_id>".
+    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
+        .await
+        .unwrap();
+    let result = s1_client
+        .call_tool(
+            "request_approval",
+            json!({"summary": "deploy sub-task artifacts", "timeout_secs": 2}),
+        )
+        .await
+        .expect("request_approval call should succeed");
+
+    assert_eq!(
+        result["approved"].as_bool(),
+        Some(true),
+        "policy should auto-approve the sub-lead's request; got: {result}"
+    );
+    assert_eq!(
+        result["comment"].as_str(),
+        Some("auto-approved by policy"),
+        "comment should indicate policy auto-approval; got: {result}"
+    );
+
+    // Verify nothing was queued in the operator approval queue.
+    let queue = state.root.approval_queue.lock().await;
+    assert!(
+        queue.is_empty(),
+        "policy short-circuit must not enqueue approval; queue has {} items",
         queue.len()
     );
 }

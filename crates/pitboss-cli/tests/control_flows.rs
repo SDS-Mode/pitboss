@@ -432,6 +432,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
                     rollback: Some("drop worktrees; nothing committed".into()),
                 },
                 timeout_secs: Some(5),
+                ..Default::default()
             },
         )
         .await
