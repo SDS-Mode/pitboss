@@ -692,6 +692,11 @@ async fn run_worker(
     // Clean up the worker_layer_index entry — the worker is done, no more
     // KV routing lookups will target it.
     state.worker_layer_index.write().await.remove(&task_id);
+    // Release any run-global leases the worker was holding
+    let released_count = state.run_leases.release_all_held_by(&task_id).await;
+    if released_count > 0 {
+        tracing::info!(worker_id = %task_id, count = released_count, "auto-released run-global leases on worker termination");
+    }
     let _ = state.done_tx.send(task_id);
 }
 

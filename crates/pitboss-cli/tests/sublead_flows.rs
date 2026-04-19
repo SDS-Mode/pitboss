@@ -527,3 +527,50 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
         .await;
     assert!(acq3.is_ok(), "s2 should acquire after s1 releases");
 }
+
+#[tokio::test]
+async fn sublead_termination_releases_run_global_leases() {
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Manually register a sub-tree LayerState + a held lease
+    let sublead_id = "sublead-Z";
+    let sub_layer = std::sync::Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
+        state.root.run_id,
+        state.root.manifest.clone(),
+        state.root.store.clone(),
+        CancelToken::new(),
+        sublead_id.into(),
+        state.root.spawner.clone(),
+        state.root.claude_binary.clone(),
+        state.root.wt_mgr.clone(),
+        CleanupPolicy::Never,
+        state.root.run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+        None,
+    ));
+    state
+        .subleads
+        .write()
+        .await
+        .insert(sublead_id.into(), sub_layer);
+    state
+        .run_leases
+        .try_acquire(
+            "output.json",
+            sublead_id,
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.run_leases.snapshot().await.len(), 1);
+
+    // Reconcile (terminate)
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, sublead_id)
+        .await
+        .unwrap();
+
+    // Lease should be released
+    assert_eq!(state.run_leases.snapshot().await.len(), 0);
+}

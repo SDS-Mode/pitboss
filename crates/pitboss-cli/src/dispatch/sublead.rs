@@ -331,5 +331,12 @@ pub async fn reconcile_terminated_sublead(
         returned = unspent,
         "sub-lead budget reconciled"
     );
+
+    // Release any run-global leases the sub-lead was holding
+    let released_count = state.run_leases.release_all_held_by(sublead_id).await;
+    if released_count > 0 {
+        tracing::info!(sublead_id = %sublead_id, count = released_count, "auto-released run-global leases on sublead termination");
+    }
+
     Ok(())
 }
