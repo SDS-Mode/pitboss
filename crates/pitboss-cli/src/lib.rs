@@ -4,6 +4,7 @@
 //! the `pitboss` binary. The binary (`src/main.rs`) imports the same modules
 //! from this lib crate rather than re-declaring them.
 
+pub mod attach;
 pub mod cli;
 pub mod control;
 pub mod diff;
