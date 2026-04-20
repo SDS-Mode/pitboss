@@ -49,22 +49,43 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  CLAUDE_CODE_VERSION: "2.1.114"
 
 jobs:
   build:
     name: Build (${{ matrix.platform_pair }})
     runs-on: ${{ matrix.runner }}
+    # Skip arm64 cells on PRs for turnaround.
+    if: github.event_name == 'push' || matrix.platform == 'linux/amd64'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: linux/amd64
+          # On PR: amd64-only cells for both targets (skip arm64 for
+          # PR turnaround; Dockerfile regressions in the with-claude
+          # stage still surface via the amd64 cell).
+          # On push: all 4 cells. The `if:` at job level filters arm64
+          # on PR events.
+          - target: runtime
+            platform: linux/amd64
             runner: ubuntu-latest
             platform_pair: linux-amd64
-          - platform: linux/arm64
+            image: pitboss
+          - target: runtime
+            platform: linux/arm64
             runner: ubuntu-24.04-arm
             platform_pair: linux-arm64
+            image: pitboss
+          - target: with-claude
+            platform: linux/amd64
+            runner: ubuntu-latest
+            platform_pair: linux-amd64
+            image: pitboss-with-claude
+          - target: with-claude
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            platform_pair: linux-arm64
+            image: pitboss-with-claude
 
     steps:
       - name: Checkout
@@ -73,11 +94,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Compute image name (lowercase for GHCR)
+      - name: Resolve image name (lowercase for GHCR)
         id: image
         run: |
           REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=${{ env.REGISTRY }}/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.target }}" == "with-claude" ]]; then
+            echo "name=${{ env.REGISTRY }}/${REPO_LC}-with-claude" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ env.REGISTRY }}/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -98,9 +123,11 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: runtime
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CLAUDE_CODE_VERSION=${{ env.CLAUDE_CODE_VERSION }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=build-${{ matrix.platform_pair }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.platform_pair }}
@@ -116,7 +143,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
-          name: digests-${{ matrix.platform_pair }}
+          name: digests-${{ matrix.target }}-${{ matrix.platform_pair }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1

@@ -1,0 +1,11 @@
+# actionlint config.
+#
+# The `matrix` context is permitted in `jobs.<id>.if` by GitHub Actions when the
+# job declares a matrix strategy, but actionlint's context-availability table
+# does not list it (see https://github.com/rhysd/actionlint/issues). Silence
+# that specific false positive for the container workflow, which uses the
+# pattern to skip arm64 matrix cells on PR events.
+paths:
+  .github/workflows/container.yml:
+    ignore:
+      - 'context "matrix" is not allowed here'
