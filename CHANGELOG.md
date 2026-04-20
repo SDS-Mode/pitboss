@@ -7,6 +7,149 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-19
+
+The depth-2 sub-leads release. Lifts the depth=1 hierarchical invariant
+with a single new tier: a root lead may dynamically spawn sub-leads,
+each of which spawns workers. Workers remain terminal. The full design
+rationale is at `docs/superpowers/specs/2026-04-19-depth-2-sub-leads-design.md`
+(local-only per project convention).
+
+### Added
+
+- **`spawn_sublead` MCP tool** — root lead creates a new sub-tree at
+  runtime with its own envelope (`budget_usd`, `max_workers`,
+  `lead_timeout_secs`), seeded `/ref/*` (`initial_ref` snapshot), and
+  optional `read_down` for observability into the sub-tree. Returns
+  `sublead_id`. Available only when `[lead] allow_subleads = true`.
+  Restricted from sub-lead callers (depth-2 cap enforced at both the
+  MCP handler and the sub-lead's `--allowedTools` list).
+- **`wait_actor` MCP tool** — generalized lifecycle wait that accepts
+  any actor id (worker or sub-lead). Returns `ActorTerminalRecord`
+  (enum over `Worker(TaskRecord)` and `Sublead(SubleadTerminalRecord)`).
+  `wait_for_worker` retained as a back-compat alias.
+- **`run_lease_acquire` / `run_lease_release` MCP tools** — run-global
+  lease coordination via a dedicated `LeaseRegistry` on
+  `DispatchState`. Use for resources that span sub-trees (operator
+  filesystem, etc.); per-layer `/leases/*` remains for sub-tree-internal
+  coordination. Auto-released on actor termination.
+- **`cancel_worker(target, reason?)`** — optional `reason` parameter.
+  When supplied, a synthetic `[SYSTEM]` reprompt is delivered to the
+  killed actor's direct parent lead via kill+resume of the parent's
+  claude session. Routing is one-hop-up: kill a worker → its sub-lead
+  (or root) gets the reason; kill a sub-lead → root gets the reason.
+- **`[[approval_policy]]` manifest blocks** — operator-declared
+  deterministic rules over `actor` / `category` / `tool_name` /
+  `cost_over` with `auto_approve` / `auto_reject` / `block` actions.
+  First-match-wins. Evaluated in pure Rust before approvals reach the
+  operator queue. NOT LLM-evaluated.
+- **Reject-with-reason** — optional `reason: String` on approval
+  rejections; flows back through MCP to the requesting actor's session
+  so claude can adapt without a separate reprompt round-trip.
+- **Approval TTL + fallback** — `QueuedApproval` gains optional
+  `ttl_secs` and `fallback` (`auto_reject` / `auto_approve` / `block`).
+  Background watcher applies the fallback when an approval ages past
+  its TTL. Prevents unreachable operators from permanently stalling
+  the tree.
+- **`SubleadSpawned` / `SubleadTerminated` control-plane events** —
+  emitted from `spawn_sublead` and `reconcile_terminated_sublead`.
+  `EventEnvelope` wrapper adds `actor_path` (e.g., `"root→S1→W3"`) to
+  every event with `serde(skip_serializing_if = "ActorPath::is_empty")`
+  so v0.5 wire format is preserved when no sub-leads exist.
+- **`ApprovalPending` notification category** — fires when an approval
+  enqueues for operator action. Reuses existing webhook/Slack/Discord
+  sinks + LRU dedup. Operator opts in via `[notifications]` config.
+- **TUI grouped grid** — sub-trees render as collapsible containers
+  (header shows sublead_id, budget bar, worker count, approval badge,
+  read_down indicator). Tab cycles focus across containers; Enter on
+  header toggles expand/collapse.
+- **TUI approval list pane** — non-modal right-rail (30% width) shows
+  pending approvals as a queue. `'a'` focuses the pane; Up/Down
+  navigate; Enter opens the detail modal. Reject branch in the modal
+  accepts an optional reason string. Replaces the v0.5 single-modal
+  blocking flow that didn't scale to N concurrent sub-leads.
+- **Manifest fields on `[lead]`:** `allow_subleads` (bool, default
+  false; required to expose `spawn_sublead`), `max_subleads` (cap on
+  total sub-leads), `max_sublead_budget_usd` (cap on per-sub-lead
+  envelope), `max_workers_across_tree` (cap on total live workers
+  including sub-tree workers).
+- **`[lead.sublead_defaults]` block** — optional defaults for
+  `budget_usd` / `max_workers` / `lead_timeout_secs` / `read_down`
+  inherited by `spawn_sublead` calls that omit those parameters.
+  Temporal-inspired ergonomic touch.
+- **Dogfood test suite** under `examples/dogfood/` — six fake-claude
+  spotlights covering isolation, cascade-cancel, lease contention,
+  policy matcher, envelope caps, and a smoke; three real-claude
+  smokes (env-var gated) for spawn_sublead invocation, kill-with-
+  reason, and reject-with-reason. Each spotlight is both a runnable
+  shell-script demo and an automated regression test.
+
+### Changed
+
+- **`DispatchState` is now a thin wrapper** around `Arc<LayerState>`
+  for the root layer plus a `RwLock<HashMap<SubleadId, Arc<LayerState>>>`
+  for sub-tree layers. Internal-only refactor: existing depth-1
+  callsites are unchanged via `Deref<Target = LayerState>` (with a
+  CAUTION doc block explaining the Phase 4+ footgun for handlers
+  that need to route by caller). `LayerState` carries all per-layer
+  state (workers, budget, kv_store, approval queue, etc.).
+- **Strict tree authz default** — sub-trees are opaque to root
+  unless `read_down = true` is passed at `spawn_sublead` time.
+  Strict peer visibility uniformly: at any layer, `/peer/<X>` is
+  readable only by X itself, that layer's lead, or the operator
+  via TUI.
+- **Budget envelope mode by default** — `spawn_sublead` requires
+  explicit `budget_usd` and `max_workers` unless `read_down = true`,
+  in which case `None` for either falls through to root's pool
+  (shared-pool mode). Unspent envelope returns to root's reservable
+  pool on sub-lead termination.
+- **Two-phase drain cascade** — root cancel cascades depth-first to
+  every sub-tree's `cancel_token` and every sub-tree worker's cancel
+  token. Sub-leads spawned mid-drain are caught by a spawn-time
+  `is_draining()` check (closes the race window the watcher alone
+  couldn't cover).
+- **Rich approval records** — `PendingApproval` carries
+  `requesting_actor_id`, `actor_path`, `blocks` (downstream wait
+  set), `created_at`, `ttl_secs`, `fallback`, `category`. Defaults
+  preserve v0.5 semantics when callers don't populate.
+- **`request_approval` accepts `tool_name` and `cost_estimate`
+  hints** — optional fields a lead can populate so policy rules
+  matching on `tool_name` / `cost_over` can fire.
+
+### Fixed
+
+- **`wait_actor` works on sub-lead actor ids.** v0.6 RC introduced
+  the `wait_actor` generalization but the implementation only checked
+  `state.workers`; sub-lead ids returned `unknown actor_id`. Added
+  `sublead_results` map on `DispatchState` populated by
+  `reconcile_terminated_sublead`, which also fires `done_tx` so
+  waiters unblock. `wait_actor` now returns `ActorTerminalRecord`
+  enum; back-compat `wait_for_worker` unwraps the `Worker` variant.
+
+### Removed
+
+Nothing removed. v0.5 manifests, MCP callers, control-plane clients,
+and TUI sessions all behave identically when `allow_subleads` is
+absent (default false).
+
+### Deferment notes
+
+- `spawn_sublead_session` now spawns real Claude subprocesses for
+  sub-leads with full lifecycle (Cancel/Timeout/Error outcome
+  classification, TaskRecord persistence, budget reconciliation,
+  reprompt-loop kill+resume). End-to-end depth-2 dispatch with real
+  claude works.
+- Some Phase 4-era tightening (e.g., per-sub-tree runners that own
+  their workers' cancellation rather than the watcher cascading
+  directly) deferred to v0.7+ — current implementation works but
+  inverts ownership in a way the spec notes for future cleanup.
+
+### Test gate
+
+455 → 536 tests, 0 failures, 3 `#[ignore]`'d real-claude smokes
+(env-var gated). `cargo fmt --check` + `cargo clippy --workspace
+--all-targets -- -D warnings` clean.
+
 ## [0.5.5] — 2026-04-19
 
 ### Fixed
