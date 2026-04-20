@@ -56,6 +56,12 @@ RUN useradd --create-home --shell /bin/bash --uid 1000 pitboss
 COPY --from=builder /build/target/release/pitboss     /usr/local/bin/pitboss
 COPY --from=builder /build/target/release/pitboss-tui /usr/local/bin/pitboss-tui
 
+# Bundled agent-facing reference doc. Mirrors `pitboss agents-md` output at
+# a standard filesystem path so shell-first agents can discover it without
+# invoking the binary. Both routes serve identical content — the binary's
+# `AGENTS_MD` const is `include_str!`'d from the same source file.
+COPY AGENTS.md /usr/share/doc/pitboss/AGENTS.md
+
 USER pitboss
 WORKDIR /home/pitboss
 
