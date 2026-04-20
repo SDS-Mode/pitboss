@@ -27,6 +27,15 @@ pub enum SubleadOutcome {
     Cancel,
     Timeout,
     Error(String),
+    /// Sub-lead exited after receiving `{approved: false}` from an
+    /// operator action or an `[[approval_policy]]` auto-reject rule.
+    /// Distinguished from `Success` because the sub-lead didn't do
+    /// meaningful work before exiting — it asked and was denied.
+    ApprovalRejected,
+    /// Sub-lead exited after its pending approval timed out (TTL
+    /// expired, fallback fired). Distinguished from `ApprovalRejected`
+    /// because no operator attention reached the approval.
+    ApprovalTimedOut,
 }
 
 impl SubleadOutcome {
@@ -37,6 +46,8 @@ impl SubleadOutcome {
             SubleadOutcome::Cancel => "cancel",
             SubleadOutcome::Timeout => "timeout",
             SubleadOutcome::Error(_) => "error",
+            SubleadOutcome::ApprovalRejected => "approval_rejected",
+            SubleadOutcome::ApprovalTimedOut => "approval_timed_out",
         }
     }
 }
@@ -613,6 +624,8 @@ async fn spawn_sublead_session(
             SubleadOutcome::Cancel => TaskStatus::Cancelled,
             SubleadOutcome::Timeout => TaskStatus::TimedOut,
             SubleadOutcome::Error(_) => TaskStatus::Failed,
+            SubleadOutcome::ApprovalRejected => TaskStatus::ApprovalRejected,
+            SubleadOutcome::ApprovalTimedOut => TaskStatus::ApprovalTimedOut,
         };
 
         // 9. Build and persist a TaskRecord for the sub-lead's compound session.

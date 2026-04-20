@@ -1679,14 +1679,18 @@ fn build_approval_plan_lines(
 // ---------------------------------------------------------------------------
 
 fn status_icon(status: &TileStatus) -> (&'static str, Color) {
+    // Cancelled + ApprovalRejected share the "blocked" glyph ⊘.
+    // TimedOut + ApprovalTimedOut share the clock glyph ⏱.
+    // All four are semantically "actor exited because its work was blocked
+    // or timed out" rather than a pure runtime error.
     let icon = match status {
         TileStatus::Pending => "…",
         TileStatus::Running => "●",
         TileStatus::Done(TaskStatus::Success) => "✓",
         TileStatus::Done(TaskStatus::Failed) => "✗",
-        TileStatus::Done(TaskStatus::TimedOut) => "⏱",
-        TileStatus::Done(TaskStatus::Cancelled) => "⊘",
         TileStatus::Done(TaskStatus::SpawnFailed) => "!",
+        TileStatus::Done(TaskStatus::TimedOut | TaskStatus::ApprovalTimedOut) => "⏱",
+        TileStatus::Done(TaskStatus::Cancelled | TaskStatus::ApprovalRejected) => "⊘",
     };
     (icon, theme::tile_status_color(status))
 }
@@ -1700,6 +1704,8 @@ fn status_label(status: &TileStatus) -> &'static str {
         TileStatus::Done(TaskStatus::TimedOut) => "Time",
         TileStatus::Done(TaskStatus::Cancelled) => "Canc",
         TileStatus::Done(TaskStatus::SpawnFailed) => "SpwF",
+        TileStatus::Done(TaskStatus::ApprovalRejected) => "AppR",
+        TileStatus::Done(TaskStatus::ApprovalTimedOut) => "AppT",
     }
 }
 

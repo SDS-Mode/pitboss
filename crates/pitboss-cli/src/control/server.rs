@@ -719,6 +719,12 @@ async fn dispatch_op(
                                 pitboss_core::store::TaskStatus::TimedOut => "done_timed_out",
                                 pitboss_core::store::TaskStatus::Cancelled => "done_cancelled",
                                 pitboss_core::store::TaskStatus::SpawnFailed => "done_spawn_failed",
+                                pitboss_core::store::TaskStatus::ApprovalRejected => {
+                                    "done_approval_rejected"
+                                }
+                                pitboss_core::store::TaskStatus::ApprovalTimedOut => {
+                                    "done_approval_timed_out"
+                                }
                             }
                             .to_string(),
                             Some(rec.started_at.to_rfc3339()),

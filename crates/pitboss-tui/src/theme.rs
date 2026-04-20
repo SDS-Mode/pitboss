@@ -37,8 +37,14 @@ pub fn tile_status_color(status: &TileStatus) -> Color {
         TileStatus::Done(TaskStatus::Success) => STATUS_SUCCESS,
         TileStatus::Done(TaskStatus::Failed) => STATUS_FAILED,
         TileStatus::Done(TaskStatus::TimedOut) => STATUS_TIMED_OUT,
-        TileStatus::Done(TaskStatus::Cancelled) => STATUS_CANCELLED,
         TileStatus::Done(TaskStatus::SpawnFailed) => STATUS_SPAWN_FAILED,
+        // Cancelled + approval-driven terminations share a color — all three
+        // represent "actor exited because its work was blocked" rather than
+        // a pure error. Approval rejection/timeout are semantically closer
+        // to cancellation than to a Failed/TimedOut runtime error.
+        TileStatus::Done(
+            TaskStatus::Cancelled | TaskStatus::ApprovalRejected | TaskStatus::ApprovalTimedOut,
+        ) => STATUS_CANCELLED,
     }
 }
 

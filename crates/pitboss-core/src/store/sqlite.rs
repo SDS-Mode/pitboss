@@ -243,6 +243,8 @@ fn status_to_str(s: &TaskStatus) -> &'static str {
         TaskStatus::TimedOut => "TimedOut",
         TaskStatus::Cancelled => "Cancelled",
         TaskStatus::SpawnFailed => "SpawnFailed",
+        TaskStatus::ApprovalRejected => "ApprovalRejected",
+        TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
     }
 }
 
@@ -254,6 +256,8 @@ fn status_from_str(s: &str) -> Result<TaskStatus, StoreError> {
         "TimedOut" => Ok(TaskStatus::TimedOut),
         "Cancelled" => Ok(TaskStatus::Cancelled),
         "SpawnFailed" => Ok(TaskStatus::SpawnFailed),
+        "ApprovalRejected" => Ok(TaskStatus::ApprovalRejected),
+        "ApprovalTimedOut" => Ok(TaskStatus::ApprovalTimedOut),
         other => Err(StoreError::Incomplete(format!(
             "unknown task status: {other}"
         ))),

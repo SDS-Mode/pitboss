@@ -121,6 +121,8 @@ impl ProgressTable {
             Status::Done(TaskStatus::TimedOut) => "⏱ TimedOut".to_string(),
             Status::Done(TaskStatus::Cancelled) => "⊘ Cancelled".to_string(),
             Status::Done(TaskStatus::SpawnFailed) => "! SpawnFail".to_string(),
+            Status::Done(TaskStatus::ApprovalRejected) => "⊘ ApprovalRej".to_string(),
+            Status::Done(TaskStatus::ApprovalTimedOut) => "⏱ ApprovalTO".to_string(),
         };
         let time = if r.duration_ms == 0 {
             "—".to_string()

@@ -1083,6 +1083,8 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
                         pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
                         pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
                         pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                        pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
+                        pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
                     }
                     .to_string(),
                     Some(rec.started_at.to_rfc3339()),
@@ -1146,6 +1148,8 @@ pub async fn handle_worker_status(
                 pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
                 pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
                 pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
+                pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
             }
             .to_string(),
             Some(rec.started_at.to_rfc3339()),
