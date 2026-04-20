@@ -16,19 +16,23 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.6.0** is the depth-2 sub-leads release. A root lead may now
-dynamically spawn sub-leads at runtime — each with its own budget
-envelope, worker cap, timeout, and isolated coordination layer —
-via the new `spawn_sublead` MCP tool. Accompanying additions: `wait_actor`
-(generalized lifecycle wait for workers or sub-leads), `run_lease_acquire`
-/ `run_lease_release` for run-global resource coordination,
-`cancel_worker(target, reason?)` delivering synthetic reprompts up the tree,
-`[[approval_policy]]` manifest blocks for deterministic (non-LLM) rule
-matching, reject-with-reason, approval TTL + fallback, a grouped TUI grid
-for sub-tree containers, and a non-modal approval list pane (`'a'` hotkey).
-455 → 536 tests, 0 failures. See `CHANGELOG.md` for the full per-version
-history and `AGENTS.md` for MCP tool reference, keybindings, and manifest
-schema.
+**v0.7.0** is the headless-mode hardening release. A new
+`ghcr.io/sds-mode/pitboss-with-claude` container variant bundles a
+pinned Claude Code CLI so you can run pitboss without installing
+claude on the host — consume OAuth via a `~/.claude` bind mount. The
+Path A permission default (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` on every
+spawned claude subprocess) closes the silent "7-second success"
+failure mode where sub-leads apologized for not having permission and
+exited cleanly with no output. Approval-driven terminations are now
+distinguished from real success via new `ApprovalRejected` and
+`ApprovalTimedOut` terminal states. `spawn_sublead` gains optional
+`env` and `tools` parameters (matching `spawn_worker`). A dispatch-time
+warning fires on stderr when approval gates are configured without a
+TTY. `pitboss agents-md` prints the embedded reference doc; container
+images also carry `/usr/share/doc/pitboss/AGENTS.md`. CI elapsed time
+drops 62 min → 5 min via native arm64 runners (no QEMU). See
+`CHANGELOG.md` for the full per-version history and `AGENTS.md` for
+the MCP tool reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency

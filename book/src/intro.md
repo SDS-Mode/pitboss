@@ -25,6 +25,6 @@ Language models are stochastic. A well-run pit is not.
 
 ## Current version
 
-**v0.6.0** — depth-2 sub-leads, `spawn_sublead`, `wait_actor`, run-global leases (`run_lease_acquire`/`run_lease_release`), `[[approval_policy]]` declarative matcher, kill-with-reason, reject-with-reason, approval TTL/fallback, TUI grouped grid, and approval list pane. 536 tests, zero flakes.
+**v0.7.0** — headless-mode hardening. Bundled-claude container variant (`ghcr.io/sds-mode/pitboss-with-claude`), `CLAUDE_CODE_ENTRYPOINT=sdk-ts` permission default (closes the "silent 7-second success" sub-lead failure), `ApprovalRejected`/`ApprovalTimedOut` terminal states, `spawn_sublead` gains optional `env` + `tools` parameters, dispatch-time TTY warning when approval gates are configured without an operator surface, `pitboss agents-md` subcommand + `/usr/share/doc/pitboss/AGENTS.md` in container images, native multi-arch CI (62 min → 5 min), GHA action bumps for Node 24 compatibility.
 
 See [Changelog](./reference/changelog.md) for the full version history.
