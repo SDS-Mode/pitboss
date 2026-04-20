@@ -967,3 +967,187 @@ async fn dogfood_policy_auto_filter() {
     // Clean up the hanging plan approval.
     plan_req_handle.abort();
 }
+
+// ── Spotlight #06: Envelope cap rejection ──────────────────────────────────────
+//
+// Final fake-claude spotlight. Demonstrates manifest-level budget cap enforcement
+// with clean rejection semantics. Root lead attempts to spawn a sub-lead with
+// budget exceeding max_sublead_budget_usd; request is rejected with a clear error
+// before any state mutation happens.
+//
+// Scenario:
+// 1. Operator sets max_sublead_budget_usd = 3.0 as a safety rail
+// 2. Root attempts to spawn sub-lead with budget_usd = 5.0 → rejected, no state change
+// 3. Root retries with budget_usd = 2.0 → succeeds, sub-lead registered
+//
+// Expected outcomes:
+// - Rejected spawn: no LayerState, no reservation, error message mentions cap
+// - State after rejection: subleads.is_empty() && reserved_usd == 0.0
+// - Successful retry: sub-lead registered, $2.0 reserved
+#[tokio::test]
+async fn dogfood_envelope_cap_rejection() {
+    use serde_json::json;
+
+    // Build state with max_sublead_budget_usd = 3.0 baked into the manifest.
+    // We use mk_state_with_sublead_budget_cap from sublead_flows.rs helper.
+    let (_dir, state) = {
+        let dir = tempfile::TempDir::new().unwrap();
+        let lead = ResolvedLead {
+            id: "root".into(),
+            directory: std::path::PathBuf::from("/tmp"),
+            prompt: "root with cap enforcement".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: pitboss_cli::manifest::schema::Effort::High,
+            tools: vec![],
+            timeout_secs: 3600,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: Some(3.0), // ← Cap: max $3 per sub-lead
+            max_workers_across_tree: None,
+            sublead_defaults: None,
+        };
+        let manifest = ResolvedManifest {
+            max_parallel: 8,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: pitboss_cli::manifest::schema::WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(20),
+            budget_usd: Some(20.0),
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "root".into(),
+            spawner,
+            std::path::PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+        ));
+        (dir, state)
+    };
+
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+
+    // ── Act 1: Root attempts to spawn sub-lead with budget_usd = 5.0 ────────
+    // Expected: rejected with "exceeds per-sublead cap" error, no state change
+    eprintln!("Act 1: Attempting spawn with budget_usd=5.0 (exceeds cap of 3.0)");
+    let rejected_result = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "test sub-lead with excessive budget",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 5.0,
+                "max_workers": 2
+            }),
+        )
+        .await;
+
+    // Verify the call failed
+    assert!(
+        rejected_result.is_err(),
+        "spawn_sublead with budget_usd=5.0 should fail when max_sublead_budget_usd=3.0"
+    );
+    let err_msg = format!("{:?}", rejected_result.unwrap_err());
+    assert!(
+        err_msg.contains("exceeds per-sublead cap"),
+        "error message should mention the cap; got: {err_msg}"
+    );
+
+    // Verify no partial state was registered
+    {
+        let subleads = state.subleads.read().await;
+        assert!(
+            subleads.is_empty(),
+            "after rejected spawn, subleads should be empty; got: {} entries",
+            subleads.len()
+        );
+    }
+
+    // Verify no budget reservation was made
+    {
+        let reserved = *state.root.reserved_usd.lock().await;
+        assert_eq!(
+            reserved, 0.0,
+            "after rejected spawn, reserved_usd should be 0.0; got: {reserved}"
+        );
+    }
+
+    // ── Act 2: Root retries with budget_usd = 2.0 ────────────────────────
+    // Expected: succeeds, sub-lead registered, $2.0 reserved
+    eprintln!("Act 2: Retrying spawn with budget_usd=2.0 (within cap of 3.0)");
+    let success_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "test sub-lead with compliant budget",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 2.0,
+                "max_workers": 2
+            }),
+        )
+        .await
+        .expect("spawn_sublead with budget_usd=2.0 should succeed when max_sublead_budget_usd=3.0");
+
+    // Verify the response includes sublead_id
+    let sublead_id = success_resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field")
+        .to_string();
+    assert!(
+        sublead_id.starts_with("sublead-"),
+        "sublead_id should start with 'sublead-'; got: {sublead_id}"
+    );
+
+    // Verify the sub-tree LayerState IS now registered
+    {
+        let subleads = state.subleads.read().await;
+        assert!(
+            subleads.contains_key(&sublead_id),
+            "after successful spawn, subleads should contain the new sublead_id: {sublead_id}"
+        );
+    }
+
+    // Verify budget IS reserved
+    {
+        let reserved = *state.root.reserved_usd.lock().await;
+        assert!(
+            (reserved - 2.0).abs() < 1e-9,
+            "after successful spawn with budget_usd=2.0, reserved_usd should be 2.0; got: {reserved}"
+        );
+    }
+
+    eprintln!("Spotlight #06 passed: cap enforcement clean rejection + successful retry");
+}

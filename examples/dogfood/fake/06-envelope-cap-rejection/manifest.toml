@@ -1,0 +1,33 @@
+# Reference manifest for Spotlight #06: Envelope cap rejection
+#
+# This demonstrates manifest-level budget cap enforcement. The `max_sublead_budget_usd = 3.0`
+# acts as a safety rail, preventing any single sub-lead from exceeding $3. Attempts to spawn
+# a sub-lead with a larger budget are rejected cleanly before any state mutation.
+#
+# Note: Tests use in-code configuration, so this file is documentation only.
+
+[run]
+max_parallel = 8
+
+[lead]
+prompt = """
+Root lead with sublead spawning capability and a strict $3 per-sub-lead budget cap.
+
+You may attempt to spawn sub-leads with varying budgets to test cap enforcement:
+1. First, try to spawn a sub-lead with budget_usd=5.0 — this should be rejected.
+2. Then, retry with budget_usd=2.0 — this should succeed.
+
+This demonstrates clean cap enforcement: rejected spawns leave no partial state behind,
+allowing safe retries.
+"""
+model = "claude-haiku-4-5"
+budget_usd = 20.0
+max_workers = 10
+
+# Enable sub-leads with a strict cap
+allow_subleads = true
+max_sublead_budget_usd = 3.0
+
+[lead.sublead_defaults]
+budget_usd = 2.0
+max_workers = 2
