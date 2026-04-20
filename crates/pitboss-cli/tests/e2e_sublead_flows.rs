@@ -194,6 +194,8 @@ async fn root_spawns_sublead_which_completes() {
         lead_timeout_secs: Some(600),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -285,6 +287,8 @@ async fn root_kill_cascades_to_sublead_workers() {
         lead_timeout_secs: Some(600),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -646,6 +650,8 @@ async fn budget_envelope_returns_to_root_pool() {
         lead_timeout_secs: Some(600),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -836,6 +842,8 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         lead_timeout_secs: Some(30),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await

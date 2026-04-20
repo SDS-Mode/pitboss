@@ -14,6 +14,17 @@ pub enum TaskStatus {
     TimedOut,
     Cancelled,
     SpawnFailed,
+    /// Terminal state for a task that called `request_approval` or
+    /// `propose_plan` and received `{approved: false}` from an operator
+    /// (or a policy rule that mapped to `auto_reject`), then exited
+    /// without doing meaningful subsequent work. Previously lumped into
+    /// `Success` because claude exited 0; distinguished as of v0.7+.
+    ApprovalRejected,
+    /// Terminal state for a task whose pending approval aged past its
+    /// `ttl_secs` and was auto-resolved via its `fallback` (typically
+    /// `auto_reject`), then exited. Distinguished from `ApprovalRejected`
+    /// because no operator attention reached the approval — it timed out.
+    ApprovalTimedOut,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +152,19 @@ mod tests {
         assert!(json.contains("parent_task_id"));
         let back: TaskRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.parent_task_id.as_deref(), Some("lead-abc"));
+    }
+
+    #[test]
+    fn task_status_approval_variants_round_trip() {
+        for (variant, expected_json) in &[
+            (TaskStatus::ApprovalRejected, "\"ApprovalRejected\""),
+            (TaskStatus::ApprovalTimedOut, "\"ApprovalTimedOut\""),
+        ] {
+            let s = serde_json::to_string(variant).unwrap();
+            assert_eq!(&s, expected_json, "serialize {variant:?}");
+            let back: TaskStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(&back, variant, "round-trip {variant:?}");
+        }
     }
 
     #[test]

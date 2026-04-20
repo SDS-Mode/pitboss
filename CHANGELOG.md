@@ -9,6 +9,30 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Two new terminal statuses: `TaskStatus::ApprovalRejected` +
+  `TaskStatus::ApprovalTimedOut`** (and matching `SubleadOutcome`
+  variants) — tasks that exit because their last `request_approval` /
+  `propose_plan` returned `{approved: false}` (operator-rejected,
+  policy auto-rejected) are now classified distinctly from genuine
+  `Success`. Previously both looked like `Success` because the claude
+  subprocess exited 0. SQLite store + JSON wire format extended with
+  the two new strings; old records deserialize unchanged.
+  `ApprovalTimedOut` is reserved for queue-TTL fallback (defined and
+  ready to wire when the queue-TTL → response path lands).
+- **`spawn_sublead` MCP tool gains optional `env` and `tools`
+  parameters** — sub-leads can now receive per-spawn environment
+  variables and a `--allowedTools` override. Operator env layers over
+  pitboss defaults (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` etc.); tools merge
+  with the standard sublead MCP toolset (de-duplicated). `mcp__pitboss__*`
+  tools are always present so the sub-lead can still orchestrate workers
+  regardless of override.
+- **Dispatch-time warning when approval gates would block headless
+  runs.** If stdout is not a TTY and the manifest has
+  `require_plan_approval = true`, `approval_policy = "block"` (or
+  unset), or any `[[approval_policy]]` rule with `action = "block"`,
+  pitboss prints a stderr warning listing each gate before any claude
+  subprocess launches. Silent on TTY (interactive operators have the
+  TUI to approve).
 - **`pitboss agents-md` subcommand** — prints the bundled AGENTS.md
   reference document to stdout. The content is compiled into the binary
   via `include_str!`, so agents orchestrating pitboss from installed
@@ -21,6 +45,25 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Sub-lead claude subprocesses spawned with empty env** — previously
+  `spawn_sublead_session` constructed its `SpawnCmd` with `env:
+  Default::default()` (empty map). For headless dispatch this meant
+  sub-leads couldn't inherit `CLAUDE_CODE_ENTRYPOINT` even when the
+  operator set it via `[defaults.env]`. Now seeded with pitboss's own
+  defaults plus any operator env from the new `spawn_sublead` `env`
+  parameter. Closes the P0 half of lessons-learned items #1 and #6.
+- **Tasks that exited because their last approval was rejected showed
+  as `Success`** — the claude subprocess exited 0 (its work was simply
+  blocked by the rejection), and pitboss had no way to distinguish this
+  from a real success. New `ApprovalRejected` terminal status, plus a
+  per-actor `last_approval_response` map on `DispatchState`, plus a
+  reclassification check at every termination site (worker /
+  continue-worker / sublead / root lead) that flips Success →
+  ApprovalRejected when the actor's most recent approval (within 30s
+  of termination) returned negative. Sub-leads in headless dispatch
+  with `[[approval_policy]] action = "auto_reject"` rules will now
+  surface as `ApprovalRejected` in `summary.json` instead of misleading
+  Success. Closes lessons-learned item #3.
 - **Run-global leases leaked on connection drop when `run_lease_acquire`
   was the only tool called on a connection.** `note_actor` was missing
   from the `run_lease_acquire` and `run_lease_release` MCP handlers, so
@@ -34,6 +77,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Default `CLAUDE_CODE_ENTRYPOINT=sdk-ts` on every spawned claude
+  subprocess** (root lead, workers, sub-leads). Pitboss is the external
+  permission authority via `approval_policy` + `[[approval_policy]]`
+  rules + the TUI; claude's own interactive permission gate is bypassed
+  to prevent silent 7-second-success failures in headless dispatch where
+  no TTY is available to approve tool calls. Operators who want claude's
+  own gate back for a specific actor restore it by setting
+  `CLAUDE_CODE_ENTRYPOINT` to a non-`sdk-ts` value via `[defaults.env]`,
+  `[lead.env]`, `[[task]].env`, or the `env` field on `spawn_sublead`.
+  See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
+  for the deferred alternative (route claude's gate through pitboss's
+  approval queue rather than bypassing).
 - **Container CI**: migrated from QEMU-emulated multi-arch builds to
   native `ubuntu-latest` + `ubuntu-24.04-arm` runners with a matrix +
   merge pipeline. Published `ghcr.io/sds-mode/pitboss` image contents
@@ -42,6 +97,16 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Docs
 
+- **AGENTS.md: new "Headless mode" section** between "Invocation
+  patterns" and "Interpreting a run directory" — covers the v0.7
+  permission model (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` default), approval
+  policy choices for unattended dispatch, the dispatch-time TTY warning,
+  the `require_plan_approval` footgun, the git-repo-required-for-
+  hierarchical-mode quirk, status reading without the TUI, the new
+  terminal-state classifications (including operator guidance for
+  `ApprovalRejected` debugging), the new `spawn_sublead` env/tools
+  parameters, and the offline access patterns (`pitboss agents-md` +
+  the container doc path).
 - **AGENTS.md**: added YAML frontmatter (`document`, `schema_version`,
   `pitboss_version`, `audience`, `canonical_url`, `last_updated`) so
   agents can filter for applicability without scanning the whole doc.

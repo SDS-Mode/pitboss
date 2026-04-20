@@ -51,6 +51,19 @@ struct SpawnSubleadRequest {
     /// max_workers).
     #[serde(default)]
     read_down: bool,
+    /// Environment variables to pass to the sub-lead's claude subprocess.
+    /// Merged on top of pitboss's own defaults (e.g. `CLAUDE_CODE_ENTRYPOINT
+    /// = "sdk-ts"`); operator-set keys win over defaults. Use this when a
+    /// specific sub-lead needs a different env than the root, e.g. an
+    /// `ANTHROPIC_API_KEY` override or a worker-toolset-specific flag.
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+    /// Tool list override for the sub-lead's `--allowedTools`. If empty, uses
+    /// the standard sublead toolset. If non-empty, the listed tools are
+    /// passed to claude verbatim; pitboss MCP tools (`mcp__pitboss__*`) are
+    /// always included on top so the sub-lead can still spawn workers etc.
+    #[serde(default)]
+    tools: Vec<String>,
     /// Caller identity injected by mcp-bridge (actor_id + actor_role).
     #[serde(rename = "_meta", default)]
     #[schemars(skip)]
@@ -315,6 +328,8 @@ impl PitbossHandler {
             lead_timeout_secs: req.lead_timeout_secs,
             initial_ref: req.initial_ref,
             read_down: req.read_down,
+            env: req.env,
+            tools: req.tools,
         };
 
         match do_spawn(&self.state, spawn_req).await {

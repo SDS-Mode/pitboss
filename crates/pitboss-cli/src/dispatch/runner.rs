@@ -17,6 +17,117 @@ use uuid::Uuid;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
+/// Seed an env map with pitboss's own defaults for spawned claude subprocesses.
+/// Currently: set `CLAUDE_CODE_ENTRYPOINT=sdk-ts` if not already present.
+///
+/// Rationale: pitboss is the external permission authority (via
+/// `approval_policy`, `[[approval_policy]]` rules, and the TUI). Claude's
+/// own interactive permission gate is redundant under pitboss orchestration
+/// and causes silent 7-second-success failures in headless dispatch when no
+/// operator is present to approve each tool call.
+///
+/// The `sdk-ts` value tells claude "you're running under an SDK runtime that
+/// manages permissions externally — don't prompt the TTY." Operators who want
+/// claude's own gate back for a specific actor can override via
+/// `[defaults.env]`, `[lead.env]`, `[[task]].env`, or the `env` field on
+/// `spawn_sublead`.
+///
+/// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
+/// for the deferred alternative (routing claude's gate through pitboss's
+/// approval queue rather than bypassing it).
+pub fn apply_pitboss_env_defaults(env: &mut std::collections::HashMap<String, String>) {
+    env.entry("CLAUDE_CODE_ENTRYPOINT".to_string())
+        .or_insert_with(|| "sdk-ts".to_string());
+}
+
+/// Check whether a manifest has approval gates that will block indefinitely
+/// in a headless (no-TUI) dispatch. Returns warning strings describing each
+/// gate; empty if the manifest can run cleanly headless. Callers typically
+/// print the warnings to stderr at dispatch startup.
+///
+/// Gates checked:
+/// - `[run].require_plan_approval = true` → lead's `propose_plan` will hang
+///   on the operator queue with no TUI to respond.
+/// - `[run].approval_policy = "block"` (or unset — the default) → unmatched
+///   `request_approval` calls will sit in the queue.
+/// - Any `[[approval_policy]]` rule with `action = "block"` → policy-matched
+///   approvals will force into the queue.
+///
+/// The warning is orthogonal to the Path A env-default fix — Path A stops
+/// claude's OWN permission gate from firing, but pitboss's own approval
+/// layer is still operator-driven by default. An operator expecting headless
+/// dispatch should set `approval_policy = "auto_approve"` (or use
+/// `[[approval_policy]]` rules with `ttl_secs` + `fallback`).
+pub fn headless_approval_gate_warnings(manifest: &ResolvedManifest) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if manifest.require_plan_approval {
+        warnings.push(
+            "`[run].require_plan_approval = true` — lead will hang on `propose_plan` \
+             with no TUI to approve. Set `false` or add a `ttl_secs` + `fallback` \
+             on the `propose_plan` call for headless use."
+                .to_string(),
+        );
+    }
+
+    // `approval_policy` defaults to `Block` when unset, so both None and
+    // Some(Block) trigger the warning.
+    let policy_blocks = matches!(
+        manifest.approval_policy,
+        None | Some(crate::dispatch::state::ApprovalPolicy::Block)
+    );
+    if policy_blocks {
+        warnings.push(
+            "`[run].approval_policy` is `block` (or unset — defaults to block) — \
+             unmatched `request_approval` / `propose_plan` calls will sit in \
+             the operator queue. Set `auto_approve` or `auto_reject` for \
+             headless use."
+                .to_string(),
+        );
+    }
+
+    let blocking_rule_count = manifest
+        .approval_rules
+        .iter()
+        .filter(|r| matches!(r.action, crate::mcp::policy::ApprovalAction::Block))
+        .count();
+    if blocking_rule_count > 0 {
+        warnings.push(format!(
+            "{} `[[approval_policy]]` rule(s) use `action = \"block\"` — matched \
+             approvals will force into the operator queue. Change to \
+             `auto_approve` / `auto_reject`, or attach a TUI.",
+            blocking_rule_count
+        ));
+    }
+
+    warnings
+}
+
+/// Emit headless-approval-gate warnings to stderr when stdout is not a
+/// terminal. Operators running pitboss interactively won't see spurious
+/// warnings; headless operators see them prominently before any claude
+/// subprocess launches.
+pub fn print_headless_warnings_if_applicable(manifest: &ResolvedManifest) {
+    if atty::is(atty::Stream::Stdout) {
+        return;
+    }
+    let warnings = headless_approval_gate_warnings(manifest);
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!(
+        "pitboss: WARNING — dispatching without a TUI surface but the manifest \
+         has approval gates that will block:"
+    );
+    for w in &warnings {
+        eprintln!("  - {}", w);
+    }
+    eprintln!(
+        "See https://sds-mode.github.io/pitboss/operator-guide/approvals.html \
+         for the headless approval patterns."
+    );
+}
+
 fn cleanup_policy_from(w: crate::manifest::schema::WorktreeCleanup) -> CleanupPolicy {
     match w {
         crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
@@ -35,6 +146,10 @@ pub async fn run_dispatch_inner(
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
 ) -> Result<i32> {
+    // Flat manifests rarely use `[[approval_policy]]` or `propose_plan`,
+    // but if they do, the same headless-gate warnings apply. Silent on TTY.
+    print_headless_warnings_if_applicable(&resolved);
+
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
     let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
     tokio::fs::create_dir_all(&run_dir).await.ok();
@@ -336,11 +451,13 @@ async fn execute_task(
         task.directory.clone()
     };
 
+    let mut cmd_env = task.env.clone();
+    apply_pitboss_env_defaults(&mut cmd_env);
     let cmd = SpawnCmd {
         program: claude.to_path_buf(),
         args: spawn_args(task),
         cwd: cwd.clone(),
-        env: task.env.clone(),
+        env: cmd_env,
     };
 
     table.lock().await.mark_running(&task.id);
@@ -573,12 +690,17 @@ pub fn lead_resume_spawn_args(
 /// - `model`: The model name (e.g., "claude-opus-4-1")
 /// - `mcp_config_path`: Path to the per-sublead mcp-config file
 /// - `resume_session_id`: Optional session ID to resume from
+/// - `tools_override`: When `Some(&[...])`, the listed tools are added to
+///   the allow-list alongside the standard sublead MCP toolset. When
+///   `None`, only the MCP toolset is included (preserves v0.6 behavior).
+///   De-duplicated to keep the resulting `--allowedTools` flag tidy.
 pub fn sublead_spawn_args(
     _sublead_id: &str,
     prompt: &str,
     model: &str,
     mcp_config_path: &std::path::Path,
     resume_session_id: Option<&str>,
+    tools_override: Option<&[String]>,
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -586,8 +708,19 @@ pub fn sublead_spawn_args(
         "--verbose".into(),
     ];
 
-    // Build the allowed-tools set: sublead tools (no user tools, no depth-2 tools).
-    let allowed: Vec<String> = SUBLEAD_MCP_TOOLS.iter().map(|t| t.to_string()).collect();
+    // Build the allowed-tools set. Operator-supplied tools (if any) are
+    // listed first; pitboss MCP tools always appended so the sub-lead can
+    // still orchestrate workers regardless of the override.
+    let mut allowed: Vec<String> = match tools_override {
+        Some(ts) => ts.to_vec(),
+        None => Vec::new(),
+    };
+    for t in SUBLEAD_MCP_TOOLS {
+        allowed.push((*t).to_string());
+    }
+    // De-duplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    allowed.retain(|t| seen.insert(t.clone()));
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
 
@@ -671,8 +804,123 @@ async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
 mod tests {
     use super::*;
     use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use std::collections::HashMap;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn apply_pitboss_env_defaults_sets_entrypoint_when_absent() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        apply_pitboss_env_defaults(&mut env);
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"sdk-ts".to_string()),
+            "default should be applied to an empty env"
+        );
+    }
+
+    #[test]
+    fn apply_pitboss_env_defaults_honors_operator_override() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
+        apply_pitboss_env_defaults(&mut env);
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"cli".to_string()),
+            "operator-set value must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn apply_pitboss_env_defaults_preserves_other_keys() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        apply_pitboss_env_defaults(&mut env);
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"sdk-ts".to_string())
+        );
+    }
+
+    fn minimal_manifest() -> ResolvedManifest {
+        ResolvedManifest {
+            max_parallel: 1,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("/tmp/pitboss-test"),
+            worktree_cleanup: crate::manifest::schema::WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
+            approval_policy: Some(crate::dispatch::state::ApprovalPolicy::AutoApprove),
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        }
+    }
+
+    #[test]
+    fn headless_warnings_empty_for_clean_manifest() {
+        let manifest = minimal_manifest();
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert!(
+            warnings.is_empty(),
+            "clean manifest should not warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn headless_warnings_flag_require_plan_approval() {
+        let mut manifest = minimal_manifest();
+        manifest.require_plan_approval = true;
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("require_plan_approval"));
+    }
+
+    #[test]
+    fn headless_warnings_flag_block_default_when_unset() {
+        let mut manifest = minimal_manifest();
+        manifest.approval_policy = None;
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("approval_policy"));
+    }
+
+    #[test]
+    fn headless_warnings_flag_block_policy_explicit() {
+        let mut manifest = minimal_manifest();
+        manifest.approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("approval_policy"));
+    }
+
+    #[test]
+    fn headless_warnings_flag_block_rule() {
+        let mut manifest = minimal_manifest();
+        manifest.approval_rules = vec![crate::mcp::policy::ApprovalRule {
+            r#match: crate::mcp::policy::ApprovalMatch::default(),
+            action: crate::mcp::policy::ApprovalAction::Block,
+        }];
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("approval_policy") && warnings[0].contains("rule"));
+    }
+
+    #[test]
+    fn headless_warnings_stack_when_multiple_gates_present() {
+        let mut manifest = minimal_manifest();
+        manifest.require_plan_approval = true;
+        manifest.approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 2, "expected two warnings: {:?}", warnings);
+    }
 
     fn init_repo(root: &std::path::Path) {
         Command::new("git")
@@ -1097,6 +1345,7 @@ mod tests {
             "claude-opus-4-1",
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1120,6 +1369,7 @@ mod tests {
             "claude-opus-4-1",
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1138,6 +1388,7 @@ mod tests {
             "claude-opus-4-1",
             &PathBuf::from("/tmp/sublead-cfg.json"),
             Some("resume-session-123"),
+            None,
         );
         // Verify the basic arg structure is correct
         assert!(args.contains(&"--output-format".to_string()));
@@ -1151,5 +1402,47 @@ mod tests {
         assert!(args.contains(&"resume-session-123".to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"do some work".to_string()));
+    }
+
+    #[test]
+    fn sublead_spawn_args_honors_tools_override() {
+        let custom = ["Read".to_string(), "Bash".to_string()];
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            Some(&custom),
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        // Operator-supplied tools must be present.
+        assert!(list.contains("Read"), "Read missing from {list}");
+        assert!(list.contains("Bash"), "Bash missing from {list}");
+        // pitboss MCP tools must still be present (override doesn't remove them).
+        assert!(
+            list.contains("mcp__pitboss__"),
+            "pitboss MCP tools missing from {list}"
+        );
+    }
+
+    #[test]
+    fn sublead_spawn_args_dedups_when_override_overlaps_mcp_tools() {
+        // Operator passes a pitboss MCP tool already in the standard set.
+        // Result should not contain duplicates.
+        let custom = ["mcp__pitboss__spawn_worker".to_string()];
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            Some(&custom),
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        let count = list.matches("mcp__pitboss__spawn_worker").count();
+        assert_eq!(count, 1, "spawn_worker appears {count} times in {list}");
     }
 }

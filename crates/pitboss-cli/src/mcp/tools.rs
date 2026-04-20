@@ -718,7 +718,7 @@ async fn run_worker(
         outcome
     };
 
-    let status = match outcome.final_state {
+    let mut status = match outcome.final_state {
         pitboss_core::session::SessionState::Completed => TaskStatus::Success,
         pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
         pitboss_core::session::SessionState::TimedOut => TaskStatus::TimedOut,
@@ -726,6 +726,20 @@ async fn run_worker(
         pitboss_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
         _ => TaskStatus::Failed,
     };
+
+    // Reclassify silent exits driven by a recent rejected approval. When a
+    // worker calls request_approval / propose_plan, gets {approved: false}
+    // (operator action or [[approval_policy]] auto_reject), and exits
+    // shortly after, the claude subprocess exits 0 and we'd otherwise
+    // mark Success. Now distinguished as ApprovalRejected so headless
+    // operators can tell the difference.
+    if matches!(status, TaskStatus::Success) {
+        if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
+            state.approval_driven_termination(&task_id).await
+        {
+            status = TaskStatus::ApprovalRejected;
+        }
+    }
 
     // Cleanup worktree per policy.
     if let Some(wt) = worktree_handle {
@@ -995,7 +1009,7 @@ pub async fn spawn_resume_worker(
         .await;
         // Clean up the pid slot when the resumed subprocess exits.
         state_bg.worker_pids.write().await.remove(&task_id_bg);
-        let status = match outcome.final_state {
+        let mut status = match outcome.final_state {
             pitboss_core::session::SessionState::Completed => TaskStatus::Success,
             pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
             pitboss_core::session::SessionState::TimedOut => TaskStatus::TimedOut,
@@ -1003,6 +1017,15 @@ pub async fn spawn_resume_worker(
             pitboss_core::session::SessionState::SpawnFailed { .. } => TaskStatus::SpawnFailed,
             _ => TaskStatus::Failed,
         };
+        // Reclassify silent exits driven by a recent rejected approval (see
+        // run_worker for the same pattern + rationale).
+        if matches!(status, TaskStatus::Success) {
+            if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
+                state_bg.approval_driven_termination(&task_id_bg).await
+            {
+                status = TaskStatus::ApprovalRejected;
+            }
+        }
         let counters = state_bg
             .worker_counters
             .read()
@@ -1083,6 +1106,8 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
                         pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
                         pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
                         pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                        pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
+                        pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
                     }
                     .to_string(),
                     Some(rec.started_at.to_rfc3339()),
@@ -1146,6 +1171,8 @@ pub async fn handle_worker_status(
                 pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
                 pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
                 pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
+                pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
             }
             .to_string(),
             Some(rec.started_at.to_rfc3339()),
@@ -1458,6 +1485,9 @@ pub async fn handle_request_approval(
                         actor = %pending.requesting_actor_id,
                         "auto-approved by policy"
                     );
+                    state
+                        .record_last_approval_response(&pending.requesting_actor_id, true)
+                        .await;
                     return Ok(ApprovalToolResponse {
                         approved: true,
                         comment: Some("auto-approved by policy".into()),
@@ -1470,6 +1500,9 @@ pub async fn handle_request_approval(
                         actor = %pending.requesting_actor_id,
                         "auto-rejected by policy"
                     );
+                    state
+                        .record_last_approval_response(&pending.requesting_actor_id, false)
+                        .await;
                     return Ok(ApprovalToolResponse {
                         approved: false,
                         comment: Some("auto-rejected by policy".into()),
@@ -1489,6 +1522,7 @@ pub async fn handle_request_approval(
             .or(state.manifest.lead_timeout_secs)
             .unwrap_or(3600),
     );
+    let caller_id_for_record = caller_id.clone();
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
         .request(
@@ -1500,12 +1534,17 @@ pub async fn handle_request_approval(
         )
         .await
     {
-        Ok(resp) => Ok(ApprovalToolResponse {
-            approved: resp.approved,
-            comment: resp.comment,
-            edited_summary: resp.edited_summary,
-            reason: resp.reason,
-        }),
+        Ok(resp) => {
+            state
+                .record_last_approval_response(&caller_id_for_record, resp.approved)
+                .await;
+            Ok(ApprovalToolResponse {
+                approved: resp.approved,
+                comment: resp.comment,
+                edited_summary: resp.edited_summary,
+                reason: resp.reason,
+            })
+        }
         Err(e) => anyhow::bail!("approval failed: {e}"),
     }
 }
@@ -1562,6 +1601,9 @@ pub async fn handle_propose_plan(
                     state
                         .plan_approved
                         .store(true, std::sync::atomic::Ordering::Release);
+                    state
+                        .record_last_approval_response(&pending.requesting_actor_id, true)
+                        .await;
                     return Ok(ApprovalToolResponse {
                         approved: true,
                         comment: Some("auto-approved by policy".into()),
@@ -1574,6 +1616,9 @@ pub async fn handle_propose_plan(
                         actor = %pending.requesting_actor_id,
                         "plan auto-rejected by policy"
                     );
+                    state
+                        .record_last_approval_response(&pending.requesting_actor_id, false)
+                        .await;
                     return Ok(ApprovalToolResponse {
                         approved: false,
                         comment: Some("auto-rejected by policy".into()),
@@ -1597,6 +1642,7 @@ pub async fn handle_propose_plan(
     // approval without the structured fields would be useless, but the
     // summary still anchors the audit trail.
     let summary = args.plan.summary.clone();
+    let caller_id_for_record = caller_id.clone();
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
         .request(
@@ -1614,6 +1660,9 @@ pub async fn handle_propose_plan(
                     .plan_approved
                     .store(true, std::sync::atomic::Ordering::Release);
             }
+            state
+                .record_last_approval_response(&caller_id_for_record, resp.approved)
+                .await;
             Ok(ApprovalToolResponse {
                 approved: resp.approved,
                 comment: resp.comment,
