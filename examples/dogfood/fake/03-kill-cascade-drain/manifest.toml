@@ -1,0 +1,24 @@
+# Reference manifest for dogfood spotlight #03: depth-first cascade cancellation.
+#
+# NOTE: this spotlight is verified via an in-process integration test
+# (cargo test --test dogfood_fake_flows dogfood_kill_cascade_drain),
+# not by running this manifest directly. The manifest documents what the
+# scenario would look like as a real depth-2 dispatch.
+#
+# Scenario: operator runs a long-running depth-2 dispatch with a root lead and
+# two parallel sub-leads (S1 and S2), each of which has two active workers.
+# The operator realizes something is wrong (wrong prompt, runaway cost, etc.)
+# and triggers a root cancel. Within the drain grace window, the cascade
+# reaches every sub-tree and every sub-tree worker.
+
+[run]
+max_parallel = 8
+
+[lead]
+prompt = "Run two parallel sub-leads, each dispatching two workers for long-running analysis."
+model = "claude-haiku-4-5"
+budget_usd = 10.00
+max_workers = 8
+allow_subleads = true
+max_subleads = 2
+max_sublead_budget_usd = 4.00

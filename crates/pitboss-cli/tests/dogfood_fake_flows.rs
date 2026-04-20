@@ -463,3 +463,172 @@ async fn dogfood_isolation_strict_tree() {
         .await
         .unwrap();
 }
+
+// ── Spotlight #03: kill-cascade-drain ────────────────────────────────────────
+
+/// Dogfood spotlight #03: depth-first cascade cancellation within the drain
+/// grace window.
+///
+/// Scenario: an operator kicks off a long-running depth-2 dispatch — a root
+/// lead with two active sub-leads (S1 for "phase 1", S2 for "phase 2"), each
+/// sub-lead having two active workers. Partway through, the operator presses
+/// cancel. Within the drain grace window, the cascade from root reaches every
+/// sub-tree cancel token and every sub-tree worker cancel token.
+///
+/// This test proves:
+///
+/// 1. **Pre-cancel**: 2 sub-leads registered in `state.subleads`; each has 2
+///    worker cancel tokens; none are draining.
+/// 2. **Root cancel triggers cascade**: `state.root.cancel.drain()` wakes the
+///    `install_cascade_cancel_watcher` task.
+/// 3. **Drain window**: within 200 ms (more than sufficient for a tokio-local
+///    task), every sub-tree cancel token and every worker cancel token reaches
+///    the draining state.
+/// 4. **Root is also draining**: the token that triggered the cascade.
+///
+/// ## In-process pattern
+///
+/// Same as spotlight #02: DispatchState + McpServer constructed in-process,
+/// driven via FakeMcpClient. Worker cancel tokens are injected directly into
+/// each sub-tree's `worker_cancels` map to simulate the state the cascade must
+/// handle (Phase 4+ will wire real sub-tree workers).
+#[tokio::test]
+async fn dogfood_kill_cascade_drain() {
+    use serde_json::json;
+
+    // ── Scenario: operator cancels a deep dispatch mid-flight ──
+    // Two sub-leads, each with two workers. Cancel is triggered at root;
+    // depth-first drain reaches every worker within the grace window.
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // ── Install the cascade watcher (normally done by run_hierarchical) ──
+    pitboss_cli::dispatch::signals::install_cascade_cancel_watcher(state.clone());
+
+    // ── Spawn two sub-leads via MCP ───────────────────────────────────────────
+    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+
+    let s1_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "phase 1",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 1.0,
+                "max_workers": 2,
+            }),
+        )
+        .await
+        .unwrap();
+    let s1_id = s1_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead should return sublead_id for S1")
+        .to_string();
+
+    let s2_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "phase 2",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 1.0,
+                "max_workers": 2,
+            }),
+        )
+        .await
+        .unwrap();
+    let s2_id = s2_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead should return sublead_id for S2")
+        .to_string();
+
+    // ── Inject two workers into each sub-tree ─────────────────────────────────
+    // Phase 4+ will have real sub-tree workers; for Phase 2/3 dogfood we
+    // inject cancel tokens directly to simulate the state the cascade must
+    // handle.
+    for sublead_id in [&s1_id, &s2_id] {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(sublead_id.as_str()).unwrap();
+        let mut workers = sub.workers.write().await;
+        let mut cancels = sub.worker_cancels.write().await;
+        for worker_n in 0..2 {
+            let worker_id = format!("{sublead_id}-w{worker_n}");
+            workers.insert(
+                worker_id.clone(),
+                pitboss_cli::dispatch::state::WorkerState::Pending,
+            );
+            cancels.insert(worker_id, CancelToken::new());
+        }
+    }
+
+    // ── OBSERVE pre-cancel state ──────────────────────────────────────────────
+    {
+        let subleads = state.subleads.read().await;
+        assert_eq!(subleads.len(), 2, "both sub-leads should be registered");
+        for (sublead_id, sub) in subleads.iter() {
+            let worker_cancels = sub.worker_cancels.read().await;
+            assert_eq!(
+                worker_cancels.len(),
+                2,
+                "sub-lead {sublead_id} should have 2 worker cancel tokens pre-cancel"
+            );
+            for (wid, tok) in worker_cancels.iter() {
+                assert!(
+                    !tok.is_draining(),
+                    "pre-cancel: worker token {wid} under {sublead_id} should not be draining"
+                );
+            }
+            assert!(
+                !sub.cancel.is_draining(),
+                "pre-cancel: sub-tree {sublead_id} cancel should not be draining"
+            );
+        }
+        assert!(
+            !state.root.cancel.is_draining(),
+            "pre-cancel: root cancel should not be draining"
+        );
+    }
+
+    // ── ACT: operator cancels root ────────────────────────────────────────────
+    state.root.cancel.drain();
+
+    // Wait for the cascade watcher task to fire and propagate to all sub-trees.
+    // The watcher runs on the tokio runtime; 200 ms is more than sufficient
+    // for an in-process test. In production this would be bounded by the
+    // TERMINATE_GRACE drain window.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // ── OBSERVE post-cancel state: cascade reached everything ─────────────────
+    {
+        let subleads = state.subleads.read().await;
+        assert_eq!(
+            subleads.len(),
+            2,
+            "sub-lead count should be unchanged after cancel"
+        );
+        for (sublead_id, sub) in subleads.iter() {
+            assert!(
+                sub.cancel.is_draining(),
+                "cascade should have drained sub-tree {sublead_id}"
+            );
+            for (wid, tok) in sub.worker_cancels.read().await.iter() {
+                assert!(
+                    tok.is_draining(),
+                    "cascade should have drained sub-tree worker {wid} under {sublead_id}"
+                );
+            }
+        }
+    }
+
+    // Root itself must be draining — it is what triggered the cascade.
+    assert!(
+        state.root.cancel.is_draining(),
+        "root cancel should be draining after operator cancel"
+    );
+}
