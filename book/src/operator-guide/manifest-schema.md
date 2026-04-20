@@ -36,7 +36,7 @@ Inherited by every `[[task]]` and `[[lead]]` unless overridden at the task level
 |-----|------|-------|
 | `model` | string | e.g., `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`. Dated suffixes allowed. |
 | `effort` | `"low"` \| `"medium"` \| `"high"` | Maps to `claude --effort`. |
-| `tools` | array of string | `--allowedTools` value. Pitboss auto-appends its MCP tools for leads and workers. Default: `["Read", "Write", "Edit", "Bash", "Glob", "Grep"]`. |
+| `tools` | array of string | `--allowedTools` value. Pitboss auto-appends its MCP tools for leads and workers. Default: `["Read", "Write", "Edit", "Bash", "Glob", "Grep"]`. See [Security → Defense-in-depth → Read-only lead pattern](../security/defense-in-depth.md) for guidance on restricting this per worker. |
 | `timeout_secs` | int | Per-task wall-clock cap. No default (no cap). |
 | `use_worktree` | bool | Default `true`. Set `false` for read-only analysis runs. |
 | `env` | table | Env vars passed to the `claude` subprocess. |

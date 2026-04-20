@@ -116,3 +116,7 @@ The reject branch accepts an optional reason string that flows back through MCP 
 ## Reject-with-reason
 
 When an approval is rejected with a `reason`, the reason is included in the MCP response returned to the lead. This allows the lead to adapt its behavior immediately (e.g., switch output format, try a different approach) without requiring a separate `reprompt_worker` call.
+
+## Using approvals as a security control
+
+`[[approval_policy]]` can be used to gate state-changing tool invocations before they execute, independent of operator availability. See [Security → Defense-in-depth → Approval-gated state-changing tools](../security/defense-in-depth.md#approval-gated-state-changing-tools) for a manifest pattern that auto-approves reads and blocks writes for operator review.

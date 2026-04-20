@@ -18,6 +18,12 @@
 - [TUI](./operator-guide/tui.md)
 - [Notifications](./operator-guide/notifications.md)
 
+# Security
+
+- [Threat model](./security/threat-model.md)
+- [The Rule of Two](./security/rule-of-two.md)
+- [Defense-in-depth patterns](./security/defense-in-depth.md)
+
 # MCP Tool Reference
 
 - [Overview](./mcp-reference/overview.md)

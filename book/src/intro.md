@@ -21,6 +21,7 @@ Language models are stochastic. A well-run pit is not.
 - **Looking for the full manifest field reference?** See [Manifest schema](./operator-guide/manifest-schema.md).
 - **Want to see it work?** The [Cookbook spotlights](./cookbook/) are runnable end-to-end examples.
 - **Writing a lead that needs MCP tools?** See the [MCP Tool Reference](./mcp-reference/overview.md).
+- **Processing untrusted content or running in a security-sensitive context?** See the [Security section](./security/threat-model.md), starting with the [Threat model](./security/threat-model.md) and [The Rule of Two](./security/rule-of-two.md).
 
 ## Current version
 

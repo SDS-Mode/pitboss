@@ -75,6 +75,10 @@ Set `dump_shared_store = true` in `[run]` to write `<run-dir>/shared-store.json`
 dump_shared_store = true
 ```
 
+## Using leases as a security control
+
+Run-global leases can serialize access to sensitive shared resources — deploy pipelines, credential stores, shared output paths — preventing concurrent writes from multiple agents. See [Security → Defense-in-depth → Run-global lease as serialization gate](../security/defense-in-depth.md) for a manifest pattern and commentary on what this does and does not protect.
+
 ## Architecture note
 
 The KV store is **in-memory and per-run**. It is not persisted between runs (except via the optional `shared-store.json` dump). Workers in separate runs cannot see each other's state.
