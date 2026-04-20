@@ -62,17 +62,17 @@ For finer control, declare deterministic policy rules in the manifest. Rules are
 ```toml
 # Auto-approve routine tool-use from sub-lead S1
 [[approval_policy]]
-match = { actor = "root→S1", category = "ToolUse" }
+match = { actor = "root→S1", category = "tool_use" }
 action = "auto_approve"
 
 # Always block plan-category approvals for explicit review
 [[approval_policy]]
-match = { category = "Plan" }
+match = { category = "plan" }
 action = "block"
 
 # Block any cost event over $0.50
 [[approval_policy]]
-match = { category = "Cost", cost_over = 0.50 }
+match = { category = "cost", cost_over = 0.50 }
 action = "block"
 ```
 
@@ -83,7 +83,7 @@ Rules are evaluated first-match-wins in declaration order. A request that doesn'
 | Field | Type | Notes |
 |-------|------|-------|
 | `actor` | string | Actor path, e.g., `"root→S1"`. Unset matches all actors. |
-| `category` | string | `"ToolUse"`, `"Plan"`, `"Cost"`. Unset matches all categories. |
+| `category` | string | `"tool_use"`, `"plan"`, `"cost"`. Unset matches all categories. |
 | `tool_name` | string | Specific MCP tool name. Unset matches all. |
 | `cost_over` | float | Fires when `cost_estimate > cost_over` (USD). |
 

@@ -22,11 +22,11 @@ The spotlight proves four things:
 
 ```toml
 [[approval_policy]]
-match = { actor = "root→S1", category = "ToolUse" }
+match = { actor = "root→S1", category = "tool_use" }
 action = "auto_approve"
 
 [[approval_policy]]
-match = { category = "Plan" }
+match = { category = "plan" }
 action = "block"
 ```
 

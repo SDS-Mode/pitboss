@@ -141,15 +141,15 @@ Use `[[approval_policy]]` to require operator review before any state-changing t
 ```toml
 # Auto-approve reads; block anything that writes or runs commands
 [[approval_policy]]
-match  = { category = "ToolUse", tool_name = "Read" }
+match  = { category = "tool_use", tool_name = "Read" }
 action = "auto_approve"
 
 [[approval_policy]]
-match  = { category = "ToolUse", tool_name = "Grep" }
+match  = { category = "tool_use", tool_name = "Grep" }
 action = "auto_approve"
 
 [[approval_policy]]
-match  = { category = "ToolUse" }
+match  = { category = "tool_use" }
 action = "block"
 ```
 

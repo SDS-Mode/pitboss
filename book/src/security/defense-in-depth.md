@@ -109,20 +109,20 @@ approval_policy = "block"
 
 # Auto-approve reads (high volume, low risk)
 [[approval_policy]]
-match  = { category = "ToolUse", tool_name = "Read" }
+match  = { category = "tool_use", tool_name = "Read" }
 action = "auto_approve"
 
 [[approval_policy]]
-match  = { category = "ToolUse", tool_name = "Glob" }
+match  = { category = "tool_use", tool_name = "Glob" }
 action = "auto_approve"
 
 [[approval_policy]]
-match  = { category = "ToolUse", tool_name = "Grep" }
+match  = { category = "tool_use", tool_name = "Grep" }
 action = "auto_approve"
 
 # Block all other tool-use (Write, Edit, Bash, etc.) for operator review
 [[approval_policy]]
-match  = { category = "ToolUse" }
+match  = { category = "tool_use" }
 action = "block"
 ```
 
@@ -244,7 +244,7 @@ To set a run-level fallback on all approval requests, combine the TTL with `[[ap
 ```toml
 # Block all approvals; set a cost-over firewall for large events
 [[approval_policy]]
-match  = { category = "Cost", cost_over = 1.00 }
+match  = { category = "cost", cost_over = 1.00 }
 action = "block"
 ```
 

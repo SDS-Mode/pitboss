@@ -87,11 +87,11 @@ Zero or more policy blocks, evaluated in order. First matching rule wins.
 
 ```toml
 [[approval_policy]]
-match = { actor = "root→S1", category = "ToolUse" }
+match = { actor = "root→S1", category = "tool_use" }
 action = "auto_approve"
 
 [[approval_policy]]
-match = { category = "Plan" }
+match = { category = "plan" }
 action = "block"
 ```
 
@@ -100,7 +100,7 @@ action = "block"
 | Field | Type | Notes |
 |-------|------|-------|
 | `actor` | string | Actor path, e.g., `"root→S1"` or `"root→S1→W3"`. |
-| `category` | string | `"ToolUse"`, `"Plan"`, `"Cost"`, etc. |
+| `category` | string | `"tool_use"`, `"plan"`, `"cost"`, etc. |
 | `tool_name` | string | Specific MCP tool name. |
 | `cost_over` | float | Fires when the request's `cost_estimate` exceeds this value (USD). |
 
