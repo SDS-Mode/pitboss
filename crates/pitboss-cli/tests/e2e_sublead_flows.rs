@@ -358,12 +358,27 @@ async fn root_kill_cascades_to_sublead_workers() {
 /// - first sub-lead acquires successfully
 /// - second sub-lead is rejected with holder info in the error
 /// - after first releases, second can acquire
+///
+/// # Why `mk_state_hold_workers`
+///
+/// The spawned sub-lead sessions use a `FakeScript` that must NOT complete
+/// during this test. With `mk_state` (fast-completing FakeScript), the
+/// FakeSpawner's subprocess task exits immediately and tokio schedules
+/// `spawn_sublead_session`'s background task — which calls
+/// `reconcile_terminated_sublead` — potentially *before* the test's
+/// `run_lease_acquire` assertions run. When that reconcile fires after S1 has
+/// already acquired the lease, it calls `release_all_held_by(s1_id)` and frees
+/// the lease, allowing S2 to acquire it and causing a spurious test failure.
+///
+/// Using `mk_state_hold_workers` (hold-until-signal FakeScript) keeps both
+/// sub-lead subprocesses alive for the duration of the test so no reconcile
+/// fires until `state.cancel.terminate()` cascades the shutdown.
 #[tokio::test]
 async fn run_global_lease_serializes_two_subleads() {
     use serde_json::json;
 
     let dir = TempDir::new().unwrap();
-    let (run_id, state) = mk_state(dir.path());
+    let (run_id, state) = mk_state_hold_workers(dir.path());
 
     let socket = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())

@@ -901,6 +901,7 @@ impl McpServer {
                                 let h = handler.for_connection();
                                 let actor_slot = h.connection_actor_handle();
                                 let store_for_cleanup = h.state.shared_store.clone();
+                                let run_leases_for_cleanup = h.state.run_leases.clone();
                                 let cancel_inner = cancel_outer.clone();
                                 // Track the spawned session task so Drop can signal cancellation
                                 // to per-connection tasks without waiting for MCP session timeouts.
@@ -920,16 +921,17 @@ impl McpServer {
                                             }
                                         } => {}
                                     }
-                                    // Connection-drop cleanup: release every
-                                    // lease held by this session's actor.
-                                    // Until this hook existed, dropped bridges
-                                    // left leases held until TTL expiry —
-                                    // fine for short TTLs, but blocked other
-                                    // workers on long-held leases when a
+                                    // Connection-drop cleanup: release every lease
+                                    // (per-layer and run-global) held by this
+                                    // session's actor. Until this hook existed,
+                                    // dropped bridges left leases held until TTL
+                                    // expiry — fine for short TTLs, but blocked
+                                    // other workers on long-held leases when a
                                     // worker crashed.
                                     let actor = actor_slot.lock().await.clone();
                                     if let Some(id) = actor {
                                         store_for_cleanup.release_all_for_actor(&id).await;
+                                        run_leases_for_cleanup.release_all_held_by(&id).await;
                                     }
                                 });
                             }
