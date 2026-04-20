@@ -1244,3 +1244,220 @@ async fn wait_actor_still_handles_worker_back_compat() {
         ActorTerminalRecord::Sublead(_) => panic!("expected Worker variant, got Sublead"),
     }
 }
+
+// ── Sub-task 1: spawn_worker layer routing ────────────────────────────────────
+
+/// Sub-lead calls `spawn_worker` via MCP. The resulting worker must appear in
+/// the sub-lead's `LayerState.workers` map, NOT in `state.root.workers`.
+/// `state.worker_layer_index` must map the new task_id → `Some(sublead_id)`.
+#[tokio::test]
+async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Root lead spawns a sub-lead.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 5.0, "max_workers": 4}),
+        )
+        .await
+        .unwrap();
+    let sublead_id = resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead must return sublead_id")
+        .to_string();
+
+    // Sub-lead calls spawn_worker. FakeMcpClient::connect_as injects
+    // _meta = {actor_id: sublead_id, actor_role: "sublead"}.
+    let mut sub_client = FakeMcpClient::connect_as(&socket, &sublead_id, "sublead")
+        .await
+        .unwrap();
+    let spawn_resp = sub_client
+        .call_tool("spawn_worker", json!({"prompt": "sub-task 1"}))
+        .await
+        .expect("sub-lead should be able to call spawn_worker");
+    let task_id = spawn_resp["task_id"]
+        .as_str()
+        .expect("spawn_worker must return task_id")
+        .to_string();
+
+    // Worker must be registered in the sub-lead's LayerState, NOT root.
+    {
+        let root_workers = state.root.workers.read().await;
+        assert!(
+            !root_workers.contains_key(&task_id),
+            "worker must NOT appear in root layer; got: {task_id}"
+        );
+    }
+    {
+        let subleads = state.subleads.read().await;
+        let sub_layer = subleads
+            .get(sublead_id.as_str())
+            .expect("sub-tree layer should exist");
+        let sub_workers = sub_layer.workers.read().await;
+        assert!(
+            sub_workers.contains_key(&task_id),
+            "worker must appear in sub-lead's layer workers map; task_id={task_id}"
+        );
+    }
+
+    // worker_layer_index must map task_id → Some(sublead_id).
+    let layer_index = state.worker_layer_index.read().await;
+    let indexed_layer = layer_index.get(&task_id).expect("task_id must be indexed");
+    assert_eq!(
+        indexed_layer.as_deref(),
+        Some(sublead_id.as_str()),
+        "worker_layer_index must point to sublead_id; got: {indexed_layer:?}"
+    );
+}
+
+/// A worker actor (with `_meta.actor_role = "worker"`) calls `spawn_worker`.
+/// The handler must reject this with the depth-2 cap error message.
+#[tokio::test]
+async fn worker_cannot_spawn_worker() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Connect as a worker actor.
+    let mut worker_client = FakeMcpClient::connect_as(&socket, "worker-xyz", "worker")
+        .await
+        .unwrap();
+    let result = worker_client
+        .call_tool("spawn_worker", json!({"prompt": "nested spawn attempt"}))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "workers must not be able to call spawn_worker (depth-2 cap); got: {result:?}"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("depth-2") || err_msg.contains("not available to workers"),
+        "error should mention the depth-2 cap; got: {err_msg}"
+    );
+}
+
+/// Calling `spawn_worker` WITHOUT `_meta` (the v0.5 backward-compat path)
+/// must route the worker into the root layer, not crash or reject.
+#[tokio::test]
+async fn v0_5_back_compat_no_meta_routes_to_root() {
+    use pitboss_cli::mcp::tools::{handle_spawn_worker, SpawnWorkerArgs};
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Call the handler directly with no _meta field (v0.5 call site style).
+    let args = SpawnWorkerArgs {
+        prompt: "legacy no-meta spawn".into(),
+        directory: None,
+        branch: None,
+        tools: None,
+        timeout_secs: None,
+        model: None,
+        meta: None, // Explicitly absent — the v0.5 compat path
+    };
+    let result = handle_spawn_worker(&state, args)
+        .await
+        .expect("spawn_worker without _meta should succeed (v0.5 back-compat)");
+
+    let task_id = result.task_id;
+
+    // Worker must be in root layer.
+    let root_workers = state.root.workers.read().await;
+    assert!(
+        root_workers.contains_key(&task_id),
+        "no-meta spawn must register worker in root layer; task_id={task_id}"
+    );
+
+    // worker_layer_index must map task_id → None (root sentinel).
+    let layer_index = state.worker_layer_index.read().await;
+    let indexed_layer = layer_index.get(&task_id).expect("task_id must be indexed");
+    assert_eq!(
+        *indexed_layer, None,
+        "no-meta spawn must set worker_layer_index to None (root); got: {indexed_layer:?}"
+    );
+}
+
+/// Sub-lead (with its own $5 envelope) spawns a worker. The spend reservation
+/// must be charged to the sub-lead's `reserved_usd`, NOT root's. Root's pool
+/// should remain unchanged.
+#[tokio::test]
+async fn sublead_worker_budget_reserved_against_sublead_envelope() {
+    use pitboss_cli::dispatch::sublead::{spawn_sublead, SubleadSpawnRequest};
+    use pitboss_cli::mcp::tools::{handle_spawn_worker, SpawnWorkerArgs};
+    use pitboss_cli::shared_store::{tools::MetaField, ActorRole};
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Spawn a sub-lead with $5 budget.
+    let req = SubleadSpawnRequest {
+        prompt: "budget test sublead".into(),
+        model: "claude-haiku-4-5".into(),
+        budget_usd: Some(5.0),
+        max_workers: Some(4),
+        lead_timeout_secs: Some(1800),
+        initial_ref: Default::default(),
+        read_down: false,
+    };
+    let sublead_id = spawn_sublead(&state, req)
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // Snapshot root's reservation before the sub-lead spawns a worker.
+    // (Root has $5 reserved for the sub-lead envelope at this point.)
+    let root_reserved_before = *state.root.reserved_usd.lock().await;
+
+    // Sub-lead calls spawn_worker with its identity in _meta.
+    let args = SpawnWorkerArgs {
+        prompt: "subtask under sublead".into(),
+        directory: None,
+        branch: None,
+        tools: None,
+        timeout_secs: None,
+        model: Some("claude-haiku-4-5".into()),
+        meta: Some(MetaField {
+            actor_id: sublead_id.clone(),
+            actor_role: ActorRole::Sublead,
+        }),
+    };
+    handle_spawn_worker(&state, args)
+        .await
+        .expect("sub-lead's spawn_worker should succeed within its $5 envelope");
+
+    // Root's reserved_usd must NOT have changed (the new reservation went to
+    // the sub-lead's layer, not root's).
+    let root_reserved_after = *state.root.reserved_usd.lock().await;
+    assert!(
+        (root_reserved_after - root_reserved_before).abs() < 1e-9,
+        "root reserved_usd should be unchanged after sub-lead spawn_worker; \
+         before={root_reserved_before}, after={root_reserved_after}"
+    );
+
+    // The sub-lead's layer must have a positive reservation (Haiku fallback = $0.10).
+    let subleads = state.subleads.read().await;
+    let sub_layer = subleads
+        .get(sublead_id.as_str())
+        .expect("sub-tree layer must exist");
+    let sub_reserved = *sub_layer.reserved_usd.lock().await;
+    assert!(
+        sub_reserved > 0.0,
+        "sub-lead's reserved_usd must be > 0 after spawning a worker; got={sub_reserved}"
+    );
+    assert!(
+        sub_reserved < 5.0,
+        "sub-lead's reservation must be within its $5 envelope; got={sub_reserved}"
+    );
+}
