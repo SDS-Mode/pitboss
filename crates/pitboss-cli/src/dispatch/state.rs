@@ -107,6 +107,36 @@ pub struct ApprovalResponse {
     pub reason: Option<String>,
 }
 
+/// Most recent approval response delivered to a given actor. Populated by
+/// `handle_request_approval` and `handle_propose_plan` immediately before
+/// they return to the MCP caller. Consulted at actor-termination time by
+/// `approval_driven_termination` to reclassify "silent exit after a
+/// rejected approval" as `TaskStatus::ApprovalRejected` rather than the
+/// misleading `Success`.
+///
+/// Entries are kept for the duration of the run — the map is small (one
+/// per actor that ever requested an approval) and termination
+/// reclassification can happen seconds to minutes after the last
+/// approval.
+#[derive(Debug, Clone)]
+pub struct LastApprovalResponse {
+    pub approved: bool,
+    pub received_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Why an actor's terminal status should be reclassified from `Success`.
+/// Returned by `DispatchState::approval_driven_termination`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalTerminationKind {
+    /// Last approval returned `{approved: false}` from an operator action
+    /// or a `[[approval_policy]]` `auto_reject` rule.
+    Rejected,
+    // Future: TimedOut variant when queue-TTL fallback is wired through to
+    // an actual {approved: false} response (today's expire_approvals removes
+    // the entry without responding, so the actor sees a bridge timeout
+    // rather than a clean rejection — that's a separate fix).
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct WorkerCounters {
     pub pause_count: u32,
@@ -234,6 +264,12 @@ pub struct DispatchState {
     /// Run-global lease registry for cross-sub-tree resource coordination.
     /// Distinct from per-layer /leases/* stored in each layer's KvStore.
     pub run_leases: Arc<RunLeaseRegistry>,
+    /// Most-recent approval response per actor id. Populated by the
+    /// approval MCP handlers when they return; consulted at actor-
+    /// termination time by `approval_driven_termination` to reclassify
+    /// silent exits as `TaskStatus::ApprovalRejected`. See the
+    /// `LastApprovalResponse` doc for the full lifecycle.
+    pub last_approval_response: RwLock<HashMap<String, LastApprovalResponse>>,
 }
 
 /// CAUTION: This Deref always resolves to the root layer, which is correct
@@ -308,7 +344,53 @@ impl DispatchState {
             sublead_results: RwLock::new(HashMap::new()),
             worker_layer_index: RwLock::new(HashMap::new()),
             run_leases: Arc::new(RunLeaseRegistry::new()),
+            last_approval_response: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Record the most recent approval response delivered to `actor_id`.
+    /// Called by approval MCP handlers immediately before they return to
+    /// the caller. Used downstream by `approval_driven_termination` to
+    /// reclassify silent exits.
+    pub async fn record_last_approval_response(&self, actor_id: &str, approved: bool) {
+        let mut slot = self.last_approval_response.write().await;
+        slot.insert(
+            actor_id.to_string(),
+            LastApprovalResponse {
+                approved,
+                received_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    /// If the given actor's most-recent approval response was negative and
+    /// recent (within 30 s of now), return the reclassification kind.
+    /// Returns `None` if no reclassification applies.
+    ///
+    /// Used by actor-termination paths to turn `TaskStatus::Success` into
+    /// `ApprovalRejected` when the actor clearly exited because of the
+    /// rejection rather than by completing real work after it.
+    ///
+    /// The 30-second recency window is empirical: claude subprocesses that
+    /// exit due to a rejected approval typically terminate within a few
+    /// seconds (the apology message + exit). 30 seconds gives generous
+    /// headroom while still excluding actors that received a rejection,
+    /// did substantial subsequent work, and then terminated for unrelated
+    /// reasons.
+    pub async fn approval_driven_termination(
+        &self,
+        actor_id: &str,
+    ) -> Option<ApprovalTerminationKind> {
+        let slot = self.last_approval_response.read().await;
+        let entry = slot.get(actor_id)?;
+        if entry.approved {
+            return None;
+        }
+        let age = chrono::Utc::now() - entry.received_at;
+        if age.num_seconds() > 30 {
+            return None;
+        }
+        Some(ApprovalTerminationKind::Rejected)
     }
 
     /// Accessor for the root layer. Used where callers need an explicit

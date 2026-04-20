@@ -337,26 +337,35 @@ pub async fn run_hierarchical(
         .unwrap_or_default();
     // Merge the loop's own reprompt_count into the counter-based one.
     let total_reprompt_count = lead_counters.reprompt_count + reprompt_count;
+    // Compute initial status from session state, then reclassify if the
+    // root lead exited shortly after a rejected approval (lessons-learned:
+    // require_plan_approval = true + auto_reject by policy → lead exits 0
+    // → would otherwise be Success). See `mcp::tools::run_worker` for the
+    // same pattern.
+    let mut lead_status = match final_outcome.final_state {
+        pitboss_core::session::SessionState::Completed => pitboss_core::store::TaskStatus::Success,
+        pitboss_core::session::SessionState::Failed { .. } => {
+            pitboss_core::store::TaskStatus::Failed
+        }
+        pitboss_core::session::SessionState::TimedOut => pitboss_core::store::TaskStatus::TimedOut,
+        pitboss_core::session::SessionState::Cancelled => {
+            pitboss_core::store::TaskStatus::Cancelled
+        }
+        pitboss_core::session::SessionState::SpawnFailed { .. } => {
+            pitboss_core::store::TaskStatus::SpawnFailed
+        }
+        _ => pitboss_core::store::TaskStatus::Failed,
+    };
+    if matches!(lead_status, pitboss_core::store::TaskStatus::Success) {
+        if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
+            state.approval_driven_termination(&lead.id).await
+        {
+            lead_status = pitboss_core::store::TaskStatus::ApprovalRejected;
+        }
+    }
     let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
-        status: match final_outcome.final_state {
-            pitboss_core::session::SessionState::Completed => {
-                pitboss_core::store::TaskStatus::Success
-            }
-            pitboss_core::session::SessionState::Failed { .. } => {
-                pitboss_core::store::TaskStatus::Failed
-            }
-            pitboss_core::session::SessionState::TimedOut => {
-                pitboss_core::store::TaskStatus::TimedOut
-            }
-            pitboss_core::session::SessionState::Cancelled => {
-                pitboss_core::store::TaskStatus::Cancelled
-            }
-            pitboss_core::session::SessionState::SpawnFailed { .. } => {
-                pitboss_core::store::TaskStatus::SpawnFailed
-            }
-            _ => pitboss_core::store::TaskStatus::Failed,
-        },
+        status: lead_status,
         exit_code: final_outcome.exit_code,
         started_at: overall_started_at,
         ended_at: final_outcome.ended_at,

@@ -605,7 +605,7 @@ async fn spawn_sublead_session(
         *sub_layer_bg.reprompt_tx.lock().await = None;
 
         // 7. Classify the outcome for the terminal record.
-        let sublead_outcome = match final_outcome.final_state {
+        let mut sublead_outcome = match final_outcome.final_state {
             pitboss_core::session::SessionState::Completed => SubleadOutcome::Success,
             pitboss_core::session::SessionState::Cancelled => SubleadOutcome::Cancel,
             pitboss_core::session::SessionState::TimedOut => SubleadOutcome::Timeout,
@@ -617,6 +617,18 @@ async fn spawn_sublead_session(
             }
             _ => SubleadOutcome::Error("unknown terminal state".into()),
         };
+
+        // Reclassify silent exits driven by a recent rejected approval. A
+        // sub-lead that called propose_plan, got auto_reject, and exited
+        // would otherwise show as Success. See run_worker for the same
+        // pattern.
+        if matches!(sublead_outcome, SubleadOutcome::Success) {
+            if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
+                state_bg.approval_driven_termination(&sublead_id_bg).await
+            {
+                sublead_outcome = SubleadOutcome::ApprovalRejected;
+            }
+        }
 
         // 8. Map to TaskStatus for the TaskRecord.
         let status = match &sublead_outcome {
