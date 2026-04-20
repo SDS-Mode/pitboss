@@ -16,6 +16,8 @@
 
 mod support;
 
+use support::{ensure_built, fake_claude_path};
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -225,9 +227,13 @@ async fn root_spawns_sublead_which_completes() {
     }
 
     // Trigger reconciliation (mimics Event::Result terminal event).
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, &sublead_id)
-        .await
-        .expect("reconcile should succeed");
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(
+        &state,
+        &sublead_id,
+        pitboss_cli::dispatch::sublead::SubleadOutcome::Success,
+    )
+    .await
+    .expect("reconcile should succeed");
 
     // After reconcile: reservation released, actual spend recorded, sub-lead removed.
     assert_eq!(
@@ -645,9 +651,13 @@ async fn budget_envelope_returns_to_root_pool() {
     }
 
     // Reconcile (terminate the sub-lead).
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, &sublead_id)
-        .await
-        .expect("reconcile should succeed");
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(
+        &state,
+        &sublead_id,
+        pitboss_cli::dispatch::sublead::SubleadOutcome::Success,
+    )
+    .await
+    .expect("reconcile should succeed");
 
     // After reconcile:
     // - reserved_usd released fully (back to pre-spawn value)
@@ -668,4 +678,217 @@ async fn budget_envelope_returns_to_root_pool() {
         state.subleads.read().await.get(&sublead_id).is_none(),
         "sub-lead should be removed from subleads map after reconcile"
     );
+}
+
+// ── Sub-task 3: spawn_sublead_session real subprocess lifecycle ───────────────
+
+/// Full end-to-end sub-lead lifecycle using the real `fake-claude` binary as
+/// the sub-lead subprocess.
+///
+/// Scenario:
+/// 1. Build a `DispatchState` with `TokioSpawner` + `fake_claude_path()` as the
+///    Claude binary.
+/// 2. Start the MCP server (needed so `socket_path_for_run` resolves to a
+///    socket that can be embedded in the per-sublead mcp-config.json).
+/// 3. Call `spawn_sublead` which triggers `spawn_sublead_session`. The
+///    spawned fake-claude reads a pre-written JSONL script that emits a
+///    valid stream-json `result` event, then exits 0.
+/// 4. Poll until `sublead_results` is populated (reconcile fired) or
+///    timeout after 10 s.
+/// 5. Call `handle_wait_for_actor(sublead_id)` — must return immediately
+///    with `ActorTerminalRecord::Sublead` carrying `outcome = "success"`.
+/// 6. Verify the sub-lead's `TaskRecord` was written via
+///    `store.get_task_record(run_id, sublead_id)`.
+///
+/// This proves the full subprocess-spawn → monitor → reconcile path that
+/// v0.6 sub-task 3 wires up.
+#[tokio::test]
+async fn sublead_session_spawns_runs_and_reconciles() {
+    ensure_built();
+
+    use pitboss_cli::dispatch::state::ActorTerminalRecord;
+    use pitboss_cli::dispatch::sublead::{spawn_sublead, SubleadSpawnRequest};
+    use pitboss_cli::mcp::tools::handle_wait_for_actor;
+    use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+
+    // Write a JSONL script for fake-claude: emit result event and exit 0.
+    let script_path = dir.path().join("sublead-script.jsonl");
+    let result_line = r#"{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sublead-sess-1\",\"result\":\"done\",\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"}"#;
+    std::fs::write(&script_path, format!("{}\n", result_line)).expect("write sublead script");
+
+    // Build DispatchState with TokioSpawner + real fake-claude binary.
+    let lead = ResolvedLead {
+        id: "root".into(),
+        directory: dir.path().to_path_buf(),
+        prompt: "root prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+        allow_subleads: true,
+        max_subleads: Some(4),
+        max_sublead_budget_usd: Some(5.0),
+        max_workers_across_tree: Some(8),
+        sublead_defaults: None,
+    };
+    let manifest = ResolvedManifest {
+        max_parallel: 4,
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(20.0),
+        lead_timeout_secs: None,
+        approval_policy: Some(ApprovalPolicy::Block),
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+    };
+
+    let store: std::sync::Arc<dyn pitboss_core::store::SessionStore> = std::sync::Arc::new(
+        pitboss_core::store::JsonFileStore::new(dir.path().to_path_buf()),
+    );
+    // Init the run so store.append_record works.
+    store
+        .init_run(&pitboss_core::store::RunMeta {
+            run_id,
+            manifest_path: dir.path().join("manifest.toml"),
+            pitboss_version: "test".into(),
+            claude_version: None,
+            started_at: chrono::Utc::now(),
+            env: Default::default(),
+        })
+        .await
+        .expect("init run");
+
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir)
+        .await
+        .expect("create run_subdir");
+
+    let spawner: std::sync::Arc<dyn ProcessSpawner> = std::sync::Arc::new(TokioSpawner::new());
+
+    let state = std::sync::Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store.clone(),
+        CancelToken::new(),
+        "root".into(),
+        spawner,
+        fake_claude_path(), // ← real fake-claude binary
+        std::sync::Arc::new(pitboss_core::worktree::WorktreeManager::new()),
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    // Start MCP server so socket_path_for_run works and mcp-config can be
+    // written. The sub-lead subprocess doesn't need to connect — fake-claude
+    // only reads PITBOSS_FAKE_MCP_SOCKET when that env var is set.
+    let socket = socket_path_for_run(run_id, dir.path());
+    let _mcp = McpServer::start(socket.clone(), state.clone())
+        .await
+        .expect("start MCP server");
+
+    // Set PITBOSS_FAKE_SCRIPT so the spawned fake-claude subprocess executes
+    // our script and emits the result event. TokioSpawner inherits the full
+    // process environment when cmd.env is empty.
+    // SAFETY: single-threaded section of the test; no concurrent env access.
+    unsafe {
+        std::env::set_var("PITBOSS_FAKE_SCRIPT", &script_path);
+    }
+
+    // Spawn the sub-lead. spawn_sublead_session is now a real implementation
+    // that launches fake-claude in the background.
+    let req = SubleadSpawnRequest {
+        prompt: "run sub-task A".into(),
+        model: "claude-haiku-4-5".into(),
+        budget_usd: Some(2.0),
+        max_workers: Some(2),
+        lead_timeout_secs: Some(30),
+        initial_ref: Default::default(),
+        read_down: false,
+    };
+    let sublead_id = spawn_sublead(&state, req)
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // After spawn, the sub-lead is registered in subleads with $2 reserved.
+    assert!(
+        state.subleads.read().await.contains_key(&sublead_id),
+        "sub-lead should be registered after spawn"
+    );
+    assert!(
+        (*state.root.reserved_usd.lock().await - 2.0).abs() < 1e-9,
+        "root should reserve $2.0 for the sub-lead"
+    );
+
+    // Poll until the sub-lead is reconciled (fake-claude exited and the
+    // background monitor task called reconcile_terminated_sublead). Timeout
+    // after 10 s to prevent indefinite test hang.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if state.sublead_results.read().await.contains_key(&sublead_id) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for sub-lead {sublead_id} to reconcile after 10 s");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Clean up the env var so other tests in the suite aren't affected.
+    unsafe {
+        std::env::remove_var("PITBOSS_FAKE_SCRIPT");
+    }
+
+    // 5. wait_actor returns the sub-lead's terminal record immediately.
+    let terminal = handle_wait_for_actor(&state, &sublead_id, Some(2))
+        .await
+        .expect("wait_actor should return for reconciled sublead");
+
+    match terminal {
+        ActorTerminalRecord::Sublead(rec) => {
+            assert_eq!(
+                rec.sublead_id, sublead_id,
+                "sublead_id in record should match"
+            );
+            assert_eq!(
+                rec.outcome, "success",
+                "sub-lead outcome should be 'success'; got: {}",
+                rec.outcome
+            );
+        }
+        ActorTerminalRecord::Worker(_) => {
+            panic!("expected Sublead terminal record, got Worker variant")
+        }
+    }
+
+    // 6. The sub-lead has been removed from the subleads map (reconciled).
+    assert!(
+        state.subleads.read().await.get(&sublead_id).is_none(),
+        "subleads map should be empty after reconcile"
+    );
+
+    // 7. Root's reservation is released and spend is recorded.
+    assert_eq!(
+        *state.root.reserved_usd.lock().await,
+        0.0,
+        "root.reserved_usd should be 0 after reconcile"
+    );
+
+    state.cancel.terminate();
 }

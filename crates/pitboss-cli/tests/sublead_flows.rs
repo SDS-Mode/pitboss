@@ -502,10 +502,14 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         *sub_layer.spent_usd.lock().await = 2.0;
     }
 
-    // Trigger reconciliation (now without the original_reservation parameter)
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, &sublead_id)
-        .await
-        .unwrap();
+    // Trigger reconciliation
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(
+        &state,
+        &sublead_id,
+        pitboss_cli::dispatch::sublead::SubleadOutcome::Success,
+    )
+    .await
+    .unwrap();
 
     // After: root's reserved_usd dropped by $5, spent_usd rose by $2,
     // releasing $3 to reservable pool.
@@ -636,9 +640,13 @@ async fn sublead_termination_releases_run_global_leases() {
     assert_eq!(state.run_leases.snapshot().await.len(), 1);
 
     // Reconcile (terminate)
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, sublead_id)
-        .await
-        .unwrap();
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(
+        &state,
+        sublead_id,
+        pitboss_cli::dispatch::sublead::SubleadOutcome::Success,
+    )
+    .await
+    .unwrap();
 
     // Lease should be released
     assert_eq!(state.run_leases.snapshot().await.len(), 0);
@@ -1073,7 +1081,7 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
 async fn wait_actor_returns_for_terminated_sublead() {
     use pitboss_cli::dispatch::state::ActorTerminalRecord;
     use pitboss_cli::dispatch::sublead::{
-        reconcile_terminated_sublead, spawn_sublead, SubleadSpawnRequest,
+        reconcile_terminated_sublead, spawn_sublead, SubleadOutcome, SubleadSpawnRequest,
     };
     use pitboss_cli::mcp::tools::handle_wait_for_actor;
 
@@ -1101,7 +1109,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
     }
 
     // Reconcile (terminate the sub-lead).
-    reconcile_terminated_sublead(&state, &sublead_id)
+    reconcile_terminated_sublead(&state, &sublead_id, SubleadOutcome::Success)
         .await
         .expect("reconcile should succeed");
 
@@ -1130,7 +1138,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
 async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
     use pitboss_cli::dispatch::state::ActorTerminalRecord;
     use pitboss_cli::dispatch::sublead::{
-        reconcile_terminated_sublead, spawn_sublead, SubleadSpawnRequest,
+        reconcile_terminated_sublead, spawn_sublead, SubleadOutcome, SubleadSpawnRequest,
     };
     use pitboss_cli::mcp::tools::handle_wait_for_actor;
     use std::time::Duration;
@@ -1162,7 +1170,7 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Reconcile the sub-lead (should wake up the waiter).
-    reconcile_terminated_sublead(&state, &sublead_id)
+    reconcile_terminated_sublead(&state, &sublead_id, SubleadOutcome::Success)
         .await
         .expect("reconcile should succeed");
 
