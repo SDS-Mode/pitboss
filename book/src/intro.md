@@ -1,7 +1,5 @@
 # Pitboss
 
-> You deal the cards; the pit watches the chips.
-
 Pitboss is a Rust toolkit for running and observing **parallel Claude Code sessions**. A dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency cap, captures structured artifacts per run, and — in hierarchical mode — lets a **lead** dynamically spawn more workers via MCP. The TUI (`pitboss-tui`) gives the floor view: tile grid, live log tailing, budget and token counters.
 
 Language models are stochastic. A well-run pit is not.

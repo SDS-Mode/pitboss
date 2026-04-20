@@ -1,7 +1,5 @@
 # Pitboss
 
-> You deal the cards; the pit watches the chips.
-
 > **Operating pitboss from an AI agent?** See [`AGENTS.md`](AGENTS.md) —
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
