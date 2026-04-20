@@ -1,0 +1,37 @@
+# R1 — Real-claude smoke: root lead uses spawn_sublead
+#
+# This manifest is driven by a real claude-haiku-4-5 model session.
+# It proves that:
+#   1. spawn_sublead is discoverable via tools/list when allow_subleads=true
+#   2. The tool description is clear enough for haiku to use it
+#   3. The model understands when to call it (vs spawn_worker)
+#   4. The call arguments are reasonable (budget_usd > 0, max_workers > 0)
+#
+# Cost: ~$0.05 per run (haiku, small prompts)
+# Prerequisites: ANTHROPIC_API_KEY set, `claude` in PATH
+
+[run]
+max_parallel = 4
+
+[lead]
+prompt = """
+You are coordinating a two-phase data pipeline. Your job is ONLY to spawn sub-leads — one per phase — and wait for them to complete. Do not do the work yourself.
+
+Phase 1: "Gather inputs" — a preparatory phase that collects source data.
+Phase 2: "Process outputs" — a follow-up phase that transforms the gathered data.
+
+Use the spawn_sublead tool for each phase. Pass a 1 USD budget and 2 worker cap for each. Wait for both to complete via wait_actor. Then finish with a summary line.
+"""
+model = "claude-haiku-4-5"
+budget_usd = 2.00
+max_workers = 2
+allow_subleads = true
+max_subleads = 4
+max_sublead_budget_usd = 1.50
+lead_timeout_secs = 300
+
+[lead.sublead_defaults]
+budget_usd = 1.00
+max_workers = 1
+lead_timeout_secs = 120
+read_down = false
