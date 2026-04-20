@@ -3,18 +3,19 @@
 ## What it proves
 
 A real `claude-haiku-4-5` model session, given a prompt that asks it to spawn
-a worker and wait for results, receives a synthetic `[SYSTEM]` reprompt when an
-external operator kills the worker with a corrective reason. The model's next
-turn visibly references the kill reason, demonstrating LLM-adaptive replanning
-in response to the `cancel_worker` reason field.
+a worker and wait for results, has a worker cancelled mid-flight by an external
+operator with a corrective reason. The dispatcher's `cancel_actor_with_reason`
+mechanism fires and delivers a synthetic `[SYSTEM]` reprompt to the lead's
+layer, which is confirmed via the tracing log.
 
 Specifically this validates:
 
-- `cancel_worker` with `reason=...` causes a synthetic `[SYSTEM]` reprompt to
-  be injected into the lead's active claude session.
-- The real model reads the injected reason and adjusts its plan (mentions CSV,
-  format change, or similar adaptation keyword).
-- The kill-with-reason mechanism works end-to-end through the MCP bridge.
+- Real claude (root lead) calls `spawn_worker` when given an appropriate prompt.
+- `cancel_worker` with `reason=...` triggers `cancel_actor_with_reason`, which
+  calls `LayerState::send_synthetic_reprompt` on the root layer.
+- The reason text appears in the `info`-level tracing log, confirming the
+  routing primitive worked end-to-end through the MCP bridge.
+- The run completes with exit code 0 even when a worker is cancelled mid-flight.
 
 ## PREREQUISITES
 
@@ -31,12 +32,7 @@ Specifically this validates:
    cargo build --workspace --release
    ```
 
-4. Run the smoke test via the shell script (drives the side-channel operator):
-   ```
-   bash examples/dogfood/real/R2-real-kill-with-reason/run.sh
-   ```
-
-   Or run the Rust integration test (requires `--ignored` + `PITBOSS_DOGFOOD_REAL=1`):
+4. Run the Rust integration test (requires `--ignored` + `PITBOSS_DOGFOOD_REAL=1`):
    ```
    PITBOSS_DOGFOOD_REAL=1 cargo test --test dogfood_real_flows real_kill_with_reason -- --ignored
    ```
@@ -47,31 +43,35 @@ Specifically this validates:
 
 ## Orchestration pattern
 
-R2 requires a side-channel operator that calls `cancel_worker` with a reason
-while the real-claude root lead is mid-flight. The test implementation uses a
-background tokio task that connects to the MCP socket directly and issues the
-`cancel_worker` call after observing the first worker appear in the dispatch
-state.
+R2 uses the **subprocess-driven dispatch** pattern (same as R1):
 
-This is more complex than R1's "dispatch, wait, inspect" pattern. R2 uses an
-in-process DispatchState + real claude subprocess — the "Option A" pattern
-described in the R2 design document.
+1. `pitboss dispatch` runs as a child process with `--run-dir <tmpdir>` and
+   `XDG_RUNTIME_DIR` unset, so the MCP socket appears at
+   `<tmpdir>/<run_id>/mcp.sock`.
+2. A concurrent test task polls `<tmpdir>` for the run subdirectory and socket
+   to appear.
+3. Once the socket is live, a `FakeMcpClient` connects and polls `list_workers`
+   until real claude spawns a worker.
+4. The test calls `cancel_worker` with `target=<worker_id>` and
+   `reason="use CSV format instead of JSON"`.
+5. The dispatcher processes the cancel, calls `cancel_actor_with_reason`, and
+   logs the synthetic reprompt at `info` level.
+6. The test waits for `pitboss dispatch` to exit with code 0.
 
-## Current implementation status
+## Caveats: reprompt delivery is currently a stub
 
-R2 is currently implemented as a stub that returns early with a skip message.
-Full Option A orchestration (in-process DispatchState + real claude subprocess +
-FakeMcpClient side-channel cancel) requires additional test infrastructure that
-was deferred. See `crates/pitboss-cli/tests/dogfood_real_flows.rs` for the stub.
+`LayerState::send_synthetic_reprompt` logs the reason at `info` level but does
+**not** inject it into the running claude session. Real session wiring (claude
+`--resume` with a prepended system message) is deferred to a future task. As a
+result, R2 validates the kill-with-reason *routing mechanism*, not that real
+claude's model output reflects the reason.
 
-## Caveats
+The "lead adapts" assertion (checking that the final message mentions "CSV",
+"format", etc.) is intentionally omitted until session delivery is implemented.
+What R2 asserts is:
 
-- **Side-channel complexity**: Driving `cancel_worker` while real claude is
-  mid-flight requires the test to act as a concurrent MCP client, racing the
-  lead's tool calls. Timing is non-trivial.
-- **Model variance**: The model may or may not spawn a worker on the first turn
-  depending on prompt interpretation. The test requires at least one worker to
-  appear before cancellation.
-- **Stub sessions**: If real worker subprocess support is limited, the worker
-  may never start — the reprompt still fires because the cancel happens at the
-  MCP layer, not the worker-process layer.
+- `pitboss dispatch` exits 0.
+- The reason keyword appears in the tracing log, confirming `cancel_actor_with_reason`
+  routed the reason to the root layer.
+- At least one worker appeared before the cancel (confirming real claude called
+  `spawn_worker`).
