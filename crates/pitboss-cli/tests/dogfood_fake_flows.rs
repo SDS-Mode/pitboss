@@ -764,3 +764,206 @@ async fn dogfood_run_lease_contention() {
         "S2 acquire should list S2 as holder (not S1)"
     );
 }
+
+#[tokio::test]
+async fn dogfood_policy_auto_filter() {
+    use pitboss_cli::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule, PolicyMatcher};
+    use serde_json::json;
+
+    // ── Scenario: Operator sets up policy rules to auto-approve routine
+    // tool-use from S1 while blocking all plan-approvals, reducing operator
+    // approval noise at depth=2 scale.
+    //
+    // Expected outcomes:
+    // - S1's tool-use auto-approved silently (no queue entry)
+    // - S2's same request enqueued (policy only matched S1)
+    // - S1's plan approval queued (Rule 2 forces operator review)
+    // - Only S2's tool-use and S1's plan blocked in queue (2 entries)
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // ── Spawn two sub-leads via MCP ──────────────────────────────────────
+    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+
+    let s1_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "sub-lead 1 for routine work",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 2.0,
+                "max_workers": 2,
+            }),
+        )
+        .await
+        .unwrap();
+    let s1_id = s1_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead must return sublead_id for S1")
+        .to_string();
+
+    let s2_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "sub-lead 2 for untrusted work",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 2.0,
+                "max_workers": 2,
+            }),
+        )
+        .await
+        .unwrap();
+    let s2_id = s2_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead must return sublead_id for S2")
+        .to_string();
+
+    // ── Operator configures policy after spawn (so we have actual S1 id) ─
+    // Rule 1: Auto-approve all tool-use from S1
+    // Rule 2: Block all plan-category approvals (always require operator review)
+    // (implicit Rule 3: everything else falls through to operator)
+    let rules = vec![
+        ApprovalRule {
+            r#match: ApprovalMatch {
+                actor: Some(format!("root→{}", s1_id)),
+                category: Some(pitboss_cli::mcp::approval::ApprovalCategory::ToolUse),
+                ..Default::default()
+            },
+            action: ApprovalAction::AutoApprove,
+        },
+        ApprovalRule {
+            r#match: ApprovalMatch {
+                category: Some(pitboss_cli::mcp::approval::ApprovalCategory::Plan),
+                ..Default::default()
+            },
+            action: ApprovalAction::Block,
+        },
+    ];
+    state
+        .root
+        .set_policy_matcher(PolicyMatcher::new(rules))
+        .await;
+
+    // ── ACT 1: S1 requests routine tool-use approval ──────────────────────
+    // Expected: auto-approved by Rule 1, no queue entry
+    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
+        .await
+        .unwrap();
+    let s1_approval = s1_client
+        .call_tool(
+            "request_approval",
+            json!({
+                "summary": "S1: read config from shared storage",
+                "timeout_secs": 2
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        s1_approval["approved"], true,
+        "S1 tool-use should be auto-approved by Rule 1"
+    );
+    assert_eq!(
+        s1_approval["comment"], "auto-approved by policy",
+        "S1 comment should indicate policy auto-approval"
+    );
+
+    // Verify no approval was queued for S1's tool-use.
+    {
+        let q = state.root.approval_queue.lock().await;
+        assert_eq!(
+            q.len(),
+            0,
+            "S1 auto-approved approval should not be enqueued; queue has {} items",
+            q.len()
+        );
+    }
+
+    // ── ACT 2: S2 requests same type of tool-use approval ───────────────
+    // Expected: falls through to operator queue (no Rule 1 match for S2)
+    // S2's request will block waiting for operator. Spawn it in a tokio task
+    // so we can let it hang briefly while we verify the queue state.
+    let socket_2 = socket.clone();
+    let s2_id_clone = s2_id.clone();
+    let s2_approval_handle = tokio::spawn(async move {
+        let mut s2_client = FakeMcpClient::connect_as(&socket_2, &s2_id_clone, "sublead")
+            .await
+            .unwrap();
+        s2_client
+            .call_tool(
+                "request_approval",
+                json!({
+                    "summary": "S2: read config from shared storage",
+                    "timeout_secs": 60
+                }),
+            )
+            .await
+    });
+
+    // Give S2's request time to land in the queue.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify S2's approval was queued (didn't match any auto-action rule).
+    {
+        let q = state.root.approval_queue.lock().await;
+        assert_eq!(
+            q.len(),
+            1,
+            "S2 tool-use should be enqueued (no Rule 1 match for S2); queue has {} items",
+            q.len()
+        );
+    }
+
+    // Clean up the hanging S2 request before moving to the next step.
+    s2_approval_handle.abort();
+
+    // ── ACT 3: S1 requests plan approval ─────────────────────────────────
+    // Expected: blocked by Rule 2 (all Plan approvals require operator), queued
+    let socket_3 = socket.clone();
+    let s1_id_clone = s1_id.clone();
+    let plan_req_handle = tokio::spawn(async move {
+        let mut s1_client = FakeMcpClient::connect_as(&socket_3, &s1_id_clone, "sublead")
+            .await
+            .unwrap();
+        s1_client
+            .call_tool(
+                "propose_plan",
+                json!({
+                    "plan": {
+                        "summary": "S1: deploy phase 2 artifacts",
+                        "rationale": "phase 1 complete, ready for next stage",
+                        "resources": ["2 workers"],
+                        "risks": ["data corruption if oversized writes"],
+                        "rollback": "restore from backup"
+                    },
+                    "timeout_secs": 60
+                }),
+            )
+            .await
+    });
+
+    // Give S1's plan approval time to land in the queue.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Verify S1's plan approval was queued (Rule 2 forces operator review).
+    {
+        let q = state.root.approval_queue.lock().await;
+        assert_eq!(
+            q.len(),
+            2,
+            "S1 plan approval should be enqueued + S2 tool-use already queued; queue has {} items",
+            q.len()
+        );
+    }
+
+    // Clean up the hanging plan approval.
+    plan_req_handle.abort();
+}
