@@ -12,6 +12,19 @@ This project uses [Semantic Versioning](https://semver.org/).
 - **Container variant `pitboss-with-claude`**: a new multi-arch container image published at `ghcr.io/sds-mode/pitboss-with-claude` bundling pitboss + a pinned Claude Code CLI (`2.1.114`). Operators consume host OAuth via a bind-mount of `~/.claude`. See the [Using Claude in a container](book/src/operator-guide/using-claude-in-container.md) book page for auth setup, UID alignment (rootless podman: `--userns=keep-id`), SELinux caveats (`:z` on all bind mounts), and macOS fallbacks.
 - CI smoke-test job that verifies `claude --version`, `pitboss --version`, and the bundled ATTRIBUTION file on both architectures post-merge.
 
+### Fixed
+
+- **Run-global leases leaked on connection drop when `run_lease_acquire`
+  was the only tool called on a connection.** `note_actor` was missing
+  from the `run_lease_acquire` and `run_lease_release` MCP handlers, so
+  the connection-drop cleanup hook had no actor id to release against.
+  Leases stayed held until the TTL elapsed; subsequent acquires from
+  new connections failed with "lease currently held by <dead-actor>".
+  Added `note_actor` to both handlers. Caught by a security-review-
+  driven integration test
+  (`run_global_lease_released_when_mcp_connection_drops`) that
+  exercises the full rmcp socket-close path.
+
 ### Changed
 
 - **Container CI**: migrated from QEMU-emulated multi-arch builds to
