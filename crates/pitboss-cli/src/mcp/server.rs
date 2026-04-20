@@ -704,6 +704,11 @@ impl PitbossHandler {
         Parameters(req): Parameters<RunLeaseAcquireRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor_id = extract_actor_id(&req.meta)?;
+        // Record actor for connection-drop cleanup (server.rs:934).
+        // Without this, a connection whose only traffic is run_lease_acquire
+        // leaves `connection_actor` unset and the run-global lease leaks
+        // until TTL when the socket drops.
+        self.note_actor(&actor_id).await;
         let ttl = std::time::Duration::from_secs(req.ttl_secs);
         match self
             .state
@@ -732,6 +737,7 @@ impl PitbossHandler {
         Parameters(req): Parameters<RunLeaseReleaseRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor_id = extract_actor_id(&req.meta)?;
+        self.note_actor(&actor_id).await;
         let released = self.state.run_leases.release(&req.key, &actor_id).await;
         to_structured_result(&serde_json::json!({
             "released": released
