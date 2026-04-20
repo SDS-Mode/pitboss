@@ -37,5 +37,8 @@ flamegraph.svg
 # Session-local Claude Code state (scheduled tasks, etc.)
 .claude/
 
+# mdBook build output
+/book/book
+
 # Local-only operator script: hardcoded host paths, not portable.
 /scripts/reset-ketchup-p0-dogfood.sh

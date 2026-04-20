@@ -6,6 +6,17 @@
 > schema reference, decision tree, canonical examples, and the rules for
 > translating natural-language requests into valid manifests.
 
+## Documentation
+
+Full operator guide, MCP tool reference, and cookbook of working scenarios:
+**https://sds-mode.github.io/pitboss/** (auto-published from `book/` on every push to `main`).
+
+To browse offline:
+
+    cd book/
+    cargo install mdbook  # one time
+    mdbook serve --open
+
 **v0.5.0** ships the flagship operator-control bucket: `pitboss attach
 <run-id> <task-id>` for a follow-mode log viewer on a single worker;
 SIGSTOP freeze-pause as an opt-in alternative to cancel-with-resume;
