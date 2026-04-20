@@ -37,5 +37,5 @@ flamegraph.svg
 # Session-local Claude Code state (scheduled tasks, etc.)
 .claude/
 
-# Local-only operator/dev scripts (smoke runs, dogfood resets, etc.)
-/scripts/
+# Local-only operator script: hardcoded host paths, not portable.
+/scripts/reset-ketchup-p0-dogfood.sh
