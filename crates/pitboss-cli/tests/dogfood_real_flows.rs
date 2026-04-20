@@ -20,7 +20,9 @@
 
 mod support;
 
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 use support::workspace_root;
 use tempfile::TempDir;
 
@@ -203,34 +205,49 @@ async fn real_root_spawns_sublead() {
     );
 }
 
-// ── R2: Real root lead adapts after worker is killed-with-reason ─────────────
+// ── R2: Real root lead kill-with-reason side-channel ─────────────────────────
 
 /// R2 smoke test: a real claude-haiku-4-5 root lead spawns a worker; an
-/// external operator kills the worker with reason="output should be CSV not
-/// JSON"; the synthetic [SYSTEM] reprompt is injected into the lead's session;
-/// the lead's next turn visibly references the kill reason.
+/// external operator (this test, via a concurrent FakeMcpClient) kills the
+/// worker with `reason="use CSV format instead of JSON"`; the dispatcher's
+/// `cancel_actor_with_reason` mechanism fires and delivers a synthetic
+/// `[SYSTEM]` reprompt to the lead's layer.
 ///
-/// ## What is asserted (loose — real-model variance)
+/// ## Orchestration pattern
 ///
-/// Ideally:
-/// - `pitboss dispatch` exits 0
-/// - The lead's final message contains "csv", "format", "reason", or "adjust"
-///   indicating the model processed the synthetic reprompt
+/// Subprocess-driven dispatch (like R1): runs `pitboss dispatch` as a
+/// child process, then races a side-channel that:
 ///
-/// ## Current status: stub
+/// 1. Discovers the MCP socket created under `--run-dir` (unsetting
+///    `XDG_RUNTIME_DIR` forces the socket to `<run_dir>/<run_id>/mcp.sock`).
+/// 2. Connects a `FakeMcpClient` and polls `list_workers` until a non-lead
+///    worker appears (real claude called `spawn_worker`).
+/// 3. Calls `cancel_worker` with `target=<worker_id>` and
+///    `reason="use CSV format instead of JSON"`.
+/// 4. Waits for `pitboss dispatch` to exit.
 ///
-/// Full R2 requires a side-channel operator that connects to the MCP socket
-/// while the real-claude dispatch is mid-flight and calls `cancel_worker` with
-/// a reason. The Option A pattern (in-process DispatchState + real claude
-/// subprocess + FakeMcpClient side-channel) requires additional test
-/// infrastructure beyond the R1 dispatch-subprocess pattern. This is deferred.
+/// ## What is asserted
 ///
-/// The stub skips immediately with a message. A future implementation should
-/// wire the side-channel cancel using Option A from the R2 design doc.
+/// - `pitboss dispatch` exits with code 0 (the run completed cleanly even
+///   though a worker was cancelled mid-flight).
+/// - The reason text appears in the combined output/stderr (the
+///   `send_synthetic_reprompt` tracing log at `info` level confirms the
+///   kill-with-reason mechanism routed the reason to the root layer).
+/// - At least one worker appeared in `list_workers` before the cancel
+///   (real claude actually called `spawn_worker`).
+///
+/// ## Caveat: reprompt delivery is currently a stub
+///
+/// `LayerState::send_synthetic_reprompt` logs the reason at `info` level but
+/// does NOT inject it into the running claude session (real session wiring is
+/// deferred to a future task). The "lead adapts" assertion is therefore omitted
+/// here. What R2 validates is the kill-with-reason *routing* primitive: the
+/// cancel fires, the reason is routed to the right layer, and the mechanism
+/// is observable in the tracing log.
 ///
 /// ## Cost
 ///
-/// ~$0.10-$0.20 per run when fully implemented (haiku, lead + worker round-trips).
+/// ~$0.10-$0.20 per run (haiku, lead + worker spawn round-trip).
 #[tokio::test]
 #[ignore = "real-claude smoke — set PITBOSS_DOGFOOD_REAL=1 and run with --ignored"]
 async fn real_kill_with_reason() {
@@ -238,17 +255,203 @@ async fn real_kill_with_reason() {
         return;
     }
 
-    // R2 not yet implemented — requires real-claude + side-channel cancel
-    // orchestration (Option A: in-process DispatchState + real claude
-    // subprocess + FakeMcpClient concurrent cancel_worker call).
-    //
-    // Tracked as follow-up work. See:
-    //   examples/dogfood/real/R2-real-kill-with-reason/README.md
-    eprintln!(
-        "real_kill_with_reason: SKIPPED — R2 not yet implemented; \
-         requires real-claude + side-channel cancel orchestration. \
-         See examples/dogfood/real/R2-real-kill-with-reason/README.md"
+    let pitboss = pitboss_release_binary();
+
+    let manifest_path =
+        workspace_root().join("examples/dogfood/real/R2-real-kill-with-reason/manifest.toml");
+    assert!(
+        manifest_path.exists(),
+        "R2 manifest not found at {}",
+        manifest_path.display()
     );
+
+    let run_dir = TempDir::new().expect("create temp run_dir");
+
+    // Spawn `pitboss dispatch` as a child process. We unset XDG_RUNTIME_DIR so
+    // the MCP socket lands at <run_dir>/<run_id>/mcp.sock (discoverable from
+    // the test without knowing the run_id in advance).
+    let child = Command::new(&pitboss)
+        .arg("dispatch")
+        .arg(&manifest_path)
+        .arg("--run-dir")
+        .arg(run_dir.path())
+        .env("RUST_LOG", "pitboss_cli=info,pitboss_core=info")
+        .env_remove("XDG_RUNTIME_DIR")
+        // Forward ANTHROPIC_API_KEY from the outer environment.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn pitboss dispatch");
+
+    // ── Side-channel: discover socket, connect, wait for worker, cancel ──────
+
+    let run_dir_path = run_dir.path().to_path_buf();
+
+    let cancel_outcome =
+        tokio::time::timeout(Duration::from_secs(120), r2_side_channel(run_dir_path)).await;
+
+    // ── Wait for `pitboss dispatch` to exit ───────────────────────────────────
+
+    let out = child
+        .wait_with_output()
+        .expect("wait_with_output on pitboss dispatch");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+
+    // ── ASSERTION 1: side-channel completed without timeout ───────────────────
+    //
+    // If the side-channel timed out, real claude probably never called
+    // spawn_worker. Report the stdout/stderr for diagnosis.
+    let side_result = cancel_outcome.unwrap_or_else(|_| {
+        panic!(
+            "R2 side-channel timed out waiting for a worker to appear.\n\
+             This likely means real claude did not call spawn_worker within 120s.\n\
+             stdout={stdout}\nstderr={stderr}"
+        )
+    });
+
+    // Warn (but don't fail) if the cancel itself encountered an error —
+    // the worker may have already finished by the time we tried to cancel it.
+    if let Err(ref e) = side_result {
+        eprintln!("real_kill_with_reason: cancel_worker returned error (may be benign): {e}");
+    }
+
+    // ── ASSERTION 2: dispatch exited 0 ───────────────────────────────────────
+    assert!(
+        out.status.success(),
+        "pitboss dispatch exited non-zero (code={:?}).\nstdout={stdout}\nstderr={stderr}",
+        out.status.code(),
+    );
+
+    // ── ASSERTION 3: reason text visible in tracing log ──────────────────────
+    //
+    // `cancel_actor_with_reason` calls `layer.send_synthetic_reprompt(&msg)`
+    // which logs at `info` level:
+    //   "synthetic reprompt (no session wired): [SYSTEM] Actor <id> was killed ..."
+    // We check for the reason keyword to confirm the routing mechanism fired.
+    //
+    // If the cancel failed (worker already done), the reprompt may not have
+    // fired. We only assert when the cancel succeeded.
+    if side_result.is_ok() {
+        let reason_keyword = "csv format";
+        assert!(
+            combined.to_lowercase().contains(reason_keyword),
+            "expected kill reason '{reason_keyword}' to appear in tracing log, \
+             confirming cancel_actor_with_reason fired.\n\
+             stdout={stdout}\nstderr={stderr}"
+        );
+    }
+}
+
+/// Side-channel task: discovers the MCP socket, waits for a worker, cancels it.
+///
+/// Returns `Ok(())` when `cancel_worker` was called (whether or not the
+/// worker was still alive), or `Err` if the MCP call failed unexpectedly.
+async fn r2_side_channel(run_dir: PathBuf) -> anyhow::Result<()> {
+    // ── Step 1: wait for the run subdirectory to appear ──────────────────────
+    let run_subdir = wait_for_run_subdir(&run_dir, Duration::from_secs(30)).await?;
+
+    // ── Step 2: wait for mcp.sock to appear ──────────────────────────────────
+    let mcp_sock = run_subdir.join("mcp.sock");
+    wait_for_path(&mcp_sock, Duration::from_secs(30)).await?;
+
+    // ── Step 3: connect FakeMcpClient ────────────────────────────────────────
+    // Connect with root_lead identity so cancel_worker is accepted without
+    // role-authz issues (cancel_worker has no role check, but the _meta field
+    // is required by some tool handlers; root_lead is always safe).
+    let mut client =
+        fake_mcp_client::FakeMcpClient::connect_as(&mcp_sock, "r2-operator", "root_lead").await?;
+
+    // ── Step 4: poll list_workers until a non-lead worker appears ─────────────
+    let worker_id = wait_for_first_worker_via_mcp(&mut client, Duration::from_secs(90)).await?;
+    eprintln!("real_kill_with_reason: worker appeared: {worker_id}");
+
+    // ── Step 5: cancel with reason ───────────────────────────────────────────
+    let cancel_result = client
+        .call_tool(
+            "cancel_worker",
+            serde_json::json!({
+                "target": worker_id,
+                "reason": "use CSV format instead of JSON"
+            }),
+        )
+        .await;
+    eprintln!("real_kill_with_reason: cancel_worker result: {cancel_result:?}");
+
+    // An error here is benign if the worker already finished before we arrived;
+    // propagate so the caller can decide whether to assert on the log.
+    cancel_result.map(|_| ())
+}
+
+/// Poll `run_dir` until a subdirectory (the run_id dir) appears.
+/// Returns the path of the first subdirectory found.
+async fn wait_for_run_subdir(
+    run_dir: &std::path::Path,
+    timeout: Duration,
+) -> anyhow::Result<PathBuf> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(mut entries) = tokio::fs::read_dir(run_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let p = entry.path();
+                if p.is_dir() {
+                    return Ok(p);
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for run subdir to appear in {}",
+                run_dir.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Poll until `path` exists on the filesystem.
+async fn wait_for_path(path: &std::path::Path, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {} to appear", path.display());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Poll `list_workers` via an open MCP client until at least one worker
+/// (non-lead entry) is reported, then return its task_id.
+async fn wait_for_first_worker_via_mcp(
+    client: &mut fake_mcp_client::FakeMcpClient,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let resp = client
+            .call_tool("list_workers", serde_json::json!({}))
+            .await?;
+        if let Some(workers) = resp["workers"].as_array() {
+            // Any non-Done worker is a candidate for cancellation.
+            for w in workers {
+                let state = w["state"].as_str().unwrap_or("");
+                let task_id = w["task_id"].as_str().unwrap_or("").to_string();
+                // Exclude workers that already completed/failed before we arrived.
+                if !state.starts_with("done") && !state.starts_with("Done") && !task_id.is_empty() {
+                    return Ok(task_id);
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for a live worker to appear in list_workers");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 // ── R3: Real root lead adapts after request_approval is rejected ──────────────

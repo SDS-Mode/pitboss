@@ -103,6 +103,21 @@ pub struct LayerState {
     /// The hook is `Arc` so it can be cloned cheaply in `send_synthetic_reprompt`
     /// without holding the lock across the async delivery path.
     pub reprompt_hook: Mutex<Option<RepromptHook>>,
+    /// Delivery channel for synthetic reprompts to the running lead subprocess.
+    ///
+    /// For sub-lead layers: set by `spawn_sublead_session` just before launching
+    /// the subprocess; the receiving end is held by the kill+resume loop inside
+    /// `spawn_sublead_session`.
+    ///
+    /// For the root layer: set by `run_hierarchical` via `set_reprompt_tx` after
+    /// constructing the `DispatchState`, and consumed by the kill+resume loop
+    /// inside `run_hierarchical`. Cleared via `clear_reprompt_tx` when the loop
+    /// exits.
+    ///
+    /// `None` until `set_reprompt_tx` is called, or after `clear_reprompt_tx`
+    /// is called (lead terminated). Sending on a closed channel is a no-op
+    /// (logged at INFO level by `send_synthetic_reprompt`).
+    pub reprompt_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
 impl std::fmt::Debug for LayerState {
@@ -174,6 +189,7 @@ impl LayerState {
             original_reservation_usd,
             policy_matcher: Mutex::new(None),
             reprompt_hook: Mutex::new(None),
+            reprompt_tx: Mutex::new(None),
         }
     }
 
@@ -182,6 +198,26 @@ impl LayerState {
     /// called in tests to inject policy without manifests.
     pub async fn set_policy_matcher(&self, matcher: PolicyMatcher) {
         *self.policy_matcher.lock().await = Some(matcher);
+    }
+
+    /// Populate the reprompt delivery channel for this layer's lead subprocess.
+    ///
+    /// Called by `run_hierarchical` after the `DispatchState` is constructed but
+    /// before the lead subprocess is spawned. The channel is consumed by the
+    /// kill+resume loop inside `run_hierarchical` itself.
+    ///
+    /// A separate setter is used (rather than a constructor parameter) to keep
+    /// `LayerState::new` backwards-compatible: all existing callers continue to
+    /// work unchanged, and root simply calls `set_reprompt_tx` after construction.
+    pub async fn set_reprompt_tx(&self, tx: mpsc::UnboundedSender<String>) {
+        *self.reprompt_tx.lock().await = Some(tx);
+    }
+
+    /// Clear the reprompt delivery channel. Called after the kill+resume loop
+    /// exits so that further sends from `send_synthetic_reprompt` fail fast
+    /// with a channel-closed error rather than queueing messages to a dead loop.
+    pub async fn clear_reprompt_tx(&self) {
+        *self.reprompt_tx.lock().await = None;
     }
 
     /// Install a test-only reprompt capture hook. When set, synthetic
@@ -197,24 +233,69 @@ impl LayerState {
         *self.reprompt_hook.lock().await = Some(Arc::new(hook));
     }
 
-    /// Deliver a synthetic reprompt message to this layer's lead. In
-    /// production (no hook installed), this is a no-op stub until Task 2.3
-    /// wires up real sub-lead Claude sessions — the message is logged at
-    /// `info` level so operators can observe it in traces.
+    /// Deliver a synthetic reprompt message to this layer's lead.
     ///
-    /// When a `reprompt_hook` is installed (tests only), the hook is called
-    /// with the message text so tests can assert on delivery without a real
-    /// subprocess.
+    /// ## Test path (hook installed)
+    ///
+    /// Calls the test-only `reprompt_hook` callback with the message text.
+    /// This path is used by unit tests (e.g. Task 4.5) to assert delivery
+    /// without spinning up a real subprocess. The hook takes priority over
+    /// the real delivery path.
+    ///
+    /// ## Production path (no hook)
+    ///
+    /// Sends the message to the `reprompt_tx` channel. The receiving end is
+    /// held by the subprocess-management loop — either `spawn_sublead_session`
+    /// (for sub-lead layers) or the kill+resume loop in `run_hierarchical`
+    /// (for the root layer). The loop handles the message by killing the
+    /// current subprocess and re-spawning with `claude --resume <session_id>
+    /// -p <message>`.
+    ///
+    /// The channel send returns immediately; the actual kill+resume is
+    /// asynchronous. If the channel send fails (lead already terminated or
+    /// channel dropped), the message is logged and delivery is skipped.
+    ///
+    /// ## No-channel fallback
+    ///
+    /// If `reprompt_tx` is `None` (layer not yet started, or already
+    /// terminated), the message is logged at INFO level and dropped.
     pub async fn send_synthetic_reprompt(&self, message: &str) {
+        // Test hook takes priority — allows unit tests to assert on delivery
+        // without spinning up a real subprocess.
         let hook = self.reprompt_hook.lock().await.clone();
         if let Some(cb) = hook {
             cb(message.to_string());
-        } else {
-            tracing::info!(
-                lead_id = %self.lead_id,
-                "synthetic reprompt (no session wired): {}",
-                message
-            );
+            return;
+        }
+
+        // Real delivery path: send via the channel managed by spawn_sublead_session.
+        let tx = self.reprompt_tx.lock().await.clone();
+        match tx {
+            Some(sender) => {
+                if sender.send(message.to_string()).is_err() {
+                    tracing::info!(
+                        lead_id = %self.lead_id,
+                        "synthetic reprompt: delivery channel closed (lead already terminated); \
+                         message dropped: {}",
+                        message
+                    );
+                } else {
+                    tracing::debug!(
+                        lead_id = %self.lead_id,
+                        "synthetic reprompt queued for delivery: {}",
+                        message
+                    );
+                }
+            }
+            None => {
+                // No channel available: layer not yet started, or already terminated.
+                tracing::info!(
+                    lead_id = %self.lead_id,
+                    "synthetic reprompt: no delivery channel (layer not yet started or \
+                     already terminated); message dropped: {}",
+                    message
+                );
+            }
         }
     }
 
@@ -325,5 +406,75 @@ mod tests {
         let (_dir, layer) = mk_layer();
         assert_eq!(layer.lead_id, "lead");
         assert_eq!(layer.run_id.get_version(), Some(uuid::Version::SortRand));
+    }
+
+    /// `send_synthetic_reprompt` with a hook installed should call the hook.
+    #[tokio::test]
+    async fn send_synthetic_reprompt_calls_hook() {
+        let (_dir, layer) = mk_layer();
+        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+        let cap = received.clone();
+        layer
+            .install_reprompt_capture(move |msg| {
+                let cap = cap.clone();
+                // tokio::spawn not needed here since tests use #[tokio::test]
+                let _ = cap.try_lock().map(|mut g| g.push(msg));
+            })
+            .await;
+
+        layer.send_synthetic_reprompt("hello world").await;
+
+        let msgs = received.lock().await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0], "hello world");
+    }
+
+    /// Without a hook or channel, `send_synthetic_reprompt` should not panic.
+    #[tokio::test]
+    async fn send_synthetic_reprompt_no_op_without_channel() {
+        let (_dir, layer) = mk_layer();
+        // Should complete without panic or error.
+        layer.send_synthetic_reprompt("no channel installed").await;
+    }
+
+    /// With a `reprompt_tx` channel installed, messages should be deliverable.
+    #[tokio::test]
+    async fn send_synthetic_reprompt_delivers_via_channel() {
+        let (_dir, layer) = mk_layer();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        *layer.reprompt_tx.lock().await = Some(tx);
+
+        layer.send_synthetic_reprompt("via channel").await;
+
+        let msg = rx.recv().await.expect("channel should have a message");
+        assert_eq!(msg, "via channel");
+    }
+
+    /// Hook takes priority over channel.
+    #[tokio::test]
+    async fn reprompt_hook_takes_priority_over_channel() {
+        let (_dir, layer) = mk_layer();
+
+        // Install both hook and channel.
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        *layer.reprompt_tx.lock().await = Some(tx);
+
+        let hook_fired = Arc::new(Mutex::new(false));
+        let fired = hook_fired.clone();
+        layer
+            .install_reprompt_capture(move |_msg| {
+                let fired = fired.clone();
+                let _ = fired.try_lock().map(|mut g| *g = true);
+            })
+            .await;
+
+        layer.send_synthetic_reprompt("priority test").await;
+
+        // Hook should have fired, channel should be empty.
+        assert!(*hook_fired.lock().await, "hook should fire before channel");
+        assert!(
+            rx.try_recv().is_err(),
+            "channel should be empty when hook fires"
+        );
     }
 }

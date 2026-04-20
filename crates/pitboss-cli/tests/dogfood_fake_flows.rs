@@ -456,12 +456,20 @@ async fn dogfood_isolation_strict_tree() {
     );
 
     // ── Cleanup: reconcile both sub-leads ─────────────────────────────────────
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, &s1_id)
-        .await
-        .unwrap();
-    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(&state, &s2_id)
-        .await
-        .unwrap();
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(
+        &state,
+        &s1_id,
+        pitboss_cli::dispatch::sublead::SubleadOutcome::Success,
+    )
+    .await
+    .unwrap();
+    pitboss_cli::dispatch::sublead::reconcile_terminated_sublead(
+        &state,
+        &s2_id,
+        pitboss_cli::dispatch::sublead::SubleadOutcome::Success,
+    )
+    .await
+    .unwrap();
 }
 
 // ── Spotlight #03: kill-cascade-drain ────────────────────────────────────────

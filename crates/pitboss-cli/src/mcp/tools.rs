@@ -4,8 +4,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SpawnWorkerArgs {
+    #[serde(default)]
     pub prompt: String,
     #[serde(default)]
     pub directory: Option<String>,
@@ -17,6 +18,13 @@ pub struct SpawnWorkerArgs {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Caller identity injected by mcp-bridge. Used to route the new worker
+    /// into the caller's layer (sub-lead callers land in their sub-tree;
+    /// root-lead callers land in root). Absent for v0.5 back-compat callers —
+    /// treated as root-lead (unchanged behavior).
+    #[serde(rename = "_meta", default, skip_serializing)]
+    #[schemars(skip)]
+    pub meta: Option<crate::shared_store::tools::MetaField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -299,13 +307,59 @@ use pitboss_core::store::TaskRecord;
 use tokio::time::Duration;
 use uuid::Uuid;
 
+use crate::dispatch::layer::LayerState;
 use crate::dispatch::state::{ActorTerminalRecord, DispatchState, WorkerState};
+
+/// Resolve the `LayerState` into which a new worker should be registered,
+/// based on the caller's role from `_meta`.
+///
+/// - `Lead` / `root_lead` alias (or absent `_meta`): root layer — unchanged v0.5 behavior.
+/// - `Sublead`: the caller's own sub-tree layer.
+/// - `Worker`: REJECTED — workers cannot spawn workers (depth-2 cap).
+///
+/// NOTE: Unlike `resolve_layer_for_caller` in `mcp/server.rs` (which routes
+/// workers to their registered layer), this function explicitly rejects Worker
+/// callers — spawning workers-from-workers would exceed the depth-2 cap.
+async fn resolve_target_layer(
+    state: &Arc<DispatchState>,
+    caller_id: &str,
+    caller_role: crate::shared_store::ActorRole,
+) -> anyhow::Result<Arc<LayerState>> {
+    use crate::shared_store::ActorRole;
+    match caller_role {
+        ActorRole::Lead => Ok(Arc::clone(&state.root)),
+        ActorRole::Sublead => {
+            let subleads = state.subleads.read().await;
+            subleads
+                .get(caller_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown sublead_id: {caller_id}"))
+        }
+        ActorRole::Worker => anyhow::bail!(
+            "spawn_worker is not available to workers (depth-2 cap); \
+             only leads and sub-leads may spawn workers"
+        ),
+    }
+}
 
 pub async fn handle_spawn_worker(
     state: &Arc<DispatchState>,
     args: SpawnWorkerArgs,
 ) -> Result<SpawnWorkerResult> {
-    // Guard 1: draining
+    use crate::shared_store::ActorRole;
+
+    // Resolve caller identity from _meta (v0.6+) or fall back to root-lead
+    // identity for backward-compat with v0.5 callers that omit _meta.
+    let (caller_id, caller_role): (String, ActorRole) = match &args.meta {
+        Some(m) => (m.actor_id.clone(), m.actor_role),
+        None => (state.root.lead_id.clone(), ActorRole::Lead),
+    };
+
+    // Resolve the target layer: sub-lead callers land in their own sub-tree;
+    // root-lead callers land in root; worker callers are rejected.
+    let target_layer = resolve_target_layer(state, &caller_id, caller_role).await?;
+
+    // Guard 1: draining (root cancel gate — always check root even for sublead workers)
     if state.cancel.is_draining() || state.cancel.is_terminated() {
         bail!("run is draining: no new workers accepted");
     }
@@ -326,16 +380,16 @@ pub async fn handle_spawn_worker(
         );
     }
 
-    // Guard 2: worker cap
-    if let Some(cap) = state.manifest.max_workers {
-        let active = state.active_worker_count().await;
+    // Guard 2: worker cap (checked against the target layer's own cap)
+    if let Some(cap) = target_layer.manifest.max_workers {
+        let active = target_layer.active_worker_count().await;
         if active >= cap as usize {
             bail!("worker cap reached: {} active (max {})", active, cap);
         }
     }
 
     // Resolve the worker's model up-front so the budget guard can price it.
-    let lead = state.manifest.lead.as_ref();
+    let lead = target_layer.manifest.lead.as_ref();
     let worker_model = args
         .model
         .clone()
@@ -344,19 +398,25 @@ pub async fn handle_spawn_worker(
 
     let task_id = format!("worker-{}", Uuid::now_v7());
 
-    // Guard 3: budget (reservation-aware + model-aware). On pass, reserve the
-    // estimated cost so a burst of parallel spawns can't all slip through
-    // before the first completion updates `spent_usd`. The reservation is
-    // released on completion (both success and spawn-fail paths).
-    if let Some(budget) = state.manifest.budget_usd {
-        let spent = *state.spent_usd.lock().await;
-        let reserved = *state.reserved_usd.lock().await;
+    // Guard 3: budget (reservation-aware + model-aware). Budget accounting
+    // runs against the target layer's envelope (sub-lead's own budget for
+    // sublead callers, root budget for root-lead callers).
+    //
+    // Special case: if the sub-lead is in shared-pool mode (budget_usd = None
+    // on the target layer but root has a budget), the reservation falls back
+    // to root's pool.
+    // TODO(sub-task 3): fully exercise and validate shared-pool reservation
+    // semantics; for now treat None budget_usd on the target layer as
+    // uncapped (no reservation placed, same as root-layer uncapped behavior).
+    if let Some(budget) = target_layer.manifest.budget_usd {
+        let spent = *target_layer.spent_usd.lock().await;
+        let reserved = *target_layer.reserved_usd.lock().await;
         // Estimate this worker's cost using its intended model, as the median
         // of prior workers priced at their actual models (or a model-specific
         // fallback if no worker has completed yet).
-        let estimate = estimate_new_worker_cost(state, &worker_model).await;
+        let estimate = estimate_new_worker_cost_for_layer(&target_layer, &worker_model).await;
         if spent + reserved + estimate > budget {
-            if let Some(router) = state.notification_router.clone() {
+            if let Some(router) = target_layer.notification_router.clone() {
                 let envelope = crate::notify::NotificationEnvelope::new(
                     &state.run_id.to_string(),
                     crate::notify::Severity::Error,
@@ -374,9 +434,9 @@ pub async fn handle_spawn_worker(
                 spent, reserved, estimate, budget
             );
         }
-        // Reserve.
-        *state.reserved_usd.lock().await += estimate;
-        state
+        // Reserve against the target layer.
+        *target_layer.reserved_usd.lock().await += estimate;
+        target_layer
             .worker_reservations
             .write()
             .await
@@ -384,22 +444,27 @@ pub async fn handle_spawn_worker(
     }
 
     {
-        let mut workers = state.workers.write().await;
+        let mut workers = target_layer.workers.write().await;
         workers.insert(task_id.clone(), WorkerState::Pending);
     }
 
     // Register in the worker_layer_index so KV routing can look up this
-    // worker's layer in O(1). Workers spawned via this handler always land
-    // in the root layer (None = root). Sub-tree wiring (Task 2.3) will
-    // extend this path.
+    // worker's layer in O(1).
+    //   - Root-lead callers: None = root layer (unchanged v0.5 behavior)
+    //   - Sub-lead callers: Some(caller_id) = the sub-lead's layer
+    let layer_index_value: Option<String> = if matches!(caller_role, ActorRole::Sublead) {
+        Some(caller_id.clone())
+    } else {
+        None
+    };
     state
         .worker_layer_index
         .write()
         .await
-        .insert(task_id.clone(), None);
+        .insert(task_id.clone(), layer_index_value);
 
     let worker_cancel = pitboss_core::session::CancelToken::new();
-    state
+    target_layer
         .worker_cancels
         .write()
         .await
@@ -407,15 +472,15 @@ pub async fn handle_spawn_worker(
 
     // Record the prompt preview before spawning the background task.
     let prompt_preview: String = args.prompt.chars().take(80).collect();
-    state
+    target_layer
         .worker_prompts
         .write()
         .await
         .insert(task_id.clone(), prompt_preview);
 
-    // Track the worker's resolved model so `estimate_new_worker_cost` can
-    // price completed workers at the correct rate.
-    state
+    // Track the worker's resolved model so cost estimation can price
+    // completed workers at the correct rate.
+    target_layer
         .worker_models
         .write()
         .await
@@ -427,7 +492,7 @@ pub async fn handle_spawn_worker(
         .as_ref()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            state
+            target_layer
                 .manifest
                 .lead
                 .as_ref()
@@ -450,7 +515,7 @@ pub async fn handle_spawn_worker(
     let worker_use_worktree = lead.is_none_or(|l| l.use_worktree);
 
     // Retrieve the per-worker cancel token we inserted above.
-    let worker_cancel_bg = state
+    let worker_cancel_bg = target_layer
         .worker_cancels
         .read()
         .await
@@ -459,13 +524,15 @@ pub async fn handle_spawn_worker(
         .ok_or_else(|| anyhow::anyhow!("internal: worker_cancel missing after insert"))?;
 
     let state_bg = Arc::clone(state);
+    let target_layer_bg = Arc::clone(&target_layer);
     let task_id_bg = task_id.clone();
-    let lead_id_bg = state.lead_id.clone();
+    let lead_id_bg = target_layer.lead_id.clone();
     let prompt_bg = args.prompt.clone();
 
     tokio::spawn(async move {
         run_worker(
             state_bg,
+            target_layer_bg,
             task_id_bg,
             lead_id_bg,
             prompt_bg,
@@ -491,6 +558,7 @@ pub async fn handle_spawn_worker(
 #[allow(clippy::too_many_arguments)]
 async fn run_worker(
     state: Arc<DispatchState>,
+    layer: Arc<LayerState>,
     task_id: String,
     lead_id: String,
     prompt: String,
@@ -508,7 +576,7 @@ async fn run_worker(
     use pitboss_core::store::TaskStatus;
     use std::time::Duration;
 
-    let task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let task_dir = layer.run_subdir.join("tasks").join(&task_id);
     let _ = tokio::fs::create_dir_all(&task_dir).await;
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
@@ -516,8 +584,8 @@ async fn run_worker(
     // Optional worktree prep.
     let mut worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
     let cwd = if use_worktree {
-        let name = format!("pitboss-worker-{}-{}", task_id, state.run_id);
-        match state.wt_mgr.prepare(&directory, &name, branch.as_deref()) {
+        let name = format!("pitboss-worker-{}-{}", task_id, layer.run_id);
+        match layer.wt_mgr.prepare(&directory, &name, branch.as_deref()) {
             Ok(wt) => {
                 let p = wt.path.clone();
                 // Persist the worktree path so the TUI's Detail view can run
@@ -534,7 +602,7 @@ async fn run_worker(
             }
             Err(e) => {
                 // Release the spawn-time reservation (SpawnFailed path).
-                release_reservation(&state, &task_id).await;
+                release_reservation_for_layer(&layer, &task_id).await;
                 // Record a SpawnFailed TaskRecord and broadcast done.
                 let now = Utc::now();
                 let rec = TaskRecord {
@@ -557,13 +625,13 @@ async fn run_worker(
                     approvals_rejected: 0,
                     model: Some(model.clone()),
                 };
-                let _ = state.store.append_record(state.run_id, &rec).await;
-                state
+                let _ = layer.store.append_record(layer.run_id, &rec).await;
+                layer
                     .workers
                     .write()
                     .await
                     .insert(task_id.clone(), WorkerState::Done(rec));
-                let _ = state.done_tx.send(task_id);
+                let _ = layer.done_tx.send(task_id);
                 return;
             }
         }
@@ -572,7 +640,7 @@ async fn run_worker(
     };
 
     // Transition Pending → Running.
-    state.workers.write().await.insert(
+    layer.workers.write().await.insert(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
@@ -582,11 +650,11 @@ async fn run_worker(
 
     // Generate worker-scoped mcp-config.json so the worker can reach
     // the shared store via the bridge-injected identity.
-    let worker_task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let worker_task_dir = layer.run_subdir.join("tasks").join(&task_id);
     tokio::fs::create_dir_all(&worker_task_dir).await.ok();
     let worker_mcp_config = worker_task_dir.join("mcp-config.json");
     let socket_path =
-        crate::mcp::server::socket_path_for_run(state.run_id, &state.manifest.run_dir);
+        crate::mcp::server::socket_path_for_run(layer.run_id, &layer.manifest.run_dir);
     let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
         &worker_mcp_config,
         &socket_path,
@@ -602,7 +670,7 @@ async fn run_worker(
     };
 
     let cmd = SpawnCmd {
-        program: state.claude_binary.clone(),
+        program: layer.claude_binary.clone(),
         args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref()),
         cwd: cwd.clone(),
         env: Default::default(),
@@ -610,11 +678,11 @@ async fn run_worker(
 
     let outcome = {
         let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
-        let session_state = Arc::clone(&state);
+        let session_layer = Arc::clone(&layer);
         let task_id_for_rx = task_id.clone();
         let promote_task = tokio::spawn(async move {
             if let Some(sid) = session_id_rx.recv().await {
-                let mut workers = session_state.workers.write().await;
+                let mut workers = session_layer.workers.write().await;
                 if let Some(WorkerState::Running { started_at, .. }) =
                     workers.get(&task_id_for_rx).cloned()
                 {
@@ -632,12 +700,12 @@ async fn run_worker(
         // signal this worker directly. Populated inside
         // `run_to_completion` right after the spawn succeeds.
         let pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        state
+        layer
             .worker_pids
             .write()
             .await
             .insert(task_id.clone(), pid_slot.clone());
-        let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&state.spawner), cmd)
+        let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&layer.spawner), cmd)
             .with_log_path(log_path.clone())
             .with_stderr_log_path(stderr_path)
             .with_session_id_tx(session_id_tx)
@@ -646,7 +714,7 @@ async fn run_worker(
             .await;
         promote_task.abort();
         // Clean up the pid slot — the worker is done, the pid is stale.
-        state.worker_pids.write().await.remove(&task_id);
+        layer.worker_pids.write().await.remove(&task_id);
         outcome
     };
 
@@ -662,11 +730,11 @@ async fn run_worker(
     // Cleanup worktree per policy.
     if let Some(wt) = worktree_handle {
         let succeeded = matches!(status, TaskStatus::Success);
-        let _ = state.wt_mgr.cleanup(wt, state.cleanup_policy, succeeded);
+        let _ = layer.wt_mgr.cleanup(wt, layer.cleanup_policy, succeeded);
     }
 
     let worktree_path = if use_worktree { Some(cwd) } else { None };
-    let counters = state
+    let counters = layer
         .worker_counters
         .read()
         .await
@@ -695,47 +763,69 @@ async fn run_worker(
     };
 
     // Persist record.
-    let _ = state.store.append_record(state.run_id, &rec).await;
+    let _ = layer.store.append_record(layer.run_id, &rec).await;
 
     // Release the spawn-time reservation before accumulating actual cost.
-    release_reservation(&state, &task_id).await;
+    release_reservation_for_layer(&layer, &task_id).await;
 
-    // Accumulate cost into spent_usd.
+    // Accumulate cost into the layer's spent_usd.
     if let Some(cost) = pitboss_core::prices::cost_usd(&model, &rec.token_usage) {
-        *state.spent_usd.lock().await += cost;
+        *layer.spent_usd.lock().await += cost;
     }
 
-    // Transition to Done + broadcast.
-    state
+    // Transition to Done + broadcast on the layer's done channel.
+    layer
         .workers
         .write()
         .await
         .insert(task_id.clone(), WorkerState::Done(rec));
-    // Clean up the worker_layer_index entry — the worker is done, no more
-    // KV routing lookups will target it.
+    // Clean up the worker_layer_index entry (on DispatchState, not LayerState).
     state.worker_layer_index.write().await.remove(&task_id);
-    // Release any run-global leases the worker was holding
+    // Release any run-global leases the worker was holding.
     let released_count = state.run_leases.release_all_held_by(&task_id).await;
     if released_count > 0 {
         tracing::info!(worker_id = %task_id, count = released_count, "auto-released run-global leases on worker termination");
     }
-    let _ = state.done_tx.send(task_id);
+    let _ = layer.done_tx.send(task_id);
 }
 
-/// Remove `task_id`'s spawn-time reservation from `reserved_usd`. Safe to
-/// call even if no reservation was placed (returns 0 from the map). Clamped
-/// at 0.0 to avoid f64 arithmetic drift going negative.
-async fn release_reservation(state: &Arc<DispatchState>, task_id: &str) {
-    let reserved_amount = state
+/// Remove `task_id`'s spawn-time reservation from `reserved_usd` on the
+/// given `LayerState`. Safe to call even if no reservation was placed
+/// (returns 0 from the map). Clamped at 0.0 to avoid f64 drift going negative.
+async fn release_reservation_for_layer(layer: &Arc<LayerState>, task_id: &str) {
+    let reserved_amount = layer
         .worker_reservations
         .write()
         .await
         .remove(task_id)
         .unwrap_or(0.0);
     if reserved_amount > 0.0 {
-        let mut r = state.reserved_usd.lock().await;
+        let mut r = layer.reserved_usd.lock().await;
         *r = (*r - reserved_amount).max(0.0);
     }
+}
+
+/// Estimate the cost (USD) of a new worker against the given `LayerState`'s
+/// completed-worker history. Takes a `LayerState` reference so it works for
+/// both root and sub-tree layers.
+async fn estimate_new_worker_cost_for_layer(layer: &Arc<LayerState>, intended_model: &str) -> f64 {
+    use pitboss_core::prices::cost_usd;
+    let workers = layer.workers.read().await;
+    let models = layer.worker_models.read().await;
+    let mut costs: Vec<f64> = Vec::new();
+    for (id, w) in workers.iter() {
+        if let WorkerState::Done(rec) = w {
+            let m = models.get(id).map(String::as_str).unwrap_or(intended_model);
+            if let Some(c) = cost_usd(m, &rec.token_usage) {
+                costs.push(c);
+            }
+        }
+    }
+    if costs.is_empty() {
+        return initial_estimate_for(intended_model);
+    }
+    costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    costs[costs.len() / 2]
 }
 
 /// MCP tool names workers need permission to call. Narrower than the lead's
@@ -952,32 +1042,10 @@ pub async fn spawn_resume_worker(
     Ok(())
 }
 
-async fn estimate_new_worker_cost(state: &Arc<DispatchState>, intended_model: &str) -> f64 {
-    use pitboss_core::prices::cost_usd;
-    let workers = state.workers.read().await;
-    let models = state.worker_models.read().await;
-    let mut costs: Vec<f64> = Vec::new();
-    for (id, w) in workers.iter() {
-        if let WorkerState::Done(rec) = w {
-            // Price using THIS worker's actual model, fall back to intended.
-            let m = models.get(id).map(String::as_str).unwrap_or(intended_model);
-            if let Some(c) = cost_usd(m, &rec.token_usage) {
-                costs.push(c);
-            }
-        }
-    }
-    if costs.is_empty() {
-        // Model-specific fallback (Haiku $0.10, Sonnet ~$0.50, Opus ~$2.00).
-        return initial_estimate_for(intended_model);
-    }
-    costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    costs[costs.len() / 2]
-}
-
 /// Initial per-worker cost estimate before any worker has completed. Used as
-/// the fallback inside `estimate_new_worker_cost` and as a model-aware
-/// replacement for the old `INITIAL_WORKER_COST_EST = 0.10` constant which
-/// undercounted Sonnet (~5x) and Opus (~20x) workers.
+/// the fallback inside `estimate_new_worker_cost_for_layer` and as a
+/// model-aware replacement for the old `INITIAL_WORKER_COST_EST = 0.10`
+/// constant which undercounted Sonnet (~5x) and Opus (~20x) workers.
 ///
 /// Normalizes dated model suffixes (e.g. `claude-haiku-4-5-20251001`) the
 /// same way `pitboss_core::prices::rates_for` does.
@@ -1835,6 +1903,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let result = handle_spawn_worker(&state, args).await.unwrap();
         assert!(result.task_id.starts_with("worker-"));
@@ -1870,6 +1939,7 @@ mod tests {
                 tools: None,
                 timeout_secs: None,
                 model: None,
+                meta: None,
             };
             handle_spawn_worker(&state, args).await.unwrap();
         }
@@ -1881,6 +1951,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let err = handle_spawn_worker(&state, args).await.unwrap_err();
         assert!(err.to_string().contains("worker cap reached"), "err: {err}");
@@ -1897,6 +1968,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let err = handle_spawn_worker(&state, args).await.unwrap_err();
         assert!(err.to_string().contains("budget exceeded"), "err: {err}");
@@ -1913,6 +1985,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let err = handle_spawn_worker(&state, args).await.unwrap_err();
         assert!(err.to_string().contains("draining"), "err: {err}");
@@ -1928,6 +2001,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let spawn = handle_spawn_worker(&state, args).await.unwrap();
         let status = handle_worker_status(&state, &spawn.task_id).await.unwrap();
@@ -1960,6 +2034,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let spawn = handle_spawn_worker(&state, args).await.unwrap();
 
@@ -2188,6 +2263,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None, // falls back to lead model (claude-haiku-4-5)
+            meta: None,
         };
 
         // Subscribe to done events BEFORE spawning.
@@ -2256,6 +2332,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
 
         let r1 = handle_spawn_worker(&state, args("w1")).await;
@@ -2300,6 +2377,7 @@ mod tests {
                 tools: None,
                 timeout_secs: None,
                 model: None,
+                meta: None,
             },
         )
         .await
@@ -2356,6 +2434,7 @@ mod tests {
             tools: None,
             timeout_secs: None,
             model: None,
+            meta: None,
         };
         let spawn = handle_spawn_worker(&state, args).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(10), rx.recv())
@@ -2872,6 +2951,7 @@ mod tests {
                 tools: None,
                 timeout_secs: None,
                 model: None,
+                meta: None,
             },
         )
         .await
@@ -2899,6 +2979,7 @@ mod tests {
                 tools: None,
                 timeout_secs: None,
                 model: None,
+                meta: None,
             },
         )
         .await;

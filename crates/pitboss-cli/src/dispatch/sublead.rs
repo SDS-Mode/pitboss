@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
@@ -18,6 +19,27 @@ use crate::manifest::resolve::ResolvedManifest;
 use crate::shared_store::SharedStore;
 use pitboss_core::session::CancelToken;
 use pitboss_core::worktree::CleanupPolicy;
+
+/// Outcome classification for a terminated sub-lead session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubleadOutcome {
+    Success,
+    Cancel,
+    Timeout,
+    Error(String),
+}
+
+impl SubleadOutcome {
+    /// Convert to the canonical string stored in `SubleadTerminalRecord.outcome`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            SubleadOutcome::Success => "success",
+            SubleadOutcome::Cancel => "cancel",
+            SubleadOutcome::Timeout => "timeout",
+            SubleadOutcome::Error(_) => "error",
+        }
+    }
+}
 
 /// Configuration for a sub-lead spawn, validated against root's caps.
 #[derive(Debug, Clone)]
@@ -146,11 +168,9 @@ pub async fn resolve_envelope(
 }
 
 /// Spawn a sub-lead under `state.root`. Reserves budget at root, creates the
-/// sub-tree LayerState, seeds `/ref/*` from `req.initial_ref`, and registers
-/// the sub-tree on `state.subleads`. Returns the new sublead_id.
-///
-/// The sub-lead's Claude session is wired in Task 2.3; for Task 2.2 the call
-/// to `spawn_sublead_session` is an intentional no-op stub.
+/// sub-tree LayerState, seeds `/ref/*` from `req.initial_ref`, registers
+/// the sub-tree on `state.subleads`, and launches the sub-lead's Claude
+/// subprocess in a background task. Returns the new sublead_id.
 pub async fn spawn_sublead(
     state: &Arc<DispatchState>,
     req: SubleadSpawnRequest,
@@ -274,7 +294,7 @@ pub async fn spawn_sublead(
             tracing::info!(sublead_id = %sublead_id, "spawned during cascade drain; immediate cascade applied");
         }
 
-        // 9. Spawn the sub-lead's Claude session (stub — full wiring in Task 2.3).
+        // 9. Spawn the sub-lead's Claude session (wired in Task 2.3).
         spawn_sublead_session(
             state.clone(),
             sub_layer.clone(),
@@ -343,46 +363,319 @@ fn derive_sublead_manifest(
     sub
 }
 
-/// Spawn the sub-lead's Claude subprocess as a worker-of-root so its
-/// lifecycle is tracked for cancellation and wait purposes.
+/// Spawn the sub-lead's Claude subprocess and monitor it to completion.
 ///
-/// Task 2.2 stub — full session wiring (per-sub-tree MCP socket, restricted
-/// toolset without `spawn_sublead`) lands in Task 2.3.
+/// Uses `SessionHandle` (the same machinery as `run_worker`) to drive
+/// the sub-lead's Claude process end-to-end:
+///
+/// 1. Builds the per-sub-lead MCP config pointing at the run-level socket.
+/// 2. Spawns via `state.root.spawner` (sub-leads are spawned by root).
+/// 3. Background-monitors stdout for stream-json events and accumulates cost.
+/// 4. On termination: builds a `TaskRecord`, persists it, classifies the
+///    outcome, and calls `reconcile_terminated_sublead`.
+///
+/// Cancel handling: the sub-lead's `sub_layer.cancel` token is propagated
+/// by the cascade watcher from root. `SessionHandle::run_to_completion`
+/// observes it via `cancel.await_terminate()`, sends SIGTERM, then SIGKILL
+/// after TERMINATE_GRACE.
 async fn spawn_sublead_session(
-    _state: Arc<DispatchState>,
-    _sub_layer: Arc<LayerState>,
-    _prompt: String,
-    _model: String,
-    _envelope: ResolvedEnvelope,
+    state: Arc<DispatchState>,
+    sub_layer: Arc<LayerState>,
+    prompt: String,
+    model: String,
+    envelope: ResolvedEnvelope,
 ) -> Result<()> {
-    // TODO(Task 2.3): spawn the sub-lead's Claude subprocess via state.spawner
-    // with the restricted toolset (no spawn_sublead) and per-sub-tree MCP socket
-    // binding.
+    use crate::dispatch::hierarchical::build_sublead_mcp_config;
+    use crate::dispatch::runner::sublead_spawn_args;
+    use crate::mcp::server::socket_path_for_run;
+    use pitboss_core::process::SpawnCmd;
+    use pitboss_core::session::SessionHandle;
+    use pitboss_core::store::TaskStatus;
+
+    let sublead_id = sub_layer.lead_id.clone();
+
+    // 1. Build the MCP socket path (shared run-level socket — all actors
+    //    connect here; mcp-bridge stamps _meta.actor_role=sublead).
+    let socket_path = socket_path_for_run(sub_layer.run_id, &sub_layer.manifest.run_dir);
+
+    // 2. Build per-sub-lead mcp-config.json.
+    let mcp_config_path = build_sublead_mcp_config(&sublead_id, &socket_path)
+        .await
+        .context("build sublead mcp-config")?;
+
+    // 3. Build the CLI args: sublead toolset, model, prompt, no --resume (v0.6).
+    let args = sublead_spawn_args(&sublead_id, &prompt, &model, &mcp_config_path, None);
+
+    // 4. Task log directory (mirrors workers' layout for consistency).
+    let task_dir = sub_layer.run_subdir.join("tasks").join(&sublead_id);
+    tokio::fs::create_dir_all(&task_dir).await.ok();
+    let log_path = task_dir.join("stdout.log");
+    let stderr_path = task_dir.join("stderr.log");
+
+    // 5. Build the spawn command. CWD is root's run_subdir (sub-leads don't
+    //    get separate worktrees in v0.6 — revisit in future).
+    let initial_cmd = SpawnCmd {
+        program: sub_layer.claude_binary.clone(),
+        args,
+        cwd: sub_layer.run_subdir.clone(),
+        env: Default::default(),
+    };
+
+    // 6. Determine the lead timeout — fall back to 1 hour if the manifest
+    //    didn't set one (should always be set for Owned envelopes).
+    let timeout_secs = match &envelope {
+        ResolvedEnvelope::Owned {
+            lead_timeout_secs, ..
+        } => *lead_timeout_secs,
+        ResolvedEnvelope::SharedPool => sub_layer.manifest.lead_timeout_secs.unwrap_or(3600),
+    };
+
+    // 7. Set up the reprompt delivery channel.
+    //    `send_synthetic_reprompt` sends messages here; the background loop
+    //    handles them by kill+resume-ing the sub-lead's current subprocess.
+    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    *sub_layer.reprompt_tx.lock().await = Some(reprompt_tx);
+
+    // Background task: run the sub-lead's subprocess to completion, handling
+    // any synthetic reprompts by kill+resuming. We detach with tokio::spawn so
+    // `spawn_sublead_session` returns immediately.
+    let state_bg = state.clone();
+    let sub_layer_bg = sub_layer.clone();
+    let sublead_id_bg = sublead_id.clone();
+    let model_bg = model.clone();
+    let mcp_config_path_bg = mcp_config_path.clone();
+
+    tokio::spawn(async move {
+        let mut current_cmd = initial_cmd;
+        // The last session_id emitted by the subprocess. Needed for --resume when
+        // a synthetic reprompt arrives.
+        let mut last_session_id: Option<String> = None;
+        // Accumulate cost and reprompt count across all subprocess iterations.
+        let mut total_token_usage = pitboss_core::parser::TokenUsage::default();
+        let mut reprompt_count: u32 = 0;
+        // Record the very first started_at for the compound TaskRecord.
+        let overall_started_at = chrono::Utc::now();
+
+        // Mark the lead as Running (no session_id yet) so worker_status et al.
+        // can report it.
+        sub_layer_bg.workers.write().await.insert(
+            sublead_id_bg.clone(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: overall_started_at,
+                session_id: None,
+            },
+        );
+
+        // Subprocess loop: runs until the subprocess exits without a pending reprompt.
+        let final_outcome = loop {
+            // Build a per-iteration session_id channel so we can capture the
+            // new session id and update the workers map entry.
+            let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
+
+            // Per-subprocess cancel token: receives termination from either the
+            // sub-tree cancel (cascade/operator kill) or from the reprompt path
+            // (which kills the current process to restart it with --resume).
+            let proc_cancel = CancelToken::new();
+
+            // Bridge: forward terminate from sub-tree cancel → subprocess cancel.
+            // This ensures operator kills and cascade drains still reach the process.
+            {
+                let tree_cancel = sub_layer_bg.cancel.clone();
+                let proc = proc_cancel.clone();
+                tokio::spawn(async move {
+                    tree_cancel.await_terminate().await;
+                    proc.terminate();
+                });
+            }
+
+            // Launch the subprocess.
+            let outcome = SessionHandle::new(
+                sublead_id_bg.clone(),
+                Arc::clone(&sub_layer_bg.spawner),
+                current_cmd.clone(),
+            )
+            .with_log_path(log_path.clone())
+            .with_stderr_log_path(stderr_path.clone())
+            .with_session_id_tx(session_id_tx)
+            .run_to_completion(proc_cancel.clone(), Duration::from_secs(timeout_secs))
+            .await;
+
+            // Update last_session_id and the workers map if the subprocess
+            // emitted a session_id before it exited.
+            if let Ok(sid) = session_id_rx.try_recv() {
+                sub_layer_bg.workers.write().await.insert(
+                    sublead_id_bg.clone(),
+                    crate::dispatch::state::WorkerState::Running {
+                        started_at: overall_started_at,
+                        session_id: Some(sid.clone()),
+                    },
+                );
+                last_session_id = Some(sid);
+            } else if let Some(sid) = outcome.claude_session_id.clone() {
+                // Fallback: session_id from the final result event (not yet in workers map
+                // since the subprocess already finished, but saves it for future reprompts).
+                last_session_id = Some(sid);
+            }
+
+            // Accumulate cost.
+            if let Some(cost) = pitboss_core::prices::cost_usd(&model_bg, &outcome.token_usage) {
+                *sub_layer_bg.spent_usd.lock().await += cost;
+            }
+            total_token_usage.add(&outcome.token_usage);
+
+            // Check if the process ended due to cancellation/termination AND
+            // there is a pending reprompt in the channel (meaning we should
+            // kill+resume rather than treating this as a final exit).
+            let pending_reprompt = reprompt_rx.try_recv().ok();
+
+            if let Some(new_prompt) = pending_reprompt {
+                // A synthetic reprompt arrived. If we have a session_id, resume.
+                if let Some(ref sid) = last_session_id {
+                    tracing::info!(
+                        sublead_id = %sublead_id_bg,
+                        session_id = %sid,
+                        "synthetic reprompt: killing current subprocess and resuming with new prompt"
+                    );
+                    reprompt_count += 1;
+
+                    // Re-build args with --resume and the new prompt.
+                    let resume_args = sublead_spawn_args(
+                        &sublead_id_bg,
+                        &new_prompt,
+                        &model_bg,
+                        &mcp_config_path_bg,
+                        Some(sid.as_str()),
+                    );
+                    current_cmd = SpawnCmd {
+                        program: sub_layer_bg.claude_binary.clone(),
+                        args: resume_args,
+                        cwd: sub_layer_bg.run_subdir.clone(),
+                        env: Default::default(),
+                    };
+
+                    // Reset workers entry to Running with no session_id (will be
+                    // updated once the resumed subprocess emits its init event).
+                    sub_layer_bg.workers.write().await.insert(
+                        sublead_id_bg.clone(),
+                        crate::dispatch::state::WorkerState::Running {
+                            started_at: overall_started_at,
+                            session_id: None,
+                        },
+                    );
+
+                    // Continue the loop: spawn the resumed subprocess.
+                    continue;
+                } else {
+                    // No session_id — cannot resume. Treat as normal termination.
+                    tracing::warn!(
+                        sublead_id = %sublead_id_bg,
+                        "synthetic reprompt arrived but no session_id available; \
+                         treating as normal termination"
+                    );
+                    break outcome;
+                }
+            }
+
+            // No pending reprompt — subprocess reached a terminal state normally.
+            break outcome;
+        };
+
+        // Close the reprompt channel so further sends return errors.
+        *sub_layer_bg.reprompt_tx.lock().await = None;
+
+        // 7. Classify the outcome for the terminal record.
+        let sublead_outcome = match final_outcome.final_state {
+            pitboss_core::session::SessionState::Completed => SubleadOutcome::Success,
+            pitboss_core::session::SessionState::Cancelled => SubleadOutcome::Cancel,
+            pitboss_core::session::SessionState::TimedOut => SubleadOutcome::Timeout,
+            pitboss_core::session::SessionState::SpawnFailed { ref message } => {
+                SubleadOutcome::Error(message.clone())
+            }
+            pitboss_core::session::SessionState::Failed { ref message } => {
+                SubleadOutcome::Error(message.clone())
+            }
+            _ => SubleadOutcome::Error("unknown terminal state".into()),
+        };
+
+        // 8. Map to TaskStatus for the TaskRecord.
+        let status = match &sublead_outcome {
+            SubleadOutcome::Success => TaskStatus::Success,
+            SubleadOutcome::Cancel => TaskStatus::Cancelled,
+            SubleadOutcome::Timeout => TaskStatus::TimedOut,
+            SubleadOutcome::Error(_) => TaskStatus::Failed,
+        };
+
+        // 9. Build and persist a TaskRecord for the sub-lead's compound session.
+        //    Uses total_token_usage across all subprocess iterations.
+        let rec = pitboss_core::store::TaskRecord {
+            task_id: sublead_id_bg.clone(),
+            status,
+            exit_code: final_outcome.exit_code,
+            started_at: overall_started_at,
+            ended_at: final_outcome.ended_at,
+            duration_ms: (final_outcome.ended_at - overall_started_at)
+                .num_milliseconds()
+                .max(0),
+            worktree_path: None,
+            log_path,
+            token_usage: total_token_usage,
+            claude_session_id: final_outcome.claude_session_id,
+            final_message_preview: final_outcome.final_message_preview,
+            parent_task_id: Some("root".into()),
+            pause_count: 0,
+            reprompt_count,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: Some(model_bg),
+        };
+        if let Err(e) = sub_layer_bg
+            .store
+            .append_record(sub_layer_bg.run_id, &rec)
+            .await
+        {
+            tracing::warn!(
+                sublead_id = %sublead_id_bg,
+                error = %e,
+                "failed to persist sub-lead TaskRecord"
+            );
+        }
+
+        // 10. Reconcile: release reservation, update root's spent_usd,
+        //     populate sublead_results, and wake wait_actor subscribers.
+        if let Err(e) =
+            reconcile_terminated_sublead(&state_bg, &sublead_id_bg, sublead_outcome).await
+        {
+            tracing::warn!(
+                sublead_id = %sublead_id_bg,
+                error = %e,
+                "reconcile_terminated_sublead failed"
+            );
+        }
+    });
+
     Ok(())
 }
 
-/// Called when a sub-lead emits its terminal Event::Result (or when
-/// it's cancelled / times out). Reconciles the sub-tree's actual spend
-/// against the original reservation: spend is moved into root's
-/// spent_usd, and any unspent reservation is released back to root's
-/// reservable pool.
+/// Called when a sub-lead terminates (success, cancel, timeout, or error).
+/// Reconciles the sub-tree's actual spend against the original reservation:
+/// spend is moved into root's `spent_usd`, and any unspent reservation is
+/// released back to root's reservable pool.
 ///
-/// Idempotent: calling twice for the same sublead_id is a no-op the
+/// Idempotent: calling twice for the same `sublead_id` is a no-op the
 /// second time (sub-tree LayerState is removed on first call).
 ///
-/// The original reservation amount is read from `sub_layer.original_reservation_usd`,
-/// which was set when the sub-layer was constructed by `spawn_sublead`.
+/// The original reservation amount is read from
+/// `sub_layer.original_reservation_usd`, which was set when the sub-layer
+/// was constructed by `spawn_sublead`.
 ///
-/// TODO(Task 2.3/Task 3.x): Wire the call site in the dispatch event loop
-/// (hierarchical.rs or runner.rs). When a sub-lead's Claude subprocess emits
-/// its terminal Done event and flows through wait_actor, call this function
-/// with the sub-lead's id. The original reservation is now read from the
-/// sub-tree's LayerState.original_reservation_usd field. For Phase 2 (no real
-/// sub-lead session yet), the test calls the helper directly; the integration
-/// lands when full sub-lead session wiring (Task 2.3) is complete.
+/// `outcome` classifies the terminal state for the `SubleadTerminalRecord`
+/// and the `SubleadTerminated` control-plane event. Existing callers (tests
+/// that reconcile manually) should pass `SubleadOutcome::Success`.
 pub async fn reconcile_terminated_sublead(
     state: &Arc<DispatchState>,
     sublead_id: &str,
+    outcome: SubleadOutcome,
 ) -> Result<()> {
     let sub_layer_opt = state.subleads.write().await.remove(sublead_id);
     let Some(sub_layer) = sub_layer_opt else {
@@ -410,14 +703,11 @@ pub async fn reconcile_terminated_sublead(
         reserved = original_reservation_usd,
         spent = actual_spend,
         returned = unspent,
+        outcome = outcome.as_str(),
         "sub-lead budget reconciled"
     );
 
     // Emit SubleadTerminated lifecycle event to the control plane.
-    // TODO(Task 2.3): thread the actual terminal outcome ("success" |
-    // "cancel" | "timeout" | "error") from the sub-lead's Claude session
-    // exit status. For now we default to "success" since reconcile is
-    // only called on clean completion in the current stub.
     {
         let ev = EventEnvelope {
             actor_path: ActorPath::new(["root", sublead_id]),
@@ -425,7 +715,7 @@ pub async fn reconcile_terminated_sublead(
                 sublead_id: sublead_id.to_string(),
                 spent_usd: actual_spend,
                 unspent_usd: unspent,
-                outcome: "success".to_string(),
+                outcome: outcome.as_str().to_string(),
             },
         };
         state.root.broadcast_control_event(ev).await;
@@ -440,9 +730,7 @@ pub async fn reconcile_terminated_sublead(
     // Persist terminal record so wait_actor(sublead_id) can return it.
     let record = SubleadTerminalRecord {
         sublead_id: sublead_id.to_string(),
-        // TODO(Task 2.3): thread real outcome from sub-lead's Claude session
-        // exit status. For now all reconciled sub-leads are "success".
-        outcome: "success".to_string(),
+        outcome: outcome.as_str().to_string(),
         spent_usd: actual_spend,
         unspent_usd: unspent,
         terminated_at: chrono::Utc::now(),
