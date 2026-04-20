@@ -1,0 +1,4 @@
+{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sublead-sess\"}"}
+{"mcp_call":{"name":"spawn_worker","args":{"prompt":"sub-task A"},"bind":"w1"}}
+{"mcp_call":{"name":"wait_for_worker","args":{"task_id":"$w1.task_id"},"bind":"rec"}}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sublead-sess\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}"}

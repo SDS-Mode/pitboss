@@ -4,6 +4,7 @@
 
 pub mod approval;
 pub mod bridge;
+pub mod policy;
 pub mod server;
 pub mod tools;
 

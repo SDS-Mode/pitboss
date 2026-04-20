@@ -13,16 +13,95 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::service::ServiceExt;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::{tool, tool_router, ErrorData, ServerHandler};
 
+use crate::dispatch::layer::LayerState;
+use crate::dispatch::signals::cancel_actor_with_reason;
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
-    handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
-    handle_propose_plan, handle_reprompt_worker, handle_request_approval, handle_spawn_worker,
+    handle_continue_worker, handle_list_workers, handle_pause_worker, handle_propose_plan,
+    handle_reprompt_worker, handle_request_approval, handle_spawn_worker, handle_wait_for_actor,
     handle_wait_for_any, handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs,
     PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs,
-    TaskIdArgs, WaitForAnyArgs, WaitForWorkerArgs,
+    TaskIdArgs, WaitActorRequest, WaitForAnyArgs, WaitForWorkerArgs,
 };
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct SpawnSubleadRequest {
+    /// The prompt the sub-lead's Claude session will start with.
+    prompt: String,
+    /// Model name for the sub-lead.
+    model: String,
+    /// Hard budget cap for this sub-tree, USD. Required unless
+    /// read_down=true (then None means "share root's pool").
+    #[serde(default)]
+    budget_usd: Option<f64>,
+    /// Hard worker count cap for this sub-tree.
+    #[serde(default)]
+    max_workers: Option<u32>,
+    /// Wall-clock cap on the sub-lead's Claude session, seconds.
+    #[serde(default)]
+    lead_timeout_secs: Option<u64>,
+    /// Snapshot data copied into the sub-tree's /ref/* at spawn time.
+    #[serde(default)]
+    initial_ref: std::collections::HashMap<String, serde_json::Value>,
+    /// If true, root gets read-only visibility into the sub-tree's
+    /// store; required for shared-pool resource mode (omitted budget/
+    /// max_workers).
+    #[serde(default)]
+    read_down: bool,
+    /// Caller identity injected by mcp-bridge (actor_id + actor_role).
+    #[serde(rename = "_meta", default)]
+    #[schemars(skip)]
+    meta: Option<CallerMeta>,
+}
+
+/// Caller identity metadata injected into tool requests by the MCP bridge.
+#[allow(dead_code)]
+#[derive(serde::Deserialize, Debug, Clone)]
+struct CallerMeta {
+    actor_id: String,
+    actor_role: String,
+}
+
+/// Request for `cancel_worker` — extends Task-4.5 with an optional `reason`
+/// field. Existing callers that omit `reason` continue to work unchanged
+/// (the field is skipped if absent on the wire).
+/// Accepts both `target` (new) and `task_id` (v0.5 wire compat) as field names.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct CancelWorkerRequest {
+    /// The actor id (worker task_id or sub-lead id) to cancel.
+    /// Accepts both `target` and `task_id` parameter names for wire compatibility.
+    #[serde(alias = "task_id")]
+    target: String,
+    /// Optional corrective context. When supplied, delivered to the killed
+    /// actor's parent lead as a synthetic `[SYSTEM]` reprompt so the lead
+    /// can adjust its plan without a separate operator round-trip.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct RunLeaseAcquireRequest {
+    key: String,
+    ttl_secs: u64,
+    /// Caller identity injected by mcp-bridge (actor_id + actor_role).
+    #[serde(rename = "_meta", default)]
+    #[schemars(skip)]
+    meta: Option<CallerMeta>,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct RunLeaseReleaseRequest {
+    key: String,
+    /// Caller identity injected by mcp-bridge (actor_id + actor_role).
+    #[serde(rename = "_meta", default)]
+    #[schemars(skip)]
+    meta: Option<CallerMeta>,
+}
 
 /// Compute the socket path for a given run. Falls back to the run_dir if
 /// $XDG_RUNTIME_DIR is unset or non-writable.
@@ -37,6 +116,86 @@ pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
     let p = run_dir.join(run_id.to_string());
     let _ = std::fs::create_dir_all(&p);
     p.join("mcp.sock")
+}
+
+// ── Per-layer KV routing helpers (Phase 3.1) ────────────────────────────────
+
+use crate::shared_store::ActorRole;
+
+/// Resolve the `LayerState` whose KvStore should service a KV operation.
+///
+/// - `Lead` (root lead) → always the root layer.
+/// - `Sublead` with id S → the sub-tree layer for S.
+/// - `Worker` → look up which layer registered this worker at spawn time via
+///   `DispatchState::worker_layer_index`. `None` (root-layer worker) returns
+///   the root layer; `Some(sublead_id)` returns that sub-tree's layer.
+///
+/// The `subleads_guard` is passed in so the caller can hold the read-lock
+/// across the full KV operation (single lock acquisition per MCP tool call).
+async fn resolve_layer_for_caller<'a>(
+    state: &'a DispatchState,
+    actor_id: &str,
+    actor_role: ActorRole,
+    subleads_guard: &'a tokio::sync::RwLockReadGuard<
+        'a,
+        std::collections::HashMap<String, Arc<LayerState>>,
+    >,
+) -> Result<&'a Arc<LayerState>, ErrorData> {
+    match actor_role {
+        ActorRole::Lead => Ok(&state.root),
+        ActorRole::Sublead => subleads_guard.get(actor_id).ok_or_else(|| {
+            ErrorData::invalid_request(format!("unknown sublead_id: {actor_id}"), None)
+        }),
+        ActorRole::Worker => {
+            // Use .read().await instead of try_read().ok() to ensure we wait
+            // for the lock rather than silently falling back to root layer if
+            // the lock is contended. worker_layer_index and subleads are
+            // independent RwLocks, so we safely await here.
+            let layer_opt = state.worker_layer_index.read().await.get(actor_id).cloned();
+            match layer_opt {
+                // None (or missing from index) → root layer.
+                None | Some(None) => Ok(&state.root),
+                // Some(sublead_id) → sub-tree layer.
+                Some(Some(sublead_id)) => subleads_guard.get(&sublead_id).ok_or_else(|| {
+                    ErrorData::invalid_request(
+                        format!("worker {actor_id} registered in unknown sub-tree {sublead_id}"),
+                        None,
+                    )
+                }),
+            }
+        }
+    }
+}
+
+/// Returns the peer-slot owner id if `key` is under `/peer/<id>/...`,
+/// or `None` for other namespaces.
+fn parse_peer_path(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("/peer/")?;
+    // Exclude the /peer/self/... alias — it should be resolved before this
+    // point, but guard defensively.
+    if rest.starts_with("self/") || rest == "self" {
+        return None;
+    }
+    let id = rest.split('/').next()?;
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Strict peer-visibility predicate (spec §4.2).
+///
+/// `/peer/<X>/*` is readable at `layer` by:
+/// - X itself (the slot owner).
+/// - The layer's lead (`layer.lead_id`).
+///
+/// Workers within the same layer CANNOT read each other's peer slots.
+/// Sibling sub-leads CANNOT read each other's peer slots.
+/// The TUI / operator bypasses this predicate entirely (it reads directly
+/// from the `SharedStore` without going through this MCP handler).
+fn can_read_peer_slot(layer: &LayerState, caller_id: &str, target_id: &str) -> bool {
+    caller_id == target_id || caller_id == layer.lead_id
 }
 
 pub struct McpServer {
@@ -116,6 +275,56 @@ impl PitbossHandler {
         }
     }
 
+    #[tool(
+        name = "spawn_sublead",
+        description = "Create a new sub-tree with its own envelope. Only available to the root lead when allow_subleads=true. Returns {sublead_id}."
+    )]
+    async fn spawn_sublead(
+        &self,
+        Parameters(req): Parameters<SpawnSubleadRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use crate::dispatch::sublead::{spawn_sublead as do_spawn, SubleadSpawnRequest};
+
+        // Manifest guard: spawn_sublead is only available when allow_subleads=true.
+        // This is the secondary line of defense; the primary gate is list_tools
+        // filtering (spawn_sublead is absent from the toolset when allow_subleads=false).
+        let allow_subleads = self
+            .state
+            .root
+            .manifest
+            .lead
+            .as_ref()
+            .is_some_and(|l| l.allow_subleads);
+        if !allow_subleads {
+            return Err(ErrorData::invalid_request(
+                String::from(
+                    "spawn_sublead requires allow_subleads=true in the manifest [lead] block",
+                ),
+                None,
+            ));
+        }
+
+        // Role check: only root_lead (or "lead" for v0.5 compat) may spawn sub-leads.
+        extract_and_check_root_lead(&req.meta)?;
+
+        let spawn_req = SubleadSpawnRequest {
+            prompt: req.prompt,
+            model: req.model,
+            budget_usd: req.budget_usd,
+            max_workers: req.max_workers,
+            lead_timeout_secs: req.lead_timeout_secs,
+            initial_ref: req.initial_ref,
+            read_down: req.read_down,
+        };
+
+        match do_spawn(&self.state, spawn_req).await {
+            Ok(sublead_id) => {
+                to_structured_result(&serde_json::json!({ "sublead_id": sublead_id }))
+            }
+            Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
+        }
+    }
+
     #[tool(description = "Non-blocking status poll for a worker. Returns state + partial data.")]
     async fn worker_status(
         &self,
@@ -133,6 +342,19 @@ impl PitbossHandler {
         Parameters(args): Parameters<WaitForWorkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match handle_wait_for_worker(&self.state, &args.task_id, args.timeout_secs).await {
+            Ok(rec) => to_structured_result(&rec),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Block until the named actor (worker or sub-lead) emits a terminal event."
+    )]
+    async fn wait_actor(
+        &self,
+        Parameters(req): Parameters<WaitActorRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_wait_for_actor(&self.state, &req.actor_id, req.timeout_secs).await {
             Ok(rec) => to_structured_result(&rec),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
@@ -164,13 +386,18 @@ impl PitbossHandler {
         to_structured_result(&serde_json::json!({ "workers": summaries }))
     }
 
-    #[tool(description = "Cancel a worker by task_id. Sends SIGTERM, grace, SIGKILL.")]
+    #[tool(
+        description = "Cancel an actor (worker or sub-lead) by id. When `reason` is supplied, it is delivered to the actor's parent lead as a synthetic [SYSTEM] reprompt so the lead can adjust its plan without a separate operator round-trip. Existing callers that omit `reason` behave identically to the pre-4.5 cancel path."
+    )]
     async fn cancel_worker(
         &self,
-        Parameters(args): Parameters<TaskIdArgs>,
+        Parameters(req): Parameters<CancelWorkerRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        match handle_cancel_worker(&self.state, &args.task_id).await {
-            Ok(res) => to_structured_result(&res),
+        // Fast-path: no reason supplied — use the existing single-layer path
+        // for root-layer workers (preserves v0.5 exact behavior for that case).
+        // If the target is in a sub-tree, cancel_actor_with_reason handles it.
+        match cancel_actor_with_reason(&self.state, &req.target, req.reason).await {
+            Ok(()) => to_structured_result(&crate::mcp::tools::CancelResult { ok: true }),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
     }
@@ -250,7 +477,36 @@ impl PitbossHandler {
         if let Some(m) = &args.meta {
             self.note_actor(&m.actor_id).await;
         }
-        match crate::shared_store::tools::handle_kv_get(&self.state.shared_store, args).await {
+
+        // Per-layer routing: resolve which LayerState's KvStore to target.
+        // Falls back to the root-layer store when no identity is present
+        // (backward-compatible with callers that omit _meta on reads).
+        let subleads = self.state.subleads.read().await;
+        let (layer, caller_id) = if let Some(m) = &args.meta {
+            let layer =
+                resolve_layer_for_caller(&self.state, &m.actor_id, m.actor_role, &subleads).await?;
+            (layer, m.actor_id.clone())
+        } else {
+            (&self.state.root, String::new())
+        };
+
+        // Strict peer-visibility check: /peer/<X>/* is readable only by X or
+        // the layer's lead. Applied before the store lookup (fast-reject).
+        if !caller_id.is_empty() {
+            if let Some(target_id) = parse_peer_path(&args.path) {
+                if !can_read_peer_slot(layer, &caller_id, target_id) {
+                    return Err(shared_store_err(
+                        &crate::shared_store::StoreError::Forbidden(format!(
+                            "strict peer visibility: {caller_id} cannot read /peer/{target_id}/*; \
+                             only {target_id} itself or the layer lead ({}) may read this slot",
+                            layer.lead_id,
+                        )),
+                    ));
+                }
+            }
+        }
+
+        match crate::shared_store::tools::handle_kv_get(&layer.shared_store, args).await {
             // Wrap Option<Entry> in an object so structuredContent is a
             // record (per MCP spec). A bare null was rejected by the
             // client's schema validator in early dogfood runs.
@@ -267,7 +523,16 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::KvSetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_kv_set(&self.state.shared_store, args).await {
+        // Per-layer routing: writes go to the caller's layer's KvStore.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )
+        .await?;
+        match crate::shared_store::tools::handle_kv_set(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -281,7 +546,16 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::KvCasArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_kv_cas(&self.state.shared_store, args).await {
+        // Per-layer routing: CAS goes to the caller's layer's KvStore.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )
+        .await?;
+        match crate::shared_store::tools::handle_kv_cas(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -297,7 +571,35 @@ impl PitbossHandler {
         if let Some(m) = &args.meta {
             self.note_actor(&m.actor_id).await;
         }
-        match crate::shared_store::tools::handle_kv_list(&self.state.shared_store, args).await {
+
+        // Per-layer routing.
+        let subleads = self.state.subleads.read().await;
+        let (layer, caller_id) = if let Some(m) = &args.meta {
+            let layer =
+                resolve_layer_for_caller(&self.state, &m.actor_id, m.actor_role, &subleads).await?;
+            (layer, m.actor_id.clone())
+        } else {
+            (&self.state.root, String::new())
+        };
+
+        // Strict peer-visibility check for /peer/<X>/* globs.
+        // Only exact /peer/<id>/... prefix patterns are checked — a broad
+        // glob like /peer/** is rejected unless the caller is the layer lead.
+        if !caller_id.is_empty() {
+            if let Some(target_id) = parse_peer_path(&args.glob) {
+                if !can_read_peer_slot(layer, &caller_id, target_id) {
+                    return Err(shared_store_err(
+                        &crate::shared_store::StoreError::Forbidden(format!(
+                            "strict peer visibility: {caller_id} cannot list /peer/{target_id}/*; \
+                             only {target_id} itself or the layer lead ({}) may list this slot",
+                            layer.lead_id,
+                        )),
+                    ));
+                }
+            }
+        }
+
+        match crate::shared_store::tools::handle_kv_list(&layer.shared_store, args).await {
             // Wrap Vec<ListMetadata> in an object — MCP spec requires
             // structuredContent to be a record.
             Ok(v) => to_structured_result(&serde_json::json!({ "entries": v })),
@@ -315,7 +617,33 @@ impl PitbossHandler {
         if let Some(m) = &args.meta {
             self.note_actor(&m.actor_id).await;
         }
-        match crate::shared_store::tools::handle_kv_wait(&self.state.shared_store, args).await {
+        // Per-layer routing: wait on the caller's layer's KvStore.
+        let subleads = self.state.subleads.read().await;
+        let (layer, caller_id) = if let Some(m) = &args.meta {
+            let layer =
+                resolve_layer_for_caller(&self.state, &m.actor_id, m.actor_role, &subleads).await?;
+            (layer, m.actor_id.clone())
+        } else {
+            (&self.state.root, String::new())
+        };
+
+        // Strict peer-visibility check: /peer/<X>/* is waiterable only by X or
+        // the layer's lead. Applied before the store wait (fast-reject).
+        if !caller_id.is_empty() {
+            if let Some(target_id) = parse_peer_path(&args.path) {
+                if !can_read_peer_slot(layer, &caller_id, target_id) {
+                    return Err(shared_store_err(
+                        &crate::shared_store::StoreError::Forbidden(format!(
+                            "strict peer visibility: {caller_id} cannot wait on /peer/{target_id}/*; \
+                             only {target_id} itself or the layer lead ({}) may wait on this slot",
+                            layer.lead_id,
+                        )),
+                    ));
+                }
+            }
+        }
+
+        match crate::shared_store::tools::handle_kv_wait(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -329,8 +657,16 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::LeaseAcquireArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_lease_acquire(&self.state.shared_store, args).await
-        {
+        // Per-layer routing: acquire from the caller's layer's LeaseRegistry.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )
+        .await?;
+        match crate::shared_store::tools::handle_lease_acquire(&layer.shared_store, args).await {
             Ok(v) => to_structured_result(&v),
             Err(e) => Err(shared_store_err(&e)),
         }
@@ -344,15 +680,65 @@ impl PitbossHandler {
         Parameters(args): Parameters<crate::shared_store::tools::LeaseReleaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         self.note_actor(&args.meta.actor_id).await;
-        match crate::shared_store::tools::handle_lease_release(&self.state.shared_store, args).await
-        {
+        // Per-layer routing: release from the caller's layer's LeaseRegistry.
+        let subleads = self.state.subleads.read().await;
+        let layer = resolve_layer_for_caller(
+            &self.state,
+            &args.meta.actor_id,
+            args.meta.actor_role,
+            &subleads,
+        )
+        .await?;
+        match crate::shared_store::tools::handle_lease_release(&layer.shared_store, args).await {
             Ok(()) => Ok(CallToolResult::structured(serde_json::json!({"ok": true}))),
             Err(e) => Err(shared_store_err(&e)),
         }
     }
+
+    #[tool(
+        name = "run_lease_acquire",
+        description = "Acquire a run-global lease for cross-sub-tree resource coordination. Use for resources accessed from multiple sub-trees (e.g., operator's filesystem). Use per-layer /leases/* for sub-tree-internal coordination."
+    )]
+    async fn run_lease_acquire(
+        &self,
+        Parameters(req): Parameters<RunLeaseAcquireRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor_id = extract_actor_id(&req.meta)?;
+        let ttl = std::time::Duration::from_secs(req.ttl_secs);
+        match self
+            .state
+            .run_leases
+            .try_acquire(&req.key, &actor_id, ttl)
+            .await
+        {
+            Ok(handle) => to_structured_result(&serde_json::json!({
+                "acquired": true,
+                "key": handle.key,
+                "holder": handle.holder
+            })),
+            Err(current_holder) => Err(ErrorData::invalid_request(
+                format!("lease '{}' currently held by {}", req.key, current_holder),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
+        name = "run_lease_release",
+        description = "Release a run-global lease previously acquired via run_lease_acquire. No-op if not held by caller."
+    )]
+    async fn run_lease_release(
+        &self,
+        Parameters(req): Parameters<RunLeaseReleaseRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor_id = extract_actor_id(&req.meta)?;
+        let released = self.state.run_leases.release(&req.key, &actor_id).await;
+        to_structured_result(&serde_json::json!({
+            "released": released
+        }))
+    }
 }
 
-#[tool_handler]
 impl ServerHandler for PitbossHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -370,6 +756,81 @@ impl ServerHandler for PitbossHandler {
             ..Default::default()
         }
     }
+
+    /// Delegate all tool calls to the rmcp tool router.
+    /// Equivalent to what `#[tool_handler]` would generate automatically, but
+    /// written manually so we can add custom filtering to `list_tools` below.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParam,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
+    /// Return the tool list, conditionally excluding `spawn_sublead` when the
+    /// manifest does not have `allow_subleads = true` (v0.6 depth-2 gate).
+    ///
+    /// When `allow_subleads` is absent or false (v0.5 manifests), `spawn_sublead`
+    /// is not listed so agents never see it in their available tools.
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let allow_subleads = self
+            .state
+            .root
+            .manifest
+            .lead
+            .as_ref()
+            .is_some_and(|l| l.allow_subleads);
+
+        let tools: Vec<rmcp::model::Tool> = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| allow_subleads || t.name != "spawn_sublead")
+            .collect();
+
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
+    }
+}
+
+/// Extract the caller's actor_role from the request's _meta field.
+/// Rejects if _meta is missing or actor_role is not "root_lead" or "lead".
+fn extract_and_check_root_lead(meta: &Option<CallerMeta>) -> Result<(), ErrorData> {
+    let Some(m) = meta else {
+        return Err(ErrorData::invalid_request(
+            String::from("spawn_sublead requires caller identity (missing _meta)"),
+            None,
+        ));
+    };
+
+    if m.actor_role != "root_lead" && m.actor_role != "lead" {
+        return Err(ErrorData::invalid_request(
+            format!(
+                "spawn_sublead is only available to the root lead (got role: {}; depth-2 invariant: workers and sub-leads cannot spawn sub-leads)",
+                m.actor_role
+            ),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+/// Extract the caller's actor_id from the request's _meta field.
+/// Available to all actors (root lead, sub-leads, workers).
+fn extract_actor_id(meta: &Option<CallerMeta>) -> Result<String, ErrorData> {
+    let Some(m) = meta else {
+        return Err(ErrorData::invalid_request(
+            String::from("caller identity required (missing _meta)"),
+            None,
+        ));
+    };
+    Ok(m.actor_id.clone())
 }
 
 /// Serialize a value to `CallToolResult::structured(json)`. Used for the
@@ -577,6 +1038,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -641,6 +1103,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();

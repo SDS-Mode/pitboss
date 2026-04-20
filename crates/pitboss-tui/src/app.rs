@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
-use crate::state::{AppSnapshot, AppState, Mode};
+use crate::state::{AppSnapshot, AppState, Mode, PaneFocus};
 use crate::watcher;
 
 // ---------------------------------------------------------------------------
@@ -303,9 +303,54 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
 }
 
 fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
+    // When the approval list pane is focused, Up/Down/Enter navigate it;
+    // Esc returns focus to the grid. All other keys fall through to the
+    // grid handler below so global shortcuts (q, ?, o, …) still work.
+    if state.pane_focus == PaneFocus::ApprovalList {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.approval_list.move_selection_down();
+                return Action::Continue;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.approval_list.move_selection_up();
+                return Action::Continue;
+            }
+            KeyCode::Enter => {
+                if let Some(item) = state.approval_list.current().cloned() {
+                    state.mode = Mode::ApprovalModal {
+                        request_id: item.id.to_string(),
+                        task_id: item.actor_path.clone(),
+                        summary: item.summary.clone(),
+                        plan: None,
+                        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+                        sub_mode: crate::state::ApprovalSubMode::Overview,
+                    };
+                }
+                return Action::Continue;
+            }
+            KeyCode::Esc => {
+                state.pane_focus = PaneFocus::Grid;
+                return Action::Continue;
+            }
+            _ => {}
+        }
+    }
+
     match code {
         // Quit
         KeyCode::Char('q') => return Action::Quit,
+
+        // Tab: cycle grouped-grid focus across containers (root → S1 → S2 → root…).
+        // Only meaningful for depth-2 runs; no-op cost for depth-1.
+        KeyCode::Tab => {
+            state.cycle_focus_to_next_subtree();
+        }
+
+        // Focus the approval list pane.
+        KeyCode::Char('a') => {
+            state.pane_focus = PaneFocus::ApprovalList;
+        }
 
         // Navigation
         KeyCode::Char('h') | KeyCode::Left => state.focus_left(),
@@ -318,6 +363,14 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
 
         // Run picker
         KeyCode::Char('o') => state.enter_picker(),
+
+        // Enter: toggle sub-tree collapse if a header is focused; otherwise snap-in.
+        KeyCode::Enter if state.focused_subtree_header() => {
+            if let Some(sublead_id) = state.focused_sublead_id() {
+                let cur = state.expanded.get(&sublead_id).copied().unwrap_or(true);
+                state.expanded.insert(sublead_id, !cur);
+            }
+        }
 
         // Snap-in: enter full-screen view for the focused tile.
         KeyCode::Enter => state.enter_detail(),
@@ -467,6 +520,7 @@ fn handle_picking_run(state: &mut AppState, code: KeyCode) -> Action {
 /// Apply a single control-socket event to the app state. Called for each event
 /// drained from the async-to-sync bridge channel once per event-loop tick.
 fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol::ControlEvent) {
+    use crate::state::SubtreeView;
     use pitboss_cli::control::protocol::ControlEvent as E;
     match ev {
         E::ApprovalRequest {
@@ -503,6 +557,30 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
                     )
                 })
                 .collect();
+        }
+        // Sub-lead lifecycle: create/destroy grouped-grid containers.
+        E::SubleadSpawned {
+            sublead_id,
+            budget_usd,
+            read_down,
+            ..
+        } => {
+            state.subtrees.insert(
+                sublead_id.clone(),
+                SubtreeView {
+                    workers: std::collections::HashMap::new(),
+                    spent_usd: 0.0,
+                    budget_usd,
+                    pending_approvals: 0,
+                    read_down,
+                },
+            );
+            // Expand by default on spawn.
+            state.expanded.insert(sublead_id, true);
+        }
+        E::SubleadTerminated { sublead_id, .. } => {
+            state.subtrees.remove(&sublead_id);
+            state.expanded.remove(&sublead_id);
         }
         _ => {}
     }
@@ -699,6 +777,10 @@ fn send_approve(
     comment: Option<String>,
     edited_summary: Option<String>,
 ) {
+    // When rejecting, forward the comment text also via the `reason` field
+    // introduced in Task 4.3 so the requesting actor receives the rejection
+    // rationale in `ApprovalResponse.reason`.
+    let reason = if approved { None } else { comment.clone() };
     spawn_control_op(
         state,
         pitboss_cli::control::protocol::ControlOp::Approve {
@@ -706,6 +788,7 @@ fn send_approve(
             approved,
             comment,
             edited_summary,
+            reason,
         },
     );
 }

@@ -8,7 +8,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use fake_mcp_client::FakeMcpClient;
-use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState};
+use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
 use pitboss_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
 use pitboss_cli::manifest::schema::{Effort, WorktreeCleanup};
 use pitboss_cli::mcp::{socket_path_for_run, McpServer};
@@ -35,6 +35,11 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
@@ -51,6 +56,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -224,3 +230,86 @@ async fn mcp_spawn_while_draining_returns_error() {
 // `e2e_lead_propose_plan_gate_unblocks_spawn`,
 // `e2e_lead_through_mcp_bridge_injects_meta`, and others). The empty
 // placeholder test has been removed.
+
+#[tokio::test]
+async fn wait_actor_alias_resolves_worker_id() {
+    use pitboss_core::store::{TaskRecord, TaskStatus};
+    use std::time::Duration;
+
+    let (_dir, state) = mk_state();
+    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let spawn_result = client
+        .call_tool(
+            "spawn_worker",
+            json!({"prompt": "p", "model": "claude-haiku-4-5"}),
+        )
+        .await
+        .unwrap();
+    let worker_id = spawn_result["task_id"].as_str().unwrap().to_string();
+    assert!(worker_id.starts_with("worker-"));
+
+    // Spawn a task to mark the worker Done after a brief delay, simulating
+    // actual completion. This allows wait_actor to unblock.
+    let state_clone = state.clone();
+    let worker_id_clone = worker_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let rec = TaskRecord {
+            task_id: worker_id_clone.clone(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 42,
+            worktree_path: None,
+            log_path: std::path::PathBuf::new(),
+            token_usage: Default::default(),
+            claude_session_id: None,
+            final_message_preview: Some("ok".into()),
+            parent_task_id: Some("lead".into()),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+        };
+        let mut w = state_clone.workers.write().await;
+        w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
+        let _ = state_clone.done_tx.send(worker_id_clone);
+    });
+
+    // wait_actor should accept a worker id (back-compat path) and
+    // resolve identically to wait_for_worker.
+    let result = client
+        .call_tool(
+            "wait_actor",
+            json!({"actor_id": worker_id, "timeout_secs": 5}),
+        )
+        .await;
+    assert!(result.is_ok(), "wait_actor should accept worker actor_ids");
+
+    client.close().await.unwrap();
+}
+
+#[test]
+fn mcp_bridge_accepts_sublead_role_in_meta() {
+    use pitboss_cli::mcp::bridge::inject_meta;
+    use serde_json::json;
+
+    let mut request = json!({
+        "method": "tools/call",
+        "params": { "name": "spawn_worker", "arguments": {} }
+    });
+    inject_meta(&mut request, "sublead-1", "sublead");
+    let meta = request
+        .pointer("/params/arguments/_meta")
+        .expect("_meta should be injected at params.arguments._meta");
+    assert_eq!(meta["actor_id"], "sublead-1");
+    assert_eq!(meta["actor_role"], "sublead");
+}

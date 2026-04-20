@@ -49,6 +49,7 @@ async fn pause_op_writes_events_jsonl() {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -117,6 +118,118 @@ async fn pause_op_writes_events_jsonl() {
 use pitboss_cli::mcp::approval::ApprovalBridge;
 
 #[tokio::test]
+async fn control_event_carries_actor_path() {
+    use pitboss_cli::control::protocol::{ControlEvent, EventEnvelope};
+    use pitboss_cli::dispatch::actor::ActorPath;
+
+    // Build an envelope wrapping an existing event with a deep actor path.
+    let envelope = EventEnvelope {
+        actor_path: ActorPath::new(["root", "S1", "W3"]),
+        event: ControlEvent::Superseded,
+    };
+
+    // Serialized form must contain the actor_path field and its segments.
+    let s = serde_json::to_string(&envelope).unwrap();
+    assert!(
+        s.contains("\"actor_path\""),
+        "actor_path must be present: {s}"
+    );
+    assert!(s.contains("root"), "root segment must appear: {s}");
+    assert!(s.contains("S1"), "S1 segment must appear: {s}");
+    assert!(s.contains("W3"), "W3 segment must appear: {s}");
+
+    // Round-trip must preserve the depth.
+    let back: EventEnvelope = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.actor_path.depth(), 3);
+}
+
+#[tokio::test]
+async fn sublead_spawned_event_emitted() {
+    use pitboss_cli::control::protocol::ControlEvent;
+
+    let event = ControlEvent::SubleadSpawned {
+        sublead_id: "S1".into(),
+        budget_usd: Some(5.0),
+        max_workers: Some(4),
+        read_down: false,
+    };
+    let s = serde_json::to_string(&event).unwrap();
+    // ControlEvent uses tag = "event", so the discriminator key is "event".
+    assert!(
+        s.contains("\"event\""),
+        "discriminator key must be 'event': {s}"
+    );
+    assert!(
+        s.contains("sublead_spawned"),
+        "variant name must appear: {s}"
+    );
+
+    // Round-trip.
+    let back: ControlEvent = serde_json::from_str(&s).unwrap();
+    assert!(
+        matches!(back, ControlEvent::SubleadSpawned { .. }),
+        "round-trip must yield SubleadSpawned"
+    );
+}
+
+#[tokio::test]
+async fn sublead_terminated_event_roundtrips() {
+    use pitboss_cli::control::protocol::ControlEvent;
+
+    let event = ControlEvent::SubleadTerminated {
+        sublead_id: "S1".into(),
+        spent_usd: 2.50,
+        unspent_usd: 2.50,
+        outcome: "success".into(),
+    };
+    let s = serde_json::to_string(&event).unwrap();
+    assert!(
+        s.contains("sublead_terminated"),
+        "variant name must appear: {s}"
+    );
+    assert!(s.contains("\"success\""), "outcome must appear: {s}");
+
+    let back: ControlEvent = serde_json::from_str(&s).unwrap();
+    match back {
+        ControlEvent::SubleadTerminated {
+            sublead_id,
+            spent_usd,
+            unspent_usd,
+            outcome,
+        } => {
+            assert_eq!(sublead_id, "S1");
+            assert!((spent_usd - 2.50).abs() < 1e-9);
+            assert!((unspent_usd - 2.50).abs() < 1e-9);
+            assert_eq!(outcome, "success");
+        }
+        other => panic!("expected SubleadTerminated, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_envelope_empty_actor_path_omitted_on_wire() {
+    use pitboss_cli::control::protocol::{ControlEvent, EventEnvelope};
+    use pitboss_cli::dispatch::actor::ActorPath;
+
+    // An envelope with an empty actor_path must serialize without the
+    // actor_path key (backward-compat: v0.5 clients parse unmodified events).
+    let envelope = EventEnvelope {
+        actor_path: ActorPath::default(),
+        event: ControlEvent::Superseded,
+    };
+    let s = serde_json::to_string(&envelope).unwrap();
+    assert!(
+        !s.contains("actor_path"),
+        "empty actor_path must be omitted: {s}"
+    );
+
+    // And it must still round-trip correctly.
+    let back: EventEnvelope = serde_json::from_str(&s).unwrap();
+    assert!(back.actor_path.is_empty());
+    assert!(matches!(back.event, ControlEvent::Superseded));
+}
+
+#[tokio::test]
 async fn block_policy_queue_drains_on_tui_connect() {
     use std::time::Duration;
 
@@ -137,6 +250,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -211,6 +325,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
             approved: true,
             comment: None,
             edited_summary: None,
+            reason: None,
         })
         .await
         .unwrap();
@@ -244,6 +359,7 @@ async fn auto_approve_policy_responds_without_tui() {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -299,6 +415,7 @@ async fn auto_reject_policy_responds_without_tui() {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -362,6 +479,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: true,
+        approval_rules: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -427,6 +545,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
                     rollback: Some("drop worktrees; nothing committed".into()),
                 },
                 timeout_secs: Some(5),
+                ..Default::default()
             },
         )
         .await
@@ -467,6 +586,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
             approved: true,
             comment: None,
             edited_summary: None,
+            reason: None,
         })
         .await
         .unwrap();

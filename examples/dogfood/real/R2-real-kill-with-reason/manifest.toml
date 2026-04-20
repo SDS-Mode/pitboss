@@ -1,0 +1,37 @@
+# R2 — Real-claude smoke: root lead adapts after worker is killed-with-reason
+#
+# This manifest is driven by a real claude-haiku-4-5 model session.
+# It proves that:
+#   1. The root lead (real claude) can spawn a worker via spawn_worker
+#   2. When that worker is killed with a corrective reason, the synthetic
+#      [SYSTEM] reprompt is injected into the lead's session
+#   3. The lead's next turn visibly references the kill reason (e.g. "CSV",
+#      "format", "adjust") showing LLM-adaptive replanning
+#
+# NOTE: This manifest is designed for R2 which requires a side-channel
+# operator to cancel a worker mid-flight with a reason. The manifest
+# itself sets up a lead that spawns a worker and waits — the test drives
+# the cancel_worker call externally.
+#
+# Cost: ~$0.10-$0.20 per run (haiku, two tool-call round-trips)
+# Prerequisites: ANTHROPIC_API_KEY set, `claude` in PATH
+
+[run]
+max_parallel = 4
+
+[lead]
+prompt = """
+You are coordinating a data-collection task. Your job:
+
+1. Call spawn_worker with the prompt: "Collect sample data and output the results as JSON to stdout."
+2. Wait for the worker using wait_actor (use a 30 second timeout).
+3. After the worker completes or is cancelled, summarize what happened.
+
+IMPORTANT: If a worker is cancelled and you receive a [SYSTEM] message explaining the reason,
+read the reason carefully and adjust your plan accordingly. Mention the specific reason in your
+summary so the operator knows you understood it.
+
+Start by spawning the worker now.
+"""
+model = "claude-haiku-4-5"
+timeout_secs = 120

@@ -44,6 +44,20 @@ impl DiscordSink {
                 );
                 ("🟡 Pitboss approval requested".to_string(), desc)
             }
+            PitbossEvent::ApprovalPending {
+                request_id,
+                task_id,
+                summary,
+            } => {
+                let desc = format!(
+                    "**Request:** {}\n**Task:** {}\n**Summary:** {}",
+                    request_id, task_id, summary
+                );
+                (
+                    "⏳ Pitboss approval pending operator action".to_string(),
+                    desc,
+                )
+            }
             PitbossEvent::RunFinished {
                 run_id,
                 tasks_total,

@@ -35,6 +35,11 @@ pub enum PitbossEvent {
         task_id: String,
         summary: String,
     },
+    ApprovalPending {
+        request_id: String,
+        task_id: String,
+        summary: String,
+    },
     RunFinished {
         run_id: String,
         tasks_total: usize,
@@ -55,6 +60,7 @@ impl PitbossEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             PitbossEvent::ApprovalRequest { .. } => "approval_request",
+            PitbossEvent::ApprovalPending { .. } => "approval_pending",
             PitbossEvent::RunFinished { .. } => "run_finished",
             PitbossEvent::BudgetExceeded { .. } => "budget_exceeded",
         }
@@ -80,6 +86,7 @@ impl NotificationEnvelope {
     pub fn new(run_id: &str, severity: Severity, event: PitbossEvent, ts: DateTime<Utc>) -> Self {
         let discriminator = match &event {
             PitbossEvent::ApprovalRequest { request_id, .. } => Some(request_id.as_str()),
+            PitbossEvent::ApprovalPending { request_id, .. } => Some(request_id.as_str()),
             PitbossEvent::RunFinished { .. } => None,
             PitbossEvent::BudgetExceeded { .. } => Some("first"),
         };
@@ -318,5 +325,33 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(env.dedup_key, "run-1:approval_request:req-9");
+    }
+
+    #[test]
+    fn pitboss_event_approval_pending_roundtrip() {
+        let ev = PitbossEvent::ApprovalPending {
+            request_id: "req-1".into(),
+            task_id: "w-1".into(),
+            summary: "spawn 3 workers".into(),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"kind\":\"approval_pending\""));
+        assert!(s.contains("\"request_id\":\"req-1\""));
+    }
+
+    #[test]
+    fn notification_envelope_approval_pending_dedup_key() {
+        use chrono::Utc;
+        let env = NotificationEnvelope::new(
+            "run-1",
+            Severity::Warning,
+            PitbossEvent::ApprovalPending {
+                request_id: "req-5".into(),
+                task_id: "lead".into(),
+                summary: "enqueued approval".into(),
+            },
+            Utc::now(),
+        );
+        assert_eq!(env.dedup_key, "run-1:approval_pending:req-5");
     }
 }

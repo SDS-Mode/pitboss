@@ -414,6 +414,11 @@ mod tests {
                 use_worktree: false,
                 env: Default::default(),
                 resume_session_id: None,
+                allow_subleads: false,
+                max_subleads: None,
+                max_sublead_budget_usd: None,
+                max_workers_across_tree: None,
+                sublead_defaults: None,
             }),
             max_workers: Some(4),
             budget_usd: Some(5.0),
@@ -422,6 +427,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -509,6 +515,11 @@ mod tests {
                 use_worktree: true,
                 env: Default::default(),
                 resume_session_id: None,
+                allow_subleads: false,
+                max_subleads: None,
+                max_sublead_budget_usd: None,
+                max_workers_across_tree: None,
+                sublead_defaults: None,
             }),
             max_workers: Some(4),
             budget_usd: Some(5.0),
@@ -517,6 +528,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         std::fs::write(
             run_dir.join("resolved.json"),

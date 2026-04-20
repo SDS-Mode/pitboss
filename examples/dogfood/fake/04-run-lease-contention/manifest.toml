@@ -1,0 +1,22 @@
+# Reference manifest for dogfood spotlight #04: run-global lease contention.
+#
+# NOTE: this spotlight is verified via an in-process integration test
+# (cargo test --test dogfood_fake_flows dogfood_run_lease_contention),
+# not by running this manifest directly. The manifest documents what the
+# scenario would look like as a real depth-2 dispatch.
+#
+# Scenario: an operator needs multiple sub-leads to coordinate exclusive access
+# to a shared filesystem resource (output.json). S1 acquires the lease first;
+# S2 is blocked with S1 named as holder. S1 releases; S2 acquires.
+
+[run]
+max_parallel = 8
+
+[lead]
+prompt = "Spawn two sub-leads to coordinate exclusive write access to output.json via run_lease_acquire/release."
+model = "claude-haiku-4-5"
+budget_usd = 10.00
+max_workers = 8
+allow_subleads = true
+max_subleads = 2
+max_sublead_budget_usd = 4.00

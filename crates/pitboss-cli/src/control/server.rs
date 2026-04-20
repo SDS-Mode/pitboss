@@ -742,6 +742,7 @@ async fn dispatch_op(
             approved,
             comment,
             edited_summary,
+            reason,
         } => {
             let tx = state.approval_bridge.lock().await.remove(&request_id);
             if let Some(tx) = tx {
@@ -750,6 +751,7 @@ async fn dispatch_op(
                     approved,
                     comment,
                     edited_summary,
+                    reason,
                 });
                 // Write an approval_response event + bump counters so the
                 // control-socket path produces the same audit trail as
@@ -824,6 +826,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::schema::{Defaults, Effort, Lead, Manifest, RunConfig, Task, Template, WorktreeCleanup};
+use super::schema::{
+    Defaults, Effort, Lead, LeadSpec, Manifest, RunConfig, SingleLeadManifest, SubleadDefaultsSpec,
+    Task, Template, WorktreeCleanup,
+};
 
 /// Fully resolved task ready for dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +46,38 @@ pub struct ResolvedLead {
     /// session. Populated by `build_resume_hierarchical`; `None` for fresh runs.
     #[serde(default)]
     pub resume_session_id: Option<String>,
+
+    // ── v0.6 depth-2 cap fields ──────────────────────────────────────────────
+    /// When true, `spawn_sublead` is included in the root lead's MCP toolset.
+    /// Default false preserves v0.5 behavior.
+    #[serde(default)]
+    pub allow_subleads: bool,
+
+    /// Hard cap on total live sub-leads under this root.
+    #[serde(default)]
+    pub max_subleads: Option<u32>,
+
+    /// Hard cap on per-sub-lead budget envelope (USD).
+    #[serde(default)]
+    pub max_sublead_budget_usd: Option<f64>,
+
+    /// Hard cap on total live workers across the entire tree
+    /// (root-level workers + all sub-tree workers).
+    #[serde(default)]
+    pub max_workers_across_tree: Option<u32>,
+
+    /// Optional defaults applied when `spawn_sublead` omits a param.
+    #[serde(default)]
+    pub sublead_defaults: Option<SubleadDefaults>,
+}
+
+/// v0.6: resolved defaults for sub-lead spawn requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubleadDefaults {
+    pub budget_usd: Option<f64>,
+    pub max_workers: Option<u32>,
+    pub lead_timeout_secs: Option<u64>,
+    pub read_down: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +105,10 @@ pub struct ResolvedManifest {
     // plan submitted via the `propose_plan` MCP tool.
     #[serde(default)]
     pub require_plan_approval: bool,
+    // NEW in v0.6 — declarative approval policy rules resolved from
+    // [[approval_policy]] manifest blocks. Empty vec means no policy.
+    #[serde(default)]
+    pub approval_rules: Vec<crate::mcp::policy::ApprovalRule>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -115,6 +154,13 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         crate::notify::config::apply_env_substitution(cfg)?;
     }
 
+    // Resolve [[approval_policy]] TOML specs into typed ApprovalRule values.
+    let approval_rules = manifest
+        .approval_policy_rules
+        .iter()
+        .map(resolve_approval_rule)
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(ResolvedManifest {
         max_parallel,
         halt_on_failure: manifest.run.halt_on_failure,
@@ -130,6 +176,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         notifications,
         dump_shared_store: manifest.run.dump_shared_store,
         require_plan_approval: manifest.run.require_plan_approval,
+        approval_rules,
     })
 }
 
@@ -164,6 +211,13 @@ fn resolve_lead(lead: &Lead, defaults: &Defaults, run: &RunConfig) -> Result<Res
         use_worktree: lead.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
         resume_session_id: None,
+        // v0.6 depth-2 fields: not present in [[lead]] array format; default to
+        // off/None so existing v0.5 manifests behave identically.
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     })
 }
 
@@ -214,6 +268,112 @@ fn resolve_task(
     })
 }
 
+/// Resolve a v0.6 `SingleLeadManifest` (parsed from `[lead]` single-table TOML)
+/// into a `ResolvedManifest`. Used by `load_manifest_from_str`.
+///
+/// Unlike `resolve`, this path does NOT call `validate` so it can be used
+/// in unit tests that don't set up real git work-trees.
+pub fn resolve_single_lead(
+    manifest: SingleLeadManifest,
+    env_max_parallel: Option<u32>,
+) -> Result<ResolvedManifest> {
+    let lead = if let Some(spec) = manifest.lead {
+        Some(resolve_lead_spec(&spec, &manifest.run)?)
+    } else {
+        None
+    };
+
+    let max_parallel = manifest
+        .run
+        .max_parallel
+        .or(env_max_parallel)
+        .unwrap_or(DEFAULT_MAX_PARALLEL);
+
+    let run_dir = manifest.run.run_dir.unwrap_or_else(default_run_dir);
+
+    let mut notifications = manifest.notification.clone();
+    for cfg in &mut notifications {
+        crate::notify::config::apply_env_substitution(cfg)?;
+    }
+
+    let approval_rules = manifest
+        .approval_policy_rules
+        .iter()
+        .map(resolve_approval_rule)
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ResolvedManifest {
+        max_parallel,
+        halt_on_failure: manifest.run.halt_on_failure,
+        run_dir,
+        worktree_cleanup: manifest.run.worktree_cleanup,
+        emit_event_stream: manifest.run.emit_event_stream,
+        tasks: vec![],
+        lead,
+        // In the [lead] single-table format, budget_usd / max_workers /
+        // lead_timeout_secs live ON the [lead] table rather than [run].
+        // ResolvedManifest top-level fields are left None here; callers
+        // that need the per-lead values read from ResolvedLead directly.
+        max_workers: manifest.run.max_workers,
+        budget_usd: manifest.run.budget_usd,
+        lead_timeout_secs: manifest.run.lead_timeout_secs,
+        approval_policy: manifest.run.approval_policy,
+        notifications,
+        dump_shared_store: manifest.run.dump_shared_store,
+        require_plan_approval: manifest.run.require_plan_approval,
+        approval_rules,
+    })
+}
+
+/// Resolve a `LeadSpec` (single-table `[lead]`) into a `ResolvedLead`.
+fn resolve_lead_spec(spec: &LeadSpec, run: &RunConfig) -> Result<ResolvedLead> {
+    let timeout_secs = spec
+        .timeout_secs
+        .or(run.lead_timeout_secs)
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+
+    let sublead_defaults = spec.sublead_defaults.as_ref().map(resolve_sublead_defaults);
+
+    Ok(ResolvedLead {
+        // id and directory are not present in the [lead] single-table format
+        // (they come from the runtime context). Default to the process CWD so
+        // the lead spawns in the same directory the operator ran pitboss from;
+        // callers of load_manifest_from_str that need a different directory
+        // can override it after resolution.
+        id: String::new(),
+        directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        prompt: spec.prompt.clone().unwrap_or_default(),
+        branch: None,
+        model: spec
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        effort: spec.effort.unwrap_or(DEFAULT_EFFORT),
+        tools: spec.tools.clone().unwrap_or_else(default_tools),
+        timeout_secs,
+        use_worktree: spec.use_worktree.unwrap_or(true),
+        env: spec.env.clone(),
+        resume_session_id: None,
+        // v0.6 depth-2 fields:
+        allow_subleads: spec.allow_subleads,
+        max_subleads: spec.max_subleads,
+        max_sublead_budget_usd: spec.max_sublead_budget_usd,
+        max_workers_across_tree: spec.max_workers_across_tree,
+        sublead_defaults,
+    })
+}
+
+/// Convert a `SubleadDefaultsSpec` (TOML deserialized) into a `SubleadDefaults`
+/// (runtime resolved).
+fn resolve_sublead_defaults(spec: &SubleadDefaultsSpec) -> SubleadDefaults {
+    SubleadDefaults {
+        budget_usd: spec.budget_usd,
+        max_workers: spec.max_workers,
+        lead_timeout_secs: spec.lead_timeout_secs,
+        read_down: spec.read_down,
+    }
+}
+
 fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> {
     let mut out = String::with_capacity(template.len());
     let mut iter = template.chars().peekable();
@@ -255,6 +415,47 @@ fn default_run_dir() -> PathBuf {
 
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Convert a TOML `ApprovalRuleSpec` into a typed `ApprovalRule`.
+/// Returns an error if `action` or `match.category` is an unrecognised string.
+fn resolve_approval_rule(
+    spec: &super::schema::ApprovalRuleSpec,
+) -> Result<crate::mcp::policy::ApprovalRule> {
+    use crate::mcp::approval::ApprovalCategory;
+    use crate::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule};
+
+    let action = match spec.action.as_str() {
+        "auto_approve" => ApprovalAction::AutoApprove,
+        "auto_reject" => ApprovalAction::AutoReject,
+        "block" => ApprovalAction::Block,
+        other => anyhow::bail!(
+            "unknown approval_policy action '{}'; expected auto_approve, auto_reject, or block",
+            other
+        ),
+    };
+
+    let category = match spec.match_clause.category.as_deref() {
+        None => None,
+        Some("tool_use") => Some(ApprovalCategory::ToolUse),
+        Some("plan") => Some(ApprovalCategory::Plan),
+        Some("cost") => Some(ApprovalCategory::Cost),
+        Some("other") => Some(ApprovalCategory::Other),
+        Some(other) => anyhow::bail!(
+            "unknown approval_policy match.category '{}'; expected tool_use, plan, cost, or other",
+            other
+        ),
+    };
+
+    Ok(ApprovalRule {
+        r#match: ApprovalMatch {
+            actor: spec.match_clause.actor.clone(),
+            category,
+            tool_name: spec.match_clause.tool_name.clone(),
+            cost_over: spec.match_clause.cost_over,
+        },
+        action,
+    })
 }
 
 #[cfg(test)]
@@ -484,6 +685,70 @@ prompt = "p"
         assert_eq!(
             r.notifications[0].url.as_deref(),
             Some("https://h.example/x")
+        );
+    }
+
+    /// TOML round-trip for [[approval_policy]] blocks: verifies that the
+    /// `#[serde(rename = "match")]` annotation on `match_clause` is correct,
+    /// that the action and match fields are parsed, and that the resolved
+    /// `ResolvedManifest.approval_rules` has the expected content.
+    ///
+    /// A typo in the rename attribute or a regression in `resolve_approval_rule`
+    /// would cause this test to fail even though the unit tests in policy.rs
+    /// and schema.rs might pass.
+    #[test]
+    fn toml_approval_policy_round_trips_through_resolve() {
+        use crate::mcp::approval::ApprovalCategory;
+        use crate::mcp::policy::ApprovalAction;
+
+        let m = man(r#"
+[run]
+max_parallel = 4
+
+[[lead]]
+id = "root"
+directory = "/tmp"
+prompt = "coordinate"
+model = "claude-haiku-4-5"
+
+[[approval_policy]]
+action = "auto_approve"
+[approval_policy.match]
+actor = "root→S1"
+category = "tool_use"
+"#);
+        let r = resolve(m, None).unwrap();
+
+        assert_eq!(
+            r.approval_rules.len(),
+            1,
+            "expected one approval rule, got: {:?}",
+            r.approval_rules
+        );
+
+        let rule = &r.approval_rules[0];
+        assert_eq!(
+            rule.action,
+            ApprovalAction::AutoApprove,
+            "action should be AutoApprove"
+        );
+        assert_eq!(
+            rule.r#match.actor.as_deref(),
+            Some("root→S1"),
+            "match.actor should be 'root→S1'"
+        );
+        assert_eq!(
+            rule.r#match.category,
+            Some(ApprovalCategory::ToolUse),
+            "match.category should be ToolUse"
+        );
+        assert!(
+            rule.r#match.tool_name.is_none(),
+            "match.tool_name should be absent"
+        );
+        assert!(
+            rule.r#match.cost_over.is_none(),
+            "match.cost_over should be absent"
         );
     }
 }

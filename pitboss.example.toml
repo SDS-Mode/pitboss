@@ -163,3 +163,35 @@ via mcp__pitboss__kv_get and print a combined report of all three echoes.
 
 Then exit.
 """
+
+# ─── Depth-2 example (v0.6+) ───
+# Uncomment to enable a root lead that may spawn sub-leads.
+#
+# [lead]
+# prompt = """
+# You are coordinating a multi-phase project. For each independent
+# phase, spawn a sub-lead with its own context and budget.
+# """
+# model = "claude-sonnet-4-6"
+# budget_usd = 20.00
+# max_workers = 20
+# allow_subleads = true
+# max_subleads = 4
+# max_sublead_budget_usd = 5.00
+# max_workers_across_tree = 16
+#
+# [lead.sublead_defaults]
+# budget_usd = 2.00
+# max_workers = 4
+# lead_timeout_secs = 1800
+# read_down = false
+#
+# # Auto-approve all file-read tool calls within sub-tree S1
+# [[approval_policy]]
+# match = { actor = "root→S1", category = "tool_use", tool_name = "Read" }
+# action = "auto_approve"
+#
+# # Force explicit approval for any cost-category event over $0.50
+# [[approval_policy]]
+# match = { category = "cost", cost_over = 0.50 }
+# action = "block"

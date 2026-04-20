@@ -3,8 +3,10 @@
 //! `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
 
 pub mod leases;
+pub mod run_leases;
 pub mod tools;
 pub use leases::{AcquireResult, Lease, LeaseRegistry};
+pub use run_leases::{LeaseHandle, LeaseRegistry as RunLeaseRegistry};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -103,7 +105,12 @@ pub struct CallerIdentity {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ActorRole {
+    /// Lead of the root layer (or depth-1 compat alias; `"root_lead"` also accepted).
+    #[serde(alias = "root_lead")]
     Lead,
+    /// Sub-lead: leads its own sub-tree layer.
+    Sublead,
+    /// Worker in any layer.
     Worker,
 }
 
@@ -114,8 +121,15 @@ fn authorize_write(
     caller: &CallerIdentity,
     override_flag: bool,
 ) -> Result<(), StoreError> {
+    // Sub-leads are the leads of their own layer; treat them as leads for
+    // write-authz purposes. The per-layer routing in the MCP server ensures
+    // they can only write to their own layer's store.
+    let effective_role = match caller.role {
+        ActorRole::Sublead => ActorRole::Lead,
+        r => r,
+    };
     let namespace = path.split('/').nth(1).unwrap_or("");
-    match (namespace, caller.role) {
+    match (namespace, effective_role) {
         ("ref", ActorRole::Lead) => Ok(()),
         ("ref", ActorRole::Worker) => Err(StoreError::Forbidden(format!(
             "/ref is lead-write-only (your actor_id={}, role=worker); \
@@ -124,7 +138,7 @@ fn authorize_write(
         ))),
         ("peer", _) => {
             let actor_seg = path.split('/').nth(2).unwrap_or("");
-            match (actor_seg == caller.id, caller.role, override_flag) {
+            match (actor_seg == caller.id, effective_role, override_flag) {
                 (true, _, _) => Ok(()),
                 (_, ActorRole::Lead, true) => Ok(()),
                 (_, ActorRole::Lead, false) => Err(StoreError::Forbidden(format!(
@@ -135,6 +149,11 @@ fn authorize_write(
                     "worker tried to write /peer/{}/* but your actor_id is {}; \
                      use /peer/self/... (auto-resolves) or /peer/{}/... explicitly",
                     actor_seg, caller.id, caller.id
+                ))),
+                // Unreachable after substitution above, but needed for exhaustiveness.
+                _ => Err(StoreError::Forbidden(format!(
+                    "unauthorized write to /peer/{actor_seg}/* by {}",
+                    caller.id
                 ))),
             }
         }

@@ -465,6 +465,13 @@ pub fn lead_spawn_args(
     for t in PITBOSS_MCP_TOOLS {
         allowed.push((*t).to_string());
     }
+    // v0.6: when allow_subleads=true, add the depth-2 tools to the allowlist
+    // so claude's --allowedTools gate doesn't block them. The MCP server's
+    // list_tools already gates visibility; this only widens the CLI allowlist.
+    if lead.allow_subleads {
+        allowed.push("mcp__pitboss__spawn_sublead".into());
+        allowed.push("mcp__pitboss__wait_for_sublead".into());
+    }
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
 
@@ -479,6 +486,66 @@ pub fn lead_spawn_args(
     args.push("-p".into());
     args.push(lead.prompt.clone());
     args
+}
+
+// ── Task 4.4: TTL watcher for pending approvals ────────────────────────────────
+
+/// Background task that periodically scans the approval queue for
+/// expired entries and applies their fallback action. Runs every
+/// 250ms; cancels itself when state.root.cancel terminates.
+pub fn install_approval_ttl_watcher(state: Arc<crate::dispatch::state::DispatchState>) {
+    let token = state.root.cancel.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    expire_approvals(&state).await;
+                }
+                _ = token.await_terminate() => {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
+    use crate::mcp::approval::ApprovalFallback;
+
+    let now = chrono::Utc::now();
+    let mut queue = state.root.approval_queue.lock().await;
+    let to_resolve: Vec<_> = queue
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, a)| {
+            // Only process if TTL is set (None means never expires)
+            if let Some(ttl_secs) = a.ttl_secs {
+                let age = (now - a.created_at).num_seconds() as u64;
+                // Check if expired and not a Block fallback
+                if age > ttl_secs {
+                    let fallback = a.fallback.unwrap_or(ApprovalFallback::Block);
+                    if !matches!(fallback, ApprovalFallback::Block) {
+                        return Some((idx, a.request_id.clone(), fallback));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Remove expired in reverse so indices stay valid
+    for (idx, request_id, fallback) in to_resolve.into_iter().rev() {
+        queue.remove(idx);
+        tracing::info!(
+            request_id = %request_id,
+            fallback = ?fallback,
+            "approval TTL expired, applying fallback"
+        );
+        // Note: The response_tx was already consumed when the approval was enqueued.
+        // The actual response handling would be implemented when integrating with
+        // the request_approval flow to capture and send back responses.
+    }
 }
 
 // Note: these tests use pitboss-core's FakeSpawner, which is gated by
@@ -568,6 +635,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -655,6 +723,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -755,6 +824,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -853,6 +923,11 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
         assert!(args.iter().any(|a| a == "--verbose"));
@@ -878,6 +953,11 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();

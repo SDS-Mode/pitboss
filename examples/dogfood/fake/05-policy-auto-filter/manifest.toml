@@ -1,0 +1,39 @@
+# Reference manifest for dogfood spotlight #05: approval policy auto-filter.
+#
+# NOTE: this spotlight is verified via an in-process integration test
+# (cargo test --test dogfood_fake_flows dogfood_policy_auto_filter),
+# not by running this manifest directly. The manifest is documentation for
+# the reader: this is what the scenario looks like as a depth-2 dispatch.
+#
+# Scenario: operator runs a depth-2 dispatch and configures a policy to
+# auto-approve routine tool-use from sub-lead S1 while blocking all plan
+# approvals, reducing approval noise at scale. The test proves:
+#   1. S1's tool-use request is auto-approved silently (no operator queue entry).
+#   2. S2's identical request falls through to operator (policy matched S1 only).
+#   3. S1's plan approval is queued for operator (Rule blocks all Plan category).
+#   4. Operator approval queue only contains non-auto-approved requests (S2 tool-use, S1 plan).
+
+[run]
+max_parallel = 8
+
+[lead]
+prompt = "Spawn two sub-leads (S1 and S2). S1 will make routine tool-use approvals; S2 will make the same requests. The operator has configured a policy that auto-approves S1's tool-use but requires operator review for all plan approvals."
+model = "claude-haiku-4-5"
+budget_usd = 10.00
+max_workers = 8
+allow_subleads = true
+max_subleads = 2
+max_sublead_budget_usd = 4.00
+
+# ── Policy rules for approval auto-filtering ────────────────────────────
+# The test uses in-code equivalent, but this documents the TOML shape.
+
+# Rule 1: Auto-approve all tool-use from root→S1 (trust S1's routine work)
+[[approval_policy]]
+# match = { actor = "root→<actual-S1-id>", category = "tool_use" }
+action = "auto_approve"
+
+# Rule 2: Block all plan-category approvals (always require operator review)
+[[approval_policy]]
+# match = { category = "plan" }
+action = "block"

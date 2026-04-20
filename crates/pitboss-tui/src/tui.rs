@@ -16,6 +16,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use crate::grouped_grid::SubtreeContainer;
 use crate::state::{AppState, Mode, TileStatus};
 use crate::theme;
 use pitboss_core::store::TaskStatus;
@@ -355,17 +356,27 @@ fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    // Split body vertically: grid | log pane
+    // Split body horizontally: grid (70%) | approval pane (30%)
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+
+    let grid_area = h_chunks[0];
+    let approval_area = h_chunks[1];
+
+    // Split grid area vertically: tile grid | log pane
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(100 - LOG_PANE_PCT),
             Constraint::Percentage(LOG_PANE_PCT),
         ])
-        .split(area);
+        .split(grid_area);
 
     render_tile_grid(frame, body_chunks[0], state);
     render_focus_log(frame, body_chunks[1], state);
+    render_approval_list_pane(frame, approval_area, state);
 }
 
 // ---------------------------------------------------------------------------
@@ -374,19 +385,35 @@ fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
     // Wipe any prior-frame content in the grid area before drawing tiles.
-    // Partial final rows would otherwise retain text from an earlier
-    // render, causing visible character leakage (fix for #129).
     frame.render_widget(Clear, area);
+
+    // If there are no sub-trees this is a depth-1 run — use the original
+    // flat grid layout so v0.5 behavior is preserved exactly.
+    if state.subtrees.is_empty() {
+        render_flat_tile_grid(frame, area, state);
+        return;
+    }
+
+    // Depth-2: grouped layout.
+    // Top section: root-layer tiles (those with no parent_task_id that are
+    // not sub-leads themselves). Then one container per sub-tree.
+    render_grouped_tile_grid(frame, area, state);
+}
+
+/// Original flat grid used for depth-1 runs (no sub-trees). Behavior
+/// is identical to v0.5 so existing tests and visual output are preserved.
+fn render_flat_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
     let n = state.tasks.len();
+    if n == 0 {
+        return;
+    }
     let cols = TILE_COLS.min(n);
     let rows = n.div_ceil(cols);
 
-    // Build column constraints (equal width).
     let col_constraints: Vec<Constraint> = (0..cols)
         .map(|_| Constraint::Ratio(1, u32::try_from(cols).unwrap_or(1)))
         .collect();
 
-    // Build row constraints (equal height).
     let row_constraints: Vec<Constraint> = (0..rows)
         .map(|_| Constraint::Ratio(1, u32::try_from(rows).unwrap_or(1)))
         .collect();
@@ -396,8 +423,6 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
         .constraints(row_constraints)
         .split(area);
 
-    // Refresh the hit-test cache for mouse click → tile lookup. Cleared
-    // each render so it reflects the current layout even after a resize.
     let mut hit_rects: Vec<(usize, Rect)> = Vec::with_capacity(n);
 
     for row in 0..rows {
@@ -421,6 +446,314 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
     if let Ok(mut cache) = state.tile_hit_rects.lock() {
         *cache = hit_rects;
     }
+}
+
+/// Grouped tile grid for depth-2 runs:
+/// ```text
+/// ┌── Root layer ─────────────────────────────────────┐
+/// │  [root-worker-1]  [root-worker-2]                 │
+/// └───────────────────────────────────────────────────┘
+/// ┌─ S1 (▼) $2.30/$5 | 3 workers | ⚠ 1 approval ─────┐
+/// │  [W1.1]  [W1.2]  [W1.3]                           │
+/// └───────────────────────────────────────────────────┘
+/// ┌─ S2 (▶) $0.80/$5 | 2 workers [collapsed]  ───────┐
+/// └───────────────────────────────────────────────────┘
+/// ```
+fn render_grouped_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
+    let sublead_ids = state.sorted_sublead_ids();
+
+    // Identify root-layer tiles: those not belonging to any sub-tree.
+    let subtree_worker_ids: std::collections::HashSet<&str> = state
+        .subtrees
+        .values()
+        .flat_map(|v| v.workers.keys().map(String::as_str))
+        .collect();
+    // Sub-lead tiles themselves (the lead tile for each sub-tree) are also
+    // in state.tasks — include them in the root row since they're the entry
+    // point visible at the root level.
+    let root_tiles: Vec<usize> = state
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !subtree_worker_ids.contains(t.id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Build vertical constraints: 1 row per section.
+    // Root section height: tile rows (min 1 if root_tiles is non-empty).
+    let root_height = if root_tiles.is_empty() {
+        1u16
+    } else {
+        #[allow(clippy::cast_possible_truncation)]
+        let root_tile_rows = (root_tiles.len().div_ceil(4).max(1) as u16).max(1);
+        // Add 2 for the border block (top + bottom).
+        root_tile_rows + 2
+    };
+
+    let mut constraints: Vec<Constraint> = vec![Constraint::Length(root_height)];
+    let containers: Vec<SubtreeContainer> = sublead_ids
+        .iter()
+        .map(|id| {
+            let view = &state.subtrees[id];
+            let expanded = state.expanded.get(id).copied().unwrap_or(true);
+            SubtreeContainer {
+                sublead_id: id.as_str(),
+                view,
+                expanded,
+            }
+        })
+        .collect();
+
+    for c in &containers {
+        // +2 for border chrome (top + bottom lines of the Block).
+        let h = c.current_height() + 2;
+        constraints.push(Constraint::Length(h));
+    }
+    // Fill remainder so the layout doesn't leave junk below.
+    constraints.push(Constraint::Min(0));
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    let hit_rects: Vec<(usize, Rect)> = Vec::with_capacity(state.tasks.len());
+    let root_section_focused = state.focused_subtree_idx == 0;
+
+    // --- Root section ---
+    render_root_section(frame, sections[0], state, &root_tiles, root_section_focused);
+
+    // --- Sub-tree containers ---
+    for (i, container) in containers.iter().enumerate() {
+        let section_rect = sections[i + 1];
+        let header_focused = state.focused_subtree_idx == i + 1;
+        render_subtree_container(frame, section_rect, state, container, header_focused);
+    }
+
+    if let Ok(mut cache) = state.tile_hit_rects.lock() {
+        *cache = hit_rects;
+    }
+}
+
+/// Render the root-layer tile section (tasks not owned by any sub-tree).
+fn render_root_section(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    root_tile_indices: &[usize],
+    focused: bool,
+) {
+    let border_style = if focused {
+        theme::focused_border()
+    } else {
+        theme::idle_border()
+    };
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .title(" Root layer ")
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if root_tile_indices.is_empty() {
+        return;
+    }
+    let n = root_tile_indices.len();
+    let cols = TILE_COLS.min(n);
+    let rows = n.div_ceil(cols);
+    let col_constraints: Vec<Constraint> = (0..cols)
+        .map(|_| Constraint::Ratio(1, u32::try_from(cols).unwrap_or(1)))
+        .collect();
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, u32::try_from(rows).unwrap_or(1)))
+        .collect();
+    let rows_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(inner);
+
+    for row in 0..rows {
+        let cols_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints.clone())
+            .split(rows_layout[row]);
+        for col in 0..cols {
+            let local = row * cols + col;
+            if local >= n {
+                break;
+            }
+            let tile_idx = root_tile_indices[local];
+            let tile_focused = tile_idx == state.focus;
+            render_tile(frame, cols_layout[col], state, tile_idx, tile_focused);
+        }
+    }
+}
+
+/// Render a single sub-tree container (header + optional inner tile grid).
+fn render_subtree_container(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    container: &SubtreeContainer<'_>,
+    header_focused: bool,
+) {
+    let border_style = if header_focused {
+        theme::focused_border()
+    } else {
+        theme::idle_border()
+    };
+    let header_text = container.header_text();
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .title(header_text)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if !container.expanded || container.view.workers.is_empty() {
+        return;
+    }
+
+    // Render worker tiles inside the inner area.
+    let worker_ids: Vec<&str> = {
+        let mut ids: Vec<&str> = container.view.workers.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids
+    };
+    let n = worker_ids.len();
+    let cols = TILE_COLS.min(n);
+    let rows = n.div_ceil(cols);
+    let col_constraints: Vec<Constraint> = (0..cols)
+        .map(|_| Constraint::Ratio(1, u32::try_from(cols).unwrap_or(1)))
+        .collect();
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, u32::try_from(rows).unwrap_or(1)))
+        .collect();
+    let rows_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(inner);
+
+    for row in 0..rows {
+        let cols_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints.clone())
+            .split(rows_layout[row]);
+        for col in 0..cols {
+            let local = row * cols + col;
+            if local >= n {
+                break;
+            }
+            let worker_id = worker_ids[local];
+            if let Some(tile_state) = container.view.workers.get(worker_id) {
+                // Find the index in state.tasks for this worker (for focus highlighting).
+                let tile_idx = state.tasks.iter().position(|t| t.id == tile_state.id);
+                let tile_focused = tile_idx.is_some_and(|i| i == state.focus);
+                // Render using the tile_state from the subtree view.
+                render_subtree_worker_tile(
+                    frame,
+                    cols_layout[col],
+                    state,
+                    tile_state,
+                    tile_focused,
+                );
+            }
+        }
+    }
+}
+
+/// Render a worker tile that lives inside a sub-tree container.
+/// Uses the `TileState` from the `SubtreeView` rather than from `state.tasks`.
+fn render_subtree_worker_tile(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    tile: &crate::state::TileState,
+    focused: bool,
+) {
+    let (icon, icon_color) = status_icon(&tile.status);
+    let swatch_color = theme::model_family_color(tile.model.as_deref());
+    let border_style = if focused {
+        theme::focused_border()
+    } else {
+        theme::idle_border()
+    };
+    let title_spans = vec![
+        ratatui::text::Span::raw(" "),
+        ratatui::text::Span::styled(
+            "\u{258E}",
+            ratatui::style::Style::default().fg(swatch_color),
+        ),
+        ratatui::text::Span::raw(" "),
+        ratatui::text::Span::styled(
+            "\u{25B8}",
+            ratatui::style::Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+        ratatui::text::Span::raw(" "),
+        ratatui::text::Span::raw(tile.id.clone()),
+        ratatui::text::Span::raw(" "),
+    ];
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .title(ratatui::text::Line::from(title_spans))
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let status_label = status_label(&tile.status);
+    let duration_str = tile.duration_ms.map_or_else(
+        || "\u{2014}".to_string(),
+        |ms| format!("{:02}m{:02}s", ms / 60_000, (ms % 60_000) / 1000),
+    );
+    let cost_str = tile.model.as_deref().map_or_else(
+        || "\u{2014}".to_string(),
+        |model| {
+            let usage = pitboss_core::parser::TokenUsage {
+                input: tile.token_usage_input,
+                output: tile.token_usage_output,
+                cache_read: tile.cache_read,
+                cache_creation: tile.cache_creation,
+            };
+            pitboss_core::prices::fmt_cost(pitboss_core::prices::cost_usd(model, &usage))
+        },
+    );
+    let activity_line = state
+        .store_activity
+        .get(&tile.id)
+        .filter(|c| c.kv_ops > 0 || c.lease_ops > 0)
+        .map(|c| {
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!("kv:{} lease:{}", c.kv_ops, c.lease_ops),
+                theme::muted_style(),
+            ))
+        });
+    let mut lines = vec![
+        ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(icon, ratatui::style::Style::default().fg(icon_color)),
+            ratatui::text::Span::raw(" "),
+            ratatui::text::Span::styled(
+                status_label,
+                ratatui::style::Style::default().fg(icon_color),
+            ),
+        ]),
+        ratatui::text::Line::from(ratatui::text::Span::styled(
+            duration_str,
+            theme::secondary_style(),
+        )),
+        ratatui::text::Line::from(ratatui::text::Span::styled(
+            format!(
+                "in:{} out:{}",
+                tile.token_usage_input, tile.token_usage_output
+            ),
+            theme::muted_style(),
+        )),
+        ratatui::text::Line::from(ratatui::text::Span::styled(cost_str, theme::muted_style())),
+    ];
+    if let Some(line) = activity_line {
+        lines.push(line);
+    }
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
 }
 
 fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize, focused: bool) {
@@ -571,6 +904,63 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Approval list pane (right-rail, 30% width)
+// ---------------------------------------------------------------------------
+
+fn render_approval_list_pane(frame: &mut Frame, area: Rect, state: &AppState) {
+    use crate::state::PaneFocus;
+
+    let focused = state.pane_focus == PaneFocus::ApprovalList;
+    let border_style = if focused {
+        theme::focused_border()
+    } else {
+        theme::idle_border()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Pending Approvals [a] ")
+        .border_style(border_style);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.approval_list.items.is_empty() {
+        let msg = Paragraph::new("No pending approvals")
+            .style(theme::secondary_style())
+            .alignment(Alignment::Center);
+        frame.render_widget(msg, inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .approval_list
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let line = state.approval_list.line_for(item);
+            let style = if i == state.approval_list.selected_idx && focused {
+                Style::default()
+                    .fg(theme::OVERLAY_ACCENT_INFO)
+                    .add_modifier(Modifier::BOLD)
+            } else if i == state.approval_list.selected_idx {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                theme::primary_style()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.approval_list.selected_idx));
+
+    let list = List::new(items);
+    frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,7 +1595,7 @@ fn render_approval_modal(
         ApprovalSubMode::Rejecting { draft } => {
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Rejection comment — Ctrl+Enter to send  Esc cancel ");
+                .title(" Rejection reason (optional) — Ctrl+Enter to send  Esc cancel ");
             let para = Paragraph::new(draft.clone())
                 .block(block)
                 .wrap(Wrap { trim: false })
@@ -1384,6 +1774,11 @@ mod tests {
             store_activity: std::collections::HashMap::new(),
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
             picker_hit_rects: std::sync::Mutex::new(Vec::new()),
+            subtrees: std::collections::HashMap::new(),
+            expanded: std::collections::HashMap::new(),
+            focused_subtree_idx: 0,
+            pane_focus: crate::state::PaneFocus::Grid,
+            approval_list: crate::approval_list::ApprovalListState::default(),
         }
     }
 

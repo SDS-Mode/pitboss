@@ -13,6 +13,37 @@ use uuid::Uuid;
 
 use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse, DispatchState, QueuedApproval};
 
+// ── Rich approval-record types (Phase 4) ────────────────────────────────────
+
+/// Re-export of `mcp::tools::ApprovalPlan` so callers can refer to it from
+/// this module (keeps `dispatch::state::PendingApproval`'s plan field type
+/// in the same module as the other approval types).
+pub type ApprovalPlan = crate::mcp::tools::ApprovalPlan;
+
+/// Discriminator for what kind of action an approval covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalCategory {
+    ToolUse,
+    Plan,
+    Cost,
+    Other,
+}
+
+/// What happens when a `PendingApproval` exceeds its `ttl_secs` with no
+/// operator response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalFallback {
+    /// Treat as rejected when TTL elapses (safe default).
+    #[default]
+    AutoReject,
+    /// Treat as approved when TTL elapses (permissive — use with care).
+    AutoApprove,
+    /// Never auto-resolve; block until an operator acts (sticky).
+    Block,
+}
+
 #[derive(Debug, Error)]
 pub enum ApprovalError {
     #[error("approval request timed out")]
@@ -126,6 +157,7 @@ impl ApprovalBridge {
                         approved: true,
                         comment: None,
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 ApprovalPolicy::AutoReject => {
@@ -133,6 +165,7 @@ impl ApprovalBridge {
                         approved: false,
                         comment: Some("no operator available".into()),
                         edited_summary: None,
+                        reason: None,
                     });
                 }
                 ApprovalPolicy::Block => {
@@ -143,12 +176,30 @@ impl ApprovalBridge {
                         .await
                         .push_back(QueuedApproval {
                             request_id: request_id.clone(),
-                            task_id,
-                            summary,
+                            task_id: task_id.clone(),
+                            summary: summary.clone(),
                             plan,
                             kind,
                             responder: tx,
+                            ttl_secs: None, // v0.5 compat: no expiration by default
+                            fallback: None, // v0.5 compat: Block fallback
+                            created_at: chrono::Utc::now(),
                         });
+
+                    // Fire approval_pending notification
+                    if let Some(router) = self.state.notification_router.clone() {
+                        let envelope = crate::notify::NotificationEnvelope::new(
+                            &self.state.run_id.to_string(),
+                            crate::notify::Severity::Warning,
+                            crate::notify::PitbossEvent::ApprovalPending {
+                                request_id: request_id.clone(),
+                                task_id: task_id.clone(),
+                                summary: summary.clone(),
+                            },
+                            chrono::Utc::now(),
+                        );
+                        let _ = router.dispatch(envelope).await;
+                    }
                 }
             }
         }
@@ -242,6 +293,7 @@ mod tests {
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
+            approval_rules: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

@@ -9,6 +9,30 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::dispatch::actor::ActorPath;
+
+/// Wrapper that adds tree-lineage metadata to every outbound control-plane
+/// event. The `actor_path` field is omitted from the wire when the path is
+/// empty (`skip_serializing_if = "ActorPath::is_empty"`), which preserves
+/// exact backward-compatibility with v0.5 TUI clients that parse
+/// `ControlEvent` lines directly: their JSON remains unchanged.
+///
+/// v0.6+ TUI clients that understand `EventEnvelope` deserialize the full
+/// envelope; v0.5 clients that only understand `ControlEvent` can still
+/// parse the flattened event fields because `#[serde(flatten)]` inlines
+/// all `ControlEvent` fields into the same JSON object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    /// Tree path from root to the actor that produced this event.
+    /// Absent on the wire (and thus backward-compatible) when the path is
+    /// empty (e.g. run-level events with no actor context).
+    #[serde(default, skip_serializing_if = "ActorPath::is_empty")]
+    pub actor_path: ActorPath,
+    /// The actual event payload, inlined into the same JSON object.
+    #[serde(flatten)]
+    pub event: ControlEvent,
+}
+
 /// Wire-format mirror of `mcp::tools::ApprovalPlan`. Duplicated here
 /// so `control::protocol` doesn't depend on the MCP tool module.
 /// Same field names + serde layout so the two types round-trip
@@ -99,12 +123,20 @@ pub enum ControlOp {
         comment: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edited_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ListWorkers,
 }
 
 /// An event pushed from the dispatcher (server) to the TUI (client).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Note: `Eq` is intentionally NOT derived — the `SubleadSpawned` and
+/// `SubleadTerminated` variants carry `f64` fields (budget/spend amounts)
+/// which do not implement `Eq`. Use `PartialEq` comparisons instead.
+/// `assert_eq!` in tests only requires `PartialEq + Debug` and continues to
+/// work correctly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ControlEvent {
     Hello {
@@ -160,6 +192,35 @@ pub enum ControlEvent {
     /// each grid tile so operators can see store utilization at a glance.
     StoreActivity {
         counters: Vec<ActorActivityEntry>,
+    },
+    /// A sub-lead was successfully spawned and its LayerState is registered.
+    /// Emitted by `dispatch::sublead::spawn_sublead` after the sub-tree is
+    /// fully initialised and inserted into `state.subleads`.
+    SubleadSpawned {
+        sublead_id: String,
+        /// Sub-lead's own budget cap (USD). `None` for shared-pool mode
+        /// (read_down=true, no explicit allocation).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_usd: Option<f64>,
+        /// Maximum workers the sub-lead may spawn concurrently. `None`
+        /// for shared-pool mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_workers: Option<u32>,
+        /// Whether the sub-lead was spawned with read_down=true (can read
+        /// root-layer KV keys).
+        read_down: bool,
+    },
+    /// A sub-lead has terminated (success, cancel, timeout, or error).
+    /// Emitted by `dispatch::sublead::reconcile_terminated_sublead` after
+    /// the sub-tree LayerState is removed and budget is reconciled.
+    SubleadTerminated {
+        sublead_id: String,
+        /// USD actually spent by the sub-lead's workers.
+        spent_usd: f64,
+        /// USD returned to the root pool (original_reservation - spent).
+        unspent_usd: f64,
+        /// Terminal outcome: `"success"` | `"cancel"` | `"timeout"` | `"error"`.
+        outcome: String,
     },
 }
 
@@ -266,6 +327,7 @@ mod tests {
             approved: true,
             comment: Some("LGTM".into()),
             edited_summary: Some("spawn 2 workers".into()),
+            reason: None,
         };
         assert_eq!(roundtrip_op(&op), op);
     }

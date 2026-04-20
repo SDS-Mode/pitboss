@@ -1,0 +1,12 @@
+{
+  "_comment": "Subset of summary.json fields to assert. Not exact-equality — run_id, timestamps, paths vary.",
+  "tasks_failed": 0,
+  "tasks_total": 1,
+  "was_interrupted": false,
+  "lead_task": {
+    "_note": "task_id is empty-string for single-lead manifests (id is set at runtime from CWD context)",
+    "status": "Success",
+    "exit_code": 0,
+    "model": "claude-haiku-4-5"
+  }
+}

@@ -90,9 +90,9 @@ pub fn validate(cfg: &NotificationConfig) -> Result<()> {
     if let Some(events) = &cfg.events {
         for e in events {
             match e.as_str() {
-                "approval_request" | "run_finished" | "budget_exceeded" => {}
+                "approval_request" | "approval_pending" | "run_finished" | "budget_exceeded" => {}
                 other => bail!(
-                    "unknown event: {other:?}; valid: approval_request, run_finished, budget_exceeded"
+                    "unknown event: {other:?}; valid: approval_request, approval_pending, run_finished, budget_exceeded"
                 ),
             }
         }

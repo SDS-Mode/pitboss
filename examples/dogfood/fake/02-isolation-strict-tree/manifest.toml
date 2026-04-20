@@ -1,0 +1,29 @@
+# Reference manifest for dogfood spotlight #02: strict-tree isolation.
+#
+# NOTE: this spotlight is verified via an in-process integration test
+# (cargo test --test dogfood_fake_flows dogfood_isolation_strict_tree),
+# not by running this manifest directly. The manifest is documentation for
+# the reader: this is what the scenario looks like as a depth-2 dispatch.
+#
+# Scenario: operator runs a depth-2 dispatch where a root lead decomposes a
+# multi-phase job into two parallel sub-trees (S1 and S2). Each sub-tree writes
+# progress updates to /shared/progress. The test proves that:
+#   1. Each sub-lead's /shared/* lives in its own layer's KvStore (S1 can't
+#      read S2's updates and vice-versa).
+#   2. Root's /shared/* is separate from both sub-leads' stores.
+#   3. Strict peer-visibility: sibling workers within the root layer cannot
+#      read each other's /peer/<id>/* slots.
+#   4. The root lead (as layer lead) CAN read any worker's peer slot in its
+#      own layer.
+
+[run]
+max_parallel = 4
+
+[lead]
+prompt = "Decompose the job into two parallel phases. Spawn sub-lead S1 for phase-1 (gather inputs) and sub-lead S2 for phase-2 (process outputs). Each sub-lead writes its progress to /shared/progress."
+model = "claude-haiku-4-5"
+budget_usd = 5.00
+max_workers = 4
+allow_subleads = true
+max_subleads = 2
+max_sublead_budget_usd = 2.00

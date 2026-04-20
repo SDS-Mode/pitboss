@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
 use pitboss_core::session::CancelToken;
+
+use crate::dispatch::state::DispatchState;
 
 const SECOND_SIGINT_WINDOW: Duration = Duration::from_secs(5);
 
@@ -73,6 +76,155 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
                 }
             }
         }
+    });
+}
+
+// ── Kill-with-reason cascade (Task 4.5) ─────────────────────────────────────
+
+/// Cancel any actor in the tree (worker or sub-lead) and optionally deliver
+/// a corrective reason to the actor's direct parent lead as a synthetic
+/// `[SYSTEM]` reprompt.
+///
+/// Routing:
+/// - Kill a worker in a sub-tree → that sub-lead receives the reason
+/// - Kill a root-layer worker → root lead receives the reason
+/// - Kill a sub-lead → root lead receives the reason
+/// - Kill root / unknown → no reprompt (no parent); reason is logged
+///
+/// Backward compatible: callers that omit `reason` behave identically to
+/// the pre-4.5 cancel path.
+pub async fn cancel_actor_with_reason(
+    state: &Arc<DispatchState>,
+    target: &str,
+    reason: Option<String>,
+) -> Result<()> {
+    // 1. Locate the target's parent lead identity (before cancellation so the
+    //    maps still contain the target).
+    let parent_lead_layer = find_parent_lead_layer(state, target).await;
+
+    // 2. Trigger cancellation: trip the CancelToken in whichever layer holds it.
+    cancel_actor_in_tree(state, target).await?;
+
+    // 3. If reason supplied AND a parent layer was found, deliver synthetic reprompt.
+    if let (Some(reason_text), Some(layer)) = (reason, parent_lead_layer) {
+        let synthetic_message = format!(
+            "[SYSTEM] Actor {target} was killed by operator.\nReason: {reason_text}\nAdjust your plan accordingly."
+        );
+        layer.send_synthetic_reprompt(&synthetic_message).await;
+    }
+
+    Ok(())
+}
+
+/// Find the `Arc<LayerState>` whose lead should receive the reason message
+/// when `target` is killed. Returns `None` when target is the root itself
+/// (no parent) or is not found in any layer.
+async fn find_parent_lead_layer(
+    state: &Arc<DispatchState>,
+    target: &str,
+) -> Option<Arc<crate::dispatch::layer::LayerState>> {
+    // Root-layer workers: parent = root lead
+    if state.root.worker_cancels.read().await.contains_key(target) {
+        return Some(state.root.clone());
+    }
+    // Sub-leads: parent = root lead
+    if state.subleads.read().await.contains_key(target) {
+        return Some(state.root.clone());
+    }
+    // Workers in a sub-tree: parent = that sub-tree's LayerState
+    let subleads = state.subleads.read().await;
+    for (_sublead_id, sub_layer) in subleads.iter() {
+        if sub_layer.worker_cancels.read().await.contains_key(target) {
+            return Some(sub_layer.clone());
+        }
+    }
+    // Root itself or completely unknown — no parent
+    None
+}
+
+/// Trip the CancelToken for `target` in whichever layer holds it.
+/// Searches root layer first, then sub-tree layers, then sub-lead's own cancel.
+async fn cancel_actor_in_tree(state: &Arc<DispatchState>, target: &str) -> Result<()> {
+    // Root-layer workers
+    {
+        let cancels = state.root.worker_cancels.read().await;
+        if let Some(tok) = cancels.get(target) {
+            tok.terminate();
+            return Ok(());
+        }
+    }
+    // Sub-tree workers
+    {
+        let subleads = state.subleads.read().await;
+        for (_sublead_id, sub_layer) in subleads.iter() {
+            let cancels = sub_layer.worker_cancels.read().await;
+            if let Some(tok) = cancels.get(target) {
+                tok.terminate();
+                return Ok(());
+            }
+        }
+        // Sub-leads themselves (trip their layer's own cancel token)
+        if let Some(sub_layer) = subleads.get(target) {
+            sub_layer.cancel.terminate();
+            return Ok(());
+        }
+    }
+    anyhow::bail!("cancel_actor_in_tree: unknown actor id: {target}")
+}
+
+/// Spawn a background task that listens for root cancellation and
+/// cascades the drain signal into every sub-tree LayerState. Each
+/// sub-tree's `cancel` token is drained, and every registered worker
+/// cancel token in the sub-tree is drained too — giving depth-first
+/// drain-then-terminate across the whole tree.
+///
+/// **Idempotency:** Call exactly once per dispatch run. Subsequent calls spawn
+/// additional watcher tasks; the result is benign (drain is idempotent on the
+/// watch::Sender) but creates duplicate tracing output and is not a substitute
+/// for a missed wakeup.
+///
+/// **Post-drain registration:** The watcher self-terminates after one cascade
+/// fire — re-installing after the cascade has fired will not catch sub-trees
+/// registered post-cascade. For that, see the spawn-time check in `spawn_sublead`.
+///
+/// Returns immediately after spawning the watcher task; the watcher
+/// terminates when the root drain signal fires AND all sub-trees
+/// have been signaled.
+///
+/// Two-phase drain semantics are preserved at each layer: the existing
+/// per-layer logic respects its grace window before forceful termination.
+pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
+    let root_cancel = state.root.cancel.clone();
+    tokio::spawn(async move {
+        // Wait for the root layer to drain.
+        root_cancel.await_drain().await;
+        // Cascade to every registered sub-tree.
+        let subleads = state.subleads.read().await;
+        for (sublead_id, sub_layer) in subleads.iter() {
+            tracing::info!(sublead_id = %sublead_id, "cascading cancel to sub-tree");
+            // Trip the sub-tree's own cancel token so its runner stops
+            // spawning new work.
+            sub_layer.cancel.drain();
+            // Also drain every worker cancel token registered in the
+            // sub-tree so in-flight workers receive the signal promptly.
+            // (The existing CancelToken type has no parent-child relationship,
+            // so we cascade explicitly rather than relying on inheritance.)
+            let worker_cancels = sub_layer.worker_cancels.read().await;
+            for (worker_id, tok) in worker_cancels.iter() {
+                tracing::debug!(
+                    sublead_id = %sublead_id,
+                    worker_id = %worker_id,
+                    "cascading cancel to sub-tree worker"
+                );
+                tok.drain();
+            }
+        }
+        // TODO(Phase 4): Currently only drain cascades; terminate does not.
+        // When Phase 4+ wires real sub-tree workers, sub-tree workers will
+        // receive drain but no terminate cascade — they'd hang waiting for
+        // terminate that never comes. Either add a parallel terminate cascade
+        // OR move worker cancellation into per-sub-tree runners that observe
+        // both their cancel and the run-level escalation.
     });
 }
 

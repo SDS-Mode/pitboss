@@ -437,6 +437,11 @@ async fn lease_released_when_mcp_connection_drops() {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_workers_across_tree: None,
+        sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
         max_parallel: 4,
@@ -453,6 +458,7 @@ async fn lease_released_when_mcp_connection_drops() {
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
+        approval_rules: vec![],
     };
     let store_trait: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().into()));
     let run_id = Uuid::now_v7();
