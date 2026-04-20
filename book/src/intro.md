@@ -19,7 +19,7 @@ Language models are stochastic. A well-run pit is not.
 - **New to pitboss?** Start with [Install](./getting-started/install.md), then work through [Your first dispatch](./getting-started/first-dispatch.md).
 - **Want to understand when to use flat vs. hierarchical mode?** See [Flat vs. hierarchical](./operator-guide/flat-vs-hierarchical.md).
 - **Looking for the full manifest field reference?** See [Manifest schema](./operator-guide/manifest-schema.md).
-- **Want to see it work?** The [Cookbook spotlights](./cookbook/README.md) are runnable end-to-end examples.
+- **Want to see it work?** The [Cookbook spotlights](./cookbook/) are runnable end-to-end examples.
 - **Writing a lead that needs MCP tools?** See the [MCP Tool Reference](./mcp-reference/overview.md).
 
 ## Current version
