@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -146,33 +146,43 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
     // Block by IP: loopback, private, link-local, unspecified.
     // `url::Host` yields the bracketed form for IPv6 via `host_str()`; strip
     // brackets before parsing.
-    let ip_candidate = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
+    let ip_candidate = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
     if let Ok(ip) = ip_candidate.parse::<IpAddr>() {
         if is_disallowed_ip(&ip) {
-            bail!(
-                "notification url {raw:?} points at a private / loopback / link-local address"
-            );
+            bail!("notification url {raw:?} points at a private / loopback / link-local address");
         }
     }
 
     Ok(())
 }
 
+fn is_disallowed_v4(v4: &Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || {
+            // Carrier-grade NAT 100.64.0.0/10 — not covered by is_private.
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 0x40
+        }
+}
+
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || {
-                    // Carrier-grade NAT 100.64.0.0/10 — not covered by is_private.
-                    let o = v4.octets();
-                    o[0] == 100 && (o[1] & 0xc0) == 0x40
-                }
-        }
+        IpAddr::V4(v4) => is_disallowed_v4(v4),
         IpAddr::V6(v6) => {
+            // `::ffff:a.b.c.d` routes to the v4 address at the network
+            // layer, so v6-only predicates like Ipv6Addr::is_loopback miss
+            // `::ffff:127.0.0.1`. Unwrap to the mapped v4 and reuse the
+            // v4 ruleset.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_disallowed_v4(&v4);
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
                 // fc00::/7 unique-local
@@ -297,6 +307,20 @@ url = "https://example.com""#;
     #[test]
     fn webhook_rejects_ipv6_loopback() {
         let err = validate(&cfg_webhook("https://[::1]/hook")).unwrap_err();
+        assert!(err.to_string().contains("private / loopback"), "{err}");
+    }
+
+    #[test]
+    fn webhook_rejects_ipv4_mapped_ipv6_loopback() {
+        // `::ffff:127.0.0.1` is a v6-encoded v4 loopback. Ipv6Addr::is_loopback
+        // returns false for this form; we must detect it via to_ipv4_mapped.
+        let err = validate(&cfg_webhook("https://[::ffff:127.0.0.1]/hook")).unwrap_err();
+        assert!(err.to_string().contains("private / loopback"), "{err}");
+    }
+
+    #[test]
+    fn webhook_rejects_ipv4_mapped_ipv6_metadata() {
+        let err = validate(&cfg_webhook("https://[::ffff:169.254.169.254]/latest")).unwrap_err();
         assert!(err.to_string().contains("private / loopback"), "{err}");
     }
 

@@ -164,7 +164,7 @@ approval_policy = "block"
 
 [[notification]]
 type = "slack"
-url = "${SLACK_WEBHOOK_URL}"
+url = "${PITBOSS_SLACK_WEBHOOK_URL}"
 events = ["approval_pending", "run_finished"]
 severity_min = "info"
 
@@ -184,7 +184,11 @@ services:
     working_dir: /workspace
     command: pitboss dispatch /run/pitboss.toml
     environment:
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      # Notification webhook env vars must be `PITBOSS_`-prefixed — pitboss
+      # only substitutes `${VAR}` tokens into notification URLs when the
+      # name starts with `PITBOSS_`, so host secrets can't be exfiltrated
+      # by a rogue manifest.
+      PITBOSS_SLACK_WEBHOOK_URL: ${PITBOSS_SLACK_WEBHOOK_URL}
     volumes:
       - ${HOME}/.claude:/home/pitboss/.claude:rw,z
       - /usr/local/bin/claude:/usr/local/bin/claude:ro
@@ -196,13 +200,17 @@ services:
 Run with the webhook URL in the shell environment:
 
 ```bash
-export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+export PITBOSS_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
 podman compose up
 ```
 
 The `${VAR}` substitution in `manifest.toml` is done by pitboss itself
 at dispatch-time, so the env var flows: shell → compose `environment:`
-→ container env → pitboss → manifest.
+→ container env → pitboss → manifest. Only names starting with
+`PITBOSS_` are substituted; `${ANTHROPIC_API_KEY}` or `${AWS_SECRET}`
+in a webhook URL would be refused at load time. Webhook URLs must
+also be `https://` and must not resolve to a loopback, private,
+link-local, or CGNAT address.
 
 ## Example 4 — pitboss-with-claude variant (v0.7+)
 

@@ -69,9 +69,7 @@ async fn run_async(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) 
     let task_dir_canon = std::fs::canonicalize(&task_dir)
         .with_context(|| format!("canonicalize {}", task_dir.display()))?;
     if !task_dir_canon.starts_with(&tasks_root_canon) {
-        bail!(
-            "task id '{task_id}' resolves outside the run directory; refusing to follow",
-        );
+        bail!("task id '{task_id}' resolves outside the run directory; refusing to follow",);
     }
     let log_path = task_dir_canon.join("stdout.log");
 

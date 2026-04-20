@@ -17,7 +17,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::cli::ActorRoleArg;
@@ -105,7 +105,7 @@ pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg)
         .await
         .with_context(|| format!("connect to pitboss mcp socket at {}", socket.display()))?;
     let (mut sr, mut sw) = stream.split();
-    let stdin = tokio::io::stdin();
+    let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
 
     let actor_id = actor_id.to_string();
@@ -113,13 +113,13 @@ pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg)
 
     // c2s: line-parse, inject _meta on tools/call, forward.
     // Chunked read with an explicit per-line cap so a child that never emits
-    // `\n` can't OOM the host.
+    // `\n` can't OOM the host. We read straight from stdin — the manual line
+    // accumulator means a BufReader wrapper would just add a second copy.
     let c2s = async {
-        let mut reader = BufReader::new(stdin);
         let mut line: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 8192];
         'outer: loop {
-            match reader.read(&mut chunk).await {
+            match stdin.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
                     for &b in &chunk[..n] {

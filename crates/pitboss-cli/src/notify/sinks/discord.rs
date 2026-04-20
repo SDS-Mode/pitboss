@@ -187,7 +187,11 @@ mod tests {
 
     #[test]
     fn build_body_sets_allowed_mentions_to_empty() {
-        let sink = DiscordSink::new(0, "https://example.com".into(), Arc::new(reqwest::Client::new()));
+        let sink = DiscordSink::new(
+            0,
+            "https://example.com".into(),
+            Arc::new(reqwest::Client::new()),
+        );
         let env = NotificationEnvelope::new(
             "run-1",
             Severity::Warning,
@@ -204,10 +208,16 @@ mod tests {
             .and_then(|v| v.get("parse"))
             .and_then(|v| v.as_array())
             .expect("allowed_mentions.parse should be an array");
-        assert!(parse.is_empty(), "parse array must be empty to disable all mentions");
+        assert!(
+            parse.is_empty(),
+            "parse array must be empty to disable all mentions"
+        );
 
         let desc = body["embeds"][0]["description"].as_str().unwrap();
-        assert!(desc.contains("\\@everyone"), "untrusted @everyone must be escaped: {desc}");
+        assert!(
+            desc.contains("\\@everyone"),
+            "untrusted @everyone must be escaped: {desc}"
+        );
     }
 
     #[tokio::test]
