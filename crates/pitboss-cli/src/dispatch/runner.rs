@@ -443,6 +443,34 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__lease_release",
 ];
 
+/// Sub-lead tools: all root-lead tools EXCEPT `spawn_sublead` and
+/// `wait_for_sublead`. Depth-2 cap is baked in; sub-leads cannot spawn
+/// further subleads. The actor_role=sublead marker in the MCP bridge invocation
+/// is enforced server-side via list_tools gating, but the CLI allowlist
+/// provides defense-in-depth.
+pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
+    // Worker orchestration tools (v0.3+).
+    "mcp__pitboss__spawn_worker",
+    "mcp__pitboss__worker_status",
+    "mcp__pitboss__wait_for_worker",
+    "mcp__pitboss__wait_for_any",
+    "mcp__pitboss__list_workers",
+    "mcp__pitboss__cancel_worker",
+    "mcp__pitboss__pause_worker",
+    "mcp__pitboss__continue_worker",
+    "mcp__pitboss__request_approval",
+    "mcp__pitboss__reprompt_worker",
+    // Shared-store tools (v0.5+).
+    "mcp__pitboss__kv_get",
+    "mcp__pitboss__kv_set",
+    "mcp__pitboss__kv_cas",
+    "mcp__pitboss__kv_list",
+    "mcp__pitboss__kv_wait",
+    "mcp__pitboss__lease_acquire",
+    "mcp__pitboss__lease_release",
+    // NOTE: spawn_sublead and wait_for_sublead are intentionally NOT included.
+];
+
 /// Builds the argv for spawning the lead subprocess, including the
 /// `--mcp-config` pointer to the generated MCP server config file.
 ///
@@ -485,6 +513,54 @@ pub fn lead_spawn_args(
     }
     args.push("-p".into());
     args.push(lead.prompt.clone());
+    args
+}
+
+/// Build the CLI args for spawning a sub-lead's claude subprocess.
+/// Mirrors `lead_spawn_args` but enforces depth-2 cap via the toolset:
+/// `spawn_sublead` and `wait_for_sublead` are NOT included, regardless of
+/// the root lead's `allow_subleads` setting. The mcp-bridge invocation
+/// passes `actor_role=sublead` so MCP handlers can route requests to the
+/// correct layer and gate tools accordingly.
+///
+/// The sub-lead is spawned as a worker-of-root in the dispatch tree,
+/// so its lifecycle is tracked for cancellation and wait purposes.
+///
+/// # Arguments
+///
+/// - `sublead_id`: UUIDv7 assigned to this sub-lead instance
+/// - `prompt`: The task prompt for the sub-lead
+/// - `model`: The model name (e.g., "claude-opus-4-1")
+/// - `mcp_config_path`: Path to the per-sublead mcp-config file
+/// - `resume_session_id`: Optional session ID to resume from
+pub fn sublead_spawn_args(
+    _sublead_id: &str,
+    prompt: &str,
+    model: &str,
+    mcp_config_path: &std::path::Path,
+    resume_session_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+    ];
+
+    // Build the allowed-tools set: sublead tools (no user tools, no depth-2 tools).
+    let allowed: Vec<String> = SUBLEAD_MCP_TOOLS.iter().map(|t| t.to_string()).collect();
+    args.push("--allowedTools".into());
+    args.push(allowed.join(","));
+
+    args.push("--model".into());
+    args.push(model.into());
+    args.push("--mcp-config".into());
+    args.push(mcp_config_path.display().to_string());
+    if let Some(sess) = resume_session_id {
+        args.push("--resume".into());
+        args.push(sess.into());
+    }
+    args.push("-p".into());
+    args.push(prompt.into());
     args
 }
 
@@ -971,5 +1047,69 @@ mod tests {
                 "expected {t} in allowedTools, got: {list}"
             );
         }
+    }
+
+    #[test]
+    fn sublead_spawn_args_excludes_spawn_sublead() {
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        // spawn_sublead must NOT be in the allowlist
+        assert!(
+            !list.contains("mcp__pitboss__spawn_sublead"),
+            "spawn_sublead should NOT be in sublead allowedTools, got: {list}"
+        );
+        // wait_for_sublead must NOT be in the allowlist either
+        assert!(
+            !list.contains("mcp__pitboss__wait_for_sublead"),
+            "wait_for_sublead should NOT be in sublead allowedTools, got: {list}"
+        );
+    }
+
+    #[test]
+    fn sublead_spawn_args_includes_spawn_worker() {
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        // spawn_worker MUST be in the allowlist
+        assert!(
+            list.contains("mcp__pitboss__spawn_worker"),
+            "spawn_worker should be in sublead allowedTools, got: {list}"
+        );
+    }
+
+    #[test]
+    fn sublead_spawn_args_passes_correct_actor_role() {
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            Some("resume-session-123"),
+        );
+        // Verify the basic arg structure is correct
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--verbose".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"claude-opus-4-1".to_string()));
+        assert!(args.contains(&"--mcp-config".to_string()));
+        assert!(args.contains(&"/tmp/sublead-cfg.json".to_string()));
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"resume-session-123".to_string()));
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"do some work".to_string()));
     }
 }

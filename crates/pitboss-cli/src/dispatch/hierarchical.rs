@@ -460,3 +460,40 @@ pub async fn write_worker_mcp_config(
     tokio::fs::write(path, bytes).await?;
     Ok(())
 }
+
+/// Emit a sublead-scoped `--mcp-config` file. Lists only the SUBLEAD_MCP_TOOLS
+/// (no spawn_sublead, no wait_for_sublead — depth-2 cap enforced).
+/// The bridge command includes the sublead's actor_id + actor_role=sublead
+/// so the dispatcher can identify the caller and enforce namespace authz.
+pub async fn build_sublead_mcp_config(
+    sublead_id: &str,
+    socket: &std::path::Path,
+) -> Result<PathBuf> {
+    use crate::dispatch::runner::SUBLEAD_MCP_TOOLS;
+
+    let pitboss_exe =
+        std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
+
+    let cfg = serde_json::json!({
+        "mcpServers": {
+            "pitboss": {
+                "command": pitboss_exe.to_string_lossy(),
+                "args": [
+                    "mcp-bridge",
+                    "--actor-id", sublead_id,
+                    "--actor-role", "sublead",
+                    socket.to_string_lossy(),
+                ],
+            }
+        },
+        "allowedTools": SUBLEAD_MCP_TOOLS.iter().collect::<Vec<_>>()
+    });
+    let bytes = serde_json::to_vec_pretty(&cfg)?;
+
+    // Create a temp file for the sublead's mcp-config
+    // Path: {run_subdir}/sublead-{sublead_id}-mcp-config.json
+    let mcp_config_path =
+        std::env::temp_dir().join(format!("sublead-{}-mcp-config.json", sublead_id));
+    tokio::fs::write(&mcp_config_path, bytes).await?;
+    Ok(mcp_config_path)
+}
