@@ -61,3 +61,13 @@ WORKDIR /home/pitboss
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["pitboss", "--help"]
+
+# --- Stage 2b (intermediate): Node.js 20 source ---
+#
+# We pull Node.js 20 from the official upstream image and COPY it into
+# the `with-claude` stage below. This is more reproducible than piping
+# NodeSource's setup script to bash — that script is remote and mutable
+# and its content can drift between builds of the same
+# CLAUDE_CODE_VERSION. The official `node:20-bookworm-slim` image is
+# pinned by tag and cached by buildx.
+FROM node:20-bookworm-slim AS node
