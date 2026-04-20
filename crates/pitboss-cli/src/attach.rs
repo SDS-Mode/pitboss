@@ -52,13 +52,26 @@ pub fn run(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) -> Resul
 }
 
 async fn run_async(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) -> Result<i32> {
+    validate_task_id(task_id)?;
     let base = default_runs_dir();
     let run_dir = resolve_run_dir(&base, run_id_prefix)?;
-    let task_dir = run_dir.join("tasks").join(task_id);
+    let tasks_root = run_dir.join("tasks");
+    let task_dir = tasks_root.join(task_id);
     if !task_dir.is_dir() {
         bail_with_siblings(&run_dir, task_id);
     }
-    let log_path = task_dir.join("stdout.log");
+    // Belt-and-suspenders: after the directory check, canonicalize both
+    // sides and assert the task dir is still inside <run>/tasks/. Guards
+    // against a pre-planted symlink under tasks/<task_id>/ pointing out of
+    // the run dir.
+    let tasks_root_canon = std::fs::canonicalize(&tasks_root)
+        .with_context(|| format!("canonicalize {}", tasks_root.display()))?;
+    let task_dir_canon = std::fs::canonicalize(&task_dir)
+        .with_context(|| format!("canonicalize {}", task_dir.display()))?;
+    if !task_dir_canon.starts_with(&tasks_root_canon) {
+        bail!("task id '{task_id}' resolves outside the run directory; refusing to follow",);
+    }
+    let log_path = task_dir_canon.join("stdout.log");
 
     let mut stderr = std::io::stderr();
     writeln!(
@@ -79,6 +92,19 @@ async fn run_async(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) 
     });
 
     follow_log(&log_path, raw, lines, &sigint).await
+}
+
+/// Reject task ids that are empty, `.`/`..`, or contain a path separator
+/// or NUL byte. Task ids are expected to be simple directory names chosen
+/// by the manifest author; anything else is a traversal attempt.
+fn validate_task_id(task_id: &str) -> Result<()> {
+    if task_id.is_empty() || task_id == "." || task_id == ".." {
+        bail!("invalid task id '{task_id}'");
+    }
+    if task_id.contains('/') || task_id.contains('\\') || task_id.contains('\0') {
+        bail!("task id must not contain path separators or NUL: '{task_id}'");
+    }
+    Ok(())
 }
 
 /// Returns `~/.local/share/pitboss/runs/` — matches the default used by
@@ -374,6 +400,23 @@ mod tests {
         let out = format_event_capped(line).unwrap();
         assert!(out.contains("in=10"));
         assert!(out.contains("out=5"));
+    }
+
+    #[test]
+    fn validate_task_id_rejects_traversal() {
+        assert!(validate_task_id("../etc").is_err());
+        assert!(validate_task_id("..").is_err());
+        assert!(validate_task_id(".").is_err());
+        assert!(validate_task_id("").is_err());
+        assert!(validate_task_id("a/b").is_err());
+        assert!(validate_task_id("a\\b").is_err());
+        assert!(validate_task_id("a\0b").is_err());
+    }
+
+    #[test]
+    fn validate_task_id_accepts_normal_names() {
+        assert!(validate_task_id("worker-1").is_ok());
+        assert!(validate_task_id("019da1bb-7820-7d73-92ea-146e21f77dd8").is_ok());
     }
 
     #[test]

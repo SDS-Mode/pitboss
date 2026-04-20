@@ -8,6 +8,39 @@ use pitboss_core::store::RunSummary;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
+/// Max length for a `claude --resume <id>` value. Real Claude session IDs
+/// are UUIDs (36 chars); we allow a generous upper bound while still refusing
+/// anything that could plausibly be crafted to blow past a sane arg length.
+const MAX_SESSION_ID_LEN: usize = 128;
+
+/// Reject session ids that are empty, too long, start with `-` (would be
+/// mis-parsed by the `claude` CLI as a flag), or contain characters outside
+/// a conservative set. `summary.json` is on-disk state any local writer
+/// could tamper with; a malformed or adversarial value there would otherwise
+/// flow straight into `claude --resume <ID>`.
+fn validate_session_id(sid: &str) -> Result<()> {
+    if sid.is_empty() {
+        bail!("claude_session_id is empty");
+    }
+    if sid.len() > MAX_SESSION_ID_LEN {
+        bail!(
+            "claude_session_id is {} chars, max {}",
+            sid.len(),
+            MAX_SESSION_ID_LEN
+        );
+    }
+    if sid.starts_with('-') {
+        bail!("claude_session_id must not start with '-': {sid:?}");
+    }
+    if !sid
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("claude_session_id contains disallowed characters: {sid:?}");
+    }
+    Ok(())
+}
+
 /// Given a prior run directory (e.g. `~/.local/share/pitboss/runs/<run-id>/`),
 /// read `resolved.json` and `summary.json` and build a fresh `ResolvedManifest`
 /// whose tasks have `resume_session_id` populated from the prior run's
@@ -80,6 +113,12 @@ pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
                 );
             }
             Some(Some(sid)) => {
+                validate_session_id(sid).with_context(|| {
+                    format!(
+                        "rejecting tampered claude_session_id for task {:?} in summary.json",
+                        task.id
+                    )
+                })?;
                 resumed_tasks.push(ResolvedTask {
                     resume_session_id: Some(sid.clone()),
                     ..task
@@ -142,6 +181,8 @@ pub fn build_resume_hierarchical(run_dir: &Path) -> Result<ResolvedManifest> {
         .claude_session_id
         .clone()
         .ok_or_else(|| anyhow!("lead has no claude_session_id — cannot resume"))?;
+    validate_session_id(&session_id)
+        .context("rejecting tampered claude_session_id for lead in summary.json")?;
 
     // Guard: if the prior run used a worktree that's since been cleaned,
     // `claude --resume` will fail to find its session data (claude keys
@@ -179,6 +220,25 @@ mod tests {
     use pitboss_core::store::{RunSummary, TaskRecord, TaskStatus};
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    #[test]
+    fn validate_session_id_accepts_uuid() {
+        assert!(validate_session_id("019da1bb-7820-7d73-92ea-146e21f77dd8").is_ok());
+        assert!(validate_session_id("sess_abc-123_DEF").is_ok());
+    }
+
+    #[test]
+    fn validate_session_id_rejects_dangerous_values() {
+        assert!(validate_session_id("").is_err());
+        assert!(validate_session_id("--dangerous-flag").is_err());
+        assert!(validate_session_id("-p").is_err());
+        assert!(validate_session_id("has space").is_err());
+        assert!(validate_session_id("has/slash").is_err());
+        assert!(validate_session_id("has;semi").is_err());
+        assert!(validate_session_id("null\0byte").is_err());
+        let too_long = "a".repeat(MAX_SESSION_ID_LEN + 1);
+        assert!(validate_session_id(&too_long).is_err());
+    }
 
     fn write_resolved(dir: &Path, tasks: &[(&str, &str)]) {
         // tasks: [(id, prompt)]

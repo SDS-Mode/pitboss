@@ -40,7 +40,9 @@ impl DiscordSink {
             } => {
                 let desc = format!(
                     "**Request:** {}\n**Task:** {}\n**Summary:** {}",
-                    request_id, task_id, summary
+                    escape_discord_md(request_id),
+                    escape_discord_md(task_id),
+                    escape_discord_md(summary),
                 );
                 ("🟡 Pitboss approval requested".to_string(), desc)
             }
@@ -51,7 +53,9 @@ impl DiscordSink {
             } => {
                 let desc = format!(
                     "**Request:** {}\n**Task:** {}\n**Summary:** {}",
-                    request_id, task_id, summary
+                    escape_discord_md(request_id),
+                    escape_discord_md(task_id),
+                    escape_discord_md(summary),
                 );
                 (
                     "⏳ Pitboss approval pending operator action".to_string(),
@@ -70,7 +74,7 @@ impl DiscordSink {
                 let duration_sec = duration_ms / 1000;
                 let desc = format!(
                     "**Run:** {}\n**Tasks:** {} / {}\n**Duration:** {}s\n**Cost:** ${:.2}",
-                    run_id,
+                    escape_discord_md(run_id),
                     tasks_total - tasks_failed,
                     tasks_total,
                     duration_sec,
@@ -85,7 +89,9 @@ impl DiscordSink {
             } => {
                 let desc = format!(
                     "**Run:** {}\n**Spent:** ${:.2}\n**Budget:** ${:.2}",
-                    run_id, spent_usd, budget_usd
+                    escape_discord_md(run_id),
+                    spent_usd,
+                    budget_usd
                 );
                 ("🛑 Pitboss budget exceeded".to_string(), desc)
             }
@@ -93,6 +99,10 @@ impl DiscordSink {
 
         json!({
             "content": null,
+            // Defense-in-depth: even with mentions escaped in the description,
+            // tell Discord not to resolve any @everyone / @here / user /
+            // role mentions the payload might contain.
+            "allowed_mentions": { "parse": [] },
             "embeds": [
                 {
                     "title": title,
@@ -100,12 +110,30 @@ impl DiscordSink {
                     "color": Self::color(env.severity),
                     "timestamp": env.ts.to_rfc3339(),
                     "footer": {
-                        "text": format!("Source: {}", env.source)
+                        "text": format!("Source: {}", escape_discord_md(&env.source))
                     }
                 }
             ]
         })
     }
+}
+
+/// Escape characters that would otherwise be interpreted as Discord markdown
+/// or as a mention trigger in untrusted fields. Backslash-escapes `* _ ~ \` ``
+/// `| > # [ ]` and the mention sigils `@`, `<`, `:`. Newlines are preserved.
+fn escape_discord_md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '*' | '_' | '~' | '`' | '|' | '>' | '#' | '[' | ']' | '(' | ')' | '@' | '<'
+            | ':' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -143,6 +171,54 @@ mod tests {
     use crate::notify::{NotificationEnvelope, PitbossEvent, Severity};
     use chrono::Utc;
     use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn escape_neutralises_markdown_and_mention_chars() {
+        let out = escape_discord_md("@everyone see [evil](https://x) **bold** `code`");
+        // @ / [ / ] / ( / ) / * / ` must all be backslash-escaped.
+        assert!(out.contains("\\@everyone"), "got: {out}");
+        assert!(out.contains("\\["), "got: {out}");
+        assert!(out.contains("\\]"), "got: {out}");
+        assert!(out.contains("\\("), "got: {out}");
+        assert!(out.contains("\\)"), "got: {out}");
+        assert!(out.contains("\\*\\*bold\\*\\*"), "got: {out}");
+        assert!(out.contains("\\`code\\`"), "got: {out}");
+    }
+
+    #[test]
+    fn build_body_sets_allowed_mentions_to_empty() {
+        let sink = DiscordSink::new(
+            0,
+            "https://example.com".into(),
+            Arc::new(reqwest::Client::new()),
+        );
+        let env = NotificationEnvelope::new(
+            "run-1",
+            Severity::Warning,
+            PitbossEvent::ApprovalRequest {
+                request_id: "req".into(),
+                task_id: "worker-1".into(),
+                summary: "@everyone run this".into(),
+            },
+            Utc::now(),
+        );
+        let body = sink.build_body(&env);
+        let parse = body
+            .get("allowed_mentions")
+            .and_then(|v| v.get("parse"))
+            .and_then(|v| v.as_array())
+            .expect("allowed_mentions.parse should be an array");
+        assert!(
+            parse.is_empty(),
+            "parse array must be empty to disable all mentions"
+        );
+
+        let desc = body["embeds"][0]["description"].as_str().unwrap();
+        assert!(
+            desc.contains("\\@everyone"),
+            "untrusted @everyone must be escaped: {desc}"
+        );
+    }
 
     #[tokio::test]
     async fn discord_sink_posts_valid_body() {
