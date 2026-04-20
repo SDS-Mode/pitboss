@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::control::protocol::{ControlEvent, EventEnvelope};
 use crate::dispatch::actor::{ActorId, ActorPath};
 use crate::dispatch::layer::LayerState;
-use crate::dispatch::state::DispatchState;
+use crate::dispatch::state::{DispatchState, SubleadTerminalRecord};
 use crate::manifest::resolve::ResolvedManifest;
 use crate::shared_store::SharedStore;
 use pitboss_core::session::CancelToken;
@@ -436,6 +436,25 @@ pub async fn reconcile_terminated_sublead(
     if released_count > 0 {
         tracing::info!(sublead_id = %sublead_id, count = released_count, "auto-released run-global leases on sublead termination");
     }
+
+    // Persist terminal record so wait_actor(sublead_id) can return it.
+    let record = SubleadTerminalRecord {
+        sublead_id: sublead_id.to_string(),
+        // TODO(Task 2.3): thread real outcome from sub-lead's Claude session
+        // exit status. For now all reconciled sub-leads are "success".
+        outcome: "success".to_string(),
+        spent_usd: actual_spend,
+        unspent_usd: unspent,
+        terminated_at: chrono::Utc::now(),
+    };
+    state
+        .sublead_results
+        .write()
+        .await
+        .insert(sublead_id.to_string(), record);
+
+    // Wake any wait_actor subscribers blocked on this sublead_id.
+    let _ = state.root.done_tx.send(sublead_id.to_string());
 
     Ok(())
 }

@@ -1064,3 +1064,183 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
         "error should mention the cap; got: {err}"
     );
 }
+
+// ── Task 1.3 fix: wait_actor works on sub-lead ids ────────────────────────────
+
+/// After `reconcile_terminated_sublead` runs, `wait_actor(sublead_id)` should
+/// return immediately with the sub-lead's terminal record (not "unknown actor_id").
+#[tokio::test]
+async fn wait_actor_returns_for_terminated_sublead() {
+    use pitboss_cli::dispatch::state::ActorTerminalRecord;
+    use pitboss_cli::dispatch::sublead::{
+        reconcile_terminated_sublead, spawn_sublead, SubleadSpawnRequest,
+    };
+    use pitboss_cli::mcp::tools::handle_wait_for_actor;
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Spawn a sub-lead.
+    let req = SubleadSpawnRequest {
+        prompt: "test".into(),
+        model: "claude-haiku-4-5".into(),
+        budget_usd: Some(2.0),
+        max_workers: Some(1),
+        lead_timeout_secs: Some(1800),
+        initial_ref: Default::default(),
+        read_down: false,
+    };
+    let sublead_id = spawn_sublead(&state, req)
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // Simulate sub-lead spending $1.
+    {
+        let subleads = state.subleads.read().await;
+        let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
+        *sub_layer.spent_usd.lock().await = 1.0;
+    }
+
+    // Reconcile (terminate the sub-lead).
+    reconcile_terminated_sublead(&state, &sublead_id)
+        .await
+        .expect("reconcile should succeed");
+
+    // wait_actor should now return immediately with the sub-lead record.
+    let result = handle_wait_for_actor(&state, &sublead_id, Some(1))
+        .await
+        .expect("wait_actor should succeed for terminated sublead");
+
+    match result {
+        ActorTerminalRecord::Sublead(rec) => {
+            assert_eq!(rec.sublead_id, sublead_id, "sublead_id should match");
+            assert_eq!(rec.outcome, "success", "outcome should be 'success'");
+            assert!((rec.spent_usd - 1.0).abs() < 1e-9, "spent should be $1.0");
+            assert!(
+                (rec.unspent_usd - 1.0).abs() < 1e-9,
+                "unspent should be $1.0 (2.0 - 1.0)"
+            );
+        }
+        ActorTerminalRecord::Worker(_) => panic!("expected Sublead variant, got Worker"),
+    }
+}
+
+/// Spawn a sub-lead, start `wait_actor(sublead_id)` concurrently (while the
+/// sub-lead is still active), then reconcile — the wait should unblock.
+#[tokio::test]
+async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
+    use pitboss_cli::dispatch::state::ActorTerminalRecord;
+    use pitboss_cli::dispatch::sublead::{
+        reconcile_terminated_sublead, spawn_sublead, SubleadSpawnRequest,
+    };
+    use pitboss_cli::mcp::tools::handle_wait_for_actor;
+    use std::time::Duration;
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Spawn a sub-lead.
+    let req = SubleadSpawnRequest {
+        prompt: "block-test".into(),
+        model: "claude-haiku-4-5".into(),
+        budget_usd: Some(3.0),
+        max_workers: Some(2),
+        lead_timeout_secs: Some(1800),
+        initial_ref: Default::default(),
+        read_down: false,
+    };
+    let sublead_id = spawn_sublead(&state, req)
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // Spawn a concurrent task that calls wait_actor — should block until reconcile.
+    let state_clone = state.clone();
+    let sublead_id_clone = sublead_id.clone();
+    let wait_handle = tokio::spawn(async move {
+        handle_wait_for_actor(&state_clone, &sublead_id_clone, Some(5)).await
+    });
+
+    // Give the wait task a moment to subscribe.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Reconcile the sub-lead (should wake up the waiter).
+    reconcile_terminated_sublead(&state, &sublead_id)
+        .await
+        .expect("reconcile should succeed");
+
+    // The wait should complete within a reasonable timeout.
+    let result = tokio::time::timeout(Duration::from_secs(2), wait_handle)
+        .await
+        .expect("wait_actor should complete within 2s after reconcile")
+        .expect("tokio::spawn should not panic")
+        .expect("wait_actor should return Ok");
+
+    match result {
+        ActorTerminalRecord::Sublead(rec) => {
+            assert_eq!(rec.sublead_id, sublead_id, "sublead_id should match");
+            assert_eq!(rec.outcome, "success");
+        }
+        ActorTerminalRecord::Worker(_) => panic!("expected Sublead variant, got Worker"),
+    }
+}
+
+/// Verify that wait_actor still works for worker ids (backward compatibility).
+/// The `wait_actor_alias_resolves_worker_id` test in hierarchical_flows.rs covers
+/// the MCP-level path; this one exercises the handler directly.
+#[tokio::test]
+async fn wait_actor_still_handles_worker_back_compat() {
+    use pitboss_cli::dispatch::state::{ActorTerminalRecord, WorkerState};
+    use pitboss_cli::mcp::tools::handle_wait_for_actor;
+    use pitboss_core::store::{TaskRecord, TaskStatus};
+    use std::time::Duration;
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Register a worker in Pending state.
+    let worker_id = "worker-bc-test".to_string();
+    {
+        let mut w = state.workers.write().await;
+        w.insert(worker_id.clone(), WorkerState::Pending);
+    }
+
+    // Mark it Done after a brief delay (simulating completion).
+    let state_clone = state.clone();
+    let worker_id_clone = worker_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let rec = TaskRecord {
+            task_id: worker_id_clone.clone(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 50,
+            worktree_path: None,
+            log_path: std::path::PathBuf::new(),
+            token_usage: Default::default(),
+            claude_session_id: None,
+            final_message_preview: Some("done".into()),
+            parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+        };
+        let mut w = state_clone.workers.write().await;
+        w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
+        let _ = state_clone.done_tx.send(worker_id_clone);
+    });
+
+    // wait_actor should return the Worker variant for a regular worker.
+    let result = handle_wait_for_actor(&state, &worker_id, Some(5))
+        .await
+        .expect("wait_actor should succeed for a worker id");
+
+    match result {
+        ActorTerminalRecord::Worker(rec) => {
+            assert_eq!(rec.task_id, worker_id);
+            assert!(matches!(rec.status, TaskStatus::Success));
+        }
+        ActorTerminalRecord::Sublead(_) => panic!("expected Worker variant, got Sublead"),
+    }
+}

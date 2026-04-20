@@ -299,7 +299,7 @@ use pitboss_core::store::TaskRecord;
 use tokio::time::Duration;
 use uuid::Uuid;
 
-use crate::dispatch::state::{DispatchState, WorkerState};
+use crate::dispatch::state::{ActorTerminalRecord, DispatchState, WorkerState};
 
 pub async fn handle_spawn_worker(
     state: &Arc<DispatchState>,
@@ -1561,14 +1561,28 @@ async fn wait_for_actor_internal(
     state: &Arc<DispatchState>,
     actor_id: &str,
     timeout_secs: Option<u64>,
-) -> Result<TaskRecord> {
-    // Fast path: already Done.
+) -> Result<ActorTerminalRecord> {
+    // ── Fast path: already Done ────────────────────────────────────────────────
+    // 1. Worker already Done?
     {
         let workers = state.workers.read().await;
         if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-            return Ok(rec.clone());
+            return Ok(ActorTerminalRecord::Worker(rec.clone()));
         }
-        if !workers.contains_key(actor_id) {
+    }
+    // 2. Sub-lead already terminated?
+    {
+        let results = state.sublead_results.read().await;
+        if let Some(rec) = results.get(actor_id) {
+            return Ok(ActorTerminalRecord::Sublead(rec.clone()));
+        }
+    }
+
+    // 3. Is actor_id known at all (worker in any state OR active sub-lead)?
+    {
+        let workers = state.workers.read().await;
+        let subleads = state.subleads.read().await;
+        if !workers.contains_key(actor_id) && !subleads.contains_key(actor_id) {
             bail!("unknown actor_id: {actor_id}");
         }
     }
@@ -1584,16 +1598,34 @@ async fn wait_for_actor_internal(
             Ok(Err(_)) => bail!("completion channel closed"),
             Ok(Ok(completed_id)) => {
                 if completed_id == actor_id {
-                    let workers = state.workers.read().await;
-                    if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-                        return Ok(rec.clone());
+                    // Check workers first.
+                    {
+                        let workers = state.workers.read().await;
+                        if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
+                            return Ok(ActorTerminalRecord::Worker(rec.clone()));
+                        }
+                    }
+                    // Then check sublead_results.
+                    {
+                        let results = state.sublead_results.read().await;
+                        if let Some(rec) = results.get(actor_id) {
+                            return Ok(ActorTerminalRecord::Sublead(rec.clone()));
+                        }
                     }
                     bail!("internal: actor_id marked done but record not present");
                 }
                 // Defensive: our target may actually be Done now; re-check.
-                let workers = state.workers.read().await;
-                if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-                    return Ok(rec.clone());
+                {
+                    let workers = state.workers.read().await;
+                    if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
+                        return Ok(ActorTerminalRecord::Worker(rec.clone()));
+                    }
+                }
+                {
+                    let results = state.sublead_results.read().await;
+                    if let Some(rec) = results.get(actor_id) {
+                        return Ok(ActorTerminalRecord::Sublead(rec.clone()));
+                    }
                 }
                 // Not our actor and target not yet done — keep waiting.
             }
@@ -1606,14 +1638,19 @@ pub async fn handle_wait_for_worker(
     task_id: &str,
     timeout_secs: Option<u64>,
 ) -> Result<TaskRecord> {
-    wait_for_actor_internal(state, task_id, timeout_secs).await
+    match wait_for_actor_internal(state, task_id, timeout_secs).await? {
+        ActorTerminalRecord::Worker(rec) => Ok(rec),
+        ActorTerminalRecord::Sublead(_) => {
+            bail!("internal: wait_for_worker called with a sub-lead id; use wait_actor instead")
+        }
+    }
 }
 
 pub async fn handle_wait_for_actor(
     state: &Arc<DispatchState>,
     actor_id: &str,
     timeout_secs: Option<u64>,
-) -> Result<TaskRecord> {
+) -> Result<ActorTerminalRecord> {
     wait_for_actor_internal(state, actor_id, timeout_secs).await
 }
 

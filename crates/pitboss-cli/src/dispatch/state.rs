@@ -21,6 +21,29 @@ use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
+/// Terminal record stored when a sub-lead finishes (success, cancel,
+/// timeout, or error). Allows `wait_actor(sublead_id)` callers to read
+/// the outcome after `reconcile_terminated_sublead` has run.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SubleadTerminalRecord {
+    pub sublead_id: String,
+    /// "success" | "cancel" | "timeout" | "error"
+    pub outcome: String,
+    pub spent_usd: f64,
+    pub unspent_usd: f64,
+    pub terminated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The return type of `wait_for_actor_internal`.
+/// Workers return a `TaskRecord`; sub-leads return a `SubleadTerminalRecord`.
+/// The MCP handler serializes whichever variant it gets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "actor_type", rename_all = "snake_case")]
+pub enum ActorTerminalRecord {
+    Worker(TaskRecord),
+    Sublead(SubleadTerminalRecord),
+}
+
 use crate::dispatch::layer::LayerState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::shared_store::RunLeaseRegistry;
@@ -175,6 +198,10 @@ pub struct DispatchState {
     /// Sub-tree layers keyed by sub-lead id. Empty in the depth-1 case.
     /// Populated by `spawn_sublead` in Phase 2.
     pub subleads: RwLock<HashMap<String, Arc<LayerState>>>,
+    /// Terminal records for sub-leads that have been reconciled. Keyed by
+    /// sublead_id. Populated by `reconcile_terminated_sublead`; consulted by
+    /// `wait_for_actor_internal` to satisfy `wait_actor(sublead_id)` calls.
+    pub sublead_results: RwLock<HashMap<String, SubleadTerminalRecord>>,
     /// Worker-id → layer-id index for O(1) KV routing.
     ///
     /// - Root-layer workers map to `None`.
@@ -207,6 +234,10 @@ impl std::fmt::Debug for DispatchState {
         f.debug_struct("DispatchState")
             .field("root", &self.root)
             .field("subleads", &self.subleads.try_read().map(|g| g.len()).ok())
+            .field(
+                "sublead_results",
+                &self.sublead_results.try_read().map(|g| g.len()).ok(),
+            )
             .field(
                 "worker_layer_index",
                 &self.worker_layer_index.try_read().map(|g| g.len()).ok(),
@@ -254,6 +285,7 @@ impl DispatchState {
         Self {
             root,
             subleads: RwLock::new(HashMap::new()),
+            sublead_results: RwLock::new(HashMap::new()),
             worker_layer_index: RwLock::new(HashMap::new()),
             run_leases: Arc::new(RunLeaseRegistry::new()),
         }
