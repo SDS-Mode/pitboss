@@ -25,6 +25,51 @@ This project uses [Semantic Versioning](https://semver.org/).
 - **AGENTS.md**: added YAML frontmatter (`document`, `schema_version`,
   `pitboss_version`, `audience`, `canonical_url`, `last_updated`) so
   agents can filter for applicability without scanning the whole doc.
+- **`book/src/operator-guide/docker-compose.md`**: new operator-guide
+  page with four compose examples (one-shot headless, dispatch + TUI,
+  headless + Slack webhook, and a preview of the `pitboss-with-claude`
+  variant shape).
+- **`crates/pitboss-tui/README.md`**: refreshed to cover v0.5/v0.6 TUI
+  features (grouped grid for depth-2 runs, approval list pane, mouse
+  support, scroll cadence, plan-vs-action approval modals, reject-with-
+  reason, frozen/paused tile states).
+
+### Gotchas caught during development (operator-relevant)
+
+Notes for operators pulling the new `pitboss-with-claude` image —
+these are covered in depth on the [Using Claude in a container](book/src/operator-guide/using-claude-in-container.md)
+page and the compose examples:
+
+- **Rootless podman + `~/.claude` mount:** `--userns=keep-id` is
+  required. Without it, host UID 1000 maps to in-container UID 0
+  (fake root) and the bundled `pitboss` user can't read the mounted
+  `.credentials.json`. `-u "$(id -u):$(id -g)"` alone is insufficient
+  on rootless podman — it's only adequate under Docker or rootful
+  podman.
+- **SELinux `:z` on ALL bind mounts:** Fedora/RHEL/Rocky operators
+  need `:z` on every bind mount (manifest, run-state dir, `~/.claude`,
+  workspace repo). Missing `:z` on any one of them surfaces as a
+  cryptic `Permission denied (os error 13)` from pitboss at
+  manifest-read time.
+- **Manifest schema — `run_id` is auto-generated**, not an
+  operator-settable field. Place it inside `[run]` if you want to
+  pin a specific run-id, but typically omit it and let the
+  dispatcher assign one per invocation.
+
+### CI / infra bugs fixed during implementation
+
+- **Dockerfile `COPY --from=node /usr/local/bin/npm` dereferences
+  the symlink** and breaks npm's relative `require('../lib/cli.js')`.
+  Fix: COPY only the node binary + `node_modules/npm` tree, then
+  `ln -s` npm/npx into `/usr/local/bin/` manually.
+- **`chown -R ${NPM_CONFIG_PREFIX}` before `npm install -g`** only
+  affects the empty dir; files npm writes afterward stay root-owned.
+  Fix: run `chown -R` as the last step of the RUN block.
+- **GHA rejects `matrix.*` in job-level `if:` expressions.** The
+  workflow fails validation before any job starts. Fix: drop the
+  arm64-skip-on-PR optimization; arm64 hosted runners are free for
+  public repos and matrix cells parallelize, so PR wall-clock is
+  unchanged.
 
 ## [0.6.0] — 2026-04-19
 
