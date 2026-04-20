@@ -3,7 +3,6 @@ title = "Pitboss"
 authors = ["Pitboss contributors"]
 description = "Dispatcher for running and observing parallel Claude Code sessions."
 language = "en"
-multilingual = false
 src = "src"
 
 [output.html]
