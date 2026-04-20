@@ -465,6 +465,13 @@ pub fn lead_spawn_args(
     for t in PITBOSS_MCP_TOOLS {
         allowed.push((*t).to_string());
     }
+    // v0.6: when allow_subleads=true, add the depth-2 tools to the allowlist
+    // so claude's --allowedTools gate doesn't block them. The MCP server's
+    // list_tools already gates visibility; this only widens the CLI allowlist.
+    if lead.allow_subleads {
+        allowed.push("mcp__pitboss__spawn_sublead".into());
+        allowed.push("mcp__pitboss__wait_for_sublead".into());
+    }
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
 

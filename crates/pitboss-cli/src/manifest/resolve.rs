@@ -336,10 +336,12 @@ fn resolve_lead_spec(spec: &LeadSpec, run: &RunConfig) -> Result<ResolvedLead> {
 
     Ok(ResolvedLead {
         // id and directory are not present in the [lead] single-table format
-        // (they come from the runtime context). Use sentinel values; callers
-        // of load_manifest_from_str that need a full run supply them separately.
+        // (they come from the runtime context). Default to the process CWD so
+        // the lead spawns in the same directory the operator ran pitboss from;
+        // callers of load_manifest_from_str that need a different directory
+        // can override it after resolution.
         id: String::new(),
-        directory: PathBuf::from("/"),
+        directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         prompt: spec.prompt.clone().unwrap_or_default(),
         branch: None,
         model: spec

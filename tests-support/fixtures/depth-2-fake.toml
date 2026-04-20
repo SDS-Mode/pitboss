@@ -15,6 +15,9 @@ allow_subleads = true
 max_subleads = 4
 max_sublead_budget_usd = 5.0
 max_workers_across_tree = 8
+# use_worktree = false so the smoke test dispatch works without a git clone.
+# The fake-claude binary exits cleanly regardless of directory.
+use_worktree = false
 
 [lead.sublead_defaults]
 budget_usd = 1.0

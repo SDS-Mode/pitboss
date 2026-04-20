@@ -1,0 +1,2 @@
+{"stdout":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"smoke-lead-sess\",\"tools\":[],\"mcp_servers\":[]}"}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"smoke-lead-sess\",\"result\":\"done\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}"}

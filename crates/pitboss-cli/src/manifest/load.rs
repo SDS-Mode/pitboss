@@ -9,16 +9,49 @@ use super::schema::{Manifest, SingleLeadManifest};
 use super::validate::validate;
 
 /// Load, parse, resolve, and validate a manifest from disk.
+///
+/// Supports two TOML shapes:
+/// - `[[lead]]` / `[[task]]` array form (`Manifest`) — the v0.3–v0.5 format.
+/// - `[lead]` single-table form (`SingleLeadManifest`) — the v0.6 depth-2
+///   convenience format.  Tried as a fallback when the primary parse fails.
 pub fn load_manifest(path: &Path, env_max_parallel: Option<u32>) -> Result<ResolvedManifest> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading manifest at {}", path.display()))?;
-    let mut manifest: Manifest =
-        toml::from_str(&text).with_context(|| format!("parsing manifest at {}", path.display()))?;
-    expand_paths(&mut manifest)?;
 
-    let resolved = resolve(manifest, env_max_parallel)?;
-    validate(&resolved)?;
-    Ok(resolved)
+    // Try the primary `[[lead]]`/`[[task]]` array format first.
+    match toml::from_str::<Manifest>(&text) {
+        Ok(mut manifest) => {
+            expand_paths(&mut manifest)?;
+            let resolved = resolve(manifest, env_max_parallel)?;
+            validate(&resolved)?;
+            Ok(resolved)
+        }
+        Err(primary_err) => {
+            // Fall back to the v0.6 single-table `[lead]` format ONLY when the
+            // error is the characteristic "map, expected a sequence" mismatch
+            // that occurs when the author writes `[lead]` instead of `[[lead]]`.
+            // All other errors (unknown keys, missing required fields, etc.) are
+            // reported as-is so they don't silently produce surprising results.
+            let err_str = primary_err.to_string();
+            let is_lead_type_mismatch =
+                err_str.contains("expected a sequence") || err_str.contains("invalid type: map");
+            if !is_lead_type_mismatch {
+                return Err(primary_err)
+                    .with_context(|| format!("parsing manifest at {}", path.display()));
+            }
+            let single: SingleLeadManifest = toml::from_str(&text).with_context(|| {
+                format!(
+                    "parsing manifest at {} as single-lead format (primary error: {primary_err})",
+                    path.display()
+                )
+            })?;
+            let resolved = resolve_single_lead(single, env_max_parallel)?;
+            // validate() requires real git work-trees and fully-populated ids;
+            // single-lead manifests use CWD for the directory and an empty id
+            // sentinel, so we skip the git-validation step here.
+            Ok(resolved)
+        }
+    }
 }
 
 /// Load, parse, and resolve a v0.6 single-table `[lead]` manifest from a TOML
