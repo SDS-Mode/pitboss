@@ -690,12 +690,17 @@ pub fn lead_resume_spawn_args(
 /// - `model`: The model name (e.g., "claude-opus-4-1")
 /// - `mcp_config_path`: Path to the per-sublead mcp-config file
 /// - `resume_session_id`: Optional session ID to resume from
+/// - `tools_override`: When `Some(&[...])`, the listed tools are added to
+///   the allow-list alongside the standard sublead MCP toolset. When
+///   `None`, only the MCP toolset is included (preserves v0.6 behavior).
+///   De-duplicated to keep the resulting `--allowedTools` flag tidy.
 pub fn sublead_spawn_args(
     _sublead_id: &str,
     prompt: &str,
     model: &str,
     mcp_config_path: &std::path::Path,
     resume_session_id: Option<&str>,
+    tools_override: Option<&[String]>,
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -703,8 +708,19 @@ pub fn sublead_spawn_args(
         "--verbose".into(),
     ];
 
-    // Build the allowed-tools set: sublead tools (no user tools, no depth-2 tools).
-    let allowed: Vec<String> = SUBLEAD_MCP_TOOLS.iter().map(|t| t.to_string()).collect();
+    // Build the allowed-tools set. Operator-supplied tools (if any) are
+    // listed first; pitboss MCP tools always appended so the sub-lead can
+    // still orchestrate workers regardless of the override.
+    let mut allowed: Vec<String> = match tools_override {
+        Some(ts) => ts.to_vec(),
+        None => Vec::new(),
+    };
+    for t in SUBLEAD_MCP_TOOLS {
+        allowed.push((*t).to_string());
+    }
+    // De-duplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    allowed.retain(|t| seen.insert(t.clone()));
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
 
@@ -1329,6 +1345,7 @@ mod tests {
             "claude-opus-4-1",
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1352,6 +1369,7 @@ mod tests {
             "claude-opus-4-1",
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1370,6 +1388,7 @@ mod tests {
             "claude-opus-4-1",
             &PathBuf::from("/tmp/sublead-cfg.json"),
             Some("resume-session-123"),
+            None,
         );
         // Verify the basic arg structure is correct
         assert!(args.contains(&"--output-format".to_string()));
@@ -1383,5 +1402,47 @@ mod tests {
         assert!(args.contains(&"resume-session-123".to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"do some work".to_string()));
+    }
+
+    #[test]
+    fn sublead_spawn_args_honors_tools_override() {
+        let custom = ["Read".to_string(), "Bash".to_string()];
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            Some(&custom),
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        // Operator-supplied tools must be present.
+        assert!(list.contains("Read"), "Read missing from {list}");
+        assert!(list.contains("Bash"), "Bash missing from {list}");
+        // pitboss MCP tools must still be present (override doesn't remove them).
+        assert!(
+            list.contains("mcp__pitboss__"),
+            "pitboss MCP tools missing from {list}"
+        );
+    }
+
+    #[test]
+    fn sublead_spawn_args_dedups_when_override_overlaps_mcp_tools() {
+        // Operator passes a pitboss MCP tool already in the standard set.
+        // Result should not contain duplicates.
+        let custom = ["mcp__pitboss__spawn_worker".to_string()];
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            Some(&custom),
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        let count = list.matches("mcp__pitboss__spawn_worker").count();
+        assert_eq!(count, 1, "spawn_worker appears {count} times in {list}");
     }
 }

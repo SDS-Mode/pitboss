@@ -483,6 +483,8 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         lead_timeout_secs: Some(1800),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = pitboss_cli::dispatch::sublead::spawn_sublead(&state, req)
         .await
@@ -1096,6 +1098,8 @@ async fn wait_actor_returns_for_terminated_sublead() {
         lead_timeout_secs: Some(1800),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1154,6 +1158,8 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
         lead_timeout_secs: Some(1800),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1616,6 +1622,8 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         lead_timeout_secs: Some(1800),
         initial_ref: Default::default(),
         read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
     };
     let sublead_id = spawn_sublead(&state, req)
         .await

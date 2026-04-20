@@ -53,7 +53,7 @@ impl SubleadOutcome {
 }
 
 /// Configuration for a sub-lead spawn, validated against root's caps.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SubleadSpawnRequest {
     pub prompt: String,
     pub model: String,
@@ -62,6 +62,18 @@ pub struct SubleadSpawnRequest {
     pub lead_timeout_secs: Option<u64>,
     pub initial_ref: HashMap<String, Value>,
     pub read_down: bool,
+    /// Operator-supplied env vars passed to the sub-lead's claude
+    /// subprocess. Layered over pitboss's own defaults
+    /// (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`); operator-set keys win when the
+    /// names collide. See `apply_pitboss_env_defaults` in dispatch/runner.rs
+    /// for the resolution order.
+    pub env: HashMap<String, String>,
+    /// Operator-supplied tool list override for `--allowedTools`. Empty
+    /// means "use the standard sublead toolset" (preserves v0.6 behavior).
+    /// Non-empty replaces the user-tool portion; the pitboss MCP tools
+    /// (`mcp__pitboss__*`) are always included regardless so the sub-lead
+    /// can still orchestrate workers.
+    pub tools: Vec<String>,
 }
 
 /// Validated, defaults-applied resource envelope for a sub-lead spawn.
@@ -312,6 +324,8 @@ pub async fn spawn_sublead(
             req.prompt,
             req.model,
             envelope,
+            req.env,
+            req.tools,
         )
         .await
         .context("sub-lead claude session spawn failed")?;
@@ -389,12 +403,15 @@ fn derive_sublead_manifest(
 /// by the cascade watcher from root. `SessionHandle::run_to_completion`
 /// observes it via `cancel.await_terminate()`, sends SIGTERM, then SIGKILL
 /// after TERMINATE_GRACE.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_sublead_session(
     state: Arc<DispatchState>,
     sub_layer: Arc<LayerState>,
     prompt: String,
     model: String,
     envelope: ResolvedEnvelope,
+    operator_env: std::collections::HashMap<String, String>,
+    tools_override: Vec<String>,
 ) -> Result<()> {
     use crate::dispatch::hierarchical::build_sublead_mcp_config;
     use crate::dispatch::runner::sublead_spawn_args;
@@ -414,8 +431,21 @@ async fn spawn_sublead_session(
         .await
         .context("build sublead mcp-config")?;
 
-    // 3. Build the CLI args: sublead toolset, model, prompt, no --resume (v0.6).
-    let args = sublead_spawn_args(&sublead_id, &prompt, &model, &mcp_config_path, None);
+    // 3. Build the CLI args: sublead toolset (or operator override),
+    //    model, prompt, no --resume on first spawn.
+    let tools_for_args: Option<&[String]> = if tools_override.is_empty() {
+        None
+    } else {
+        Some(&tools_override)
+    };
+    let args = sublead_spawn_args(
+        &sublead_id,
+        &prompt,
+        &model,
+        &mcp_config_path,
+        None,
+        tools_for_args,
+    );
 
     // 4. Task log directory (mirrors workers' layout for consistency).
     let task_dir = sub_layer.run_subdir.join("tasks").join(&sublead_id);
@@ -425,12 +455,10 @@ async fn spawn_sublead_session(
 
     // 5. Build the spawn command. CWD is root's run_subdir (sub-leads don't
     //    get separate worktrees in v0.6 — revisit in future).
-    //    TODO(Task 5): merge manifest [defaults.env] + per-spawn env overrides
-    //    here. For now, only pitboss's own defaults (CLAUDE_CODE_ENTRYPOINT)
-    //    are seeded — operators who need `[defaults.env]` on sub-leads
-    //    spawn them from a dispatcher with the target env var already in its
-    //    ambient env (tokio Command inherits parent env for keys not explicitly set).
-    let mut sublead_env: std::collections::HashMap<String, String> = Default::default();
+    //    Env precedence (lowest → highest): pitboss defaults
+    //    (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`) → operator-supplied env from the
+    //    `spawn_sublead` MCP call. Operator wins for collisions.
+    let mut sublead_env: std::collections::HashMap<String, String> = operator_env.clone();
     crate::dispatch::runner::apply_pitboss_env_defaults(&mut sublead_env);
     let initial_cmd = SpawnCmd {
         program: sub_layer.claude_binary.clone(),
@@ -462,6 +490,8 @@ async fn spawn_sublead_session(
     let sublead_id_bg = sublead_id.clone();
     let model_bg = model.clone();
     let mcp_config_path_bg = mcp_config_path.clone();
+    let operator_env_bg = operator_env;
+    let tools_override_bg = tools_override;
 
     tokio::spawn(async move {
         let mut current_cmd = initial_cmd;
@@ -557,15 +587,24 @@ async fn spawn_sublead_session(
                     reprompt_count += 1;
 
                     // Re-build args with --resume and the new prompt.
+                    // Carry forward the operator's tool override for resume too.
+                    let tools_for_resume: Option<&[String]> = if tools_override_bg.is_empty() {
+                        None
+                    } else {
+                        Some(&tools_override_bg)
+                    };
                     let resume_args = sublead_spawn_args(
                         &sublead_id_bg,
                         &new_prompt,
                         &model_bg,
                         &mcp_config_path_bg,
                         Some(sid.as_str()),
+                        tools_for_resume,
                     );
+                    // Same env precedence as the initial spawn: operator first,
+                    // pitboss defaults fill gaps.
                     let mut resume_env: std::collections::HashMap<String, String> =
-                        Default::default();
+                        operator_env_bg.clone();
                     crate::dispatch::runner::apply_pitboss_env_defaults(&mut resume_env);
                     current_cmd = SpawnCmd {
                         program: sub_layer_bg.claude_binary.clone(),
