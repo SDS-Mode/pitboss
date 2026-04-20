@@ -7,6 +7,39 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+*(nothing yet)*
+
+## [0.7.0] — 2026-04-20
+
+The headless-mode hardening release. Closes the silent "7-second
+success" failure modes that an external operator hit running pitboss
+under another agent. Also ships the bundled-claude container variant,
+native multi-arch CI (no more QEMU), bundled AGENTS.md reference,
+GitHub Action bumps for Node 24 compatibility, and a security-review
+follow-up (run-global lease connection-drop cleanup).
+
+Highlights:
+- **`ghcr.io/sds-mode/pitboss-with-claude`** — new multi-arch container
+  variant bundling a pinned Claude Code CLI. Run pitboss without
+  installing claude on the host; consume OAuth via a `~/.claude` mount.
+- **Path A permission default** — `CLAUDE_CODE_ENTRYPOINT=sdk-ts` auto-set
+  on every spawned claude subprocess. Eliminates silent sub-lead failures
+  where claude asked for permission from a non-existent operator and
+  exited cleanly with no output.
+- **Approval-driven terminal states** — `ApprovalRejected` and
+  `ApprovalTimedOut` distinguish "task exited because its approval was
+  denied" from a real `Success`. Previously both looked like Success.
+- **`spawn_sublead` gains `env` and `tools`** — sub-leads can now
+  receive per-spawn environment variables and allowlist overrides,
+  matching `spawn_worker`'s shape.
+- **Headless-dispatch warning** — stderr warning at startup when
+  approval gates would block without a TTY.
+- **`pitboss agents-md`** — prints the AGENTS.md reference document
+  bundled into the binary. Same content at
+  `/usr/share/doc/pitboss/AGENTS.md` in container images.
+- **CI elapsed time 62 min → 5 min** — native `ubuntu-24.04-arm`
+  runners with matrix + merge pipeline. No QEMU emulation.
+
 ### Added
 
 - **Two new terminal statuses: `TaskStatus::ApprovalRejected` +

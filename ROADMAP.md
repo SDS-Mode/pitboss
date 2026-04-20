@@ -3,8 +3,8 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: v0.6.0 (2026-04-19).** Everything shipped through
-v0.6.0 has been removed from this file — check `CHANGELOG.md` for
+**Last refresh: v0.7.0 (2026-04-20).** Everything shipped through
+v0.7.0 has been removed from this file — check `CHANGELOG.md` for
 per-version history. If you're about to add an item, slot it into one
 of the tiered sections below (biggest effort first).
 
@@ -54,29 +54,56 @@ form explicitly retired.
 
 ---
 
-## Deferred from v0.6.0 (targeting v0.7+)
+## Deferred from v0.7.0 (targeting v0.8+)
 
-Items that were scoped or considered during v0.6 development but
+Items that were scoped or considered during v0.7 development but
 explicitly deferred. These are reasonably well-understood problems,
 not blue-sky ideas.
 
+### Queue-TTL fallback → response wiring
+
+`ApprovalTimedOut` terminal state was added in v0.7 but never fires —
+`expire_approvals` (in `runner.rs`) removes expired queue entries
+without sending a `{approved: false, from_ttl: true}` response back to
+the waiting actor. The actor instead sees a bridge-timeout error and
+lands in `Failed` rather than `ApprovalTimedOut`. **Status:** variant
+defined and classification path is ready; the wiring is a ~2-3 hour
+follow-up.
+
+### `pitboss status` subcommand
+
+Headless-mode inspection currently relies on `pitboss attach` +
+manual reads of `summary.jsonl` and `tasks/`. A dedicated `pitboss
+status <run-id>` would be a natural cap on the headless-agent flow.
+**Status:** deferred; needs a small spec on columns, flags, snapshot-
+vs-tail, JSON output.
+
+### Path B — route claude's permission gate through pitboss
+
+Alternative to the v0.7 Path A default (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`
+bypasses claude's own gate). Path B would route claude's per-tool
+permission requests through a new `permission_prompt` MCP tool,
+surfacing them in pitboss's approval queue + TUI. **Status:** spec
+pinned at `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`;
+revisit when a concrete trigger appears.
+
 ### Per-sub-tree runners (Phase 4 ownership cleanup)
 
-In v0.6.0, the watcher cascades cancel tokens directly across sub-tree
-boundaries rather than going through a per-sub-tree runner that owns
-its workers' cancellation. This inverts the ownership model the v0.6
-spec noted for future cleanup. Current implementation works correctly
-but the ownership inversion is a known footgun for handlers that need
-to route by caller. **Status:** deferred for v0.7; tracked in codebase
-with CAUTION doc block on `DispatchState`'s `Deref` impl.
+The watcher cascades cancel tokens directly across sub-tree boundaries
+rather than going through a per-sub-tree runner that owns its workers'
+cancellation. Current implementation works correctly but the ownership
+inversion is a known footgun. Also: `terminate()` does not cascade to
+sub-tree workers (only `drain()` does); gates Phase 4 work.
+**Status:** deferred; tracked in codebase via `TODO(Phase 4)` in
+`signals.rs:222` and CAUTION doc block on `DispatchState`'s `Deref` impl.
 
 ### TUI runtime policy mutation
 
-`[[approval_policy]]` rules are manifest-only in v0.6 — the TUI can
-display and act on policy but cannot edit rules while a run is live.
-Useful for operators who want to tighten or relax auto-approve rules
-mid-run without restarting. **Status:** deferred; manifest-only is
-safe and sufficient for the v0.6 use cases.
+`[[approval_policy]]` rules are manifest-only — the TUI can display
+and act on policy but cannot edit rules while a run is live. Useful
+for operators who want to tighten or relax auto-approve rules mid-run
+without restarting. **Status:** deferred; manifest-only is safe and
+sufficient for current use cases.
 
 ### Sub-lead resume support
 
@@ -88,13 +115,21 @@ persisting sub-lead `sublead_id` → `session_id` mappings and threading
 current fallback (root lead re-spawns) is workable for the typical
 interruption+retry case.
 
-### Native-arm container runners
+### Hierarchical mode requires a git repo even with `use_worktree = false`
 
-The current multi-arch container build uses QEMU emulation for
-`linux/arm64`, which is slow. Splitting the matrix to use native arm64
-runners (GitHub's `ubuntu-24.04-arm` or self-hosted) would cut build
-time significantly. **Status:** deferred; blocked on runner availability
-and cost in the public CI budget; the QEMU build is correct if slow.
+Lead setup runs a git-repo check regardless of the `use_worktree`
+setting. Flat mode has no equivalent check — the hierarchical side is
+inconsistent. **Status:** deferred; documented in AGENTS.md "Headless
+mode" section as a known quirk. Fix is a 1-line code change or a more
+prominent book note.
+
+### Slack notification sink escaping
+
+v0.7 hardened the Discord sink (escape markdown + `allowed_mentions: []`)
+but the Slack sink wasn't audited for the same class of injection.
+If Slack sink formats untrusted fields into `mrkdwn` blocks, same
+treatment applies. **Status:** deferred; audit + fix in one small PR
+when prioritized.
 
 ---
 
