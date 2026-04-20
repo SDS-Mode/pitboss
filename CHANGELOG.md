@@ -7,6 +7,11 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Container variant `pitboss-with-claude`**: a new multi-arch container image published at `ghcr.io/sds-mode/pitboss-with-claude` bundling pitboss + a pinned Claude Code CLI (`2.1.114`). Operators consume host OAuth via a bind-mount of `~/.claude`. See the [Using Claude in a container](book/src/operator-guide/using-claude-in-container.md) book page for auth setup, UID alignment (rootless podman: `--userns=keep-id`), SELinux caveats (`:z` on all bind mounts), and macOS fallbacks.
+- CI smoke-test job that verifies `claude --version`, `pitboss --version`, and the bundled ATTRIBUTION file on both architectures post-merge.
+
 ### Changed
 
 - **Container CI**: migrated from QEMU-emulated multi-arch builds to

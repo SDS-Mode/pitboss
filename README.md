@@ -97,6 +97,8 @@ The image carries `git` (needed for worktree isolation) but NOT the
 `claude` binary — mount your host's Claude Code install or build a
 derived image that layers it in.
 
+A variant image `ghcr.io/sds-mode/pitboss-with-claude` bundles a pinned Claude Code CLI (`2.1.114`) so you can run pitboss without installing claude on the host. See [Using Claude in a container](./book/src/operator-guide/using-claude-in-container.md) for auth setup and caveats.
+
 ### Direct tarball download
 
 Prefer the tarball? Grab `pitboss-cli-<target>.tar.xz` or
