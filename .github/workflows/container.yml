@@ -89,7 +89,7 @@ jobs:
 
       - name: Extract metadata (for labels only at this stage)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
 
@@ -152,7 +152,7 @@ jobs:
 
       - name: Extract metadata (final tags)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
