@@ -79,6 +79,42 @@ The following are inside your trust boundary as operator:
 
 ---
 
+## Internal trust surfaces
+
+Pitboss has two processes that talk to each other over an **unauthenticated** Unix domain socket:
+
+1. **The dispatcher** (`pitboss dispatch`). Holds run state, routes MCP tool calls to the correct layer, enforces policy.
+2. **The MCP bridge** (`pitboss mcp-bridge <socket>`). A small stdio↔socket adapter invoked by `claude` via `--mcp-config`. Stamps each incoming MCP request with a `_meta` field describing which actor (root lead, sub-lead, worker) originated it.
+
+The dispatcher **trusts** the bridge's `_meta.actor_id` and `_meta.actor_role` fields. These values are used as index keys into layer-routing maps (`subleads`, `worker_layer_index`) and as the basis for `ActorPath` on approval requests. This has two consequences:
+
+### If the bridge is compromised, actor identity is forgeable
+
+An attacker with the ability to inject MCP requests over the dispatcher's socket — or to replace the `pitboss mcp-bridge` binary before it starts — can stamp arbitrary `actor_id` / `actor_role` pairs. The dispatcher will route those requests as if they came from that actor. Concretely, a compromised bridge can:
+
+- **Elevate a worker to a sub-lead.** A worker-originated request stamped as `actor_role = "sublead"` bypasses the depth-2 spawn cap (workers are terminal; sub-leads can spawn more workers).
+- **Cross-tree access.** A sub-tree worker stamped with a peer sub-lead's `actor_id` can read `/peer/<peer>/*` entries it is not supposed to see.
+- **Approval redirection.** Approval requests are routed by `actor_path`; a mislabeled approval will surface to the operator under the wrong originator, potentially misleading approve/reject decisions.
+
+### Mitigations currently in place
+
+- **Socket permissions.** The dispatcher creates the MCP socket with restrictive permissions (owner-only) in the run directory, which is typically under `~/.local/share/pitboss/runs/<run-id>/`. Any process running as your host user can still connect; a process running as a different user cannot.
+- **Role-shape validation.** The dispatcher rejects syntactically invalid `_meta` payloads (e.g. `actor_role = "sublead"` without a matching registered `actor_id`), which closes some but not all misuse paths.
+- **Worker-sent requests that target sub-lead-only tools are rejected** regardless of `_meta`, because sub-lead-only tools are not in the worker's `--allowedTools` list passed to the claude subprocess.
+
+### What is NOT mitigated
+
+- A bridge binary replaced on disk before the dispatcher invokes it. Verify the binary path you configure in any shared-tooling setup.
+- A local attacker with the same UID as the pitboss process. Pitboss assumes single-user-on-host; multi-tenant deployments require an external wrapper.
+
+### Planned hardening (tracked for a future phase)
+
+- **Bridge-auth secret.** A per-run secret the dispatcher generates, passes to the bridge at launch via a non-inherited channel, and requires the bridge to HMAC over `_meta` fields. Would cryptographically prevent forged identities from an unauthenticated connector even if an attacker reaches the socket.
+
+Operators deploying pitboss in security-sensitive contexts should treat the bridge and dispatcher as a single trust unit and harden the host boundary (single-user host, restricted OS account, standard filesystem permissions on the runs directory) rather than relying on internal checks.
+
+---
+
 ## What pitboss does not provide (operator responsibilities)
 
 | Gap | Operator action |
