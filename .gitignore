@@ -36,3 +36,6 @@ flamegraph.svg
 
 # Session-local Claude Code state (scheduled tasks, etc.)
 .claude/
+
+# Local-only operator/dev scripts (smoke runs, dogfood resets, etc.)
+/scripts/
