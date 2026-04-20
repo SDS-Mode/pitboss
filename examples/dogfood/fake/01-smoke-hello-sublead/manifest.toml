@@ -1,0 +1,30 @@
+# Dogfood manifest: spotlight #01 — "hello sub-lead" smoke test.
+#
+# Proves that a depth-2 manifest with allow_subleads=true parses and dispatches
+# cleanly end-to-end using fake-claude. The lead subprocess emits a clean
+# stream-json success result; pitboss records the run and writes summary.json.
+#
+# NOTE: spawn_sublead_session is a no-op stub in v0.6. Real sub-lead Claude
+# subprocess spawning lands in Task 2.3. This spotlight tests the orchestration
+# layer — manifest schema, dispatch pipeline, and summary generation — using
+# the MCP-less script path. The spawn_sublead MCP call lifecycle is covered
+# by crates/pitboss-cli/tests/e2e_sublead_flows.rs.
+
+[run]
+max_parallel = 2
+
+[lead]
+prompt = "Spawn one sub-lead for phase-A work, wait for it to finish, then exit."
+model = "claude-haiku-4-5"
+budget_usd = 10.0
+max_workers = 4
+lead_timeout_secs = 300
+allow_subleads = true
+max_subleads = 2
+max_sublead_budget_usd = 2.00
+use_worktree = false
+
+[lead.sublead_defaults]
+budget_usd = 1.00
+max_workers = 2
+lead_timeout_secs = 600
