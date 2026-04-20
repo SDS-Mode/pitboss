@@ -1399,6 +1399,203 @@ async fn v0_5_back_compat_no_meta_routes_to_root() {
     );
 }
 
+// ── Sub-task 5: kill-with-reason synthetic reprompt delivery ─────────────────
+
+/// Canonical regression test: when a worker inside a sub-lead's layer is
+/// killed with reason, the reason IS delivered to the sub-lead via the
+/// `reprompt_tx` channel that `spawn_sublead_session` manages.
+///
+/// This test uses a manually-wired `reprompt_tx` channel (simulating what
+/// `spawn_sublead_session` installs) rather than the test hook, so it
+/// exercises the REAL production delivery path through
+/// `send_synthetic_reprompt`.
+#[tokio::test]
+async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Root lead spawns sub-lead S1.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 1.0, "max_workers": 2}),
+        )
+        .await
+        .unwrap();
+    let s1 = resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field")
+        .to_string();
+
+    // Inject a worker into S1's layer.
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(s1.as_str()).unwrap();
+        sub.workers.write().await.insert(
+            "worker-B".into(),
+            pitboss_cli::dispatch::state::WorkerState::Pending,
+        );
+        sub.worker_cancels
+            .write()
+            .await
+            .insert("worker-B".into(), CancelToken::new());
+    }
+
+    // Manually install a reprompt_tx channel on S1's layer, simulating what
+    // spawn_sublead_session does. This exercises the real production path
+    // through send_synthetic_reprompt (NOT the test hook).
+    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(s1.as_str()).unwrap();
+        *sub.reprompt_tx.lock().await = Some(reprompt_tx);
+    }
+
+    // Operator kills worker-B with a reason via the MCP cancel_worker tool.
+    root_client
+        .call_tool(
+            "cancel_worker",
+            json!({
+                "target": "worker-B",
+                "reason": "schema mismatch"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Allow the reprompt delivery to complete.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The reprompt_tx channel should have received exactly one message
+    // containing both the worker id and the reason text.
+    let msg = reprompt_rx
+        .try_recv()
+        .expect("reprompt channel should have received a message");
+    assert!(
+        msg.contains("worker-B"),
+        "reprompt message should name the killed worker; got: {msg}"
+    );
+    assert!(
+        msg.contains("schema mismatch"),
+        "reprompt message should include the reason; got: {msg}"
+    );
+    assert!(
+        msg.contains("[SYSTEM]"),
+        "reprompt message should use [SYSTEM] prefix; got: {msg}"
+    );
+}
+
+/// When the parent lead has already terminated (workers map entry is Done),
+/// `send_synthetic_reprompt` should complete cleanly without panicking or
+/// attempting delivery.
+#[tokio::test]
+async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
+    use pitboss_core::store::{TaskRecord, TaskStatus};
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Root lead spawns sub-lead S1.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    let resp = root_client
+        .call_tool(
+            "spawn_sublead",
+            json!({"prompt": "p", "model": "claude-haiku-4-5", "budget_usd": 1.0, "max_workers": 2}),
+        )
+        .await
+        .unwrap();
+    let s1 = resp["sublead_id"]
+        .as_str()
+        .expect("response should have sublead_id field")
+        .to_string();
+
+    // Inject a worker into S1's layer.
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(s1.as_str()).unwrap();
+        sub.workers.write().await.insert(
+            "worker-C".into(),
+            pitboss_cli::dispatch::state::WorkerState::Pending,
+        );
+        sub.worker_cancels
+            .write()
+            .await
+            .insert("worker-C".into(), CancelToken::new());
+    }
+
+    // Simulate S1's lead session having already terminated: set workers[s1] to Done
+    // AND drop the reprompt_tx channel (simulating spawn_sublead_session cleanup).
+    {
+        let subleads = state.subleads.read().await;
+        let sub = subleads.get(s1.as_str()).unwrap();
+
+        // Mark lead as Done.
+        let done_rec = TaskRecord {
+            task_id: s1.clone(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 100,
+            worktree_path: None,
+            log_path: std::path::PathBuf::new(),
+            token_usage: Default::default(),
+            claude_session_id: Some("finished-session".into()),
+            final_message_preview: Some("done".into()),
+            parent_task_id: Some("root".into()),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: Some("claude-haiku-4-5".into()),
+        };
+        sub.workers.write().await.insert(
+            s1.clone(),
+            pitboss_cli::dispatch::state::WorkerState::Done(done_rec),
+        );
+
+        // Close the reprompt channel (no sender installed — lead is gone).
+        *sub.reprompt_tx.lock().await = None;
+    }
+
+    // Operator kills worker-C with a reason. The S1 lead is already done;
+    // this should complete cleanly with no panic.
+    let result = root_client
+        .call_tool(
+            "cancel_worker",
+            json!({
+                "target": "worker-C",
+                "reason": "late cleanup"
+            }),
+        )
+        .await;
+
+    // The cancel_worker call itself may fail (worker-C has no real cancel token
+    // running a subprocess, but it was inserted into worker_cancels above so
+    // cancel_actor_in_tree should find it).
+    // What matters is that there's no panic and the process doesn't hang.
+    // Allow the async machinery to settle.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // No assertion on result — the point is no panic, no hang.
+    let _ = result;
+}
+
 /// Sub-lead (with its own $5 envelope) spawns a worker. The spend reservation
 /// must be charged to the sub-lead's `reserved_usd`, NOT root's. Root's pool
 /// should remain unchanged.

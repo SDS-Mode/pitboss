@@ -103,6 +103,20 @@ pub struct LayerState {
     /// The hook is `Arc` so it can be cloned cheaply in `send_synthetic_reprompt`
     /// without holding the lock across the async delivery path.
     pub reprompt_hook: Mutex<Option<RepromptHook>>,
+    /// Delivery channel for synthetic reprompts to the running lead subprocess.
+    ///
+    /// `None` for the root layer (root-lead reprompt is not supported in v0.6;
+    /// see the root-lead limitation note in `send_synthetic_reprompt`).
+    ///
+    /// Set by `spawn_sublead_session` just before launching the subprocess.
+    /// The receiving end is held by the subprocess-management loop inside
+    /// `spawn_sublead_session`, which handles incoming messages by killing
+    /// the current subprocess and re-spawning it with `--resume + message`.
+    ///
+    /// Sending on this channel is the only way the real reprompt path in
+    /// `send_synthetic_reprompt` delivers a message; the loop in
+    /// `spawn_sublead_session` is responsible for the actual kill+resume.
+    pub reprompt_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
 impl std::fmt::Debug for LayerState {
@@ -174,6 +188,7 @@ impl LayerState {
             original_reservation_usd,
             policy_matcher: Mutex::new(None),
             reprompt_hook: Mutex::new(None),
+            reprompt_tx: Mutex::new(None),
         }
     }
 
@@ -197,24 +212,75 @@ impl LayerState {
         *self.reprompt_hook.lock().await = Some(Arc::new(hook));
     }
 
-    /// Deliver a synthetic reprompt message to this layer's lead. In
-    /// production (no hook installed), this is a no-op stub until Task 2.3
-    /// wires up real sub-lead Claude sessions — the message is logged at
-    /// `info` level so operators can observe it in traces.
+    /// Deliver a synthetic reprompt message to this layer's lead.
     ///
-    /// When a `reprompt_hook` is installed (tests only), the hook is called
-    /// with the message text so tests can assert on delivery without a real
-    /// subprocess.
+    /// ## Test path (hook installed)
+    ///
+    /// Calls the test-only `reprompt_hook` callback with the message text.
+    /// This path is used by unit tests (e.g. Task 4.5) to assert delivery
+    /// without spinning up a real subprocess. The hook takes priority over
+    /// the real delivery path.
+    ///
+    /// ## Production path (no hook, sub-lead layer)
+    ///
+    /// Sends the message to the `reprompt_tx` channel. The receiving end is
+    /// held by the subprocess-management loop in `spawn_sublead_session`,
+    /// which handles it by killing the current subprocess and re-spawning with
+    /// `claude --resume <session_id> -p <message>`. This is identical to the
+    /// mechanism used by the `reprompt_worker` MCP tool.
+    ///
+    /// The channel send returns immediately; the actual kill+resume is
+    /// asynchronous. If the channel send fails (lead already terminated or
+    /// channel dropped), the message is logged and delivery is skipped.
+    ///
+    /// ## Root-lead limitation (v0.6)
+    ///
+    /// The root lead's process is managed by `run_hierarchical`, which holds
+    /// the blocking await on its `SessionHandle`. Killing and re-spawning the
+    /// root lead would cascade-cancel all workers and end the run. Root-lead
+    /// reprompt is therefore not supported in v0.6.
+    ///
+    /// `reprompt_tx` is `None` for the root layer; this branch falls through
+    /// to the log-only path with a clear comment explaining the limitation.
     pub async fn send_synthetic_reprompt(&self, message: &str) {
+        // Test hook takes priority — allows unit tests to assert on delivery
+        // without spinning up a real subprocess.
         let hook = self.reprompt_hook.lock().await.clone();
         if let Some(cb) = hook {
             cb(message.to_string());
-        } else {
-            tracing::info!(
-                lead_id = %self.lead_id,
-                "synthetic reprompt (no session wired): {}",
-                message
-            );
+            return;
+        }
+
+        // Real delivery path: send via the channel managed by spawn_sublead_session.
+        let tx = self.reprompt_tx.lock().await.clone();
+        match tx {
+            Some(sender) => {
+                if sender.send(message.to_string()).is_err() {
+                    tracing::info!(
+                        lead_id = %self.lead_id,
+                        "synthetic reprompt: delivery channel closed (lead already terminated); \
+                         message dropped: {}",
+                        message
+                    );
+                } else {
+                    tracing::debug!(
+                        lead_id = %self.lead_id,
+                        "synthetic reprompt queued for delivery: {}",
+                        message
+                    );
+                }
+            }
+            None => {
+                // Root layer or layer not yet started: no channel available.
+                // Root-lead reprompt is not supported in v0.6 (would cascade-cancel
+                // all workers and end the run — requires a larger refactor).
+                tracing::info!(
+                    lead_id = %self.lead_id,
+                    "synthetic reprompt: no delivery channel (root lead or layer not yet \
+                     started — root-lead reprompt not supported in v0.6): {}",
+                    message
+                );
+            }
         }
     }
 
@@ -325,5 +391,75 @@ mod tests {
         let (_dir, layer) = mk_layer();
         assert_eq!(layer.lead_id, "lead");
         assert_eq!(layer.run_id.get_version(), Some(uuid::Version::SortRand));
+    }
+
+    /// `send_synthetic_reprompt` with a hook installed should call the hook.
+    #[tokio::test]
+    async fn send_synthetic_reprompt_calls_hook() {
+        let (_dir, layer) = mk_layer();
+        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+        let cap = received.clone();
+        layer
+            .install_reprompt_capture(move |msg| {
+                let cap = cap.clone();
+                // tokio::spawn not needed here since tests use #[tokio::test]
+                let _ = cap.try_lock().map(|mut g| g.push(msg));
+            })
+            .await;
+
+        layer.send_synthetic_reprompt("hello world").await;
+
+        let msgs = received.lock().await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0], "hello world");
+    }
+
+    /// Without a hook or channel, `send_synthetic_reprompt` should not panic.
+    #[tokio::test]
+    async fn send_synthetic_reprompt_no_op_without_channel() {
+        let (_dir, layer) = mk_layer();
+        // Should complete without panic or error.
+        layer.send_synthetic_reprompt("no channel installed").await;
+    }
+
+    /// With a `reprompt_tx` channel installed, messages should be deliverable.
+    #[tokio::test]
+    async fn send_synthetic_reprompt_delivers_via_channel() {
+        let (_dir, layer) = mk_layer();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        *layer.reprompt_tx.lock().await = Some(tx);
+
+        layer.send_synthetic_reprompt("via channel").await;
+
+        let msg = rx.recv().await.expect("channel should have a message");
+        assert_eq!(msg, "via channel");
+    }
+
+    /// Hook takes priority over channel.
+    #[tokio::test]
+    async fn reprompt_hook_takes_priority_over_channel() {
+        let (_dir, layer) = mk_layer();
+
+        // Install both hook and channel.
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        *layer.reprompt_tx.lock().await = Some(tx);
+
+        let hook_fired = Arc::new(Mutex::new(false));
+        let fired = hook_fired.clone();
+        layer
+            .install_reprompt_capture(move |_msg| {
+                let fired = fired.clone();
+                let _ = fired.try_lock().map(|mut g| *g = true);
+            })
+            .await;
+
+        layer.send_synthetic_reprompt("priority test").await;
+
+        // Hook should have fired, channel should be empty.
+        assert!(*hook_fired.lock().await, "hook should fire before channel");
+        assert!(
+            rx.try_recv().is_err(),
+            "channel should be empty when hook fires"
+        );
     }
 }

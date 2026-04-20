@@ -414,7 +414,7 @@ async fn spawn_sublead_session(
 
     // 5. Build the spawn command. CWD is root's run_subdir (sub-leads don't
     //    get separate worktrees in v0.6 — revisit in future).
-    let cmd = SpawnCmd {
+    let initial_cmd = SpawnCmd {
         program: sub_layer.claude_binary.clone(),
         args,
         cwd: sub_layer.run_subdir.clone(),
@@ -430,37 +430,161 @@ async fn spawn_sublead_session(
         ResolvedEnvelope::SharedPool => sub_layer.manifest.lead_timeout_secs.unwrap_or(3600),
     };
 
-    // Background task: run the sub-lead's subprocess to completion.
-    // We detach with tokio::spawn so `spawn_sublead_session` returns
-    // immediately (the MCP call that triggered it can complete while the
-    // sub-lead runs asynchronously).
+    // 7. Set up the reprompt delivery channel.
+    //    `send_synthetic_reprompt` sends messages here; the background loop
+    //    handles them by kill+resume-ing the sub-lead's current subprocess.
+    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    *sub_layer.reprompt_tx.lock().await = Some(reprompt_tx);
+
+    // Background task: run the sub-lead's subprocess to completion, handling
+    // any synthetic reprompts by kill+resuming. We detach with tokio::spawn so
+    // `spawn_sublead_session` returns immediately.
     let state_bg = state.clone();
     let sub_layer_bg = sub_layer.clone();
     let sublead_id_bg = sublead_id.clone();
     let model_bg = model.clone();
+    let mcp_config_path_bg = mcp_config_path.clone();
 
     tokio::spawn(async move {
-        // Wire up a session_id channel so we can observe the sub-lead's
-        // init event and update the sub-lead's worker state entry (if desired
-        // in future). For now we use it for the promote-to-Running pattern.
-        let (session_id_tx, _session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
+        let mut current_cmd = initial_cmd;
+        // The last session_id emitted by the subprocess. Needed for --resume when
+        // a synthetic reprompt arrives.
+        let mut last_session_id: Option<String> = None;
+        // Accumulate cost and reprompt count across all subprocess iterations.
+        let mut total_token_usage = pitboss_core::parser::TokenUsage::default();
+        let mut reprompt_count: u32 = 0;
+        // Record the very first started_at for the compound TaskRecord.
+        let overall_started_at = chrono::Utc::now();
 
-        let outcome = SessionHandle::new(
+        // Mark the lead as Running (no session_id yet) so worker_status et al.
+        // can report it.
+        sub_layer_bg.workers.write().await.insert(
             sublead_id_bg.clone(),
-            Arc::clone(&sub_layer_bg.spawner),
-            cmd,
-        )
-        .with_log_path(log_path.clone())
-        .with_stderr_log_path(stderr_path)
-        .with_session_id_tx(session_id_tx)
-        .run_to_completion(
-            sub_layer_bg.cancel.clone(),
-            Duration::from_secs(timeout_secs),
-        )
-        .await;
+            crate::dispatch::state::WorkerState::Running {
+                started_at: overall_started_at,
+                session_id: None,
+            },
+        );
+
+        // Subprocess loop: runs until the subprocess exits without a pending reprompt.
+        let final_outcome = loop {
+            // Build a per-iteration session_id channel so we can capture the
+            // new session id and update the workers map entry.
+            let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
+
+            // Per-subprocess cancel token: receives termination from either the
+            // sub-tree cancel (cascade/operator kill) or from the reprompt path
+            // (which kills the current process to restart it with --resume).
+            let proc_cancel = CancelToken::new();
+
+            // Bridge: forward terminate from sub-tree cancel → subprocess cancel.
+            // This ensures operator kills and cascade drains still reach the process.
+            {
+                let tree_cancel = sub_layer_bg.cancel.clone();
+                let proc = proc_cancel.clone();
+                tokio::spawn(async move {
+                    tree_cancel.await_terminate().await;
+                    proc.terminate();
+                });
+            }
+
+            // Launch the subprocess.
+            let outcome = SessionHandle::new(
+                sublead_id_bg.clone(),
+                Arc::clone(&sub_layer_bg.spawner),
+                current_cmd.clone(),
+            )
+            .with_log_path(log_path.clone())
+            .with_stderr_log_path(stderr_path.clone())
+            .with_session_id_tx(session_id_tx)
+            .run_to_completion(proc_cancel.clone(), Duration::from_secs(timeout_secs))
+            .await;
+
+            // Update last_session_id and the workers map if the subprocess
+            // emitted a session_id before it exited.
+            if let Ok(sid) = session_id_rx.try_recv() {
+                sub_layer_bg.workers.write().await.insert(
+                    sublead_id_bg.clone(),
+                    crate::dispatch::state::WorkerState::Running {
+                        started_at: overall_started_at,
+                        session_id: Some(sid.clone()),
+                    },
+                );
+                last_session_id = Some(sid);
+            } else if let Some(sid) = outcome.claude_session_id.clone() {
+                // Fallback: session_id from the final result event (not yet in workers map
+                // since the subprocess already finished, but saves it for future reprompts).
+                last_session_id = Some(sid);
+            }
+
+            // Accumulate cost.
+            if let Some(cost) = pitboss_core::prices::cost_usd(&model_bg, &outcome.token_usage) {
+                *sub_layer_bg.spent_usd.lock().await += cost;
+            }
+            total_token_usage.add(&outcome.token_usage);
+
+            // Check if the process ended due to cancellation/termination AND
+            // there is a pending reprompt in the channel (meaning we should
+            // kill+resume rather than treating this as a final exit).
+            let pending_reprompt = reprompt_rx.try_recv().ok();
+
+            if let Some(new_prompt) = pending_reprompt {
+                // A synthetic reprompt arrived. If we have a session_id, resume.
+                if let Some(ref sid) = last_session_id {
+                    tracing::info!(
+                        sublead_id = %sublead_id_bg,
+                        session_id = %sid,
+                        "synthetic reprompt: killing current subprocess and resuming with new prompt"
+                    );
+                    reprompt_count += 1;
+
+                    // Re-build args with --resume and the new prompt.
+                    let resume_args = sublead_spawn_args(
+                        &sublead_id_bg,
+                        &new_prompt,
+                        &model_bg,
+                        &mcp_config_path_bg,
+                        Some(sid.as_str()),
+                    );
+                    current_cmd = SpawnCmd {
+                        program: sub_layer_bg.claude_binary.clone(),
+                        args: resume_args,
+                        cwd: sub_layer_bg.run_subdir.clone(),
+                        env: Default::default(),
+                    };
+
+                    // Reset workers entry to Running with no session_id (will be
+                    // updated once the resumed subprocess emits its init event).
+                    sub_layer_bg.workers.write().await.insert(
+                        sublead_id_bg.clone(),
+                        crate::dispatch::state::WorkerState::Running {
+                            started_at: overall_started_at,
+                            session_id: None,
+                        },
+                    );
+
+                    // Continue the loop: spawn the resumed subprocess.
+                    continue;
+                } else {
+                    // No session_id — cannot resume. Treat as normal termination.
+                    tracing::warn!(
+                        sublead_id = %sublead_id_bg,
+                        "synthetic reprompt arrived but no session_id available; \
+                         treating as normal termination"
+                    );
+                    break outcome;
+                }
+            }
+
+            // No pending reprompt — subprocess reached a terminal state normally.
+            break outcome;
+        };
+
+        // Close the reprompt channel so further sends return errors.
+        *sub_layer_bg.reprompt_tx.lock().await = None;
 
         // 7. Classify the outcome for the terminal record.
-        let sublead_outcome = match outcome.final_state {
+        let sublead_outcome = match final_outcome.final_state {
             pitboss_core::session::SessionState::Completed => SubleadOutcome::Success,
             pitboss_core::session::SessionState::Cancelled => SubleadOutcome::Cancel,
             pitboss_core::session::SessionState::TimedOut => SubleadOutcome::Timeout,
@@ -481,29 +605,25 @@ async fn spawn_sublead_session(
             SubleadOutcome::Error(_) => TaskStatus::Failed,
         };
 
-        // 9. Accumulate the sub-lead's own cost into its layer's spent_usd
-        //    (so reconcile_terminated_sublead can roll it up to root).
-        if let Some(cost) = pitboss_core::prices::cost_usd(&model_bg, &outcome.token_usage) {
-            *sub_layer_bg.spent_usd.lock().await += cost;
-        }
-
-        // 10. Build and persist a TaskRecord for the sub-lead's session
-        //     (same shape as a worker record; task_id = sublead_id).
+        // 9. Build and persist a TaskRecord for the sub-lead's compound session.
+        //    Uses total_token_usage across all subprocess iterations.
         let rec = pitboss_core::store::TaskRecord {
             task_id: sublead_id_bg.clone(),
             status,
-            exit_code: outcome.exit_code,
-            started_at: outcome.started_at,
-            ended_at: outcome.ended_at,
-            duration_ms: outcome.duration_ms(),
+            exit_code: final_outcome.exit_code,
+            started_at: overall_started_at,
+            ended_at: final_outcome.ended_at,
+            duration_ms: (final_outcome.ended_at - overall_started_at)
+                .num_milliseconds()
+                .max(0),
             worktree_path: None,
             log_path,
-            token_usage: outcome.token_usage,
-            claude_session_id: outcome.claude_session_id,
-            final_message_preview: outcome.final_message_preview,
+            token_usage: total_token_usage,
+            claude_session_id: final_outcome.claude_session_id,
+            final_message_preview: final_outcome.final_message_preview,
             parent_task_id: Some("root".into()),
             pause_count: 0,
-            reprompt_count: 0,
+            reprompt_count,
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
@@ -521,7 +641,7 @@ async fn spawn_sublead_session(
             );
         }
 
-        // 11. Reconcile: release reservation, update root's spent_usd,
+        // 10. Reconcile: release reservation, update root's spent_usd,
         //     populate sublead_results, and wake wait_actor subscribers.
         if let Err(e) =
             reconcile_terminated_sublead(&state_bg, &sublead_id_bg, sublead_outcome).await
