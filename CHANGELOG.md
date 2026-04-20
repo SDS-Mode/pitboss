@@ -7,6 +7,20 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Container CI**: migrated from QEMU-emulated multi-arch builds to
+  native `ubuntu-latest` + `ubuntu-24.04-arm` runners with a matrix +
+  merge pipeline. Published `ghcr.io/sds-mode/pitboss` image contents
+  and tags are unchanged; build elapsed time drops from ~60 min to
+  ~5 min (12× faster). No user-facing behavior change.
+
+### Docs
+
+- **AGENTS.md**: added YAML frontmatter (`document`, `schema_version`,
+  `pitboss_version`, `audience`, `canonical_url`, `last_updated`) so
+  agents can filter for applicability without scanning the whole doc.
+
 ## [0.6.0] — 2026-04-19
 
 The depth-2 sub-leads release. Lifts the depth=1 hierarchical invariant
