@@ -17,12 +17,17 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::cli::ActorRoleArg;
 
 const ALLOWED_ROLES: &[&str] = &["root_lead", "lead", "sublead", "worker"];
+
+/// Hard cap on a single JSON-RPC line from the child's stdout. A buggy or
+/// hostile subprocess that never emits `\n` would otherwise grow the read
+/// buffer until pitboss OOMs. 4 MiB is well above any legitimate MCP message.
+const MAX_C2S_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 fn role_str(role: ActorRoleArg) -> &'static str {
     match role {
@@ -106,26 +111,49 @@ pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg)
     let actor_id = actor_id.to_string();
     let role_s = role_str(actor_role).to_string();
 
-    // c2s: line-parse, inject _meta on tools/call, forward
+    // c2s: line-parse, inject _meta on tools/call, forward.
+    // Chunked read with an explicit per-line cap so a child that never emits
+    // `\n` can't OOM the host.
     let c2s = async {
         let mut reader = BufReader::new(stdin);
         let mut line: Vec<u8> = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line).await {
+        let mut chunk = [0u8; 8192];
+        'outer: loop {
+            match reader.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(_) => {
-                    let injected = inject_meta_line(&line, &actor_id, &role_s)
-                        .unwrap_or_else(|_| line.clone());
-                    if sw.write_all(&injected).await.is_err() {
-                        break;
-                    }
-                    if sw.flush().await.is_err() {
-                        break;
+                Ok(n) => {
+                    for &b in &chunk[..n] {
+                        line.push(b);
+                        if b == b'\n' {
+                            let injected = inject_meta_line(&line, &actor_id, &role_s)
+                                .unwrap_or_else(|_| line.clone());
+                            if sw.write_all(&injected).await.is_err() {
+                                break 'outer;
+                            }
+                            if sw.flush().await.is_err() {
+                                break 'outer;
+                            }
+                            line.clear();
+                        } else if line.len() > MAX_C2S_LINE_BYTES {
+                            tracing::error!(
+                                len = line.len(),
+                                cap = MAX_C2S_LINE_BYTES,
+                                "mcp-bridge: c2s line exceeds cap, closing bridge",
+                            );
+                            break 'outer;
+                        }
                     }
                 }
                 Err(_) => break,
             }
+        }
+        // Flush the final line if the stream ended without a trailing newline
+        // and it's within the cap.
+        if !line.is_empty() && line.len() <= MAX_C2S_LINE_BYTES {
+            let injected =
+                inject_meta_line(&line, &actor_id, &role_s).unwrap_or_else(|_| line.clone());
+            let _ = sw.write_all(&injected).await;
+            let _ = sw.flush().await;
         }
     };
 
