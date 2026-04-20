@@ -53,19 +53,19 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.platform_pair }})
+    name: Build ${{ matrix.target }} (${{ matrix.platform_pair }})
     runs-on: ${{ matrix.runner }}
-    # Skip arm64 cells on PRs for turnaround.
-    if: github.event_name == 'push' || matrix.platform == 'linux/amd64'
     strategy:
       fail-fast: false
       matrix:
         include:
-          # On PR: amd64-only cells for both targets (skip arm64 for
-          # PR turnaround; Dockerfile regressions in the with-claude
-          # stage still surface via the amd64 cell).
-          # On push: all 4 cells. The `if:` at job level filters arm64
-          # on PR events.
+          # All 4 cells run on both PRs and pushes. Arm64 cells on PRs
+          # don't cost extra (arm64 hosted runners are free for public
+          # repos and builds run in parallel), so it's simpler to always
+          # build all targets on all platforms. Earlier iterations
+          # gated arm64 on push-only via `if: ... matrix.platform == ...`,
+          # but GHA rejects `matrix.*` in job-level `if:` expressions
+          # and the workflow fails to start.
           - target: runtime
             platform: linux/amd64
             runner: ubuntu-latest
