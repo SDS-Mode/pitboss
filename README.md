@@ -6,8 +6,10 @@
 
 ## Documentation
 
-Full operator guide, MCP tool reference, and cookbook of working scenarios:
-**https://sds-mode.github.io/pitboss/** (auto-published from `book/` on every push to `main`).
+Full operator guide, MCP tool reference, Security section (threat model,
+defense-in-depth, Rule of Two), approval policy reference, and a cookbook
+of working scenarios: **https://sds-mode.github.io/pitboss/**
+(auto-published from `book/` on every push to `main`).
 
 To browse offline:
 
@@ -15,17 +17,19 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.5.0** ships the flagship operator-control bucket: `pitboss attach
-<run-id> <task-id>` for a follow-mode log viewer on a single worker;
-SIGSTOP freeze-pause as an opt-in alternative to cancel-with-resume;
-structured `ApprovalPlan` (rationale / resources / risks / rollback)
-rendered as labeled sections in the TUI modal; a new `propose_plan`
-MCP tool + `[run].require_plan_approval` flag that gates `spawn_worker`
-on operator pre-flight approval; and `fake-claude` end-to-end test
-coverage through `pitboss mcp-bridge` that closes the v0.3 Task 26
-placeholder. 455 tests, zero flakes, full flagship bucket delivered.
-See `CHANGELOG.md` for the per-version history and `AGENTS.md` for
-MCP tool reference, keybindings, and manifest schema.
+**v0.6.0** is the depth-2 sub-leads release. A root lead may now
+dynamically spawn sub-leads at runtime — each with its own budget
+envelope, worker cap, timeout, and isolated coordination layer —
+via the new `spawn_sublead` MCP tool. Accompanying additions: `wait_actor`
+(generalized lifecycle wait for workers or sub-leads), `run_lease_acquire`
+/ `run_lease_release` for run-global resource coordination,
+`cancel_worker(target, reason?)` delivering synthetic reprompts up the tree,
+`[[approval_policy]]` manifest blocks for deterministic (non-LLM) rule
+matching, reject-with-reason, approval TTL + fallback, a grouped TUI grid
+for sub-tree containers, and a non-modal approval list pane (`'a'` hotkey).
+455 → 536 tests, 0 failures. See `CHANGELOG.md` for the full per-version
+history and `AGENTS.md` for MCP tool reference, keybindings, and manifest
+schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
@@ -217,19 +221,22 @@ The lead has these MCP tools, auto-allowed in its `--allowedTools`:
 | `mcp__pitboss__spawn_worker` | Deal a new worker with a prompt + optional directory/model/tools |
 | `mcp__pitboss__worker_status` | Non-blocking peek at a worker's state |
 | `mcp__pitboss__wait_for_worker` | Block until a specific worker settles |
+| `mcp__pitboss__wait_actor` | Generalized lifecycle wait — accepts any actor id (worker or sub-lead); returns `ActorTerminalRecord` |
 | `mcp__pitboss__wait_for_any` | Block until any of a list of workers settles |
 | `mcp__pitboss__list_workers` | Snapshot of active + completed workers |
-| `mcp__pitboss__cancel_worker` | Signal a per-worker `CancelToken` |
+| `mcp__pitboss__cancel_worker` | Signal a per-worker `CancelToken`; optional `reason` delivers a synthetic reprompt to the parent |
 | `mcp__pitboss__pause_worker` | Pause a worker — `mode="cancel"` (default, terminates + snapshots session) or `mode="freeze"` (SIGSTOPs the subprocess in place) |
 | `mcp__pitboss__continue_worker` | Resume a paused/frozen worker (`claude --resume` or SIGCONT respectively) |
 | `mcp__pitboss__reprompt_worker` | Mid-flight redirect: kill + `claude --resume <sid>` with a new prompt |
 | `mcp__pitboss__request_approval` | Gate a single in-flight action on operator approval; accepts an optional typed `ApprovalPlan` |
 | `mcp__pitboss__propose_plan` | Pre-flight gate: submit an execution plan for approval; required before `spawn_worker` when `[run].require_plan_approval = true` |
+| `mcp__pitboss__spawn_sublead` | (v0.6+, root lead only) Spawn a sub-lead with its own envelope; requires `[lead] allow_subleads = true` |
+| `mcp__pitboss__run_lease_acquire` | (v0.6+) Acquire a run-global lease for cross-sub-tree resource coordination |
+| `mcp__pitboss__run_lease_release` | (v0.6+) Release a run-global lease |
 
 Workers additionally get the 7 shared-store tools (`kv_get`, `kv_set`,
 `kv_cas`, `kv_list`, `kv_wait`, `lease_acquire`, `lease_release`) for
-hub-mediated coordination without breaking the depth-1 invariant. See
-`AGENTS.md` for full schemas.
+hub-mediated coordination. See `AGENTS.md` for full schemas.
 
 ### House rules
 
@@ -240,7 +247,7 @@ hub-mediated coordination without breaking the depth-1 invariant. See
   stack, `spawn_worker` returns `budget exceeded` and the lead decides what to
   do with partial results.
 - **`lead_timeout_secs`** — wall-clock cap on the lead. The pit always clears.
-- Depth is 1. Workers don't spawn sub-workers; no re-raise, no chaining.
+- Depth is capped at 2. Workers don't spawn sub-workers. Root leads may spawn sub-leads (v0.6+, opt-in via `allow_subleads = true`); sub-leads spawn only workers.
 
 ### The bridge
 
@@ -260,8 +267,12 @@ clearing — full history stays visible for the run.
 
 A root lead can spawn sub-leads at runtime, each with its own envelope
 (budget, worker cap, timeout) and isolated coordination layer. Useful
-when a project decomposes into orthogonal phases that each need their
-own clean context. See `AGENTS.md` for the full model.
+when a project decomposes into orthogonal phases that each need their own
+clean context. `spawn_sublead_session` is fully wired — sub-leads run as
+real Claude subprocesses end-to-end with complete lifecycle tracking
+(Cancel/Timeout/Error outcome classification, `TaskRecord` persistence,
+budget reconciliation, and reprompt-loop kill+resume). See `AGENTS.md`
+for the full model, manifest fields, and MCP tool schemas.
 
 ### Resume
 
@@ -304,15 +315,19 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-`v0.5.0` — the flagship operator-control bucket shipped:
-`pitboss attach` follow-mode viewer, SIGSTOP freeze-pause, structured
-`ApprovalPlan`, pre-flight `propose_plan` gate, and a full
-fake-claude-through-`mcp-bridge` e2e test harness. Builds on v0.4.4's
-shared-store + resume polish, v0.4.3's worker shared store, and
-v0.4.1's control plane (cancel/pause/continue/reprompt, operator
-approvals, notification sinks). 455 tests pass under `cargo test
---workspace --features pitboss-core/test-support`. See
-[`CHANGELOG.md`](CHANGELOG.md) for the per-version history.
+`v0.6.0` — depth-2 sub-leads shipped: `spawn_sublead` MCP tool, real
+end-to-end subprocess lifecycle for sub-leads, `wait_actor` (generalized
+lifecycle wait), `run_lease_acquire` / `run_lease_release` (run-global
+leases), `cancel_worker` reason delivery, `[[approval_policy]]`
+deterministic manifest rules, reject-with-reason, approval TTL +
+fallback, TUI grouped grid + non-modal approval list pane, and a
+dogfood test suite of six fake-claude spotlights. Builds on v0.5.0's
+flagship operator-control bucket (`pitboss attach`, SIGSTOP
+freeze-pause, `ApprovalPlan`, `propose_plan` gate, fake-claude e2e
+harness) and the v0.4.x control plane (shared store, cancel/pause/
+continue/reprompt, notifications). 536 tests pass under `cargo test
+--workspace --features pitboss-core/test-support`, 0 failures. See
+[`CHANGELOG.md`](CHANGELOG.md) for the full per-version history.
 
 ## Manual smoke testing
 
@@ -329,7 +344,7 @@ Requires `claude` authenticated via its normal subscription config (no
 
 ```bash
 cargo build --workspace
-cargo test --workspace --features pitboss-core/test-support    # 455 tests
+cargo test --workspace --features pitboss-core/test-support    # 536 tests
 cargo lint                                                     # clippy -D warnings
 cargo fmt --all -- --check
 ```

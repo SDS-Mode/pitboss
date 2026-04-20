@@ -3,29 +3,15 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: v0.4.5 (2026-04-19).** Everything shipped through
-v0.4.5 has been removed from this file — check `CHANGELOG.md` for
+**Last refresh: v0.6.0 (2026-04-19).** Everything shipped through
+v0.6.0 has been removed from this file — check `CHANGELOG.md` for
 per-version history. If you're about to add an item, slot it into one
 of the tiered sections below (biggest effort first).
 
 ---
 
-## Flagship feature bucket (targeting v0.5.0)
-
-_Empty — all v0.5.0 flagship items have shipped. v0.5.0 release can
-cut whenever we're ready. Post-v0.5.0 items live in the tiered
-sections below._
-
----
-
 ## Ops / infra polish
 
-- **`cargo-dist` migration.** Current release workflow is a manual
-  cross-compile matrix. `cargo-dist` adds installers (`curl | sh`),
-  auto-updater binaries, and Homebrew formula publishing. Worth the
-  switch once we add more target triples.
-- **Dockerfile / container image.** Deployment convenience + a
-  canonical runtime environment for CI reproduction.
 - **MCP protocol extensions.** We only implement `tools`. Adding
   `resources` + `prompts` would be cheap and makes pitboss a more
   complete MCP citizen — useful if we ever expose it to non-claude
@@ -47,12 +33,15 @@ Send the same prompt to every running tile. From the v0.2.1 roadmap.
 Depends on interactive snap-in (retired — see below). **Status:**
 parked; probably needs a different UX surface now.
 
-### Depth > 1 hierarchies
+### Depth > 2 hierarchies
 
-A worker can itself be a lead. Needs recursion guardrails, a nested
-socket addressing scheme, and a real product decision: *should this
-exist at all, or is "I want a deeper tree" a code smell for a flatter
-decomposition?* **Status:** parked pending need.
+Depth-2 (root lead → sub-leads → workers) shipped in v0.6.0. Depth-3+
+(sub-leads spawning their own sub-leads) remains a non-goal for now —
+the same "flatter decomposition" concern applies with more force. The
+depth=2 cap is enforced at both the MCP handler and the sub-lead's
+`--allowedTools` list. **Status:** depth=2 SHIPPED (v0.6.0); depth>2
+parked pending a concrete need that can't be served by a wider flat
+fan-out.
 
 ### Peer messaging
 
@@ -65,16 +54,62 @@ form explicitly retired.
 
 ---
 
+## Deferred from v0.6.0 (targeting v0.7+)
+
+Items that were scoped or considered during v0.6 development but
+explicitly deferred. These are reasonably well-understood problems,
+not blue-sky ideas.
+
+### Per-sub-tree runners (Phase 4 ownership cleanup)
+
+In v0.6.0, the watcher cascades cancel tokens directly across sub-tree
+boundaries rather than going through a per-sub-tree runner that owns
+its workers' cancellation. This inverts the ownership model the v0.6
+spec noted for future cleanup. Current implementation works correctly
+but the ownership inversion is a known footgun for handlers that need
+to route by caller. **Status:** deferred for v0.7; tracked in codebase
+with CAUTION doc block on `DispatchState`'s `Deref` impl.
+
+### TUI runtime policy mutation
+
+`[[approval_policy]]` rules are manifest-only in v0.6 — the TUI can
+display and act on policy but cannot edit rules while a run is live.
+Useful for operators who want to tighten or relax auto-approve rules
+mid-run without restarting. **Status:** deferred; manifest-only is
+safe and sufficient for the v0.6 use cases.
+
+### Sub-lead resume support
+
+`pitboss resume <run-id>` only resumes the root lead. Sub-leads that
+were live when the run was interrupted are not individually resumed;
+the root lead must re-spawn them. Full sub-lead resume would require
+persisting sub-lead `sublead_id` → `session_id` mappings and threading
+`--resume` through `spawn_sublead_session`. **Status:** deferred; the
+current fallback (root lead re-spawns) is workable for the typical
+interruption+retry case.
+
+### Native-arm container runners
+
+The current multi-arch container build uses QEMU emulation for
+`linux/arm64`, which is slow. Splitting the matrix to use native arm64
+runners (GitHub's `ubuntu-24.04-arm` or self-hosted) would cut build
+time significantly. **Status:** deferred; blocked on runner availability
+and cost in the public CI budget; the QEMU build is correct if slow.
+
+---
+
 ## Non-goals (don't build these)
 
 ### Worker → worker MCP channel
 
 Specifically: don't let workers spawn sub-workers or send tool calls
-laterally. Depth = 1 is a design invariant, not an accidental limit.
-Breaking it re-introduces the contention + ordering complexity that
-pitboss was built to avoid. If you need workers to share data, use
-the shared store (`/shared/*` or `/peer/<id>/*` namespaces — see
-`AGENTS.md`).
+laterally. Workers are terminal nodes — no spawning, no lateral calls.
+This is a design constraint, not an accidental limit. Breaking it
+re-introduces the contention + ordering complexity that pitboss was
+built to avoid. (Note: v0.6.0 added depth-2 via *sub-leads*, which are
+a distinct concept — a sub-lead is a full orchestrator, not a worker
+calling peers.) If you need workers to share data, use the shared store
+(`/shared/*` or `/peer/<id>/*` namespaces — see `AGENTS.md`).
 
 ### Interactive snap-in (keystroke passthrough)
 

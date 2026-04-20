@@ -44,8 +44,10 @@ Anti-patterns — **don't use pitboss** for:
   workers cannot message each other (by design).
 - Work where the operator needs to inspect intermediate state
   interactively. Pitboss runs are batch; the TUI is read-only.
-- Deep recursion. Depth is 1 (hub-and-spoke). Workers cannot spawn
-  sub-workers.
+- Deep recursion. Max depth is 2 (root lead → sub-leads → workers).
+  Workers cannot spawn anything. Sub-leads are available via `spawn_sublead`
+  when `allow_subleads = true`; use them for orthogonal phases, not for
+  general recursion.
 
 ---
 
@@ -76,7 +78,7 @@ hierarchical.**
 | **Run** | One `pitboss dispatch` invocation. Produces `~/.local/share/pitboss/runs/<run-id>/`. |
 | **Lead** | In hierarchical mode, the first claude subprocess. Receives the operator's prompt + the full MCP orchestration toolset. Decides how many workers to spawn. |
 | **Worker** | A claude subprocess executing a single task, either declared in `[[task]]` (flat) or dynamically spawned by the lead (hierarchical). |
-| **House rules** | Hierarchical guardrails: `max_workers` (≤16), `budget_usd`, `lead_timeout_secs`. |
+| **House rules** | Hierarchical guardrails: `max_workers` (≤16), `budget_usd`, `lead_timeout_secs`. For depth-2 runs: also `max_subleads`, `max_sublead_budget_usd`, `max_workers_across_tree`. |
 | **Worktree** | A per-task git worktree under a fresh branch, isolating concurrent work. `use_worktree = true` by default. |
 
 ---
@@ -100,6 +102,35 @@ TOML, typically named `pitboss.toml`. Every field annotated below.
 | `approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: how `request_approval` / `propose_plan` behave when no TUI is attached. See the `approval_policy` section below. |
 | `require_plan_approval` | bool | no | false | Hierarchical (v0.5.0+): when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. Opt-in; runs without it behave identically to v0.4.x. |
 | `dump_shared_store` | bool | no | false | Hierarchical: at run finalize, write `shared-store.json` into the run dir for post-mortem inspection. |
+
+### `[[notification]]` sinks (v0.4.1+)
+
+Optional notification sinks. Multiple blocks allowed, one per sink.
+
+| Key | Required? | Notes |
+|---|---|---|
+| `type` | yes | `"log"`, `"webhook"`, `"slack"`, `"discord"` |
+| `url` | for webhook/slack/discord | Endpoint; `${ENV_VAR}` substitution supported |
+| `events` | no | Filter by event category. Defaults to all. |
+| `severity_min` | no | Minimum severity to fire. |
+
+Event categories:
+
+| Category | Fires when |
+|---|---|
+| `"approval_request"` | A `request_approval` or `propose_plan` call is queued for operator action |
+| `"approval_pending"` | An approval enqueues and awaits operator action (v0.6+); use for alerting when a run is blocked |
+| `"run_finished"` | A run reaches a terminal state |
+| `"budget_exceeded"` | A `spawn_worker` call is rejected due to budget exhaustion |
+
+Example — Slack alert on blocked approvals:
+
+```toml
+[[notification]]
+type = "slack"
+url = "${SLACK_WEBHOOK_URL}"
+events = ["approval_pending", "run_finished"]
+```
 
 ### `[defaults]`
 
@@ -129,6 +160,25 @@ Inherited by every `[[task]]` and `[[lead]]` unless overridden.
 Same fields as `[[task]]`. `id` is used as the tile label in the TUI.
 Mutually exclusive with `[[task]]` — a manifest is either flat or
 hierarchical.
+
+Additional `[lead]` fields for depth-2 sub-leads (v0.6+):
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `allow_subleads` | bool | `false` | Expose `spawn_sublead` in the root lead's `--allowedTools`. Required to enable depth-2. |
+| `max_subleads` | int | unset | Cap on total sub-leads the root lead may spawn. |
+| `max_sublead_budget_usd` | float | unset | Per-sub-lead envelope cap; `spawn_sublead` rejects envelopes exceeding this. |
+| `max_workers_across_tree` | int | unset | Cap on total live workers including all sub-tree workers. |
+
+`[lead.sublead_defaults]` — optional defaults inherited by `spawn_sublead` calls that omit those parameters:
+
+```toml
+[lead.sublead_defaults]
+budget_usd = 2.00
+max_workers = 4
+lead_timeout_secs = 1800
+read_down = false
+```
 
 ---
 
@@ -271,14 +321,18 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__spawn_worker` | `{prompt, directory?, branch?, tools?, timeout_secs?, model?}` | `{task_id, worktree_path}` |
 | `mcp__pitboss__worker_status` | `{task_id}` | `{state, started_at, partial_usage, last_text_preview, prompt_preview}` |
 | `mcp__pitboss__wait_for_worker` | `{task_id, timeout_secs?}` | full `TaskRecord` when worker settles |
+| `mcp__pitboss__wait_actor` | `{actor_id, timeout_secs?}` | `ActorTerminalRecord` (`Worker(TaskRecord)` or `Sublead(SubleadTerminalRecord)`) when actor settles. Accepts worker or sub-lead ids. `wait_for_worker` is a back-compat alias. |
 | `mcp__pitboss__wait_for_any` | `{task_ids: [...], timeout_secs?}` | `{task_id, record}` on first settle |
 | `mcp__pitboss__list_workers` | `{}` | `{workers: [{task_id, state, prompt_preview, started_at}, ...]}` |
-| `mcp__pitboss__cancel_worker` | `{task_id}` | `{ok: bool}` |
+| `mcp__pitboss__cancel_worker` | `{task_id, reason?: string}` | `{ok: bool}` — optional `reason` delivers a synthetic `[SYSTEM]` reprompt to the killed actor's direct parent lead via kill+resume |
 | `mcp__pitboss__pause_worker` | `{task_id, mode?}` — `mode` is `"cancel"` (default) or `"freeze"` | `{ok: bool}` |
 | `mcp__pitboss__continue_worker` | `{task_id, prompt?}` | `{ok: bool}` |
 | `mcp__pitboss__reprompt_worker` | `{task_id, prompt}` | `{ok: bool}` — mid-flight course-correct via `claude --resume` |
-| `mcp__pitboss__request_approval` | `{summary, timeout_secs?, plan?: ApprovalPlan}` | `{approved, comment?, edited_summary?}` |
-| `mcp__pitboss__propose_plan` | `{plan: ApprovalPlan, timeout_secs?}` | `{approved, comment?, edited_summary?}` |
+| `mcp__pitboss__request_approval` | `{summary, timeout_secs?, plan?: ApprovalPlan}` | `{approved, comment?, edited_summary?, reason?}` |
+| `mcp__pitboss__propose_plan` | `{plan: ApprovalPlan, timeout_secs?}` | `{approved, comment?, edited_summary?, reason?}` |
+| `mcp__pitboss__spawn_sublead` | `{prompt, model, budget_usd?, max_workers?, lead_timeout_secs?, initial_ref?, read_down?}` | `{sublead_id}` — root lead only; requires `[lead] allow_subleads = true`. See Depth-2 section. |
+| `mcp__pitboss__run_lease_acquire` | `{key, ttl_secs, wait_secs?}` | `{lease_id, version, ...}` — run-global; auto-released on actor termination |
+| `mcp__pitboss__run_lease_release` | `{lease_id}` | `{ok: true}` |
 
 All tool responses returning a collection are wrapped in a record
 (`{workers: [...]}`, `{entries: [...]}`, `{entry: ...}`) — MCP spec
@@ -296,7 +350,7 @@ tools don't return bare arrays or null. Unwrap one level from callers.
 
 A per-run, in-memory, hub-mediated coordination surface. Workers get
 a narrower `mcp-config.json` that lists only the seven tools below
-(not `spawn_worker` — depth-1 invariant). Namespaces:
+(not `spawn_worker` or `spawn_sublead` — workers are terminal). Namespaces:
 
 - `/ref/*` — lead-write, all-read. Use for shared context (plans,
   conventions, targets).
@@ -348,8 +402,9 @@ redirect a frozen worker).
 
 Gate a *single in-flight action* on operator approval. Block the lead
 until the operator approves, rejects, or edits. Args:
-`{summary: string, timeout_secs?: number, plan?: ApprovalPlan}`.
-Returns `{approved: bool, comment?: string, edited_summary?: string}`.
+`{summary: string, timeout_secs?: number, ttl_secs?: number, fallback?: "auto_reject"|"auto_approve"|"block", plan?: ApprovalPlan}`.
+Returns `{approved: bool, comment?: string, edited_summary?: string, reason?: string}`.
+When `approved = false`, `reason` carries the operator's rejection explanation if provided.
 Policy-gated: see `approval_policy` below.
 
 `ApprovalPlan` (v0.5.0+) is a typed structured schema that the TUI
@@ -426,12 +481,15 @@ branch conflict, non-git directory). Check the stderr log.
 
 ---
 
-## Operator keybindings (pitboss-tui, v0.5.0+)
+## Operator keybindings (pitboss-tui, v0.6.0+)
 
 Navigation / views:
 - `h j k l` / arrows — navigate tiles
+- `Tab` — cycle focus across sub-tree containers (v0.6+; depth-2 runs)
 - `Enter` — open Detail view for focused tile (metadata pane + live
-  git-diff + scrollable log)
+  git-diff + scrollable log); on a sub-tree container header,
+  toggles expand/collapse
+- `a` — focus the approval list pane (right-rail, non-modal; v0.6+)
 - `o` — run picker (switch to another run)
 - `?` — help overlay (full keybinding reference)
 - `q` / `Ctrl-C` — quit
@@ -455,18 +513,83 @@ Control plane:
 - `p` — pause focused worker (requires initialized session)
 - `c` — continue paused worker
 - `r` — open reprompt textarea (Ctrl+Enter to submit, Esc to cancel)
-- During approval modal: `y` approve, `n` reject (with comment), `e`
-  edit (Ctrl+Enter to submit, Esc to cancel)
+- During approval modal: `y` approve, `n` reject (with optional reason
+  string, Ctrl+Enter to submit), `e` edit (Ctrl+Enter to submit, Esc to cancel)
+
+Approval list pane (`'a'` to focus, v0.6+):
+- `Up` / `Down` — navigate pending approvals
+- `Enter` — open detail modal for the highlighted approval
 
 ## `[run].approval_policy`
 
-Controls handling of `request_approval` calls when no TUI is attached.
+Run-level scalar. Controls handling of `request_approval` calls when
+no TUI is attached and no `[[approval_policy]]` rule matches.
 
-- `block` (default) — queue until a TUI connects, or fail after
+- `"block"` (default) — queue until a TUI connects, or fail after
   `lead_timeout_secs`.
-- `auto_approve` — immediate `{approved: true}`.
-- `auto_reject` — immediate `{approved: false, comment: "no operator
+- `"auto_approve"` — immediate `{approved: true}`.
+- `"auto_reject"` — immediate `{approved: false, comment: "no operator
   available"}`.
+
+## `[[approval_policy]]` blocks (v0.6+)
+
+Ordered list of deterministic rules evaluated in pure Rust before
+approvals reach the operator queue. **NOT LLM-evaluated.** First match
+wins; unmatched approvals fall through to `[run].approval_policy`.
+
+```toml
+[[approval_policy]]
+match = { actor = "root", category = "tool_use", tool_name = "Bash" }
+action = "auto_approve"
+
+[[approval_policy]]
+match = { category = "cost", cost_over = 1.00 }
+action = "block"
+
+[[approval_policy]]
+match = { actor = "root→S1" }
+action = "auto_reject"
+```
+
+Match fields (all optional; unset fields match any value):
+
+| Field | Type | Notes |
+|---|---|---|
+| `actor` | string | `ActorPath` rendered as `"root"` or `"root→S1"` or `"root→S1→W3"` |
+| `category` | string | snake_case enum: `"tool_use"`, `"plan"`, `"cost"`, `"other"` |
+| `tool_name` | string | Exact tool name; only meaningful when `category = "tool_use"` |
+| `cost_over` | float | Matches when the `cost_estimate` hint on the approval exceeds this USD value |
+
+Action values (snake_case):
+
+| Action | Effect |
+|---|---|
+| `"auto_approve"` | Immediate approved response, no operator queue entry |
+| `"auto_reject"` | Immediate rejected response with optional `reason` |
+| `"block"` | Force into operator queue regardless of run-level policy |
+
+For full syntax reference and defense-in-depth patterns see:
+- [Approval policy reference](https://sds-mode.github.io/pitboss/operator-guide/approval-policy-reference.html)
+- [Defense-in-depth](https://sds-mode.github.io/pitboss/security/defense-in-depth.html)
+
+### Reject-with-reason (v0.6+)
+
+When the operator rejects an approval, an optional `reason: string` is
+accepted in the modal. The reason flows back through MCP to the
+requesting actor's session so Claude can adapt without a separate
+reprompt round-trip. Appears in the `reason` field of the approval
+response alongside `approved: false`.
+
+### Approval TTL + fallback (v0.6+)
+
+`request_approval` accepts optional `ttl_secs` and `fallback` hints:
+- `ttl_secs` — seconds after which the approval auto-resolves
+- `fallback` — action to take on TTL expiry: `"auto_reject"` (default),
+  `"auto_approve"`, or `"block"` (requeue)
+
+Prevents unreachable operators from permanently stalling a run. Set a
+short TTL + `fallback = "auto_reject"` on approvals that should not
+block indefinitely if the operator steps away.
 
 ---
 
@@ -680,6 +803,12 @@ spawn_sublead(
 
 `cancel_worker(target, reason)` — when invoked with a reason, the killed actor's direct parent lead receives a synthetic reprompt with the reason text. Use this to correct a misbehaving sub-tree without a separate reprompt round-trip.
 
+### Waiting on sub-leads
+
+Use `wait_actor(sublead_id)` to block until a sub-lead settles.
+Returns `ActorTerminalRecord` (a `Sublead(SubleadTerminalRecord)` variant).
+`wait_for_worker` only accepts worker ids — call `wait_actor` for sub-leads.
+
 ### Cancel cascade
 
 Cancellation is depth-first. Root cancel → sub-leads → their workers, with the existing two-phase drain at each layer.
@@ -708,6 +837,6 @@ dispatch first and have to ask follow-ups, you've probably wasted budget.
 
 ## Version
 
-Written for pitboss `v0.5.0`. Schema may evolve; `pitboss validate` is the
+Written for pitboss `v0.6.0`. Schema may evolve; `pitboss validate` is the
 source of truth. This document should stay self-contained — if something
 here conflicts with the actual binary, the binary wins. File a PR.
