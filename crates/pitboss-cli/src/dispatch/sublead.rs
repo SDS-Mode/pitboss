@@ -414,11 +414,18 @@ async fn spawn_sublead_session(
 
     // 5. Build the spawn command. CWD is root's run_subdir (sub-leads don't
     //    get separate worktrees in v0.6 — revisit in future).
+    //    TODO(Task 5): merge manifest [defaults.env] + per-spawn env overrides
+    //    here. For now, only pitboss's own defaults (CLAUDE_CODE_ENTRYPOINT)
+    //    are seeded — operators who need `[defaults.env]` on sub-leads
+    //    spawn them from a dispatcher with the target env var already in its
+    //    ambient env (tokio Command inherits parent env for keys not explicitly set).
+    let mut sublead_env: std::collections::HashMap<String, String> = Default::default();
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut sublead_env);
     let initial_cmd = SpawnCmd {
         program: sub_layer.claude_binary.clone(),
         args,
         cwd: sub_layer.run_subdir.clone(),
-        env: Default::default(),
+        env: sublead_env,
     };
 
     // 6. Determine the lead timeout — fall back to 1 hour if the manifest
@@ -546,11 +553,14 @@ async fn spawn_sublead_session(
                         &mcp_config_path_bg,
                         Some(sid.as_str()),
                     );
+                    let mut resume_env: std::collections::HashMap<String, String> =
+                        Default::default();
+                    crate::dispatch::runner::apply_pitboss_env_defaults(&mut resume_env);
                     current_cmd = SpawnCmd {
                         program: sub_layer_bg.claude_binary.clone(),
                         args: resume_args,
                         cwd: sub_layer_bg.run_subdir.clone(),
-                        env: Default::default(),
+                        env: resume_env,
                     };
 
                     // Reset workers entry to Running with no session_id (will be

@@ -17,6 +17,29 @@ use uuid::Uuid;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
+/// Seed an env map with pitboss's own defaults for spawned claude subprocesses.
+/// Currently: set `CLAUDE_CODE_ENTRYPOINT=sdk-ts` if not already present.
+///
+/// Rationale: pitboss is the external permission authority (via
+/// `approval_policy`, `[[approval_policy]]` rules, and the TUI). Claude's
+/// own interactive permission gate is redundant under pitboss orchestration
+/// and causes silent 7-second-success failures in headless dispatch when no
+/// operator is present to approve each tool call.
+///
+/// The `sdk-ts` value tells claude "you're running under an SDK runtime that
+/// manages permissions externally — don't prompt the TTY." Operators who want
+/// claude's own gate back for a specific actor can override via
+/// `[defaults.env]`, `[lead.env]`, `[[task]].env`, or the `env` field on
+/// `spawn_sublead`.
+///
+/// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
+/// for the deferred alternative (routing claude's gate through pitboss's
+/// approval queue rather than bypassing it).
+pub fn apply_pitboss_env_defaults(env: &mut std::collections::HashMap<String, String>) {
+    env.entry("CLAUDE_CODE_ENTRYPOINT".to_string())
+        .or_insert_with(|| "sdk-ts".to_string());
+}
+
 fn cleanup_policy_from(w: crate::manifest::schema::WorktreeCleanup) -> CleanupPolicy {
     match w {
         crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
@@ -336,11 +359,13 @@ async fn execute_task(
         task.directory.clone()
     };
 
+    let mut cmd_env = task.env.clone();
+    apply_pitboss_env_defaults(&mut cmd_env);
     let cmd = SpawnCmd {
         program: claude.to_path_buf(),
         args: spawn_args(task),
         cwd: cwd.clone(),
-        env: task.env.clone(),
+        env: cmd_env,
     };
 
     table.lock().await.mark_running(&task.id);
@@ -671,8 +696,44 @@ async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
 mod tests {
     use super::*;
     use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use std::collections::HashMap;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn apply_pitboss_env_defaults_sets_entrypoint_when_absent() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        apply_pitboss_env_defaults(&mut env);
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"sdk-ts".to_string()),
+            "default should be applied to an empty env"
+        );
+    }
+
+    #[test]
+    fn apply_pitboss_env_defaults_honors_operator_override() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
+        apply_pitboss_env_defaults(&mut env);
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"cli".to_string()),
+            "operator-set value must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn apply_pitboss_env_defaults_preserves_other_keys() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        apply_pitboss_env_defaults(&mut env);
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"sdk-ts".to_string())
+        );
+    }
 
     fn init_repo(root: &std::path::Path) {
         Command::new("git")

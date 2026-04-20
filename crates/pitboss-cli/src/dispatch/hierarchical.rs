@@ -200,11 +200,13 @@ pub async fn run_hierarchical(
     //     identical behaviour to the v0.5 single-shot. The extra state
     //     (last_session_id, overall_started_at, total_token_usage) adds no
     //     overhead on the common path.
+    let mut lead_env = lead.env.clone();
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env);
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
         args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
         cwd: lead_cwd.clone(),
-        env: lead.env.clone(),
+        env: lead_env,
     };
 
     state.workers.write().await.insert(
@@ -286,11 +288,13 @@ pub async fn run_hierarchical(
                     sid,
                     &new_prompt,
                 );
+                let mut resume_env = lead.env.clone();
+                crate::dispatch::runner::apply_pitboss_env_defaults(&mut resume_env);
                 current_cmd = pitboss_core::process::SpawnCmd {
                     program: claude_binary.clone(),
                     args: resume_args,
                     cwd: lead_cwd.clone(),
-                    env: lead.env.clone(),
+                    env: resume_env,
                 };
                 // Reset the workers map entry to Running (session_id TBD).
                 state.workers.write().await.insert(
