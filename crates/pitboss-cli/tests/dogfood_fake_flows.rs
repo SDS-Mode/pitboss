@@ -632,3 +632,135 @@ async fn dogfood_kill_cascade_drain() {
         "root cancel should be draining after operator cancel"
     );
 }
+
+#[tokio::test]
+async fn dogfood_run_lease_contention() {
+    use serde_json::json;
+
+    // ── Scenario: two sub-leads compete for cross-tree resource (output.json)
+    // S1 acquires first; S2 is blocked with S1 as holder. S1 releases; S2
+    // acquires. Demonstrates the run_lease_* API for cross-tree coordination.
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // ── Spawn two sub-leads via MCP ───────────────────────────────────────────
+    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+
+    let s1_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "sub-lead 1",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 1.0,
+                "max_workers": 1,
+            }),
+        )
+        .await
+        .unwrap();
+    let s1_id = s1_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead should return sublead_id for S1")
+        .to_string();
+
+    let s2_resp = root
+        .call_tool(
+            "spawn_sublead",
+            json!({
+                "prompt": "sub-lead 2",
+                "model": "claude-haiku-4-5",
+                "budget_usd": 1.0,
+                "max_workers": 1,
+            }),
+        )
+        .await
+        .unwrap();
+    let s2_id = s2_resp["sublead_id"]
+        .as_str()
+        .expect("spawn_sublead should return sublead_id for S2")
+        .to_string();
+
+    // ── STEP 1: S1 acquires the lease ────────────────────────────────────────
+    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
+        .await
+        .unwrap();
+    let acq1 = s1_client
+        .call_tool(
+            "run_lease_acquire",
+            json!({"key": "output.json", "ttl_secs": 60}),
+        )
+        .await;
+    assert!(acq1.is_ok(), "S1 should acquire the lease");
+    let acq1_resp = acq1.unwrap();
+    assert_eq!(
+        acq1_resp["acquired"], true,
+        "S1 acquire should return acquired=true"
+    );
+    assert_eq!(
+        acq1_resp["key"], "output.json",
+        "S1 acquire should return the key"
+    );
+    assert_eq!(
+        acq1_resp["holder"], s1_id,
+        "S1 acquire should list S1 as holder"
+    );
+
+    // ── STEP 2: S2 tries to acquire the same lease — should be blocked ──────
+    let mut s2_client = FakeMcpClient::connect_as(&socket, &s2_id, "sublead")
+        .await
+        .unwrap();
+    let acq2 = s2_client
+        .call_tool(
+            "run_lease_acquire",
+            json!({"key": "output.json", "ttl_secs": 60}),
+        )
+        .await;
+    assert!(acq2.is_err(), "S2 should be blocked by S1's existing lease");
+    let err = format!("{:?}", acq2.unwrap_err());
+    assert!(
+        err.contains(&s1_id),
+        "error message should mention S1 as current holder; got: {err}"
+    );
+
+    // ── STEP 3: S1 releases the lease ────────────────────────────────────────
+    let rel1 = s1_client
+        .call_tool("run_lease_release", json!({"key": "output.json"}))
+        .await;
+    assert!(rel1.is_ok(), "S1 should release the lease successfully");
+    let rel1_resp = rel1.unwrap();
+    assert_eq!(
+        rel1_resp["released"], true,
+        "S1 release should return released=true"
+    );
+
+    // ── STEP 4: S2 retries and now acquires the lease ──────────────────────
+    let acq3 = s2_client
+        .call_tool(
+            "run_lease_acquire",
+            json!({"key": "output.json", "ttl_secs": 60}),
+        )
+        .await;
+    assert!(
+        acq3.is_ok(),
+        "S2 should acquire the lease after S1 releases"
+    );
+    let acq3_resp = acq3.unwrap();
+    assert_eq!(
+        acq3_resp["acquired"], true,
+        "S2 acquire should return acquired=true"
+    );
+    assert_eq!(
+        acq3_resp["key"], "output.json",
+        "S2 acquire should return the key"
+    );
+    assert_eq!(
+        acq3_resp["holder"], s2_id,
+        "S2 acquire should list S2 as holder (not S1)"
+    );
+}
