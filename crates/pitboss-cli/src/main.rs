@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use pitboss_cli::{attach, cli, diff, dispatch, manifest, mcp};
+use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp};
 
 use cli::{Cli, Command};
 
@@ -12,6 +12,10 @@ fn main() -> Result<()> {
     match args.command {
         Command::Version => {
             println!("pitboss {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Command::AgentsMd => {
+            agents_md::print_agents_md();
             Ok(())
         }
         Command::Validate { manifest } => run_validate(&manifest),

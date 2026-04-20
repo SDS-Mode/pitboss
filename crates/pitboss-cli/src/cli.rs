@@ -78,6 +78,11 @@ pub enum Command {
     },
     /// Print version information.
     Version,
+    /// Print the bundled AGENTS.md reference document to stdout. Useful
+    /// for agents orchestrating pitboss from environments without repo
+    /// access (installed binary, container, CI runner). Content is
+    /// compiled in at build time and matches the running binary's version.
+    AgentsMd,
     /// Internal: proxy stdio <-> unix-socket for a claude subprocess's MCP client.
     /// Launched automatically by the `--mcp-config` file that pitboss generates
     /// per-actor. Not intended for direct human use.
