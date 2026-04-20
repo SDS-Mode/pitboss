@@ -1,0 +1,37 @@
+# R3 — Real-claude smoke: root lead adapts after request_approval is rejected
+#
+# This manifest is driven by a real claude-haiku-4-5 model session.
+# It proves that:
+#   1. The root lead (real claude) calls request_approval before writing files
+#   2. The approval is rejected by policy (auto_reject — no operator needed)
+#   3. The lead's next turn adapts its plan based on the rejection, producing
+#      CSV output instead of JSON as instructed in the prompt
+#
+# The rejection reason is conveyed via the prompt: "if rejected, use CSV".
+# The auto_reject policy returns approved=false with comment="auto-rejected by
+# policy". The model sees the rejection and should adapt accordingly.
+#
+# Cost: ~$0.10-$0.20 per run (haiku, approval gate round-trip + adaptation)
+# Prerequisites: ANTHROPIC_API_KEY set, `claude` in PATH
+
+[run]
+max_parallel = 4
+approval_policy = "auto_reject"
+
+[lead]
+prompt = """
+You are writing a data summary. Before writing any files, you MUST call
+request_approval with summary="Write results as JSON to output.json".
+
+IMPORTANT INSTRUCTIONS:
+- If the approval returns with approved=true: write a JSON file named output.json
+  with some sample data.
+- If the approval returns with approved=false (rejected): this means you should use
+  CSV format instead of JSON. Output a CSV summary to stdout (do NOT write a file)
+  and explicitly state in your response: "Approval was rejected — producing CSV
+  output instead of JSON."
+
+After handling the approval result, end with a one-line summary of what you did.
+"""
+model = "claude-haiku-4-5"
+timeout_secs = 120

@@ -202,3 +202,193 @@ async fn real_root_spawns_sublead() {
          spawn_sublead was called.\nstdout={stdout}\nstderr={stderr}"
     );
 }
+
+// ── R2: Real root lead adapts after worker is killed-with-reason ─────────────
+
+/// R2 smoke test: a real claude-haiku-4-5 root lead spawns a worker; an
+/// external operator kills the worker with reason="output should be CSV not
+/// JSON"; the synthetic [SYSTEM] reprompt is injected into the lead's session;
+/// the lead's next turn visibly references the kill reason.
+///
+/// ## What is asserted (loose — real-model variance)
+///
+/// Ideally:
+/// - `pitboss dispatch` exits 0
+/// - The lead's final message contains "csv", "format", "reason", or "adjust"
+///   indicating the model processed the synthetic reprompt
+///
+/// ## Current status: stub
+///
+/// Full R2 requires a side-channel operator that connects to the MCP socket
+/// while the real-claude dispatch is mid-flight and calls `cancel_worker` with
+/// a reason. The Option A pattern (in-process DispatchState + real claude
+/// subprocess + FakeMcpClient side-channel) requires additional test
+/// infrastructure beyond the R1 dispatch-subprocess pattern. This is deferred.
+///
+/// The stub skips immediately with a message. A future implementation should
+/// wire the side-channel cancel using Option A from the R2 design doc.
+///
+/// ## Cost
+///
+/// ~$0.10-$0.20 per run when fully implemented (haiku, lead + worker round-trips).
+#[tokio::test]
+#[ignore = "real-claude smoke — set PITBOSS_DOGFOOD_REAL=1 and run with --ignored"]
+async fn real_kill_with_reason() {
+    if should_skip("real_kill_with_reason") {
+        return;
+    }
+
+    // R2 not yet implemented — requires real-claude + side-channel cancel
+    // orchestration (Option A: in-process DispatchState + real claude
+    // subprocess + FakeMcpClient concurrent cancel_worker call).
+    //
+    // Tracked as follow-up work. See:
+    //   examples/dogfood/real/R2-real-kill-with-reason/README.md
+    eprintln!(
+        "real_kill_with_reason: SKIPPED — R2 not yet implemented; \
+         requires real-claude + side-channel cancel orchestration. \
+         See examples/dogfood/real/R2-real-kill-with-reason/README.md"
+    );
+}
+
+// ── R3: Real root lead adapts after request_approval is rejected ──────────────
+
+/// R3 smoke test: a real claude-haiku-4-5 root lead, given a prompt that
+/// asks it to call `request_approval` before writing files, receives an
+/// automatic rejection (via `approval_policy = "auto_reject"` in the manifest).
+/// The model's next turn adapts its output format, demonstrating LLM-adaptive
+/// behaviour in response to a tool-call rejection.
+///
+/// ## What is asserted (loose — real-model variance)
+///
+/// - `pitboss dispatch` exits with code 0
+/// - `summary.json` is written with `status = "Success"` for the lead task
+/// - The lead's output (stdout.log or final_message_preview) contains at least
+///   one of: "csv", "reject", "not approved", "format", "instead" — indicating
+///   the model read the `approved: false` response and adapted its plan
+///
+/// ## What is NOT asserted
+///
+/// - Exact phrasing of the adaptation response (real-model variance)
+/// - That a CSV file is written (the prompt asks for stdout output only)
+/// - That the model uses the exact phrase "auto-rejected by policy"
+/// - Token counts or cost
+///
+/// ## Cost
+///
+/// ~$0.10-$0.20 per run (haiku, approval tool round-trip + adaptation turn).
+#[tokio::test]
+#[ignore = "real-claude smoke — set PITBOSS_DOGFOOD_REAL=1 and run with --ignored"]
+async fn real_reject_with_reason() {
+    if should_skip("real_reject_with_reason") {
+        return;
+    }
+
+    let pitboss = pitboss_release_binary();
+
+    let manifest_path =
+        workspace_root().join("examples/dogfood/real/R3-real-reject-with-reason/manifest.toml");
+    assert!(
+        manifest_path.exists(),
+        "R3 manifest not found at {}",
+        manifest_path.display()
+    );
+
+    let run_dir = TempDir::new().expect("create temp run_dir");
+
+    let mut cmd = Command::new(&pitboss);
+    cmd.arg("dispatch")
+        .arg(&manifest_path)
+        .arg("--run-dir")
+        .arg(run_dir.path())
+        .env("RUST_LOG", "pitboss_cli=debug,pitboss_core=debug");
+
+    let out = cmd.output().expect("spawn pitboss dispatch");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // ── ASSERTION 1: Exit code 0 ─────────────────────────────────────────────
+    assert!(
+        out.status.success(),
+        "pitboss dispatch exited non-zero (code={:?}).\nstdout={stdout}\nstderr={stderr}",
+        out.status.code(),
+    );
+
+    // ── ASSERTION 2: summary.json written ───────────────────────────────────
+    let run_subdirs: Vec<_> = std::fs::read_dir(run_dir.path())
+        .expect("read run_dir")
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .collect();
+    assert_eq!(
+        run_subdirs.len(),
+        1,
+        "expected exactly one run subdirectory, got {}.\nstdout={stdout}\nstderr={stderr}",
+        run_subdirs.len()
+    );
+    let run_subdir = run_subdirs[0].path();
+
+    let summary_path = run_subdir.join("summary.json");
+    assert!(
+        summary_path.exists(),
+        "summary.json not written at {}.\nstdout={stdout}\nstderr={stderr}",
+        summary_path.display()
+    );
+
+    let summary_bytes = std::fs::read(&summary_path).expect("read summary.json");
+    let summary: serde_json::Value =
+        serde_json::from_slice(&summary_bytes).expect("parse summary.json");
+
+    let tasks = summary["tasks"]
+        .as_array()
+        .expect("summary.tasks should be an array");
+    let lead = tasks
+        .iter()
+        .find(|t| t["parent_task_id"].is_null())
+        .expect("at least one task with no parent (the lead)");
+    assert_eq!(
+        lead["status"].as_str(),
+        Some("Success"),
+        "lead task status should be Success"
+    );
+
+    // ── ASSERTION 3: Lead adapted to the rejection ───────────────────────────
+    //
+    // The prompt instructs the lead: "if approval returns approved=false,
+    // produce CSV output instead and say so". With auto_reject, the MCP tool
+    // returns { approved: false, comment: "auto-rejected by policy" }. The
+    // real model should read the tool response and adapt.
+    //
+    // We check:
+    //   (a) final_message_preview in summary.json (if set by the session)
+    //   (b) stdout.log of the lead task (full transcript)
+    //
+    // A loose keyword match is sufficient to demonstrate adaptive behaviour.
+    let final_preview = lead["final_message_preview"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase();
+
+    let log_path = run_subdir.join("tasks").join("lead").join("stdout.log");
+    let log_contents = std::fs::read_to_string(&log_path)
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let combined_output = format!("{final_preview}\n{log_contents}");
+
+    let adaptation_keywords = ["csv", "reject", "not approved", "format", "instead"];
+    let adapted = adaptation_keywords
+        .iter()
+        .any(|kw| combined_output.contains(kw));
+
+    assert!(
+        adapted,
+        "expected lead output to reference the rejection (one of {:?}), \
+         but none were found.\nfinal_preview={final_preview:?}\n\
+         log path={}\nlog snippet={:.500}",
+        adaptation_keywords,
+        log_path.display(),
+        &combined_output[..combined_output.len().min(500)]
+    );
+}

@@ -49,13 +49,13 @@ cargo test --workspace --quiet
 | 05 | TODO | root kill cascades to sub-lead workers |
 | 06 | TODO | run-global lease serializes two sub-leads |
 
-## Real-Claude spotlights (planned v0.6.1+)
+## Real-Claude spotlights
 
 | # | Name | What it proves |
 |---|------|----------------|
-| R1 | TODO | Real Claude API root lead spawns one sub-lead (stub session) |
-| R2 | TODO | Approval gate blocks sub-lead spawn until operator approves |
-| R3 | TODO | Budget exhaustion returns error to lead gracefully |
+| R1 | real-root-spawns-sublead | Real `claude-haiku-4-5` root lead calls `spawn_sublead` at least once when prompted. Validates tool discoverability, MCP bridge, and model comprehension of `spawn_sublead` vs `spawn_worker`. |
+| R2 | real-kill-with-reason (stub) | Root lead spawns a worker; operator kills it with a corrective reason; synthetic `[SYSTEM]` reprompt injected; lead's next turn references the reason. **Currently a stub** — full Option A orchestration deferred. |
+| R3 | real-reject-with-reason | Root lead calls `request_approval`; auto_reject policy returns `approved=false`; lead adapts output format (CSV instead of JSON) based on the rejection response. Validates LLM-adaptive replanning via tool-call rejection. |
 
 ## Flagship walkthrough (planned)
 
