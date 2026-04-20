@@ -9,7 +9,6 @@
 Full operator guide, MCP tool reference, Security section (threat model,
 defense-in-depth, Rule of Two), approval policy reference, and a cookbook
 of working scenarios: **https://sds-mode.github.io/pitboss/**
-(auto-published from `book/` on every push to `main`).
 
 To browse offline:
 
