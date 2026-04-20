@@ -20,6 +20,17 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Skip the (slow, QEMU-emulated) container rebuild when a commit
+    # touches ONLY documentation. A commit touching docs AND code (e.g.
+    # the v0.6.0 release commit, which updates Cargo.toml + CHANGELOG.md)
+    # still triggers because not all changed paths match the ignore list.
+    paths-ignore:
+      - '**.md'
+      - 'book/**'
+      - 'docs/**'
+      - 'examples/**'
+      - 'pitboss.example.toml'
+      - 'LICENSE-*'
   pull_request:
     branches: [main]
     paths:
