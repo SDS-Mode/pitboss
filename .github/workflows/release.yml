@@ -57,7 +57,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -117,7 +117,7 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -176,7 +176,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -226,7 +226,7 @@ jobs:
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -297,7 +297,7 @@ jobs:
       # push fails with "could not read Username for 'https://github.com'"
       # (exit 128). If `dist init` is ever re-run, this fix must be
       # reapplied. Upstream issue should be filed with cargo-dist.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: "SDS-Mode/homebrew-pitboss"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -343,7 +343,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive

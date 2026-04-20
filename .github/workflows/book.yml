@@ -25,7 +25,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install mdbook
         uses: peaceiris/actions-mdbook@v2
         with:
