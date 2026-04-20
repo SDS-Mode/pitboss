@@ -21,6 +21,7 @@
 - [TUI](./operator-guide/tui.md)
 - [Notifications](./operator-guide/notifications.md)
 - [Running with docker-compose](./operator-guide/docker-compose.md)
+- [Using Claude in a container](./operator-guide/using-claude-in-container.md)
 
 # Security
 
