@@ -1,8 +1,24 @@
+---
+document: pitboss-agent-instructions
+schema_version: 1
+pitboss_version: 0.6.0
+last_updated: 2026-04-20
+audience: ai-agent
+canonical_url: https://github.com/SDS-Mode/pitboss/blob/main/AGENTS.md
+---
+
 # Pitboss for agents
 
 Instructions for an AI agent (Claude, GPT, whatever) operating `pitboss` on
 behalf of a human. If you're a human: read `README.md`. If you're an agent
 that needs to orchestrate pitboss from natural language, stay here.
+
+> **Agents:** the YAML frontmatter above is a stable machine-readable identity
+> block. Filter on `document: pitboss-agent-instructions` + `pitboss_version`
+> to decide whether this applies to the binary you're orchestrating. If
+> `pitboss --version` disagrees with `pitboss_version` above, trust the
+> binary — regenerate the manifest against its actual schema via
+> `pitboss validate`.
 
 ---
 
@@ -837,6 +853,7 @@ dispatch first and have to ask follow-ups, you've probably wasted budget.
 
 ## Version
 
-Written for pitboss `v0.6.0`. Schema may evolve; `pitboss validate` is the
+The current version is declared in the frontmatter at the top of this
+file (`pitboss_version`). Schema may evolve; `pitboss validate` is the
 source of truth. This document should stay self-contained — if something
 here conflicts with the actual binary, the binary wins. File a PR.
