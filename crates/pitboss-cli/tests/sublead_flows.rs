@@ -1666,3 +1666,131 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         "sub-lead's reservation must be within its $5 envelope; got={sub_reserved}"
     );
 }
+
+// ── Sub-task 6: kill-with-reason delivery to root-lead targets ───────────────
+
+/// Mirrors `kill_with_reason_delivers_synthetic_reprompt_to_running_lead` but
+/// targets the ROOT layer instead of a sub-lead.
+///
+/// Verifies that when a worker inside the root layer is killed with reason,
+/// the reason text is delivered to `state.root.reprompt_tx` — the channel
+/// that `run_hierarchical`'s kill+resume loop consumes.
+///
+/// We wire the channel manually here (exactly as `run_hierarchical` does via
+/// `set_reprompt_tx`) rather than calling `run_hierarchical` itself, which
+/// would require a real executable. This isolates the delivery path from
+/// subprocess lifetime concerns.
+#[tokio::test]
+async fn kill_with_reason_delivers_to_root_lead() {
+    use serde_json::json;
+
+    let (_dir, state) = mk_state_with_subleads();
+    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    // Inject a worker into the ROOT layer (not inside a sub-lead).
+    {
+        state.root.workers.write().await.insert(
+            "worker-root-1".into(),
+            pitboss_cli::dispatch::state::WorkerState::Pending,
+        );
+        state
+            .root
+            .worker_cancels
+            .write()
+            .await
+            .insert("worker-root-1".into(), CancelToken::new());
+    }
+
+    // Manually wire a reprompt_tx on the root layer — exactly what
+    // run_hierarchical does via set_reprompt_tx before spawning the lead.
+    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    state.root.set_reprompt_tx(reprompt_tx).await;
+
+    // Operator (acting as root lead) kills worker-root-1 with a reason.
+    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
+        .await
+        .unwrap();
+    root_client
+        .call_tool(
+            "cancel_worker",
+            json!({
+                "target": "worker-root-1",
+                "reason": "root regression"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Allow the reprompt delivery to complete.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The reprompt_tx channel should have received exactly one message
+    // containing both the worker id and the reason text.
+    let msg = reprompt_rx
+        .try_recv()
+        .expect("root reprompt channel should have received a message");
+    assert!(
+        msg.contains("worker-root-1"),
+        "reprompt message should name the killed worker; got: {msg}"
+    );
+    assert!(
+        msg.contains("root regression"),
+        "reprompt message should include the reason; got: {msg}"
+    );
+    assert!(
+        msg.contains("[SYSTEM]"),
+        "reprompt message should use [SYSTEM] prefix; got: {msg}"
+    );
+}
+
+/// v0.5 back-compat regression: when no kill-with-reason events are issued,
+/// the reprompt channel is empty — meaning the `run_hierarchical` kill+resume
+/// loop would NOT re-iterate. The loop runs exactly once (same as v0.5).
+///
+/// Verifies:
+/// 1. `set_reprompt_tx` installs the channel correctly.
+/// 2. After a normal single-shot run (no reprompts queued), `try_recv()`
+///    returns `Err` (empty channel) — the loop would break on first iteration.
+/// 3. `clear_reprompt_tx` removes the channel from the layer state.
+/// 4. After clear, `send_synthetic_reprompt` gracefully logs and drops the
+///    message (no panic, no hang).
+#[tokio::test]
+async fn v0_5_single_shot_root_lead_unchanged_when_no_reprompts() {
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Step 1: install the reprompt channel (mirrors run_hierarchical setup).
+    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    state.root.set_reprompt_tx(reprompt_tx).await;
+
+    // Confirm the channel is installed.
+    assert!(
+        state.root.reprompt_tx.lock().await.is_some(),
+        "reprompt_tx should be Some after set_reprompt_tx"
+    );
+
+    // Step 2: no reprompts are queued — try_recv should return Err (empty).
+    // This is the condition the run_hierarchical loop checks: if empty, break
+    // on first iteration (identical to v0.5 single-shot).
+    assert!(
+        reprompt_rx.try_recv().is_err(),
+        "reprompt channel must be empty when no kill-with-reason events occurred"
+    );
+
+    // Step 3: simulate loop exit — clear_reprompt_tx drops the channel from state.
+    state.root.clear_reprompt_tx().await;
+    assert!(
+        state.root.reprompt_tx.lock().await.is_none(),
+        "reprompt_tx should be None after clear_reprompt_tx (loop exited)"
+    );
+
+    // Step 4: after clear, send_synthetic_reprompt should complete without panic.
+    // The None path in send_synthetic_reprompt logs at INFO and drops the message.
+    state
+        .root
+        .send_synthetic_reprompt("late message after loop exit")
+        .await;
+    // If we reached here without panicking, the no-channel path is safe.
+}

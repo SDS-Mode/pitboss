@@ -105,17 +105,18 @@ pub struct LayerState {
     pub reprompt_hook: Mutex<Option<RepromptHook>>,
     /// Delivery channel for synthetic reprompts to the running lead subprocess.
     ///
-    /// `None` for the root layer (root-lead reprompt is not supported in v0.6;
-    /// see the root-lead limitation note in `send_synthetic_reprompt`).
+    /// For sub-lead layers: set by `spawn_sublead_session` just before launching
+    /// the subprocess; the receiving end is held by the kill+resume loop inside
+    /// `spawn_sublead_session`.
     ///
-    /// Set by `spawn_sublead_session` just before launching the subprocess.
-    /// The receiving end is held by the subprocess-management loop inside
-    /// `spawn_sublead_session`, which handles incoming messages by killing
-    /// the current subprocess and re-spawning it with `--resume + message`.
+    /// For the root layer: set by `run_hierarchical` via `set_reprompt_tx` after
+    /// constructing the `DispatchState`, and consumed by the kill+resume loop
+    /// inside `run_hierarchical`. Cleared via `clear_reprompt_tx` when the loop
+    /// exits.
     ///
-    /// Sending on this channel is the only way the real reprompt path in
-    /// `send_synthetic_reprompt` delivers a message; the loop in
-    /// `spawn_sublead_session` is responsible for the actual kill+resume.
+    /// `None` until `set_reprompt_tx` is called, or after `clear_reprompt_tx`
+    /// is called (lead terminated). Sending on a closed channel is a no-op
+    /// (logged at INFO level by `send_synthetic_reprompt`).
     pub reprompt_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
@@ -199,6 +200,26 @@ impl LayerState {
         *self.policy_matcher.lock().await = Some(matcher);
     }
 
+    /// Populate the reprompt delivery channel for this layer's lead subprocess.
+    ///
+    /// Called by `run_hierarchical` after the `DispatchState` is constructed but
+    /// before the lead subprocess is spawned. The channel is consumed by the
+    /// kill+resume loop inside `run_hierarchical` itself.
+    ///
+    /// A separate setter is used (rather than a constructor parameter) to keep
+    /// `LayerState::new` backwards-compatible: all existing callers continue to
+    /// work unchanged, and root simply calls `set_reprompt_tx` after construction.
+    pub async fn set_reprompt_tx(&self, tx: mpsc::UnboundedSender<String>) {
+        *self.reprompt_tx.lock().await = Some(tx);
+    }
+
+    /// Clear the reprompt delivery channel. Called after the kill+resume loop
+    /// exits so that further sends from `send_synthetic_reprompt` fail fast
+    /// with a channel-closed error rather than queueing messages to a dead loop.
+    pub async fn clear_reprompt_tx(&self) {
+        *self.reprompt_tx.lock().await = None;
+    }
+
     /// Install a test-only reprompt capture hook. When set, synthetic
     /// reprompts delivered via `send_synthetic_reprompt` call this callback
     /// instead of (or before) the real delivery path.
@@ -221,27 +242,23 @@ impl LayerState {
     /// without spinning up a real subprocess. The hook takes priority over
     /// the real delivery path.
     ///
-    /// ## Production path (no hook, sub-lead layer)
+    /// ## Production path (no hook)
     ///
     /// Sends the message to the `reprompt_tx` channel. The receiving end is
-    /// held by the subprocess-management loop in `spawn_sublead_session`,
-    /// which handles it by killing the current subprocess and re-spawning with
-    /// `claude --resume <session_id> -p <message>`. This is identical to the
-    /// mechanism used by the `reprompt_worker` MCP tool.
+    /// held by the subprocess-management loop — either `spawn_sublead_session`
+    /// (for sub-lead layers) or the kill+resume loop in `run_hierarchical`
+    /// (for the root layer). The loop handles the message by killing the
+    /// current subprocess and re-spawning with `claude --resume <session_id>
+    /// -p <message>`.
     ///
     /// The channel send returns immediately; the actual kill+resume is
     /// asynchronous. If the channel send fails (lead already terminated or
     /// channel dropped), the message is logged and delivery is skipped.
     ///
-    /// ## Root-lead limitation (v0.6)
+    /// ## No-channel fallback
     ///
-    /// The root lead's process is managed by `run_hierarchical`, which holds
-    /// the blocking await on its `SessionHandle`. Killing and re-spawning the
-    /// root lead would cascade-cancel all workers and end the run. Root-lead
-    /// reprompt is therefore not supported in v0.6.
-    ///
-    /// `reprompt_tx` is `None` for the root layer; this branch falls through
-    /// to the log-only path with a clear comment explaining the limitation.
+    /// If `reprompt_tx` is `None` (layer not yet started, or already
+    /// terminated), the message is logged at INFO level and dropped.
     pub async fn send_synthetic_reprompt(&self, message: &str) {
         // Test hook takes priority — allows unit tests to assert on delivery
         // without spinning up a real subprocess.
@@ -271,13 +288,11 @@ impl LayerState {
                 }
             }
             None => {
-                // Root layer or layer not yet started: no channel available.
-                // Root-lead reprompt is not supported in v0.6 (would cascade-cancel
-                // all workers and end the run — requires a larger refactor).
+                // No channel available: layer not yet started, or already terminated.
                 tracing::info!(
                     lead_id = %self.lead_id,
-                    "synthetic reprompt: no delivery channel (root lead or layer not yet \
-                     started — root-lead reprompt not supported in v0.6): {}",
+                    "synthetic reprompt: no delivery channel (layer not yet started or \
+                     already terminated); message dropped: {}",
                     message
                 );
             }

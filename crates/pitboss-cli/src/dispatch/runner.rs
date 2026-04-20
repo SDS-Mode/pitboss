@@ -516,6 +516,46 @@ pub fn lead_spawn_args(
     args
 }
 
+/// Build the CLI args for resuming the root lead's claude subprocess with a
+/// synthetic reprompt. Used by `run_hierarchical`'s kill+resume loop when a
+/// `kill_worker_with_reason` reprompt message arrives.
+///
+/// Mirrors `lead_spawn_args` exactly except:
+/// - `--resume <session_id>` is always emitted (using the captured session_id)
+/// - `-p <prompt>` uses the supplied `new_prompt` instead of `lead.prompt`
+pub fn lead_resume_spawn_args(
+    lead: &crate::manifest::resolve::ResolvedLead,
+    mcp_config: &std::path::Path,
+    session_id: &str,
+    new_prompt: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+    ];
+    let mut allowed: Vec<String> = lead.tools.clone();
+    for t in PITBOSS_MCP_TOOLS {
+        allowed.push((*t).to_string());
+    }
+    if lead.allow_subleads {
+        allowed.push("mcp__pitboss__spawn_sublead".into());
+        allowed.push("mcp__pitboss__wait_for_sublead".into());
+    }
+    args.push("--allowedTools".into());
+    args.push(allowed.join(","));
+
+    args.push("--model".into());
+    args.push(lead.model.clone());
+    args.push("--mcp-config".into());
+    args.push(mcp_config.display().to_string());
+    args.push("--resume".into());
+    args.push(session_id.into());
+    args.push("-p".into());
+    args.push(new_prompt.into());
+    args
+}
+
 /// Build the CLI args for spawning a sub-lead's claude subprocess.
 /// Mirrors `lead_spawn_args` but enforces depth-2 cap via the toolset:
 /// `spawn_sublead` and `wait_for_sublead` are NOT included, regardless of

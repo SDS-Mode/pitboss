@@ -187,7 +187,20 @@ pub async fn run_hierarchical(
         .await;
     }
 
-    let spawn_cmd = pitboss_core::process::SpawnCmd {
+    // 3b. Wire the reprompt delivery channel for the root lead BEFORE spawning.
+    //     `send_synthetic_reprompt` will find this channel when a worker is
+    //     killed with reason and the root layer is the target. The receiving
+    //     end is consumed by the kill+resume loop below.
+    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    state.root.set_reprompt_tx(reprompt_tx).await;
+
+    // 3c. Kill+resume loop — identical in structure to spawn_sublead_session.
+    //
+    //     When no reprompts are queued the loop runs exactly once, producing
+    //     identical behaviour to the v0.5 single-shot. The extra state
+    //     (last_session_id, overall_started_at, total_token_usage) adds no
+    //     overhead on the common path.
+    let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
         args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
         cwd: lead_cwd.clone(),
@@ -202,16 +215,110 @@ pub async fn run_hierarchical(
         },
     );
 
-    let outcome = pitboss_core::session::SessionHandle::new(lead.id.clone(), spawner, spawn_cmd)
+    let overall_started_at = Utc::now();
+    let mut last_session_id: Option<String> = None;
+    let mut total_token_usage = pitboss_core::parser::TokenUsage::default();
+    let mut reprompt_count: u32 = 0;
+    let mut current_cmd = initial_cmd;
+
+    let final_outcome = loop {
+        // Per-iteration session_id capture channel.
+        let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
+
+        // Per-iteration cancel token: forwards termination from the run-level
+        // cancel token. This lets operator Ctrl-C still reach the subprocess
+        // while still allowing the reprompt path to kill+restart without
+        // terminating the whole run.
+        let proc_cancel = pitboss_core::session::CancelToken::new();
+        {
+            let run_cancel = cancel.clone();
+            let proc = proc_cancel.clone();
+            tokio::spawn(async move {
+                run_cancel.await_terminate().await;
+                proc.terminate();
+            });
+        }
+
+        let outcome = pitboss_core::session::SessionHandle::new(
+            lead.id.clone(),
+            spawner.clone(),
+            current_cmd.clone(),
+        )
         .with_log_path(lead_log_path.clone())
-        .with_stderr_log_path(lead_stderr_path)
+        .with_stderr_log_path(lead_stderr_path.clone())
+        .with_session_id_tx(session_id_tx)
         .run_to_completion(
-            cancel.clone(),
+            proc_cancel,
             std::time::Duration::from_secs(lead.timeout_secs),
         )
         .await;
 
-    // Build lead TaskRecord
+        // Capture session_id from either the mid-run channel or the final result.
+        if let Ok(sid) = session_id_rx.try_recv() {
+            state.workers.write().await.insert(
+                lead.id.clone(),
+                crate::dispatch::state::WorkerState::Running {
+                    started_at: overall_started_at,
+                    session_id: Some(sid.clone()),
+                },
+            );
+            last_session_id = Some(sid);
+        } else if let Some(ref sid) = outcome.claude_session_id {
+            last_session_id = Some(sid.clone());
+        }
+
+        // Accumulate token usage across iterations.
+        total_token_usage.add(&outcome.token_usage);
+
+        // Check for a pending reprompt.
+        let pending_reprompt = reprompt_rx.try_recv().ok();
+        if let Some(new_prompt) = pending_reprompt {
+            if let Some(ref sid) = last_session_id {
+                tracing::info!(
+                    lead_id = %lead.id,
+                    session_id = %sid,
+                    "root-lead kill+resume: new synthetic reprompt received"
+                );
+                reprompt_count += 1;
+                let resume_args = crate::dispatch::runner::lead_resume_spawn_args(
+                    lead,
+                    &mcp_config_path,
+                    sid,
+                    &new_prompt,
+                );
+                current_cmd = pitboss_core::process::SpawnCmd {
+                    program: claude_binary.clone(),
+                    args: resume_args,
+                    cwd: lead_cwd.clone(),
+                    env: lead.env.clone(),
+                };
+                // Reset the workers map entry to Running (session_id TBD).
+                state.workers.write().await.insert(
+                    lead.id.clone(),
+                    crate::dispatch::state::WorkerState::Running {
+                        started_at: overall_started_at,
+                        session_id: None,
+                    },
+                );
+                continue;
+            } else {
+                tracing::warn!(
+                    lead_id = %lead.id,
+                    "root-lead kill+resume: reprompt arrived but no session_id captured; \
+                     treating as normal termination"
+                );
+                break outcome;
+            }
+        }
+
+        // No pending reprompt — subprocess reached terminal state normally.
+        break outcome;
+    };
+
+    // Close the reprompt channel so further sends fail fast.
+    state.root.clear_reprompt_tx().await;
+
+    // Build lead TaskRecord using the accumulated data from all iterations.
     let lead_counters = state
         .worker_counters
         .read()
@@ -219,9 +326,11 @@ pub async fn run_hierarchical(
         .get(&state.lead_id)
         .cloned()
         .unwrap_or_default();
+    // Merge the loop's own reprompt_count into the counter-based one.
+    let total_reprompt_count = lead_counters.reprompt_count + reprompt_count;
     let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
-        status: match outcome.final_state {
+        status: match final_outcome.final_state {
             pitboss_core::session::SessionState::Completed => {
                 pitboss_core::store::TaskStatus::Success
             }
@@ -239,22 +348,24 @@ pub async fn run_hierarchical(
             }
             _ => pitboss_core::store::TaskStatus::Failed,
         },
-        exit_code: outcome.exit_code,
-        started_at: outcome.started_at,
-        ended_at: outcome.ended_at,
-        duration_ms: outcome.duration_ms(),
+        exit_code: final_outcome.exit_code,
+        started_at: overall_started_at,
+        ended_at: final_outcome.ended_at,
+        duration_ms: (final_outcome.ended_at - overall_started_at)
+            .num_milliseconds()
+            .max(0),
         worktree_path: if lead.use_worktree {
             Some(lead_cwd)
         } else {
             None
         },
         log_path: lead_log_path,
-        token_usage: outcome.token_usage,
-        claude_session_id: outcome.claude_session_id,
-        final_message_preview: outcome.final_message_preview,
+        token_usage: total_token_usage,
+        claude_session_id: final_outcome.claude_session_id,
+        final_message_preview: final_outcome.final_message_preview,
         parent_task_id: None, // lead has no parent
         pause_count: lead_counters.pause_count,
-        reprompt_count: lead_counters.reprompt_count,
+        reprompt_count: total_reprompt_count,
         approvals_requested: lead_counters.approvals_requested,
         approvals_approved: lead_counters.approvals_approved,
         approvals_rejected: lead_counters.approvals_rejected,
