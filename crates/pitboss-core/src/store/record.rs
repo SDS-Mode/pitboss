@@ -161,9 +161,9 @@ mod tests {
             (TaskStatus::ApprovalTimedOut, "\"ApprovalTimedOut\""),
         ] {
             let s = serde_json::to_string(variant).unwrap();
-            assert_eq!(&s, expected_json, "serialize {:?}", variant);
+            assert_eq!(&s, expected_json, "serialize {variant:?}");
             let back: TaskStatus = serde_json::from_str(&s).unwrap();
-            assert_eq!(&back, variant, "round-trip {:?}", variant);
+            assert_eq!(&back, variant, "round-trip {variant:?}");
         }
     }
 
