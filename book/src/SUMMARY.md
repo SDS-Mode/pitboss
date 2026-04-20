@@ -13,6 +13,8 @@
 - [Manifest schema](./operator-guide/manifest-schema.md)
 - [Flat vs. hierarchical mode](./operator-guide/flat-vs-hierarchical.md)
 - [Depth-2 sub-leads](./operator-guide/depth-2-subleads.md)
+- [Writing effective leads](./operator-guide/writing-effective-leads.md)
+- [Cost & model selection](./operator-guide/cost-and-model-selection.md)
 - [Approvals](./operator-guide/approvals.md)
 - [Approval policy reference](./operator-guide/approval-policy-reference.md)
 - [Leases & coordination](./operator-guide/leases.md)
