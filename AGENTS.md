@@ -262,6 +262,132 @@ Compares two runs side-by-side. Useful for A/B testing prompts or models.
 
 ---
 
+## Headless mode (agents dispatching pitboss without a terminal)
+
+If you (the agent) are dispatching pitboss without a terminal attached —
+running in a container, under systemd, from another orchestrator — the
+behavior diverges from interactive TUI use in several ways. Read this
+section before writing manifests for headless dispatch.
+
+### Permission model
+
+As of v0.7, pitboss auto-sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` on every
+spawned claude subprocess. This tells claude to bypass its built-in
+interactive permission gate; pitboss becomes the sole approval authority
+via `approval_policy` and `[[approval_policy]]` rules. Without this fix,
+sub-leads in headless dispatch would exit in ~7 seconds reporting
+`Success` with no output (claude apologizing that it can't get
+permission to write files, then giving up cleanly).
+
+You can override this per-actor by setting `[defaults.env.CLAUDE_CODE_ENTRYPOINT]`
+to a different value in the manifest, but for headless dispatch you
+almost certainly want the default.
+
+### Approval policy — set `auto_approve` (or use rules)
+
+Without a TUI to approve things, pitboss's own approval mechanisms hang
+forever (or until timeout) if not configured. Set:
+
+```toml
+[run]
+approval_policy = "auto_approve"  # or "auto_reject" for strict dry-run dispatch
+```
+
+For finer control, use `[[approval_policy]]` rules with `ttl_secs`
+fallbacks. Pitboss now emits a startup warning to stderr when it detects
+`approval_policy = "block"` (or unset) AND no TTY on stdout — read it
+before assuming a hang is something else.
+
+### `require_plan_approval = true` is usually wrong headless
+
+Setting `[run].require_plan_approval = true` blocks the run until an
+operator approves the lead's first `propose_plan` call. In headless mode
+this hangs unless the lead's `propose_plan` includes a `ttl_secs` +
+`fallback`. If you see a task land with `status: "ApprovalRejected"` (v0.7+)
+or `"ApprovalTimedOut"` (when queue-TTL plumbing lands), this gate is
+the most likely cause.
+
+### Hierarchical mode requires a git repo even with `use_worktree = false`
+
+Lead setup runs a git-repo check regardless of the worktree setting.
+Before dispatching a hierarchical manifest in a fresh workspace:
+
+```bash
+git init /workspace
+git -C /workspace commit --allow-empty -m "init"
+```
+
+Flat mode (`[[task]]` only, no `[[lead]]`) does not have this requirement.
+
+### Reading run status without the TUI
+
+There is no `pitboss status` subcommand (yet). Use:
+
+- `pitboss attach <run-prefix> <task-id>` — follow a specific worker's stream-json
+- `cat <run-dir>/summary.jsonl` — completed tasks (streamed append-only)
+- `cat <run-dir>/summary.json` — full summary on clean finalize
+- `ls <run-dir>/tasks/` — all spawned task directories
+
+The root lead's logs live at `<run-dir>/tasks/<lead-id>/stdout.log`.
+Workers and sub-leads live at `<run-dir>/tasks/<task-id>/` and
+`<run-dir>/tasks/<sublead-id>/` respectively. Sub-lead ids are
+`sublead-<uuid>` — they don't match the manifest's `[lead].id`. Use
+the UUID form from `summary.jsonl` when calling `pitboss attach`.
+
+### Terminal-state classification (v0.7+)
+
+A task that exited because an approval returned negative is classified
+distinctly from a task that succeeded:
+
+| Status | Meaning |
+|--------|---------|
+| `Success` | Task completed work and exited cleanly |
+| `Failed` | Task exited with non-zero status |
+| `TimedOut` | Task exceeded `timeout_secs` |
+| `Cancelled` | Task was explicitly cancelled by operator or cascade |
+| `SpawnFailed` | Task never started (worktree prep, claude not found, etc.) |
+| `ApprovalRejected` | Task's last approval returned `{approved: false}` from operator action or `[[approval_policy]]` auto_reject rule, then exited shortly after |
+| `ApprovalTimedOut` | Reserved for queue-TTL fallback (today fires only via the `from_ttl: true` codepath which is not yet wired end-to-end; treat as an intent variant) |
+
+Before v0.7, both new statuses were reported as `Success` because the
+claude subprocess exited 0. If you see `ApprovalRejected` in
+`summary.json`, your manifest's `approval_policy` (or operator action)
+denied the actor's request — revisit the approval configuration.
+
+### Customizing sub-lead env and tools per spawn (v0.7+)
+
+`spawn_sublead` accepts optional `env` and `tools` parameters:
+
+```
+spawn_sublead(
+  prompt: "...",
+  model: "claude-sonnet-4-6",
+  budget_usd: 2.0,
+  max_workers: 4,
+  env: { "MY_VAR": "value" },        // merged over pitboss defaults
+  tools: ["Read", "Bash"]            // adds to standard sublead toolset
+)
+```
+
+Both fields are optional. Operator-supplied `env` keys override pitboss
+defaults (including `CLAUDE_CODE_ENTRYPOINT` if you really want claude's
+own gate back for that sub-lead). Operator-supplied `tools` are added
+to the standard sublead MCP toolset; pitboss orchestration tools are
+always present regardless of override.
+
+### Offline access to this doc
+
+```bash
+pitboss agents-md                                    # from any binary
+cat /usr/share/doc/pitboss/AGENTS.md                  # from a container
+```
+
+Both routes serve the same bytes — `AGENTS.md` is `include_str!`'d into
+the binary at compile time and `COPY`'d into the container image.
+`pitboss_version` in the frontmatter matches the binary version.
+
+---
+
 ## Interpreting a run directory
 
 After `pitboss dispatch` finishes, find the run via:
