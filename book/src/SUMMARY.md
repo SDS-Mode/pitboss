@@ -20,6 +20,7 @@
 - [Leases & coordination](./operator-guide/leases.md)
 - [TUI](./operator-guide/tui.md)
 - [Notifications](./operator-guide/notifications.md)
+- [Running with docker-compose](./operator-guide/docker-compose.md)
 
 # Security
 
