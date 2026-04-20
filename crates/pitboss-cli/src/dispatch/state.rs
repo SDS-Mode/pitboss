@@ -193,6 +193,26 @@ pub struct QueuedApproval {
 ///
 /// Implements `Deref<Target = LayerState>` so all existing callsites that
 /// access fields like `state.workers`, `state.cancel`, etc. compile unchanged.
+///
+/// ## Lock access rule (DO NOT VIOLATE)
+///
+/// Cross-layer lookups (reading `subleads`, `sublead_results`, or
+/// `worker_layer_index`) on an async code path use `.read().await`,
+/// **never** `.try_read().ok()`. A failed `try_read` followed by `.ok()`
+/// is a silent-misrouting hazard — the caller quietly falls through to
+/// the default (usually the root layer) and reads/writes the wrong
+/// sub-tree's state without any error signal. This is how an earlier
+/// version of `kv_wait` ended up returning peer-visibility-violating
+/// data across sub-trees; see commit 00b05a2.
+///
+/// The `try_read` uses in the `Debug` impl below are the *only* allowed
+/// uses: they are deliberately non-blocking because a blocking `Debug`
+/// would deadlock under log-while-holding-lock patterns, and the lengths
+/// they report are best-effort diagnostic output, not authoritative.
+///
+/// New cross-layer lookups MUST use `.read().await` — or, better, route
+/// through `resolve_layer_for_caller` (see `crate::mcp::server`) which
+/// encapsulates the correct lock discipline for depth-2 routing.
 pub struct DispatchState {
     pub root: Arc<LayerState>,
     /// Sub-tree layers keyed by sub-lead id. Empty in the depth-1 case.
