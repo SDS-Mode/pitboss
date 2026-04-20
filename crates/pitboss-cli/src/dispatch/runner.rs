@@ -40,6 +40,94 @@ pub fn apply_pitboss_env_defaults(env: &mut std::collections::HashMap<String, St
         .or_insert_with(|| "sdk-ts".to_string());
 }
 
+/// Check whether a manifest has approval gates that will block indefinitely
+/// in a headless (no-TUI) dispatch. Returns warning strings describing each
+/// gate; empty if the manifest can run cleanly headless. Callers typically
+/// print the warnings to stderr at dispatch startup.
+///
+/// Gates checked:
+/// - `[run].require_plan_approval = true` → lead's `propose_plan` will hang
+///   on the operator queue with no TUI to respond.
+/// - `[run].approval_policy = "block"` (or unset — the default) → unmatched
+///   `request_approval` calls will sit in the queue.
+/// - Any `[[approval_policy]]` rule with `action = "block"` → policy-matched
+///   approvals will force into the queue.
+///
+/// The warning is orthogonal to the Path A env-default fix — Path A stops
+/// claude's OWN permission gate from firing, but pitboss's own approval
+/// layer is still operator-driven by default. An operator expecting headless
+/// dispatch should set `approval_policy = "auto_approve"` (or use
+/// `[[approval_policy]]` rules with `ttl_secs` + `fallback`).
+pub fn headless_approval_gate_warnings(manifest: &ResolvedManifest) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if manifest.require_plan_approval {
+        warnings.push(
+            "`[run].require_plan_approval = true` — lead will hang on `propose_plan` \
+             with no TUI to approve. Set `false` or add a `ttl_secs` + `fallback` \
+             on the `propose_plan` call for headless use."
+                .to_string(),
+        );
+    }
+
+    // `approval_policy` defaults to `Block` when unset, so both None and
+    // Some(Block) trigger the warning.
+    let policy_blocks = matches!(
+        manifest.approval_policy,
+        None | Some(crate::dispatch::state::ApprovalPolicy::Block)
+    );
+    if policy_blocks {
+        warnings.push(
+            "`[run].approval_policy` is `block` (or unset — defaults to block) — \
+             unmatched `request_approval` / `propose_plan` calls will sit in \
+             the operator queue. Set `auto_approve` or `auto_reject` for \
+             headless use."
+                .to_string(),
+        );
+    }
+
+    let blocking_rule_count = manifest
+        .approval_rules
+        .iter()
+        .filter(|r| matches!(r.action, crate::mcp::policy::ApprovalAction::Block))
+        .count();
+    if blocking_rule_count > 0 {
+        warnings.push(format!(
+            "{} `[[approval_policy]]` rule(s) use `action = \"block\"` — matched \
+             approvals will force into the operator queue. Change to \
+             `auto_approve` / `auto_reject`, or attach a TUI.",
+            blocking_rule_count
+        ));
+    }
+
+    warnings
+}
+
+/// Emit headless-approval-gate warnings to stderr when stdout is not a
+/// terminal. Operators running pitboss interactively won't see spurious
+/// warnings; headless operators see them prominently before any claude
+/// subprocess launches.
+pub fn print_headless_warnings_if_applicable(manifest: &ResolvedManifest) {
+    if atty::is(atty::Stream::Stdout) {
+        return;
+    }
+    let warnings = headless_approval_gate_warnings(manifest);
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!(
+        "pitboss: WARNING — dispatching without a TUI surface but the manifest \
+         has approval gates that will block:"
+    );
+    for w in &warnings {
+        eprintln!("  - {}", w);
+    }
+    eprintln!(
+        "See https://sds-mode.github.io/pitboss/operator-guide/approvals.html \
+         for the headless approval patterns."
+    );
+}
+
 fn cleanup_policy_from(w: crate::manifest::schema::WorktreeCleanup) -> CleanupPolicy {
     match w {
         crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
@@ -58,6 +146,10 @@ pub async fn run_dispatch_inner(
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
 ) -> Result<i32> {
+    // Flat manifests rarely use `[[approval_policy]]` or `propose_plan`,
+    // but if they do, the same headless-gate warnings apply. Silent on TTY.
+    print_headless_warnings_if_applicable(&resolved);
+
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
     let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
     tokio::fs::create_dir_all(&run_dir).await.ok();
@@ -733,6 +825,85 @@ mod tests {
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"sdk-ts".to_string())
         );
+    }
+
+    fn minimal_manifest() -> ResolvedManifest {
+        ResolvedManifest {
+            max_parallel: 1,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("/tmp/pitboss-test"),
+            worktree_cleanup: crate::manifest::schema::WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
+            approval_policy: Some(crate::dispatch::state::ApprovalPolicy::AutoApprove),
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        }
+    }
+
+    #[test]
+    fn headless_warnings_empty_for_clean_manifest() {
+        let manifest = minimal_manifest();
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert!(
+            warnings.is_empty(),
+            "clean manifest should not warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn headless_warnings_flag_require_plan_approval() {
+        let mut manifest = minimal_manifest();
+        manifest.require_plan_approval = true;
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("require_plan_approval"));
+    }
+
+    #[test]
+    fn headless_warnings_flag_block_default_when_unset() {
+        let mut manifest = minimal_manifest();
+        manifest.approval_policy = None;
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("approval_policy"));
+    }
+
+    #[test]
+    fn headless_warnings_flag_block_policy_explicit() {
+        let mut manifest = minimal_manifest();
+        manifest.approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("approval_policy"));
+    }
+
+    #[test]
+    fn headless_warnings_flag_block_rule() {
+        let mut manifest = minimal_manifest();
+        manifest.approval_rules = vec![crate::mcp::policy::ApprovalRule {
+            r#match: crate::mcp::policy::ApprovalMatch::default(),
+            action: crate::mcp::policy::ApprovalAction::Block,
+        }];
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
+        assert!(warnings[0].contains("approval_policy") && warnings[0].contains("rule"));
+    }
+
+    #[test]
+    fn headless_warnings_stack_when_multiple_gates_present() {
+        let mut manifest = minimal_manifest();
+        manifest.require_plan_approval = true;
+        manifest.approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
+        let warnings = headless_approval_gate_warnings(&manifest);
+        assert_eq!(warnings.len(), 2, "expected two warnings: {:?}", warnings);
     }
 
     fn init_repo(root: &std::path::Path) {

@@ -27,6 +27,11 @@ pub async fn run_hierarchical(
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
 ) -> Result<i32> {
+    // Surface headless approval-gate mis-configurations early, before any
+    // claude subprocess launches. Runs silently if stdout is a TTY (the
+    // operator has the TUI to approve things).
+    crate::dispatch::runner::print_headless_warnings_if_applicable(&resolved);
+
     let run_id = Uuid::now_v7();
     let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
     tokio::fs::create_dir_all(&run_dir).await.ok();
