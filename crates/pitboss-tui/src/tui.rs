@@ -1526,7 +1526,7 @@ fn render_prompt_reprompt(frame: &mut Frame, area: Rect, task_id: &str, draft: &
     let modal = Rect::new(x, y, modal_w, modal_h);
     frame.render_widget(Clear, modal);
     let block = Block::default().borders(Borders::ALL).title(format!(
-        " Reprompt `{task_id}` — Ctrl+Enter to send, Esc cancel "
+        " Reprompt `{task_id}` — F2 / Alt+Enter / Ctrl+Enter to send, Esc cancel "
     ));
     let para = Paragraph::new(draft)
         .block(block)
@@ -1589,7 +1589,7 @@ fn render_approval_modal(
         ApprovalSubMode::Editing { draft } => {
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Edit summary — Ctrl+Enter to submit  Esc cancel ");
+                .title(" Edit summary — F2 / Alt+Enter / Ctrl+Enter to submit  Esc cancel ");
             let para = Paragraph::new(draft.clone())
                 .block(block)
                 .wrap(Wrap { trim: false })
@@ -1597,9 +1597,9 @@ fn render_approval_modal(
             frame.render_widget(para, modal);
         }
         ApprovalSubMode::Rejecting { draft } => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Rejection reason (optional) — Ctrl+Enter to send  Esc cancel ");
+            let block = Block::default().borders(Borders::ALL).title(
+                " Rejection reason (optional) — F2 / Alt+Enter / Ctrl+Enter to send  Esc cancel ",
+            );
             let para = Paragraph::new(draft.clone())
                 .block(block)
                 .wrap(Wrap { trim: false })

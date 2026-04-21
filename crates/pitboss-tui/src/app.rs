@@ -655,8 +655,21 @@ fn handle_prompt_reprompt(state: &mut AppState, code: KeyCode, modifiers: KeyMod
             state.mode = Mode::Normal;
             return Action::Continue;
         }
-        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
-            // Ctrl+Enter: submit.
+        // Submit the reprompt. Multiple accepted chords because most
+        // terminal emulators (konsole, gnome-terminal, default VTE-based
+        // terminals, default xterm/alacritty/tilix without CSI-u /
+        // kitty-keyboard) DON'T distinguish Ctrl+Enter from Enter —
+        // crossterm only sees `Enter` with no CTRL modifier, and we'd
+        // silently swallow the submission. F2 is unambiguous across
+        // every terminal I know of; Alt+Enter is reliably distinct in
+        // most terminals because the Alt/Meta modifier survives even
+        // when Ctrl doesn't. Kept Ctrl+Enter for the terminals that
+        // DO route it (kitty with keyboard protocol, wezterm, iTerm2).
+        KeyCode::F(2) | KeyCode::Enter
+            if matches!(code, KeyCode::F(2))
+                || modifiers.contains(KeyModifiers::CONTROL)
+                || modifiers.contains(KeyModifiers::ALT) =>
+        {
             if !draft.is_empty() {
                 spawn_control_op(
                     state,
@@ -788,7 +801,15 @@ fn handle_approval_draft(
 ) {
     use crate::state::ApprovalSubMode;
     match code {
-        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+        // Submit. Same multi-chord fallback as the reprompt modal — see
+        // handle_prompt_reprompt for the full rationale. Ctrl+Enter is
+        // often swallowed by VTE-based terminals; F2 and Alt+Enter
+        // survive.
+        KeyCode::F(2) | KeyCode::Enter
+            if matches!(code, KeyCode::F(2))
+                || modifiers.contains(KeyModifiers::CONTROL)
+                || modifiers.contains(KeyModifiers::ALT) =>
+        {
             if editing {
                 send_approve(state, &ctx.request_id, true, None, Some(draft));
             } else {
