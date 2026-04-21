@@ -89,6 +89,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
   changed from `uuid::Uuid` to `String` to match the server's
   `req-<uuid>` wire format.
+- **Workers spawned with an empty env — `[defaults.env]` never
+  reached them.** `run_worker` and `spawn_resume_worker` both built
+  their `SpawnCmd` with `env: Default::default()`, so manifest-level
+  env vars (e.g. `WORK_DIR`, `ARTIFACTS_DIR`) propagated lead → sublead
+  (after prior fixes) but dead-ended before hitting workers. Observable
+  symptom: a sublead asking a worker to write `"$WORK_DIR/file.md"`
+  resolved `$WORK_DIR` to empty and the worker's bash either errored
+  or wrote to an unexpected path. Same bug class as the sublead-env
+  regression; third occurrence of "env stops at layer N". Fixed by
+  re-using `compose_sublead_env` at both worker-spawn paths, seeding
+  from `layer.manifest.lead.env` (initial) / `state.manifest.lead.env`
+  (resume) so the same lead → sublead → worker env chain holds across
+  depth-2, pause/continue, and reprompt. `SpawnWorkerArgs` still has
+  no per-spawn `env` override — operator env stays at the manifest
+  level for now.
 - **Sub-leads couldn't read project files without a permission
   prompt.** Every sub-lead's claude subprocess started with
   `cwd = ~/.local/share/pitboss/runs/<run_id>/`, which put the operator's

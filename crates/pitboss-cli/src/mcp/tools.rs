@@ -669,11 +669,35 @@ async fn run_worker(
         }
     };
 
+    // Worker env: inherit from the parent layer's resolved lead env (which
+    // already merges `[defaults.env]` + `[lead.env]`), then apply pitboss
+    // defaults to fill gaps like `CLAUDE_CODE_ENTRYPOINT=sdk-ts`. Matches
+    // the precedence used at sublead spawn time.
+    //
+    // Previous behavior was `env: Default::default()` (empty env). A
+    // manifest setting `[defaults.env.WORK_DIR] = "/project/out"` would
+    // reach the lead and sublead subprocesses but NOT workers — a
+    // sublead's bash call to `echo ... >> "$WORK_DIR/file"` would get an
+    // empty `WORK_DIR` and drop output to `/file`. Same bug class as the
+    // sublead-env regression fixed earlier; this closes the worker hole.
+    //
+    // `SpawnWorkerArgs` has no `env` field today, so the operator-env
+    // layer is an empty HashMap. If we ever add one, pass it here.
+    let lead_env_for_worker = layer
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.env.clone())
+        .unwrap_or_default();
+    let worker_env = crate::dispatch::sublead::compose_sublead_env(
+        &lead_env_for_worker,
+        &std::collections::HashMap::new(),
+    );
     let cmd = SpawnCmd {
         program: layer.claude_binary.clone(),
         args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref()),
         cwd: cwd.clone(),
-        env: Default::default(),
+        env: worker_env,
     };
 
     let outcome = {
@@ -975,11 +999,24 @@ pub async fn spawn_resume_worker(
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
 
+    // Resume path mirrors the initial spawn: inherit the parent lead's
+    // resolved env so `[defaults.env]` and `[lead.env]` survive a
+    // pause/continue or reprompt cycle.
+    let lead_env_for_resume = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.env.clone())
+        .unwrap_or_default();
+    let resume_env = crate::dispatch::sublead::compose_sublead_env(
+        &lead_env_for_resume,
+        &std::collections::HashMap::new(),
+    );
     let cmd = pitboss_core::process::SpawnCmd {
         program: state.claude_binary.clone(),
         args: spawn_args_v,
         cwd,
-        env: Default::default(),
+        env: resume_env,
     };
     let task_dir = state.run_subdir.join("tasks").join(&task_id);
     let _ = tokio::fs::create_dir_all(&task_dir).await;
