@@ -37,8 +37,16 @@ pub struct SubleadTerminalRecord {
 /// The return type of `wait_for_actor_internal`.
 /// Workers return a `TaskRecord`; sub-leads return a `SubleadTerminalRecord`.
 /// The MCP handler serializes whichever variant it gets.
+///
+/// The variant-size lint is allowed here: `TaskRecord` is ~300 B vs. ~80 B for
+/// `SubleadTerminalRecord`, but boxing `TaskRecord` would ripple through every
+/// `wait_actor` caller (plus pattern matches across TUI / dispatch / tests) to
+/// dereference through a `Box`. This type is constructed once per actor
+/// termination — a handful of times per run — so the extra inline bytes are
+/// immaterial compared to the churn that boxing would introduce.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "actor_type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ActorTerminalRecord {
     Worker(TaskRecord),
     Sublead(SubleadTerminalRecord),
