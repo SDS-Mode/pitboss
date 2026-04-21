@@ -37,8 +37,16 @@ pub struct SubleadTerminalRecord {
 /// The return type of `wait_for_actor_internal`.
 /// Workers return a `TaskRecord`; sub-leads return a `SubleadTerminalRecord`.
 /// The MCP handler serializes whichever variant it gets.
+///
+/// The variant-size lint is allowed here: `TaskRecord` is ~300 B vs. ~80 B for
+/// `SubleadTerminalRecord`, but boxing `TaskRecord` would ripple through every
+/// `wait_actor` caller (plus pattern matches across TUI / dispatch / tests) to
+/// dereference through a `Box`. This type is constructed once per actor
+/// termination — a handful of times per run — so the extra inline bytes are
+/// immaterial compared to the churn that boxing would introduce.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "actor_type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ActorTerminalRecord {
     Worker(TaskRecord),
     Sublead(SubleadTerminalRecord),
@@ -270,6 +278,13 @@ pub struct DispatchState {
     /// silent exits as `TaskStatus::ApprovalRejected`. See the
     /// `LastApprovalResponse` doc for the full lifecycle.
     pub last_approval_response: RwLock<HashMap<String, LastApprovalResponse>>,
+    /// Rolling view of Anthropic API health derived from classified worker
+    /// failures. Consulted by `handle_spawn_worker` /
+    /// `handle_spawn_sublead` to refuse new spawns while rate-limit or
+    /// auth conditions persist — otherwise a loop of failing workers
+    /// burns budget faster than the operator can intervene. Updated
+    /// alongside the `TaskRecord` persist in every completion path.
+    pub api_health: Arc<crate::dispatch::failure_detection::ApiHealth>,
 }
 
 /// CAUTION: This Deref always resolves to the root layer, which is correct
@@ -345,6 +360,7 @@ impl DispatchState {
             worker_layer_index: RwLock::new(HashMap::new()),
             run_leases: Arc::new(RunLeaseRegistry::new()),
             last_approval_response: RwLock::new(HashMap::new()),
+            api_health: Arc::new(crate::dispatch::failure_detection::ApiHealth::new()),
         }
     }
 

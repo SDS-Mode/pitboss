@@ -452,6 +452,7 @@ async fn execute_task(
                     approvals_approved: 0,
                     approvals_rejected: 0,
                     model: Some(task.model.clone()),
+                    failure_reason: None,
                 };
             }
         }
@@ -492,6 +493,11 @@ async fn execute_task(
     }
 
     let worktree_path = if task.use_worktree { Some(cwd) } else { None };
+    let failure_reason = crate::dispatch::failure_detection::detect_failure_reason(
+        outcome.exit_code,
+        Some(&log_path),
+        Some(&stderr_log_path),
+    );
     TaskRecord {
         task_id: task.id.clone(),
         status,
@@ -511,6 +517,7 @@ async fn execute_task(
         approvals_approved: 0,
         approvals_rejected: 0,
         model: Some(task.model.clone()),
+        failure_reason,
     }
 }
 

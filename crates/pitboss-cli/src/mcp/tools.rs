@@ -364,6 +364,28 @@ pub async fn handle_spawn_worker(
         bail!("run is draining: no new workers accepted");
     }
 
+    // Guard 1a: API health. If a recent worker classified as rate-limited
+    // or auth-failed, refuse new spawns until the condition clears. The
+    // lead's Claude session sees a structured error and can plan around
+    // the outage (wait for reset, report to operator) rather than firing
+    // another doomed subprocess. See `dispatch::failure_detection` for
+    // the gate rules.
+    if let Err(gate) = state.api_health.check_can_spawn().await {
+        use crate::dispatch::failure_detection::SpawnGateReason;
+        match gate {
+            SpawnGateReason::RateLimited { retry_after } => bail!(
+                "api rate-limited: refusing to spawn new workers until {} (retry_after); a \
+                 prior worker hit the limit",
+                retry_after.to_rfc3339()
+            ),
+            SpawnGateReason::AuthFailed { clears_at } => bail!(
+                "api auth failed on a recent worker; refusing to spawn new workers until {} \
+                 (clears_at). Rotate credentials or cancel the run",
+                clears_at.to_rfc3339()
+            ),
+        }
+    }
+
     // Guard 1b: plan approval. When the manifest opts in with
     // `[run].require_plan_approval = true`, the lead must call
     // `propose_plan` and get operator approval before any worker
@@ -652,6 +674,7 @@ async fn run_worker(
                     approvals_approved: 0,
                     approvals_rejected: 0,
                     model: Some(model.clone()),
+                    failure_reason: None,
                 };
                 let _ = layer.store.append_record(layer.run_id, &rec).await;
                 layer
@@ -773,7 +796,7 @@ async fn run_worker(
             .insert(task_id.clone(), pid_slot.clone());
         let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&layer.spawner), cmd)
             .with_log_path(log_path.clone())
-            .with_stderr_log_path(stderr_path)
+            .with_stderr_log_path(stderr_path.clone())
             .with_session_id_tx(session_id_tx)
             .with_pid_slot(pid_slot)
             .run_to_completion(cancel, Duration::from_secs(timeout_secs))
@@ -821,6 +844,13 @@ async fn run_worker(
         .get(&task_id)
         .cloned()
         .unwrap_or_default();
+    // Classify non-zero exits by scanning the tail of stdout/stderr for known
+    // markers (rate-limit, network, auth, etc.). `None` on exit_code == 0.
+    let failure_reason = crate::dispatch::failure_detection::detect_failure_reason(
+        outcome.exit_code,
+        Some(&log_path),
+        Some(&stderr_path),
+    );
     let rec = TaskRecord {
         task_id: task_id.clone(),
         status,
@@ -833,17 +863,36 @@ async fn run_worker(
         token_usage: outcome.token_usage,
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
-        parent_task_id: Some(lead_id),
+        parent_task_id: Some(lead_id.clone()),
         pause_count: counters.pause_count,
         reprompt_count: counters.reprompt_count,
         approvals_requested: counters.approvals_requested,
         approvals_approved: counters.approvals_approved,
         approvals_rejected: counters.approvals_rejected,
         model: Some(model.clone()),
+        failure_reason,
     };
 
     // Persist record.
     let _ = layer.store.append_record(layer.run_id, &rec).await;
+
+    // Broadcast structured failure to any connected TUI so operators see
+    // *why* the worker failed without opening logs, and so a parent lead
+    // can react (back off on RateLimit, fail fast on AuthFailure).
+    // Also record into `api_health` so the next spawn call short-circuits
+    // while the condition persists — one dead worker is enough; a loop
+    // of them burns budget faster than any operator can intervene.
+    if let Some(reason) = rec.failure_reason.clone() {
+        state.api_health.record(&reason).await;
+        crate::dispatch::failure_detection::broadcast_worker_failed(
+            &state.root,
+            task_id.clone(),
+            Some(lead_id.clone()),
+            reason,
+            &["root", &lead_id, &task_id],
+        )
+        .await;
+    }
 
     // Release the spawn-time reservation before accumulating actual cost.
     release_reservation_for_layer(&layer, &task_id).await;
@@ -1098,7 +1147,7 @@ pub async fn spawn_resume_worker(
             cmd,
         )
         .with_log_path(log_path.clone())
-        .with_stderr_log_path(stderr_path)
+        .with_stderr_log_path(stderr_path.clone())
         .with_pid_slot(resume_pid_slot)
         .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
         .await;
@@ -1136,19 +1185,35 @@ pub async fn spawn_resume_worker(
             ended_at: outcome.ended_at,
             duration_ms: outcome.duration_ms(),
             worktree_path: None,
-            log_path,
+            log_path: log_path.clone(),
             token_usage: outcome.token_usage,
             claude_session_id: outcome.claude_session_id,
             final_message_preview: outcome.final_message_preview,
-            parent_task_id: Some(lead_id_bg),
+            parent_task_id: Some(lead_id_bg.clone()),
             pause_count: counters.pause_count,
             reprompt_count: counters.reprompt_count,
             approvals_requested: counters.approvals_requested,
             approvals_approved: counters.approvals_approved,
             approvals_rejected: counters.approvals_rejected,
             model: Some(resume_model),
+            failure_reason: crate::dispatch::failure_detection::detect_failure_reason(
+                outcome.exit_code,
+                Some(&log_path),
+                Some(&stderr_path),
+            ),
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
+        if let Some(reason) = rec.failure_reason.clone() {
+            state_bg.api_health.record(&reason).await;
+            crate::dispatch::failure_detection::broadcast_worker_failed(
+                &state_bg.root,
+                task_id_bg.clone(),
+                Some(lead_id_bg.clone()),
+                reason,
+                &["root", &lead_id_bg, &task_id_bg],
+            )
+            .await;
+        }
         state_bg
             .workers
             .write()
@@ -2216,6 +2281,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_worker_refuses_when_api_rate_limited() {
+        use pitboss_core::store::FailureReason;
+        let state = test_state().await;
+        // Simulate a just-finished worker that hit rate-limit with a
+        // reset 10 minutes in the future — any new spawn must refuse.
+        let future = chrono::Utc::now() + chrono::Duration::minutes(10);
+        state
+            .api_health
+            .record(&FailureReason::RateLimit {
+                resets_at: Some(future),
+            })
+            .await;
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+            meta: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("rate-limited"),
+            "err should mention rate-limited: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_when_api_auth_failed() {
+        use pitboss_core::store::FailureReason;
+        let state = test_state().await;
+        state.api_health.record(&FailureReason::AuthFailure).await;
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+            meta: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("auth failed"),
+            "err should mention auth failed: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_worker_refuses_when_draining() {
         let state = test_state().await;
         state.cancel.drain();
@@ -2324,6 +2439,7 @@ mod tests {
                 approvals_approved: 0,
                 approvals_rejected: 0,
                 model: None,
+                failure_reason: None,
             };
             let mut w = state_clone.workers.write().await;
             w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -2396,6 +2512,7 @@ mod tests {
                 approvals_approved: 0,
                 approvals_rejected: 0,
                 model: None,
+                failure_reason: None,
             };
             let mut w = state_clone.workers.write().await;
             w.insert("w-b".into(), WorkerState::Done(rec));
@@ -2987,6 +3104,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         };
         state
             .workers

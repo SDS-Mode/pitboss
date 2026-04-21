@@ -377,7 +377,7 @@ pub async fn run_hierarchical(
         } else {
             None
         },
-        log_path: lead_log_path,
+        log_path: lead_log_path.clone(),
         token_usage: total_token_usage,
         claude_session_id: final_outcome.claude_session_id,
         final_message_preview: final_outcome.final_message_preview,
@@ -388,6 +388,11 @@ pub async fn run_hierarchical(
         approvals_approved: lead_counters.approvals_approved,
         approvals_rejected: lead_counters.approvals_rejected,
         model: Some(lead.model.clone()),
+        failure_reason: crate::dispatch::failure_detection::detect_failure_reason(
+            final_outcome.exit_code,
+            Some(&lead_log_path),
+            Some(&lead_stderr_path),
+        ),
     };
 
     // Cleanup worktree per policy
@@ -398,6 +403,22 @@ pub async fn run_hierarchical(
 
     // Persist lead record
     store.append_record(run_id, &lead_record).await?;
+    // Broadcast classified failure so the TUI and any attached client see
+    // why the root lead died (rate-limit / network / auth / ...).
+    // Root-lead dying generally ends the run, but still record into
+    // api_health for completeness — any subleads spawned after this point
+    // (rare) will see the gate.
+    if let Some(reason) = lead_record.failure_reason.clone() {
+        state.api_health.record(&reason).await;
+        crate::dispatch::failure_detection::broadcast_worker_failed(
+            &state.root,
+            lead.id.clone(),
+            None,
+            reason,
+            &["root", lead.id.as_str()],
+        )
+        .await;
+    }
     state.workers.write().await.insert(
         lead.id.clone(),
         crate::dispatch::state::WorkerState::Done(lead_record.clone()),
@@ -459,6 +480,7 @@ pub async fn run_hierarchical(
                         approvals_approved: 0,
                         approvals_rejected: 0,
                         model: worker_models.get(id).cloned(),
+                        failure_reason: None,
                     }
                 }
             })

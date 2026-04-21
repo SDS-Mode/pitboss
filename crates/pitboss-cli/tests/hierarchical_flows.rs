@@ -278,6 +278,7 @@ async fn wait_actor_alias_resolves_worker_id() {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         };
         let mut w = state_clone.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
