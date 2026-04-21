@@ -1119,57 +1119,80 @@ pub(crate) fn initial_estimate_for(model: &str) -> f64 {
 }
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
-    let workers = state.workers.read().await;
+    // Collect from every layer (root + each active sub-lead). Previously
+    // this read only `state.workers` (= root via Deref), so sub-leads
+    // calling `list_workers` got an empty list even when they had their
+    // own workers active — the workers were registered in the sub-lead
+    // layer's own `workers` map by `handle_spawn_worker`'s
+    // `target_layer.workers.write()`.
+    //
+    // Lead id filtering: excludes the root lead id. Sub-lead ids aren't
+    // registered as workers so they don't need filtering here.
+    let mut summaries: Vec<WorkerSummary> = Vec::new();
     let prompts = state.worker_prompts.read().await;
-    workers
-        .iter()
-        .filter(|(id, _)| *id != &state.lead_id)
-        .map(|(id, w)| {
-            let (state_str, started_at) = match w {
-                WorkerState::Pending => ("Pending".to_string(), None),
-                WorkerState::Running { started_at, .. } => {
-                    ("Running".to_string(), Some(started_at.to_rfc3339()))
-                }
-                WorkerState::Paused { paused_at, .. } => {
-                    ("Paused".to_string(), Some(paused_at.to_rfc3339()))
-                }
-                WorkerState::Frozen { started_at, .. } => {
-                    ("Frozen".to_string(), Some(started_at.to_rfc3339()))
-                }
-                WorkerState::Done(rec) => (
-                    match rec.status {
-                        pitboss_core::store::TaskStatus::Success => "Completed",
-                        pitboss_core::store::TaskStatus::Failed => "Failed",
-                        pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
-                        pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
-                        pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
-                        pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
-                        pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
-                    }
-                    .to_string(),
-                    Some(rec.started_at.to_rfc3339()),
-                ),
-            };
-            let prompt_preview = prompts.get(id).cloned().unwrap_or_default();
-            WorkerSummary {
-                task_id: id.clone(),
-                state: state_str,
-                prompt_preview,
-                started_at,
+    let render = |id: &String, w: &WorkerState| -> WorkerSummary {
+        let (state_str, started_at) = match w {
+            WorkerState::Pending => ("Pending".to_string(), None),
+            WorkerState::Running { started_at, .. } => {
+                ("Running".to_string(), Some(started_at.to_rfc3339()))
             }
-        })
-        .collect()
+            WorkerState::Paused { paused_at, .. } => {
+                ("Paused".to_string(), Some(paused_at.to_rfc3339()))
+            }
+            WorkerState::Frozen { started_at, .. } => {
+                ("Frozen".to_string(), Some(started_at.to_rfc3339()))
+            }
+            WorkerState::Done(rec) => (
+                match rec.status {
+                    pitboss_core::store::TaskStatus::Success => "Completed",
+                    pitboss_core::store::TaskStatus::Failed => "Failed",
+                    pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
+                    pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
+                    pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                    pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
+                    pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
+                }
+                .to_string(),
+                Some(rec.started_at.to_rfc3339()),
+            ),
+        };
+        WorkerSummary {
+            task_id: id.clone(),
+            state: state_str,
+            prompt_preview: prompts.get(id).cloned().unwrap_or_default(),
+            started_at,
+        }
+    };
+    for (id, w) in state.workers.read().await.iter() {
+        if id != &state.lead_id {
+            summaries.push(render(id, w));
+        }
+    }
+    let subleads = state.subleads.read().await;
+    for layer in subleads.values() {
+        for (id, w) in layer.workers.read().await.iter() {
+            // Sub-lead layers hold the sub-lead itself as a "worker" entry
+            // (the claude subprocess registered via workers.write() in
+            // finalize_sublead_spawn). Filter by layer.lead_id so the
+            // sub-lead doesn't show up as one of its own workers.
+            if id != &layer.lead_id {
+                summaries.push(render(id, w));
+            }
+        }
+    }
+    summaries
 }
 
 pub async fn handle_worker_status(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Result<WorkerStatus> {
-    let workers = state.workers.read().await;
-    let w = workers
-        .get(task_id)
+    // Scan all layers — same rationale as find_worker_across_layers:
+    // a sub-lead's own workers are registered in the sub-lead's layer.
+    let w = find_worker_across_layers(state, task_id)
+        .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
-    let (state_str, started_at, partial_usage, last_text_preview) = match w {
+    let (state_str, started_at, partial_usage, last_text_preview) = match &w {
         WorkerState::Pending => (
             "Pending".to_string(),
             None,
@@ -1711,18 +1734,43 @@ pub async fn handle_propose_plan(
     }
 }
 
+/// Look up a worker by task_id across the root layer AND every active
+/// sub-lead layer. Returns the first matching `WorkerState`.
+///
+/// Workers spawned by a sub-lead are registered in that sub-lead's
+/// `LayerState.workers`, not in root's. Before this helper existed the
+/// v0.6 MCP handlers all read `state.workers` (= root via Deref), so a
+/// sub-lead's own worker looked "unknown" to every downstream tool
+/// (`wait_for_worker`, `wait_actor`, `worker_status`, `list_workers`).
+/// Surfaced via the depth-2 smoke test: sub-lead calls `spawn_worker`,
+/// gets a task_id, then `wait_actor` on that id immediately returns
+/// `unknown actor_id: worker-...`.
+async fn find_worker_across_layers(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+) -> Option<WorkerState> {
+    if let Some(w) = state.workers.read().await.get(task_id).cloned() {
+        return Some(w);
+    }
+    let subleads = state.subleads.read().await;
+    for layer in subleads.values() {
+        if let Some(w) = layer.workers.read().await.get(task_id).cloned() {
+            return Some(w);
+        }
+    }
+    None
+}
+
 async fn wait_for_actor_internal(
     state: &Arc<DispatchState>,
     actor_id: &str,
     timeout_secs: Option<u64>,
 ) -> Result<ActorTerminalRecord> {
     // ── Fast path: already Done ────────────────────────────────────────────────
-    // 1. Worker already Done?
-    {
-        let workers = state.workers.read().await;
-        if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-            return Ok(ActorTerminalRecord::Worker(rec.clone()));
-        }
+    // 1. Worker already Done? (scan all layers — the worker may be in a
+    //    sub-lead's layer, not root.)
+    if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, actor_id).await {
+        return Ok(ActorTerminalRecord::Worker(rec));
     }
     // 2. Sub-lead already terminated?
     {
@@ -1732,11 +1780,16 @@ async fn wait_for_actor_internal(
         }
     }
 
-    // 3. Is actor_id known at all (worker in any state OR active sub-lead)?
+    // 3. Is actor_id known at all (worker in any layer OR active sub-lead)?
     {
-        let workers = state.workers.read().await;
         let subleads = state.subleads.read().await;
-        if !workers.contains_key(actor_id) && !subleads.contains_key(actor_id) {
+        let is_sublead = subleads.contains_key(actor_id);
+        // Drop the subleads lock before scanning layers to avoid deadlock
+        // (find_worker_across_layers re-acquires it in read mode — RwLock
+        // permits multiple readers, but keep the surface tight).
+        drop(subleads);
+        let is_worker = find_worker_across_layers(state, actor_id).await.is_some();
+        if !is_worker && !is_sublead {
             bail!("unknown actor_id: {actor_id}");
         }
     }
@@ -1752,12 +1805,12 @@ async fn wait_for_actor_internal(
             Ok(Err(_)) => bail!("completion channel closed"),
             Ok(Ok(completed_id)) => {
                 if completed_id == actor_id {
-                    // Check workers first.
+                    // Check workers first (all layers — sub-lead-owned
+                    // workers aren't in root's workers map).
+                    if let Some(WorkerState::Done(rec)) =
+                        find_worker_across_layers(state, actor_id).await
                     {
-                        let workers = state.workers.read().await;
-                        if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-                            return Ok(ActorTerminalRecord::Worker(rec.clone()));
-                        }
+                        return Ok(ActorTerminalRecord::Worker(rec));
                     }
                     // Then check sublead_results.
                     {
@@ -1768,12 +1821,12 @@ async fn wait_for_actor_internal(
                     }
                     bail!("internal: actor_id marked done but record not present");
                 }
-                // Defensive: our target may actually be Done now; re-check.
+                // Defensive: our target may actually be Done now; re-check
+                // across all layers.
+                if let Some(WorkerState::Done(rec)) =
+                    find_worker_across_layers(state, actor_id).await
                 {
-                    let workers = state.workers.read().await;
-                    if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-                        return Ok(ActorTerminalRecord::Worker(rec.clone()));
-                    }
+                    return Ok(ActorTerminalRecord::Worker(rec));
                 }
                 {
                     let results = state.sublead_results.read().await;

@@ -89,6 +89,23 @@ This project uses [Semantic Versioning](https://semver.org/).
   (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
   changed from `uuid::Uuid` to `String` to match the server's
   `req-<uuid>` wire format.
+- **Sub-lead-spawned workers looked "unknown" to every downstream
+  lookup.** `handle_list_workers`, `handle_worker_status`, and
+  `wait_for_actor_internal` (the engine behind `wait_actor` /
+  `wait_for_worker`) all read `state.workers` — which under the
+  DispatchState → LayerState Deref resolves to the root layer's
+  workers map. Workers spawned by a sub-lead are registered in the
+  sub-lead's `LayerState.workers` via `target_layer.workers.write()`
+  in `handle_spawn_worker`, so a sub-lead calling `spawn_worker` got
+  back a valid task_id but the very next `wait_actor` on that id
+  returned `MCP error -32600: unknown actor_id: worker-...` and
+  `list_workers` returned `[]`. Silent depth-2 break since v0.6 —
+  sub-leads cannot manage their own workers. Fixed by introducing
+  `find_worker_across_layers` that scans root + every active
+  sub-lead layer, and routing all four handlers through it.
+  Confirmed via the depth-2 smoke test: before the fix, the sublead
+  got "unknown actor_id" on every wait; after, the wait completes
+  against the correct layer's worker record.
 - **Workers spawned with an empty env — `[defaults.env]` never
   reached them.** `run_worker` and `spawn_resume_worker` both built
   their `SpawnCmd` with `env: Default::default()`, so manifest-level
