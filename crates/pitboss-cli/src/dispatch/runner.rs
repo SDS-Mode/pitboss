@@ -1384,7 +1384,10 @@ mod tests {
             // spawn_sublead only appears when allow_subleads=true (our fixture).
             "mcp__pitboss__spawn_sublead",
         ] {
-            assert!(list.contains(t), "expected {t} in allowedTools, got: {list}");
+            assert!(
+                list.contains(t),
+                "expected {t} in allowedTools, got: {list}"
+            );
         }
         // Phantom entry removed: `wait_for_sublead` is not a real server tool.
         // Keeping it in the allowlist masked the `wait_actor` omission during
@@ -1417,7 +1420,10 @@ mod tests {
             "mcp__pitboss__run_lease_acquire",
             "mcp__pitboss__run_lease_release",
         ] {
-            assert!(list.contains(t), "expected {t} in sublead allowedTools, got: {list}");
+            assert!(
+                list.contains(t),
+                "expected {t} in sublead allowedTools, got: {list}"
+            );
         }
     }
 
