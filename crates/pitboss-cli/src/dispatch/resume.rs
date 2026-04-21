@@ -299,6 +299,7 @@ mod tests {
                 approvals_approved: 0,
                 approvals_rejected: 0,
                 model: None,
+                failure_reason: None,
             })
             .collect();
 
@@ -515,6 +516,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
@@ -619,6 +621,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),

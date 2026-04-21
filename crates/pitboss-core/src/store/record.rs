@@ -7,6 +7,31 @@ use uuid::Uuid;
 
 use crate::parser::TokenUsage;
 
+/// Structured classification of *why* a claude subprocess failed, derived by
+/// scanning its stdout/stderr after a non-zero exit. Populated on the
+/// `TaskRecord` so callers (TUI, parent lead, spawn gater) can react without
+/// re-parsing logs. Exit code 0 never produces a `FailureReason` — a successful
+/// response that happens to mention "rate limit" in body text is not a failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FailureReason {
+    /// API rate/usage limit hit. `resets_at` is the parsed reset time when the
+    /// CLI emitted one (e.g., "resets Apr 23, 3pm"); `None` when the marker was
+    /// detected but no timestamp was parseable.
+    RateLimit { resets_at: Option<DateTime<Utc>> },
+    /// DNS/connection errors: ENOTFOUND, ETIMEDOUT, ECONNRESET, etc.
+    NetworkError { message: String },
+    /// 401 / `invalid_api_key` from the API.
+    AuthFailure,
+    /// Model refused the prompt due to context-length exceeded.
+    ContextExceeded,
+    /// 400 `invalid_request_error` surfaced by the CLI.
+    InvalidArgument { message: String },
+    /// Non-zero exit with no recognized marker. `message` is a short excerpt
+    /// from the tail of stderr/stdout for triage.
+    Unknown { message: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     Success,
@@ -61,6 +86,10 @@ pub struct TaskRecord {
     /// scanning the log if they need this for an older run.
     #[serde(default)]
     pub model: Option<String>,
+    /// Structured failure classification for non-zero exits. `None` for
+    /// successful tasks, cancelled tasks, and pre-v0.7.1 records.
+    #[serde(default)]
+    pub failure_reason: Option<FailureReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +148,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&json).unwrap();
@@ -147,6 +177,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("parent_task_id"));
@@ -207,6 +238,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: Some("claude-opus-4-7".into()),
+            failure_reason: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("claude-opus-4-7"));
@@ -278,6 +310,7 @@ mod tests {
             approvals_approved: 2,
             approvals_rejected: 1,
             model: None,
+            failure_reason: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&s).unwrap();

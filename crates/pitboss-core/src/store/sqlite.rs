@@ -61,6 +61,7 @@ impl SqliteStore {
         migrate_parent_task_id(&conn)?;
         migrate_v04_event_counters(&conn)?;
         migrate_task_model(&conn)?;
+        migrate_failure_reason(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -111,6 +112,31 @@ fn migrate_task_model(conn: &rusqlite::Connection) -> Result<(), StoreError> {
     if !has_model {
         conn.execute("ALTER TABLE task_records ADD COLUMN model TEXT NULL", [])
             .map_err(|e| StoreError::Incomplete(format!("migrate model alter: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Idempotent migration: add the v0.7.1 `failure_reason` column to
+/// `task_records` if it's missing. Stores the `FailureReason` enum as JSON
+/// (TEXT NULL) so adding/removing variants doesn't require another schema
+/// migration. Populated by the post-exit failure-detection parser.
+fn migrate_failure_reason(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let has_col = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('task_records') \
+                 WHERE name = 'failure_reason'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate failure_reason prepare: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate failure_reason exists: {e}")))?
+    };
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE task_records ADD COLUMN failure_reason TEXT NULL",
+            [],
+        )
+        .map_err(|e| StoreError::Incomplete(format!("migrate failure_reason alter: {e}")))?;
     }
     Ok(())
 }
@@ -228,6 +254,7 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             approvals_approved    INTEGER NOT NULL DEFAULT 0,
             approvals_rejected    INTEGER NOT NULL DEFAULT 0,
             model                 TEXT NULL,
+            failure_reason        TEXT NULL,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -331,6 +358,7 @@ struct TaskRow {
     approvals_approved: i64,
     approvals_rejected: i64,
     model: Option<String>,
+    failure_reason: Option<String>,
 }
 
 impl TaskRow {
@@ -357,6 +385,7 @@ impl TaskRow {
             approvals_approved: row.get("approvals_approved").unwrap_or(0),
             approvals_rejected: row.get("approvals_rejected").unwrap_or(0),
             model: row.get("model").unwrap_or(None),
+            failure_reason: row.get("failure_reason").unwrap_or(None),
         })
     }
 
@@ -389,6 +418,10 @@ impl TaskRow {
             approvals_approved: self.approvals_approved.try_into().unwrap_or(0),
             approvals_rejected: self.approvals_rejected.try_into().unwrap_or(0),
             model: self.model,
+            failure_reason: self
+                .failure_reason
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok()),
         })
     }
 }
@@ -426,7 +459,7 @@ fn fetch_task_records(
                   token_input, token_output, token_cache_read, token_cache_creation, \
                   claude_session_id, final_message_preview, parent_task_id, \
                   pause_count, reprompt_count, approvals_requested, \
-                  approvals_approved, approvals_rejected, model \
+                  approvals_approved, approvals_rejected, model, failure_reason \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -544,9 +577,9 @@ impl SessionStore for SqliteStore {
                       token_input, token_output, token_cache_read, token_cache_creation, \
                       claude_session_id, final_message_preview, parent_task_id, \
                       pause_count, reprompt_count, approvals_requested, \
-                      approvals_approved, approvals_rejected, model) \
+                      approvals_approved, approvals_rejected, model, failure_reason) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                             ?17, ?18, ?19, ?20, ?21, ?22)",
+                             ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -573,6 +606,10 @@ impl SessionStore for SqliteStore {
                         i64::from(record.approvals_approved),
                         i64::from(record.approvals_rejected),
                         record.model.as_deref(),
+                        record
+                            .failure_reason
+                            .as_ref()
+                            .and_then(|fr| serde_json::to_string(fr).ok()),
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -680,6 +717,7 @@ mod sqlite_tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         }
     }
 

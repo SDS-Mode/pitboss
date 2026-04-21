@@ -3,7 +3,7 @@
 pub mod record;
 pub mod traits;
 
-pub use record::{RunMeta, RunSummary, TaskRecord, TaskStatus};
+pub use record::{FailureReason, RunMeta, RunSummary, TaskRecord, TaskStatus};
 pub use traits::SessionStore;
 
 pub mod json_file;
@@ -53,6 +53,7 @@ mod integration_tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+            failure_reason: None,
         }
     }
 
