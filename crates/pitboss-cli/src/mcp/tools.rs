@@ -486,19 +486,38 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), worker_model.clone());
 
-    // Resolve the worker's directory: args override -> lead.directory fallback.
+    // Resolve the worker's directory and worktree-use, falling back through:
+    //   1. `args.directory` / per-args overrides — operator's spawn_worker call
+    //   2. target_layer's lead — set for root-lead callers, NOT for sub-leads
+    //      (derive_sublead_manifest clears `lead` on the sub-manifest)
+    //   3. ROOT lead — always present in hierarchical runs and pinned to the
+    //      operator's project directory
+    //   4. /tmp — last-ditch fallback (git worktree creation will fail loudly,
+    //      which is the right outcome for a malformed run)
+    //
+    // Pre-fix, sub-lead-spawned workers without an explicit `directory` arg
+    // landed at /tmp because step 2 returned None and we skipped to step 4
+    // immediately. Worker spawn then SpawnFailed with "not inside a git
+    // work-tree: /tmp", visible in summary.jsonl but not in the sublead's
+    // wait_for_worker reply (which sees the SpawnFailed task record but
+    // doesn't surface the cwd that caused it). Smoke-test artifact:
+    // sublead-1's only worker SpawnFailed; sublead-2's first worker
+    // SpawnFailed and its second only succeeded because haiku retried with
+    // an explicit directory after seeing the failure.
+    let root_lead = state.root.manifest.lead.as_ref();
     let worker_dir: std::path::PathBuf = args
         .directory
         .as_ref()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
+        .or_else(|| {
             target_layer
                 .manifest
                 .lead
                 .as_ref()
                 .map(|l| l.directory.clone())
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        });
+        })
+        .or_else(|| root_lead.map(|l| l.directory.clone()))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     // Resolve tools, timeout: per-args override -> lead defaults -> fallback.
     // (worker_model was resolved above for the budget guard.)
@@ -506,13 +525,22 @@ pub async fn handle_spawn_worker(
         .tools
         .clone()
         .or_else(|| lead.map(|l| l.tools.clone()))
+        .or_else(|| root_lead.map(|l| l.tools.clone()))
         .unwrap_or_default();
     let worker_timeout_secs = args
         .timeout_secs
         .or_else(|| lead.map(|l| l.timeout_secs))
+        .or_else(|| root_lead.map(|l| l.timeout_secs))
         .unwrap_or(3600);
     let worker_branch = args.branch.clone();
-    let worker_use_worktree = lead.is_none_or(|l| l.use_worktree);
+    // Mirror the directory cascade: target lead → root lead → default(true).
+    // Without the root-lead step, sub-lead workers always made a worktree
+    // (lead.is_none_or → true) regardless of root's `use_worktree` setting,
+    // surprising operators who set `use_worktree = false` at the root level.
+    let worker_use_worktree = lead
+        .map(|l| l.use_worktree)
+        .or_else(|| root_lead.map(|l| l.use_worktree))
+        .unwrap_or(true);
 
     // Retrieve the per-worker cancel token we inserted above.
     let worker_cancel_bg = target_layer

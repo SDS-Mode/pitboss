@@ -113,6 +113,24 @@ This project uses [Semantic Versioning](https://semver.org/).
   (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
   changed from `uuid::Uuid` to `String` to match the server's
   `req-<uuid>` wire format.
+- **Sub-lead-spawned workers SpawnFailed at `/tmp` when no
+  `directory` arg was passed.** `derive_sublead_manifest` clears
+  `lead` on the sub-manifest, and `handle_spawn_worker`'s fallback
+  chain only consulted `target_layer.manifest.lead.directory` before
+  defaulting to `/tmp`. Sub-lead callers therefore landed on `/tmp`
+  whenever they didn't supply an explicit directory — git worktree
+  creation then failed loudly with `"not inside a git work-tree:
+  /tmp"` and the worker was marked SpawnFailed. The failure was
+  visible in `summary.jsonl` but **not** in the sub-lead's
+  `wait_for_worker` reply (which sees the SpawnFailed task record
+  but doesn't surface the cwd that caused it), so a sub-lead's only
+  signal was a worker that never produced output — easy to misread
+  as a model-side problem. Fixed by extending the fallback chain
+  through the **root lead's** directory before falling back to
+  `/tmp`. Same fix applied to `tools`, `timeout_secs`, and
+  `use_worktree` resolution so sub-lead workers honor the operator's
+  root-level defaults instead of either crashing on `/tmp` or
+  silently using a different `use_worktree` setting than root.
 - **Sub-lead-spawned workers looked "unknown" to every downstream
   lookup.** `handle_list_workers`, `handle_worker_status`, and
   `wait_for_actor_internal` (the engine behind `wait_actor` /
