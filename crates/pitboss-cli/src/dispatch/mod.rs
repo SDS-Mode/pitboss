@@ -1,5 +1,6 @@
 pub mod actor;
 pub mod events;
+pub mod failure_detection;
 pub mod hierarchical;
 pub mod layer;
 pub mod probe;

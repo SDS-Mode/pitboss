@@ -624,6 +624,7 @@ async fn run_worker(
                     approvals_approved: 0,
                     approvals_rejected: 0,
                     model: Some(model.clone()),
+                    failure_reason: None,
                 };
                 let _ = layer.store.append_record(layer.run_id, &rec).await;
                 layer
@@ -707,7 +708,7 @@ async fn run_worker(
             .insert(task_id.clone(), pid_slot.clone());
         let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&layer.spawner), cmd)
             .with_log_path(log_path.clone())
-            .with_stderr_log_path(stderr_path)
+            .with_stderr_log_path(stderr_path.clone())
             .with_session_id_tx(session_id_tx)
             .with_pid_slot(pid_slot)
             .run_to_completion(cancel, Duration::from_secs(timeout_secs))
@@ -755,6 +756,13 @@ async fn run_worker(
         .get(&task_id)
         .cloned()
         .unwrap_or_default();
+    // Classify non-zero exits by scanning the tail of stdout/stderr for known
+    // markers (rate-limit, network, auth, etc.). `None` on exit_code == 0.
+    let failure_reason = crate::dispatch::failure_detection::detect_failure_reason(
+        outcome.exit_code,
+        Some(&log_path),
+        Some(&stderr_path),
+    );
     let rec = TaskRecord {
         task_id: task_id.clone(),
         status,
@@ -774,6 +782,7 @@ async fn run_worker(
         approvals_approved: counters.approvals_approved,
         approvals_rejected: counters.approvals_rejected,
         model: Some(model.clone()),
+        failure_reason,
     };
 
     // Persist record.
@@ -1003,7 +1012,7 @@ pub async fn spawn_resume_worker(
             cmd,
         )
         .with_log_path(log_path.clone())
-        .with_stderr_log_path(stderr_path)
+        .with_stderr_log_path(stderr_path.clone())
         .with_pid_slot(resume_pid_slot)
         .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
         .await;
@@ -1041,7 +1050,7 @@ pub async fn spawn_resume_worker(
             ended_at: outcome.ended_at,
             duration_ms: outcome.duration_ms(),
             worktree_path: None,
-            log_path,
+            log_path: log_path.clone(),
             token_usage: outcome.token_usage,
             claude_session_id: outcome.claude_session_id,
             final_message_preview: outcome.final_message_preview,
@@ -1052,6 +1061,11 @@ pub async fn spawn_resume_worker(
             approvals_approved: counters.approvals_approved,
             approvals_rejected: counters.approvals_rejected,
             model: Some(resume_model),
+            failure_reason: crate::dispatch::failure_detection::detect_failure_reason(
+                outcome.exit_code,
+                Some(&log_path),
+                Some(&stderr_path),
+            ),
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
         state_bg
@@ -2132,6 +2146,7 @@ mod tests {
                 approvals_approved: 0,
                 approvals_rejected: 0,
                 model: None,
+                failure_reason: None,
             };
             let mut w = state_clone.workers.write().await;
             w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -2204,6 +2219,7 @@ mod tests {
                 approvals_approved: 0,
                 approvals_rejected: 0,
                 model: None,
+                failure_reason: None,
             };
             let mut w = state_clone.workers.write().await;
             w.insert("w-b".into(), WorkerState::Done(rec));
@@ -2795,6 +2811,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
+                failure_reason: None,
         };
         state
             .workers

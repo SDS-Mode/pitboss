@@ -731,7 +731,7 @@ async fn spawn_sublead_session(
                 .num_milliseconds()
                 .max(0),
             worktree_path: None,
-            log_path,
+            log_path: log_path.clone(),
             token_usage: total_token_usage,
             claude_session_id: final_outcome.claude_session_id,
             final_message_preview: final_outcome.final_message_preview,
@@ -742,6 +742,11 @@ async fn spawn_sublead_session(
             approvals_approved: 0,
             approvals_rejected: 0,
             model: Some(model_bg),
+            failure_reason: crate::dispatch::failure_detection::detect_failure_reason(
+                final_outcome.exit_code,
+                Some(&log_path),
+                Some(&stderr_path),
+            ),
         };
         if let Err(e) = sub_layer_bg
             .store
