@@ -1,0 +1,172 @@
+# PR Gate — single required-status-check that aggregates across other workflows.
+#
+# Problem this solves: branch protection's required-status-checks list
+# hard-codes check names. If a required check happens to be in a workflow
+# that's path-filtered (e.g. the Container workflow only triggers on
+# Dockerfile / crates/ / etc. changes), a docs-only PR has no way to
+# satisfy it — the check never runs, so the merge stays BLOCKED forever
+# unless an admin bypasses.
+#
+# Approach: this single always-runs gate workflow polls the GitHub Checks
+# API for the required set, using path filters to decide which checks
+# actually need to have run. The gate succeeds only when:
+#   - Every required check for this PR's changed paths has completed with
+#     conclusion = "success", AND
+#   - No required check for this PR's changed paths is still in progress
+#     (after a 25-minute poll window)
+#
+# Branch protection then requires only this gate's job. The specific
+# workflows (CI, Container, Book, Release) still run independently —
+# the gate just aggregates their statuses into a single pass/fail for
+# the merge button.
+#
+# Adding / removing required checks: update the `required` array in the
+# github-script step below. Ruleset stays the same.
+#
+# Security note: the only ${{ … }} expression interpolated into a `run:`
+# or script body is `github.event.pull_request.head.sha`, which Git
+# computes and is not user-controlled (a SHA is always 40 hex chars).
+# PR title/body/head.ref (which ARE user-controlled) are never referenced.
+# All other ${{ … }} usage is in `env:` with quoted values, which is the
+# injection-safe pattern.
+
+name: PR Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  checks: read
+  pull-requests: read
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: All required checks passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect changed path categories
+        id: paths
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - '.github/workflows/container.yml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'tests-support/**'
+            book:
+              - 'book/**'
+              - '.github/workflows/book.yml'
+
+      - name: Wait for required checks and verify conclusions
+        uses: actions/github-script@v7
+        env:
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          CODE_CHANGED: ${{ steps.paths.outputs.code }}
+          BOOK_CHANGED: ${{ steps.paths.outputs.book }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = process.env.PR_SHA;
+            const codeChanged = process.env.CODE_CHANGED === 'true';
+            const bookChanged = process.env.BOOK_CHANGED === 'true';
+
+            // Required-check definitions.
+            //   always    — required regardless of what paths changed
+            //   requires  — required only when the corresponding paths-filter
+            //               category fired (e.g. "code" or "book")
+            // Adding a required check: append a row here. Removing: delete.
+            const required = [
+              { name: 'test + lint + fmt',               always: true },
+              { name: 'plan',                            always: true },
+              { name: 'Build runtime (linux-amd64)',     requires: 'code' },
+              { name: 'Build runtime (linux-arm64)',     requires: 'code' },
+              { name: 'Build with-claude (linux-amd64)', requires: 'code' },
+              { name: 'Build with-claude (linux-arm64)', requires: 'code' },
+              { name: 'build',                           requires: 'book' },
+            ];
+
+            const relevant = required.filter(r => {
+              if (r.always) return true;
+              if (r.requires === 'code') return codeChanged;
+              if (r.requires === 'book') return bookChanged;
+              return false;
+            });
+
+            core.info(`Changed paths — code: ${codeChanged}, book: ${bookChanged}`);
+            core.info(`Waiting for ${relevant.length} required check(s):`);
+            for (const r of relevant) core.info(`  - ${r.name}`);
+
+            // Poll the Checks API until every relevant check has completed
+            // or the 25-min budget elapses (leaves 5 min under the job's
+            // 30-min timeout for final accounting).
+            const pollIntervalMs = 15 * 1000;
+            const maxWaitMs = 25 * 60 * 1000;
+            const start = Date.now();
+
+            while (Date.now() - start < maxWaitMs) {
+              const runs = await github.paginate(
+                github.rest.checks.listForRef,
+                { owner, repo, ref: sha, per_page: 100 }
+              );
+
+              let allDone = true;
+              const results = [];
+              for (const r of relevant) {
+                const matching = runs.filter(run => run.name === r.name);
+                if (matching.length === 0) {
+                  allDone = false;
+                  core.info(`  [wait] "${r.name}": not yet scheduled`);
+                  break;
+                }
+                // If a check was re-run, multiple entries may exist; take the
+                // most recent by started_at.
+                const latest = matching.sort(
+                  (a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0)
+                )[0];
+                if (latest.status !== 'completed') {
+                  allDone = false;
+                  core.info(`  [wait] "${r.name}": ${latest.status}`);
+                  break;
+                }
+                results.push({ name: r.name, conclusion: latest.conclusion });
+              }
+
+              if (allDone) {
+                // Treat skipped as success for required-but-conditional checks
+                // that got path-filtered out at the workflow level. This
+                // shouldn't happen because our `relevant` filter already
+                // excludes those, but defense-in-depth.
+                const failed = results.filter(r =>
+                  r.conclusion !== 'success' && r.conclusion !== 'skipped'
+                );
+                if (failed.length > 0) {
+                  const msg = failed
+                    .map(r => `${r.name} (${r.conclusion})`)
+                    .join(', ');
+                  core.setFailed('Required checks failed: ' + msg);
+                  return;
+                }
+                core.info('All required checks passed.');
+                return;
+              }
+
+              await new Promise(r => setTimeout(r, pollIntervalMs));
+            }
+
+            core.setFailed(
+              'Timed out waiting for required checks after 25 minutes. ' +
+              'Check whether the expected workflows actually triggered.'
+            );

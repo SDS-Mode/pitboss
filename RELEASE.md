@@ -225,11 +225,20 @@ version" callout on the landing page shows `X.Y.Z`.
 `main` is protected by a ruleset requiring:
 
 - Pull request (0 approvals — solo-dev repo)
-- Required status checks: `test + lint + fmt`, and all four container
-  build cells
+- A single required status check: `All required checks passed` — emitted
+  by `.github/workflows/pr-gate.yml`. The gate workflow always runs on
+  PRs and aggregates across the other workflows (CI, Container, Book,
+  Release) using path filters: it knows which checks *should* have run
+  given the PR's changed files, and passes only when those all succeed.
+  This way a docs-only PR isn't blocked waiting on the Container
+  workflow that was (correctly) path-filtered out.
 - Branch up-to-date with main before merge
 - Linear history (matches squash-merge)
 - No force push, no deletion
+
+To add or remove a required check: edit the `required` array in
+`.github/workflows/pr-gate.yml` — **not** the ruleset. The ruleset
+itself continues to reference only the gate.
 
 Auto-merge is enabled repo-wide; `delete-branch-on-merge` is on.
 
