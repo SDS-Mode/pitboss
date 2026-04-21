@@ -125,10 +125,10 @@ Optional notification sinks. Multiple blocks allowed, one per sink.
 
 | Key | Required? | Notes |
 |---|---|---|
-| `type` | yes | `"log"`, `"webhook"`, `"slack"`, `"discord"` |
-| `url` | for webhook/slack/discord | Endpoint; `${ENV_VAR}` substitution supported |
+| `kind` | yes | `"log"`, `"webhook"`, `"slack"`, `"discord"` |
+| `url` | for webhook/slack/discord | Endpoint; `${PITBOSS_VAR}` substitution supported (v0.7.1+: only `PITBOSS_`-prefixed env vars may be substituted) |
 | `events` | no | Filter by event category. Defaults to all. |
-| `severity_min` | no | Minimum severity to fire. |
+| `severity_min` | no | Minimum severity to fire (`info` / `warning` / `error` / `critical`). |
 
 Event categories:
 
@@ -143,8 +143,8 @@ Example — Slack alert on blocked approvals:
 
 ```toml
 [[notification]]
-type = "slack"
-url = "${SLACK_WEBHOOK_URL}"
+kind = "slack"
+url = "${PITBOSS_SLACK_WEBHOOK_URL}"
 events = ["approval_pending", "run_finished"]
 ```
 
