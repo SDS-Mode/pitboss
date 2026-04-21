@@ -16,6 +16,7 @@ pub fn validate(resolved: &ResolvedManifest) -> Result<()> {
     if resolved.lead.is_some() {
         validate_lead(resolved)?;
         validate_hierarchical_ranges(resolved)?;
+        validate_sublead_defaults_adequate(resolved)?;
     } else {
         // Flat-mode validations unchanged.
         validate_ids(resolved)?;
@@ -75,6 +76,61 @@ fn validate_lead(r: &ResolvedManifest) -> Result<()> {
         bail!("lead timeout_secs must be > 0");
     }
     Ok(())
+}
+
+/// If `[lead] allow_subleads = true`, the manifest must also either
+/// supply both `sublead_defaults.budget_usd` + `sublead_defaults.max_workers`
+/// (for Owned-envelope default), or set `sublead_defaults.read_down = true`
+/// (for SharedPool default). Otherwise a runtime `spawn_sublead` call that
+/// omits those fields will fail with "budget_usd required when read_down=false"
+/// mid-dispatch — a failure class that should have been caught at validate
+/// time since it's a pure function of manifest shape.
+///
+/// Rationale: the lead's Claude session can always override these per-spawn
+/// by passing explicit `budget_usd` + `max_workers` arguments, but there's
+/// no way at validate time to prove it will. Forcing a well-defined manifest
+/// default means the worst case (lead calls spawn_sublead without explicit
+/// resources) still resolves cleanly rather than blowing up at dispatch.
+///
+/// Common fixes:
+/// - "share root's pool by default" — `[lead.sublead_defaults] read_down = true`
+/// - "give each sub-lead a budget" — `[lead.sublead_defaults]` with both
+///   `budget_usd` and `max_workers` set
+pub fn validate_sublead_defaults_adequate(r: &ResolvedManifest) -> Result<()> {
+    let Some(lead) = r.lead.as_ref() else {
+        return Ok(());
+    };
+    if !lead.allow_subleads {
+        return Ok(());
+    }
+    // Owned default: both budget_usd AND max_workers set on sublead_defaults.
+    // SharedPool default: read_down = true (budget/workers irrelevant).
+    // Either path resolves cleanly at spawn time even if the lead omits the
+    // per-spawn args.
+    let owned_default_ok = lead
+        .sublead_defaults
+        .as_ref()
+        .is_some_and(|d| d.budget_usd.is_some() && d.max_workers.is_some());
+    let shared_pool_default_ok = lead.sublead_defaults.as_ref().is_some_and(|d| d.read_down);
+    if owned_default_ok || shared_pool_default_ok {
+        return Ok(());
+    }
+
+    bail!(
+        "`[lead] allow_subleads = true` requires `[lead.sublead_defaults]` to \
+         specify either (a) both `budget_usd` and `max_workers` for an \
+         Owned-envelope default, or (b) `read_down = true` for a SharedPool \
+         default. Without this, any `spawn_sublead` call from the lead that \
+         omits those fields will fail at dispatch time with \
+         \"budget_usd required when read_down=false\". \
+         Pick the one that matches your intent:\n  \
+         [lead.sublead_defaults]\n  \
+         read_down = true                  # share root's budget + worker pool\n\n\
+         or\n\n  \
+         [lead.sublead_defaults]\n  \
+         budget_usd = 1.00                 # per-sub-lead cap\n  \
+         max_workers = 4"
+    );
 }
 
 fn validate_hierarchical_ranges(r: &ResolvedManifest) -> Result<()> {
@@ -429,6 +485,132 @@ mod tests {
             approval_rules: vec![],
         };
         assert!(validate(&r).is_err());
+    }
+
+    /// Build a minimal hierarchical manifest with a lead in a real git repo,
+    /// parameterized by the two knobs under test.
+    fn hierarchical_with_subleads(
+        allow_subleads: bool,
+        sublead_defaults: Option<super::super::resolve::SubleadDefaults>,
+    ) -> (TempDir, ResolvedManifest) {
+        let d = with_tmp_repo(true);
+        let mut lead = rl("l", d.path().to_path_buf());
+        lead.allow_subleads = allow_subleads;
+        lead.sublead_defaults = sublead_defaults;
+        let r = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        };
+        (d, r)
+    }
+
+    #[test]
+    fn accepts_allow_subleads_false_without_sublead_defaults() {
+        // No sub-leads → sublead_defaults is irrelevant.
+        let (_d, r) = hierarchical_with_subleads(false, None);
+        assert!(validate(&r).is_ok());
+    }
+
+    #[test]
+    fn rejects_allow_subleads_true_without_sublead_defaults() {
+        // The regression this validation was added for: allow_subleads=true
+        // with no defaults → any lead-initiated spawn_sublead that omits the
+        // resource args fails at dispatch. Must be caught at validate time.
+        let (_d, r) = hierarchical_with_subleads(true, None);
+        let err = validate(&r).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("allow_subleads = true` requires `[lead.sublead_defaults]`"),
+            "expected explanatory error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_allow_subleads_true_with_empty_sublead_defaults() {
+        let (_d, r) = hierarchical_with_subleads(
+            true,
+            Some(super::super::resolve::SubleadDefaults {
+                budget_usd: None,
+                max_workers: None,
+                lead_timeout_secs: None,
+                read_down: false,
+            }),
+        );
+        assert!(validate(&r).is_err());
+    }
+
+    #[test]
+    fn rejects_allow_subleads_true_with_partial_owned_defaults() {
+        // budget_usd but no max_workers — ambiguous; must reject.
+        let (_d, r) = hierarchical_with_subleads(
+            true,
+            Some(super::super::resolve::SubleadDefaults {
+                budget_usd: Some(1.0),
+                max_workers: None,
+                lead_timeout_secs: None,
+                read_down: false,
+            }),
+        );
+        assert!(validate(&r).is_err());
+    }
+
+    #[test]
+    fn accepts_allow_subleads_true_with_complete_owned_defaults() {
+        let (_d, r) = hierarchical_with_subleads(
+            true,
+            Some(super::super::resolve::SubleadDefaults {
+                budget_usd: Some(2.0),
+                max_workers: Some(4),
+                lead_timeout_secs: Some(1800),
+                read_down: false,
+            }),
+        );
+        assert!(validate(&r).is_ok());
+    }
+
+    #[test]
+    fn accepts_allow_subleads_true_with_read_down() {
+        // SharedPool fallback — budget/workers omitted intentionally.
+        let (_d, r) = hierarchical_with_subleads(
+            true,
+            Some(super::super::resolve::SubleadDefaults {
+                budget_usd: None,
+                max_workers: None,
+                lead_timeout_secs: None,
+                read_down: true,
+            }),
+        );
+        assert!(validate(&r).is_ok());
+    }
+
+    #[test]
+    fn accepts_allow_subleads_true_with_read_down_and_explicit_defaults() {
+        // Redundant but benign: operator set both read_down and explicit
+        // defaults. Either alone would satisfy the check; both together is
+        // fine.
+        let (_d, r) = hierarchical_with_subleads(
+            true,
+            Some(super::super::resolve::SubleadDefaults {
+                budget_usd: Some(2.0),
+                max_workers: Some(4),
+                lead_timeout_secs: None,
+                read_down: true,
+            }),
+        );
+        assert!(validate(&r).is_ok());
     }
 
     #[test]

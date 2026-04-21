@@ -51,6 +51,22 @@ This project uses [Semantic Versioning](https://semver.org/).
   now reads chunked with a 4 MiB per-line cap; a child that never emits
   `\n` closes the bridge instead of OOM-ing the host.
 
+### Fixed
+
+- **`pitboss validate` now catches the `allow_subleads = true` +
+  no-fallback footgun.** A manifest with `[lead] allow_subleads = true`
+  but no `[lead.sublead_defaults]` would pass `validate` and then
+  blow up at the first `spawn_sublead` call from the lead with
+  `"budget_usd required when read_down=false"`. Validation is a pure
+  function of manifest shape — it should have caught this. Now does:
+  rejects with an actionable error pointing at the two fix paths
+  (`read_down = true` for SharedPool default, or `budget_usd` +
+  `max_workers` for Owned default). Also closes a wider gap: the
+  single-table `[lead]` form was bypassing `validate()` entirely
+  (acceptable for git/dir checks where it uses CWD + sentinel id, not
+  acceptable for shape-only checks like this one). The shape-only
+  check now runs in both manifest-form paths.
+
 ### Docs
 
 - **`[[notification]]` field name correction** — documented as `type`
