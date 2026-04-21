@@ -46,9 +46,19 @@ pub fn load_manifest(path: &Path, env_max_parallel: Option<u32>) -> Result<Resol
                 )
             })?;
             let resolved = resolve_single_lead(single, env_max_parallel)?;
-            // validate() requires real git work-trees and fully-populated ids;
-            // single-lead manifests use CWD for the directory and an empty id
-            // sentinel, so we skip the git-validation step here.
+            // The full validate() pipeline assumes a real git work-tree and a
+            // populated lead id, neither of which the single-lead form
+            // guarantees (it uses CWD + an empty id sentinel). Skip the
+            // structure-shape checks but run the manifest-shape checks that
+            // are universally applicable — currently just the sublead-defaults
+            // adequacy check, which catches the
+            // "allow_subleads = true with no fallback" footgun that would
+            // otherwise blow up at the first spawn_sublead call.
+            //
+            // Add similar shape-only checks here as they get factored out of
+            // validate() — the goal is parity between the two manifest forms
+            // for everything that doesn't require real on-disk state.
+            super::validate::validate_sublead_defaults_adequate(&resolved)?;
             Ok(resolved)
         }
     }
