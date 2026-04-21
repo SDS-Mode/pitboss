@@ -89,6 +89,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
   changed from `uuid::Uuid` to `String` to match the server's
   `req-<uuid>` wire format.
+- **Sub-leads couldn't read project files without a permission
+  prompt.** Every sub-lead's claude subprocess started with
+  `cwd = ~/.local/share/pitboss/runs/<run_id>/`, which put the operator's
+  project directory (and anything `[defaults.env]` pointed into it)
+  outside claude's cwd-rooted trust zone. Claude would prompt on every
+  read, and under `-p` headless mode the prompt is unanswerable —
+  sub-leads effectively couldn't see any project artifact. The v0.6
+  author's own comment flagged this as a placeholder ("sub-leads don't
+  get separate worktrees in v0.6 — revisit in future"). Fixed: sub-lead
+  cwd is now the root lead's manifest `directory` (not `lead_cwd` —
+  when the lead uses a worktree, sub-leads still cwd the canonical
+  project dir so they can't lose cwd mid-flight if the lead's worktree
+  is cleaned up, and they see committed project state rather than the
+  lead's in-flight edits). Applied at both initial spawn and the
+  kill+resume path.
 - **Sub-lead MCP bridge was silently broken since v0.6.** The CLI
   `ActorRoleArg` enum defined only `Lead` and `Worker`, but
   `build_sublead_mcp_config` wrote `--actor-role sublead` into every
