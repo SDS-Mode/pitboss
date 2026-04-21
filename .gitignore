@@ -42,3 +42,10 @@ flamegraph.svg
 
 # Local-only operator script: hardcoded host paths, not portable.
 /scripts/reset-ketchup-p0-dogfood.sh
+
+# Local notes — NOTES-*.md at the repo root. Scratch docs (testing
+# processes, diagnostic recipes, in-flight bug postmortems) accessible
+# from the working tree without polluting git history. Format on
+# purpose: one-shot grep-target, uppercase prefix so they sort above
+# tracked docs in a directory listing.
+NOTES-*.md

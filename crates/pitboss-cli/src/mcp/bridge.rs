@@ -32,6 +32,8 @@ const MAX_C2S_LINE_BYTES: usize = 4 * 1024 * 1024;
 fn role_str(role: ActorRoleArg) -> &'static str {
     match role {
         ActorRoleArg::Lead => "lead",
+        ActorRoleArg::RootLead => "root_lead",
+        ActorRoleArg::Sublead => "sublead",
         ActorRoleArg::Worker => "worker",
     }
 }
@@ -189,6 +191,49 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
+
+    #[test]
+    fn role_str_covers_every_actor_role_variant() {
+        // Regression: CLI previously had only Lead + Worker. Sub-lead mcp
+        // configs write `--actor-role sublead`; clap rejected the argv,
+        // mcp-bridge never started, and claude reported `pitboss: failed`.
+        // Silent depth-2 break since v0.6. These four strings are load-
+        // bearing: they must match the server-side ALLOWED_ROLES list.
+        assert_eq!(role_str(ActorRoleArg::Lead), "lead");
+        assert_eq!(role_str(ActorRoleArg::RootLead), "root_lead");
+        assert_eq!(role_str(ActorRoleArg::Sublead), "sublead");
+        assert_eq!(role_str(ActorRoleArg::Worker), "worker");
+        for role in [
+            ActorRoleArg::Lead,
+            ActorRoleArg::RootLead,
+            ActorRoleArg::Sublead,
+            ActorRoleArg::Worker,
+        ] {
+            assert!(
+                ALLOWED_ROLES.contains(&role_str(role)),
+                "role {:?} serializes to {:?} which is not in ALLOWED_ROLES \
+                 {ALLOWED_ROLES:?}",
+                role,
+                role_str(role)
+            );
+        }
+    }
+
+    #[test]
+    fn clap_accepts_sublead_and_root_lead_role_tokens() {
+        // Token-level check: the mcp-bridge subcommand must accept every
+        // string that pitboss itself writes into mcp-config files. Before
+        // this fix, `pitboss mcp-bridge --actor-role sublead ...` failed
+        // with `invalid value 'sublead' for '--actor-role'` before even
+        // attempting to connect the socket.
+        use clap::ValueEnum;
+        for token in ["lead", "root_lead", "sublead", "worker"] {
+            assert!(
+                ActorRoleArg::from_str(token, false).is_ok(),
+                "clap rejected actor-role token {token:?}"
+            );
+        }
+    }
 
     /// Sanity-check the unix-socket scaffolding the bridge relies on. We spin
     /// up a minimal echo server on a unix socket, connect to it directly, and

@@ -88,15 +88,25 @@ pub enum PaneFocus {
 /// A single pending approval shown in the right-rail approval list pane.
 #[derive(Debug, Clone)]
 pub struct ApprovalListItem {
-    /// Opaque request id (forwarded to `ControlOp::Approve`).
-    pub id: uuid::Uuid,
+    /// Opaque request id (forwarded verbatim to `ControlOp::Approve`).
+    /// Server-generated format is `req-<uuidv7>`, so this is a string
+    /// rather than a parsed `Uuid` — no meaningful operation treats the
+    /// inner uuid as a uuid, only as a stable handle.
+    pub id: String,
     /// Human-readable path to the actor that raised the request
     /// (e.g. `"root"` or `"root→S1"`).
     pub actor_path: String,
-    /// Free-form category tag (e.g. `"tool_use"`, `"plan"`, …).
+    /// Free-form category tag (e.g. `"plan"`, `"action"`).
     pub category: String,
     /// One-line summary of the requested action.
     pub summary: String,
+    /// Optional typed plan payload carried by `propose_plan` requests.
+    /// None for `request_approval` calls. Preserved in the list so
+    /// re-opening a dismissed plan approval renders the structured
+    /// plan view (not just the summary).
+    pub plan: Option<pitboss_cli::control::protocol::ApprovalPlanWire>,
+    /// Discriminator for modal rendering (Plan vs Action badge).
+    pub kind: pitboss_cli::control::protocol::ApprovalKind,
     /// Wall-clock time when the request arrived.
     pub created_at: chrono::DateTime<chrono::Utc>,
 }

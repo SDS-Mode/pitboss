@@ -500,16 +500,37 @@ async fn spawn_sublead_session(
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
 
-    // 5. Build the spawn command. CWD is root's run_subdir (sub-leads don't
-    //    get separate worktrees in v0.6 — revisit in future).
-    //    Env precedence (lowest → highest): root lead's resolved env (which
-    //    already merges [defaults.env] + [lead.env]) → operator-supplied env
-    //    from the `spawn_sublead` MCP call → pitboss defaults
-    //    (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`, only fills gaps).
-    //    Inheriting the lead's env means project-level path blocks like
-    //    `[defaults.env]` (WORK_DIR/ARTIFACTS_DIR/etc.) reach subleads
-    //    automatically, matching operator expectations; the lead doesn't
-    //    have to re-pass them in every spawn_sublead call.
+    // 5. Build the spawn command.
+    //
+    //    CWD: the root lead's manifest `directory` (not its worktree path,
+    //    even when the lead uses one). Rationale:
+    //    - Claude gates file I/O on paths outside cwd. Previous default of
+    //      `run_subdir` (under ~/.local/share/pitboss/runs/…) put every
+    //      operator artifact (project files, $WORK_DIR, $ARTIFACTS_DIR)
+    //      outside the sublead's trust zone, triggering a permission
+    //      prompt on every read. Under `-p` headless mode the prompt is
+    //      unanswerable; subleads effectively couldn't read project files.
+    //    - Using `lead.directory` (not `lead_cwd` = possibly-worktree-path)
+    //      keeps subleads independent of the lead's worktree lifecycle:
+    //      subleads won't lose cwd if the lead's worktree is cleaned up
+    //      while subleads are still running, and they see the committed
+    //      project state rather than the lead's in-flight edits.
+    //    - Workers spawned by subleads resolve their own cwd via
+    //      `args.directory` → `lead.directory` fallback → optional
+    //      per-worker worktree, so worker cwd is unchanged by this.
+    //    Falls back to `run_subdir` when the manifest has no `[lead]`
+    //    (flat-only hierarchical run — not a path that reaches
+    //    spawn_sublead in practice, but we prefer a well-defined cwd over
+    //    a panic).
+    //
+    //    Env precedence (lowest → highest): root lead's resolved env
+    //    (which already merges [defaults.env] + [lead.env]) →
+    //    operator-supplied env from the `spawn_sublead` MCP call →
+    //    pitboss defaults (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`, only fills
+    //    gaps). Inheriting the lead's env means project-level path
+    //    blocks like `[defaults.env]` (WORK_DIR/ARTIFACTS_DIR/etc.)
+    //    reach subleads automatically; the lead doesn't have to re-pass
+    //    them in every spawn_sublead call.
     let lead_env = state
         .root
         .manifest
@@ -518,10 +539,17 @@ async fn spawn_sublead_session(
         .map(|l| l.env.clone())
         .unwrap_or_default();
     let sublead_env = compose_sublead_env(&lead_env, &operator_env);
+    let sublead_cwd = state
+        .root
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.directory.clone())
+        .unwrap_or_else(|| sub_layer.run_subdir.clone());
     let initial_cmd = SpawnCmd {
         program: sub_layer.claude_binary.clone(),
         args,
-        cwd: sub_layer.run_subdir.clone(),
+        cwd: sublead_cwd.clone(),
         env: sublead_env,
     };
 
@@ -669,10 +697,20 @@ async fn spawn_sublead_session(
                         .map(|l| l.env.clone())
                         .unwrap_or_default();
                     let resume_env = compose_sublead_env(&lead_env_resume, &operator_env_bg);
+                    // Same cwd rationale as the initial spawn: lead.directory
+                    // (not lead_cwd). See the long comment in
+                    // finalize_sublead_spawn.
+                    let resume_cwd = state_bg
+                        .root
+                        .manifest
+                        .lead
+                        .as_ref()
+                        .map(|l| l.directory.clone())
+                        .unwrap_or_else(|| sub_layer_bg.run_subdir.clone());
                     current_cmd = SpawnCmd {
                         program: sub_layer_bg.claude_binary.clone(),
                         args: resume_args,
-                        cwd: sub_layer_bg.run_subdir.clone(),
+                        cwd: resume_cwd,
                         env: resume_env,
                     };
 
