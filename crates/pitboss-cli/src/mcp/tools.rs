@@ -711,11 +711,19 @@ async fn run_worker(
     //
     // `SpawnWorkerArgs` has no `env` field today, so the operator-env
     // layer is an empty HashMap. If we ever add one, pass it here.
+    //
+    // Same target_layer.lead = None pitfall as the worker_dir cascade
+    // above: sub-leads have `lead` cleared on their derived manifest, so
+    // a sub-lead-spawned worker would otherwise get an empty env even
+    // though the operator set `[defaults.env]` at the manifest level.
+    // Fall back through the root lead (always populated, carries the
+    // merged [defaults.env] + [lead.env]) before defaulting to empty.
     let lead_env_for_worker = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
+        .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
         .unwrap_or_default();
     let worker_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_worker,
