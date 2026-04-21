@@ -541,12 +541,14 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__worker_status",
     "mcp__pitboss__wait_for_worker",
     "mcp__pitboss__wait_for_any",
+    "mcp__pitboss__wait_actor",
     "mcp__pitboss__list_workers",
     "mcp__pitboss__cancel_worker",
     "mcp__pitboss__pause_worker",
     "mcp__pitboss__continue_worker",
     "mcp__pitboss__request_approval",
     "mcp__pitboss__reprompt_worker",
+    "mcp__pitboss__propose_plan",
     // Shared-store tools (v0.5+). Leads can read/write the per-run
     // coordination surface alongside workers; without these in the
     // allowlist, claude stalls at the permission prompt the first time
@@ -558,6 +560,10 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
+    // Run-global leases (v0.6+). For cross-sub-tree resource coordination
+    // (e.g., serializing access to an operator-facing filesystem dir).
+    "mcp__pitboss__run_lease_acquire",
+    "mcp__pitboss__run_lease_release",
 ];
 
 /// Sub-lead tools: all root-lead tools EXCEPT `spawn_sublead` and
@@ -571,12 +577,14 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__worker_status",
     "mcp__pitboss__wait_for_worker",
     "mcp__pitboss__wait_for_any",
+    "mcp__pitboss__wait_actor",
     "mcp__pitboss__list_workers",
     "mcp__pitboss__cancel_worker",
     "mcp__pitboss__pause_worker",
     "mcp__pitboss__continue_worker",
     "mcp__pitboss__request_approval",
     "mcp__pitboss__reprompt_worker",
+    "mcp__pitboss__propose_plan",
     // Shared-store tools (v0.5+).
     "mcp__pitboss__kv_get",
     "mcp__pitboss__kv_set",
@@ -585,7 +593,10 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
-    // NOTE: spawn_sublead and wait_for_sublead are intentionally NOT included.
+    // Run-global leases (v0.6+) for cross-sub-tree resource coordination.
+    "mcp__pitboss__run_lease_acquire",
+    "mcp__pitboss__run_lease_release",
+    // NOTE: spawn_sublead is intentionally NOT included (depth-2 cap).
 ];
 
 /// Builds the argv for spawning the lead subprocess, including the
@@ -615,7 +626,6 @@ pub fn lead_spawn_args(
     // list_tools already gates visibility; this only widens the CLI allowlist.
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
-        allowed.push("mcp__pitboss__wait_for_sublead".into());
     }
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
@@ -657,7 +667,6 @@ pub fn lead_resume_spawn_args(
     }
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
-        allowed.push("mcp__pitboss__wait_for_sublead".into());
     }
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
@@ -1334,6 +1343,81 @@ mod tests {
                 list.contains(t),
                 "expected {t} in allowedTools, got: {list}"
             );
+        }
+    }
+
+    #[test]
+    fn lead_spawn_args_allows_depth2_orchestration_tools() {
+        // Regression: prior to this test, the root-lead allowlist omitted
+        // wait_actor, propose_plan, and run_lease_*, so claude's own
+        // --allowedTools gate denied them at call time ("Claude requested
+        // permissions to use mcp__pitboss__wait_actor, but you haven't
+        // granted it yet"). These tools MUST be pre-allowed.
+        use crate::manifest::resolve::ResolvedLead;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
+        };
+        let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        for t in [
+            "mcp__pitboss__wait_actor",
+            "mcp__pitboss__propose_plan",
+            "mcp__pitboss__run_lease_acquire",
+            "mcp__pitboss__run_lease_release",
+            // spawn_sublead only appears when allow_subleads=true (our fixture).
+            "mcp__pitboss__spawn_sublead",
+        ] {
+            assert!(list.contains(t), "expected {t} in allowedTools, got: {list}");
+        }
+        // Phantom entry removed: `wait_for_sublead` is not a real server tool.
+        // Keeping it in the allowlist masked the `wait_actor` omission during
+        // review, and the string is load-bearing noise on the CLI.
+        assert!(
+            !list.contains("mcp__pitboss__wait_for_sublead"),
+            "phantom wait_for_sublead should not be in allowedTools, got: {list}"
+        );
+    }
+
+    #[test]
+    fn sublead_spawn_args_allows_depth2_orchestration_tools() {
+        // Subleads wait on their own workers (wait_actor), propose plans
+        // when the root has require_plan_approval set, and coordinate across
+        // sub-trees via run_lease_*. All must be pre-allowed to avoid the
+        // same Claude permission-prompt failure mode the root lead hit.
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            None,
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        for t in [
+            "mcp__pitboss__wait_actor",
+            "mcp__pitboss__propose_plan",
+            "mcp__pitboss__run_lease_acquire",
+            "mcp__pitboss__run_lease_release",
+        ] {
+            assert!(list.contains(t), "expected {t} in sublead allowedTools, got: {list}");
         }
     }
 
