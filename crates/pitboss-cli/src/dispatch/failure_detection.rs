@@ -383,8 +383,8 @@ fn parse_12h_time(s: &str) -> Option<NaiveTime> {
         return None;
     }
     let hour24 = match (hour, is_pm) {
-        (12, false) => 0,        // 12am = 00:00
-        (12, true) => 12,        // 12pm = 12:00
+        (12, false) => 0, // 12am = 00:00
+        (12, true) => 12, // 12pm = 12:00
         (h, false) => h,
         (h, true) => h + 12,
     };
@@ -419,7 +419,9 @@ mod tests {
     fn rate_limit_with_reset_timestamp_parses() {
         let blob = "You've hit your limit · resets Apr 23, 3pm";
         match classify(blob) {
-            FailureReason::RateLimit { resets_at: Some(ts) } => {
+            FailureReason::RateLimit {
+                resets_at: Some(ts),
+            } => {
                 use chrono::{Datelike, Timelike};
                 assert_eq!(ts.month(), 4);
                 assert_eq!(ts.day(), 23);
@@ -434,7 +436,9 @@ mod tests {
     fn rate_limit_with_hour_minute_reset_parses() {
         let blob = "You've hit your limit · resets May 5, 9:45am";
         match classify(blob) {
-            FailureReason::RateLimit { resets_at: Some(ts) } => {
+            FailureReason::RateLimit {
+                resets_at: Some(ts),
+            } => {
                 use chrono::{Datelike, Timelike};
                 assert_eq!(ts.month(), 5);
                 assert_eq!(ts.day(), 5);
@@ -552,7 +556,8 @@ mod tests {
     #[tokio::test]
     async fn api_health_rate_limit_without_timestamp_uses_default_backoff() {
         let h = ApiHealth::new();
-        h.record(&FailureReason::RateLimit { resets_at: None }).await;
+        h.record(&FailureReason::RateLimit { resets_at: None })
+            .await;
         match h.check_can_spawn().await {
             Err(SpawnGateReason::RateLimited { retry_after }) => {
                 let remaining = (retry_after - Utc::now()).num_seconds();
@@ -611,7 +616,8 @@ mod tests {
         // Both gates active — auth is more actionable for the operator,
         // so its error should be reported first.
         let h = ApiHealth::new();
-        h.record(&FailureReason::RateLimit { resets_at: None }).await;
+        h.record(&FailureReason::RateLimit { resets_at: None })
+            .await;
         h.record(&FailureReason::AuthFailure).await;
         assert!(matches!(
             h.check_can_spawn().await,

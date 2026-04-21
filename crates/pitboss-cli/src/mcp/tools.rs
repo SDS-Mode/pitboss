@@ -2912,7 +2912,7 @@ mod tests {
             approvals_approved: 0,
             approvals_rejected: 0,
             model: None,
-                failure_reason: None,
+            failure_reason: None,
         };
         state
             .workers
