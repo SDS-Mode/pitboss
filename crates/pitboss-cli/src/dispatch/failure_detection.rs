@@ -24,6 +24,10 @@ use std::path::Path;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use pitboss_core::store::FailureReason;
 
+use crate::control::protocol::{ControlEvent, EventEnvelope};
+use crate::dispatch::actor::ActorPath;
+use crate::dispatch::layer::LayerState;
+
 /// How many bytes from the end of stdout+stderr to scan. Markers land at the
 /// tail of a session, and claude's final error block is typically <1 KiB —
 /// 8 KiB is generous without being wasteful.
@@ -59,6 +63,34 @@ pub fn detect_failure_reason(
         buf.push_str(&read_tail(p, TAIL_BYTES));
     }
     Some(classify(&buf))
+}
+
+/// Build a `WorkerFailed` control event envelope and broadcast it via the
+/// root layer's control writer. No-op if no TUI is connected. Call this
+/// alongside the `TaskRecord` persist in every worker/lead/sublead
+/// completion path so downstream consumers (TUI, parent lead) see
+/// classified failures without rescanning logs.
+///
+/// `actor_path_segments` builds the tree lineage — pass `[lead_id, task_id]`
+/// for a lead-owned worker, `[root, sublead_id, task_id]` for a sublead-
+/// owned worker, `[root]` alone for a root-lead failure. Empty paths are
+/// elided on the wire for v0.5 client compat.
+pub async fn broadcast_worker_failed(
+    root_layer: &LayerState,
+    task_id: String,
+    parent_task_id: Option<String>,
+    reason: FailureReason,
+    actor_path_segments: &[&str],
+) {
+    let envelope = EventEnvelope {
+        actor_path: ActorPath::new(actor_path_segments.iter().copied()),
+        event: ControlEvent::WorkerFailed {
+            task_id,
+            parent_task_id,
+            reason,
+        },
+    };
+    root_layer.broadcast_control_event(envelope).await;
 }
 
 /// Public for unit tests — classify a pre-read log blob without touching the
@@ -391,6 +423,148 @@ mod tests {
         let tail = read_tail(f.path(), 100);
         assert!(tail.ends_with("MARKER"));
         assert!(tail.len() <= 100);
+    }
+
+    #[tokio::test]
+    async fn broadcast_worker_failed_delivers_event() {
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use crate::shared_store::SharedStore;
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::JsonFileStore;
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        };
+        let store: Arc<dyn pitboss_core::store::SessionStore> =
+            Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let spawner: Arc<dyn pitboss_core::process::ProcessSpawner> =
+            Arc::new(FakeSpawner::new(FakeScript::new()));
+        let layer = LayerState::new(
+            uuid::Uuid::now_v7(),
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            Arc::new(WorktreeManager::new()),
+            CleanupPolicy::Never,
+            dir.path().to_path_buf(),
+            crate::dispatch::state::ApprovalPolicy::Block,
+            None,
+            Arc::new(SharedStore::new()),
+            None,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlEvent>();
+        *layer.control_writer.lock().await = Some(tx);
+
+        broadcast_worker_failed(
+            &layer,
+            "w-1".into(),
+            Some("lead".into()),
+            FailureReason::RateLimit { resets_at: None },
+            &["root", "lead", "w-1"],
+        )
+        .await;
+
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("event should arrive before timeout")
+            .expect("channel should deliver one event");
+        match ev {
+            ControlEvent::WorkerFailed {
+                task_id,
+                parent_task_id,
+                reason,
+            } => {
+                assert_eq!(task_id, "w-1");
+                assert_eq!(parent_task_id.as_deref(), Some("lead"));
+                assert!(matches!(reason, FailureReason::RateLimit { .. }));
+            }
+            other => panic!("expected WorkerFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_without_control_writer_is_noop() {
+        // With no TUI attached, broadcast must not panic or block.
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use crate::shared_store::SharedStore;
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::JsonFileStore;
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        };
+        let store: Arc<dyn pitboss_core::store::SessionStore> =
+            Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let spawner: Arc<dyn pitboss_core::process::ProcessSpawner> =
+            Arc::new(FakeSpawner::new(FakeScript::new()));
+        let layer = LayerState::new(
+            uuid::Uuid::now_v7(),
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            Arc::new(WorktreeManager::new()),
+            CleanupPolicy::Never,
+            dir.path().to_path_buf(),
+            crate::dispatch::state::ApprovalPolicy::Block,
+            None,
+            Arc::new(SharedStore::new()),
+            None,
+        );
+        // No control_writer installed.
+        broadcast_worker_failed(
+            &layer,
+            "w-1".into(),
+            None,
+            FailureReason::AuthFailure,
+            &["root", "w-1"],
+        )
+        .await;
     }
 
     #[test]

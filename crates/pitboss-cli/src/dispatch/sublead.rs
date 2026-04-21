@@ -759,6 +759,18 @@ async fn spawn_sublead_session(
                 "failed to persist sub-lead TaskRecord"
             );
         }
+        // Broadcast classified failure from the sub-lead so the root TUI
+        // sees why this branch of the tree died.
+        if let Some(reason) = rec.failure_reason.clone() {
+            crate::dispatch::failure_detection::broadcast_worker_failed(
+                &state_bg.root,
+                sublead_id_bg.clone(),
+                Some("root".into()),
+                reason,
+                &["root", sublead_id_bg.as_str()],
+            )
+            .await;
+        }
 
         // 10. Reconcile: release reservation, update root's spent_usd,
         //     populate sublead_results, and wake wait_actor subscribers.

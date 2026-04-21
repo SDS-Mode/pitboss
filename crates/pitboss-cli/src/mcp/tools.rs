@@ -775,7 +775,7 @@ async fn run_worker(
         token_usage: outcome.token_usage,
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
-        parent_task_id: Some(lead_id),
+        parent_task_id: Some(lead_id.clone()),
         pause_count: counters.pause_count,
         reprompt_count: counters.reprompt_count,
         approvals_requested: counters.approvals_requested,
@@ -787,6 +787,20 @@ async fn run_worker(
 
     // Persist record.
     let _ = layer.store.append_record(layer.run_id, &rec).await;
+
+    // Broadcast structured failure to any connected TUI so operators see
+    // *why* the worker failed without opening logs, and so a parent lead
+    // can react (back off on RateLimit, fail fast on AuthFailure).
+    if let Some(reason) = rec.failure_reason.clone() {
+        crate::dispatch::failure_detection::broadcast_worker_failed(
+            &state.root,
+            task_id.clone(),
+            Some(lead_id.clone()),
+            reason,
+            &["root", &lead_id, &task_id],
+        )
+        .await;
+    }
 
     // Release the spawn-time reservation before accumulating actual cost.
     release_reservation_for_layer(&layer, &task_id).await;
@@ -1054,7 +1068,7 @@ pub async fn spawn_resume_worker(
             token_usage: outcome.token_usage,
             claude_session_id: outcome.claude_session_id,
             final_message_preview: outcome.final_message_preview,
-            parent_task_id: Some(lead_id_bg),
+            parent_task_id: Some(lead_id_bg.clone()),
             pause_count: counters.pause_count,
             reprompt_count: counters.reprompt_count,
             approvals_requested: counters.approvals_requested,
@@ -1068,6 +1082,16 @@ pub async fn spawn_resume_worker(
             ),
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
+        if let Some(reason) = rec.failure_reason.clone() {
+            crate::dispatch::failure_detection::broadcast_worker_failed(
+                &state_bg.root,
+                task_id_bg.clone(),
+                Some(lead_id_bg.clone()),
+                reason,
+                &["root", &lead_id_bg, &task_id_bg],
+            )
+            .await;
+        }
         state_bg
             .workers
             .write()

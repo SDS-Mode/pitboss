@@ -210,6 +210,20 @@ pub enum ControlEvent {
         /// root-layer KV keys).
         read_down: bool,
     },
+    /// A worker, sub-lead, or lead claude subprocess exited non-zero and
+    /// was classified with a structured `FailureReason`. Emitted from the
+    /// per-actor completion site (runner / sublead / hierarchical lead /
+    /// run_worker / continue_worker resume path) alongside the
+    /// `TaskRecord` persist. The TUI renders this in the tile footer so
+    /// operators see *why* something failed without opening logs; parent
+    /// leads consume it to back off on `RateLimit` or fail fast on
+    /// `AuthFailure`. Success exits never emit this event.
+    WorkerFailed {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_task_id: Option<String>,
+        reason: pitboss_core::store::FailureReason,
+    },
     /// A sub-lead has terminated (success, cancel, timeout, or error).
     /// Emitted by `dispatch::sublead::reconcile_terminated_sublead` after
     /// the sub-tree LayerState is removed and budget is reconciled.
@@ -498,6 +512,34 @@ mod tests {
             },
         };
         assert_eq!(roundtrip_event(&rf), rf);
+    }
+
+    #[test]
+    fn worker_failed_roundtrips() {
+        use pitboss_core::store::FailureReason;
+        let ev = ControlEvent::WorkerFailed {
+            task_id: "w-1".into(),
+            parent_task_id: Some("lead".into()),
+            reason: FailureReason::RateLimit { resets_at: None },
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"event\":\"worker_failed\""));
+        assert!(s.contains("\"kind\":\"rate_limit\""));
+        assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    #[test]
+    fn worker_failed_without_parent_elides_field() {
+        // Root-lead failures have no parent; ensure the field is omitted
+        // on the wire rather than serialized as `null`.
+        use pitboss_core::store::FailureReason;
+        let ev = ControlEvent::WorkerFailed {
+            task_id: "lead".into(),
+            parent_task_id: None,
+            reason: FailureReason::AuthFailure,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(!s.contains("parent_task_id"));
     }
 
     #[test]
