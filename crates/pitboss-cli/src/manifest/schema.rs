@@ -185,10 +185,21 @@ pub struct Lead {
 /// the TOML author writes `[lead]` (one table) instead of `[[lead]]` (array).
 /// Carries all per-run settings under `[run]` and per-lead settings (including
 /// depth-2 caps) under `[lead]`.
+///
+/// `deny_unknown_fields` is intentional: without it, a typo'd top-level
+/// section (e.g. `[default]` instead of `[defaults]`) silently disappears
+/// at parse time and the operator only finds out at dispatch — too late.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SingleLeadManifest {
     #[serde(default)]
     pub run: RunConfig,
+    /// Per-actor defaults (model, env, tools, etc.). Merged into `[lead]`
+    /// during resolution; `[lead]` values override on collision. The
+    /// array-form `Manifest` already carries this; the single-table form
+    /// gained it in the same release that added the `[lead]` form.
+    #[serde(default)]
+    pub defaults: Defaults,
     /// Single-table `[lead]` block.
     pub lead: Option<LeadSpec>,
     /// Notification sinks (v0.4.1+). Parsed as [[notification]] sections.

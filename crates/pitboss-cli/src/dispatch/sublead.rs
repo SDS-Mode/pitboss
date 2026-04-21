@@ -20,6 +20,30 @@ use crate::shared_store::SharedStore;
 use pitboss_core::session::CancelToken;
 use pitboss_core::worktree::CleanupPolicy;
 
+/// Build the env for a sub-lead's claude subprocess.
+///
+/// Precedence (lowest → highest):
+/// 1. `lead_env` — the root lead's resolved env (already contains
+///    `[defaults.env]` merged with `[lead.env]`). Propagating this to
+///    subleads means project-level path blocks (e.g. `WORK_DIR`,
+///    `ARTIFACTS_DIR`) reach sub-leads automatically without the root
+///    lead having to re-pass them in every `spawn_sublead` MCP call.
+/// 2. `operator_env` — per-spawn env passed explicitly by the caller of
+///    the `spawn_sublead` MCP tool. Wins over the lead-inherited env for
+///    collisions (operator override wins).
+/// 3. Pitboss defaults (e.g. `CLAUDE_CODE_ENTRYPOINT=sdk-ts`) —
+///    `entry().or_insert()` semantics, so these only fill gaps left by the
+///    two higher-priority sources.
+pub fn compose_sublead_env(
+    lead_env: &HashMap<String, String>,
+    operator_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut out = lead_env.clone();
+    out.extend(operator_env.clone());
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut out);
+    out
+}
+
 /// Outcome classification for a terminated sub-lead session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubleadOutcome {
@@ -455,11 +479,22 @@ async fn spawn_sublead_session(
 
     // 5. Build the spawn command. CWD is root's run_subdir (sub-leads don't
     //    get separate worktrees in v0.6 — revisit in future).
-    //    Env precedence (lowest → highest): pitboss defaults
-    //    (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`) → operator-supplied env from the
-    //    `spawn_sublead` MCP call. Operator wins for collisions.
-    let mut sublead_env: std::collections::HashMap<String, String> = operator_env.clone();
-    crate::dispatch::runner::apply_pitboss_env_defaults(&mut sublead_env);
+    //    Env precedence (lowest → highest): root lead's resolved env (which
+    //    already merges [defaults.env] + [lead.env]) → operator-supplied env
+    //    from the `spawn_sublead` MCP call → pitboss defaults
+    //    (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`, only fills gaps).
+    //    Inheriting the lead's env means project-level path blocks like
+    //    `[defaults.env]` (WORK_DIR/ARTIFACTS_DIR/etc.) reach subleads
+    //    automatically, matching operator expectations; the lead doesn't
+    //    have to re-pass them in every spawn_sublead call.
+    let lead_env = state
+        .root
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.env.clone())
+        .unwrap_or_default();
+    let sublead_env = compose_sublead_env(&lead_env, &operator_env);
     let initial_cmd = SpawnCmd {
         program: sub_layer.claude_binary.clone(),
         args,
@@ -601,11 +636,16 @@ async fn spawn_sublead_session(
                         Some(sid.as_str()),
                         tools_for_resume,
                     );
-                    // Same env precedence as the initial spawn: operator first,
-                    // pitboss defaults fill gaps.
-                    let mut resume_env: std::collections::HashMap<String, String> =
-                        operator_env_bg.clone();
-                    crate::dispatch::runner::apply_pitboss_env_defaults(&mut resume_env);
+                    // Same env precedence as the initial spawn (see
+                    // compose_sublead_env): lead → operator → pitboss defaults.
+                    let lead_env_resume = state_bg
+                        .root
+                        .manifest
+                        .lead
+                        .as_ref()
+                        .map(|l| l.env.clone())
+                        .unwrap_or_default();
+                    let resume_env = compose_sublead_env(&lead_env_resume, &operator_env_bg);
                     current_cmd = SpawnCmd {
                         program: sub_layer_bg.claude_binary.clone(),
                         args: resume_args,
@@ -819,4 +859,78 @@ pub async fn reconcile_terminated_sublead(
     let _ = state.root.done_tx.send(sublead_id.to_string());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod env_composition_tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn lead_env_propagates_to_sublead() {
+        // Regression: operator reported [defaults.env] reaching the lead
+        // but not the subleads. Lead-env must be the base layer.
+        let lead = env(&[
+            ("WORK_DIR", "/run/work"),
+            ("ARTIFACTS_DIR", "/run/artifacts"),
+            ("ADVENTURE_OUT", "/run/out"),
+        ]);
+        let out = compose_sublead_env(&lead, &HashMap::new());
+        assert_eq!(out.get("WORK_DIR").map(String::as_str), Some("/run/work"));
+        assert_eq!(
+            out.get("ARTIFACTS_DIR").map(String::as_str),
+            Some("/run/artifacts")
+        );
+        assert_eq!(
+            out.get("ADVENTURE_OUT").map(String::as_str),
+            Some("/run/out")
+        );
+    }
+
+    #[test]
+    fn operator_env_wins_over_lead_env() {
+        // Spawn-site override beats inherited lead env. Lets a lead steer a
+        // specific sublead to a different WORK_DIR without editing the manifest.
+        let lead = env(&[("WORK_DIR", "/lead/path")]);
+        let operator = env(&[("WORK_DIR", "/operator/path")]);
+        let out = compose_sublead_env(&lead, &operator);
+        assert_eq!(
+            out.get("WORK_DIR").map(String::as_str),
+            Some("/operator/path")
+        );
+    }
+
+    #[test]
+    fn pitboss_defaults_fill_gaps_only() {
+        // CLAUDE_CODE_ENTRYPOINT is only set when neither lead nor operator
+        // supplied it. If either did, that value wins.
+        let empty = HashMap::new();
+        let out = compose_sublead_env(&empty, &empty);
+        assert_eq!(
+            out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
+            Some("sdk-ts")
+        );
+
+        let lead = env(&[("CLAUDE_CODE_ENTRYPOINT", "cli")]);
+        let out = compose_sublead_env(&lead, &HashMap::new());
+        assert_eq!(
+            out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
+            Some("cli"),
+            "lead's explicit CLAUDE_CODE_ENTRYPOINT must not be clobbered by defaults"
+        );
+    }
+
+    #[test]
+    fn empty_lead_env_still_applies_pitboss_defaults() {
+        // No [defaults.env] and no operator env → sublead still gets
+        // CLAUDE_CODE_ENTRYPOINT so the MCP permission bypass engages.
+        let out = compose_sublead_env(&HashMap::new(), &HashMap::new());
+        assert!(out.contains_key("CLAUDE_CODE_ENTRYPOINT"));
+    }
 }

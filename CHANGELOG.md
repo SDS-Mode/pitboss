@@ -53,6 +53,48 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`[defaults]` block silently dropped in single-table `[lead]`
+  manifests.** The `SingleLeadManifest` parser had no `defaults` field
+  and no `deny_unknown_fields`, so the entire `[defaults]` section
+  (including `[defaults.env]`) was silently discarded at parse time —
+  a manifest setting `[defaults.env.WORK_DIR] = "/tmp/foo"` would never
+  see that variable reach the lead subprocess. The lead also wasn't
+  merging defaults for `model`, `tools`, `effort`, `timeout_secs`, or
+  `use_worktree` in this form; the single-lead path used only
+  `[lead]`-level values plus a hardcoded fallback, in contrast with
+  the array-form `[[lead]]` path which has done the merge correctly
+  since v0.3. Fixed: `SingleLeadManifest` now carries `defaults`,
+  `resolve_lead_spec` merges the same way `resolve_lead` (array form)
+  does, and `deny_unknown_fields` is on so the next silent-drop bug
+  fails loud at parse time. The `[default]` (singular, common typo
+  for `[defaults]`) is now rejected with an actionable parse error.
+- **Root-lead `--allowedTools` was missing four real MCP tools, causing
+  silent orchestration stalls.** `PITBOSS_MCP_TOOLS` omitted
+  `wait_actor`, `propose_plan`, `run_lease_acquire`, and
+  `run_lease_release` — all registered by the MCP server since v0.5/v0.6
+  but never added to the CLI allowlist. In headless dispatches this
+  manifested as a lead that successfully spawned subleads, then tripped
+  Claude's own permission gate on the very next call (`"Claude requested
+  permissions to use mcp__pitboss__wait_actor, but you haven't granted
+  it yet"`) and quietly exited. The interactive prompt cannot be
+  answered under `-p`, so the tool call fails and the orchestration
+  plan collapses. `SUBLEAD_MCP_TOOLS` had the same gaps. Fixed by
+  pre-allowing the missing tools on both root and sublead paths. Also
+  removed a phantom `wait_for_sublead` allowlist entry that was
+  masking the `wait_actor` omission during review (no such server tool
+  exists — sublead waits go through `wait_actor` / `wait_for_worker`).
+- **`[defaults.env]` did not propagate from the lead to subleads.**
+  Once PR #45 plumbed `[defaults.env]` through to the root lead, the
+  env still stopped there: `spawn_sublead`'s sublead env came solely
+  from the `env:` param of the MCP tool call, so project-level path
+  blocks (e.g. `WORK_DIR`, `ARTIFACTS_DIR`) defined in `[defaults.env]`
+  were invisible to subleads unless the lead remembered to re-pass them
+  on every `spawn_sublead`. Fixed by seeding sublead env from the root
+  lead's resolved env (which already carries the merged `[defaults.env]`
+  + `[lead.env]`) before layering the operator's per-spawn env on top.
+  Precedence: lead env → operator env → pitboss defaults (gap-fill).
+  Applies to both the initial spawn and the kill+resume path used when
+  a synthetic reprompt arrives.
 - **`pitboss validate` now catches the `allow_subleads = true` +
   no-fallback footgun.** A manifest with `[lead] allow_subleads = true`
   but no `[lead.sublead_defaults]` would pass `validate` and then

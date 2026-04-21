@@ -278,7 +278,7 @@ pub fn resolve_single_lead(
     env_max_parallel: Option<u32>,
 ) -> Result<ResolvedManifest> {
     let lead = if let Some(spec) = manifest.lead {
-        Some(resolve_lead_spec(&spec, &manifest.run)?)
+        Some(resolve_lead_spec(&spec, &manifest.run, &manifest.defaults)?)
     } else {
         None
     };
@@ -326,13 +326,31 @@ pub fn resolve_single_lead(
 }
 
 /// Resolve a `LeadSpec` (single-table `[lead]`) into a `ResolvedLead`.
-fn resolve_lead_spec(spec: &LeadSpec, run: &RunConfig) -> Result<ResolvedLead> {
+///
+/// `defaults` carries any `[defaults]` block from the manifest; its fields
+/// are merged into the `LeadSpec` so the single-table form has the same
+/// inheritance behavior the array-form `[[lead]]` already had via `resolve`.
+/// Per-lead values override defaults on collision; for env, defaults are
+/// applied first then per-lead env entries layered on top.
+fn resolve_lead_spec(
+    spec: &LeadSpec,
+    run: &RunConfig,
+    defaults: &Defaults,
+) -> Result<ResolvedLead> {
+    // Timeout cascade matches `resolve_lead` (array form):
+    // per-lead → [run].lead_timeout_secs → [defaults].timeout_secs → DEFAULT.
     let timeout_secs = spec
         .timeout_secs
         .or(run.lead_timeout_secs)
+        .or(defaults.timeout_secs)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
     let sublead_defaults = spec.sublead_defaults.as_ref().map(resolve_sublead_defaults);
+
+    // Env merge: defaults first, lead-level entries override on collision.
+    // Mirrors the array-form pattern in `resolve` (around line 184).
+    let mut env = defaults.env.clone();
+    env.extend(spec.env.clone());
 
     Ok(ResolvedLead {
         // id and directory are not present in the [lead] single-table format
@@ -347,12 +365,17 @@ fn resolve_lead_spec(spec: &LeadSpec, run: &RunConfig) -> Result<ResolvedLead> {
         model: spec
             .model
             .clone()
+            .or_else(|| defaults.model.clone())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        effort: spec.effort.unwrap_or(DEFAULT_EFFORT),
-        tools: spec.tools.clone().unwrap_or_else(default_tools),
+        effort: spec.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
+        tools: spec
+            .tools
+            .clone()
+            .or_else(|| defaults.tools.clone())
+            .unwrap_or_else(default_tools),
         timeout_secs,
-        use_worktree: spec.use_worktree.unwrap_or(true),
-        env: spec.env.clone(),
+        use_worktree: spec.use_worktree.or(defaults.use_worktree).unwrap_or(true),
+        env,
         resume_session_id: None,
         // v0.6 depth-2 fields:
         allow_subleads: spec.allow_subleads,
@@ -464,6 +487,125 @@ mod tests {
 
     fn man(src: &str) -> Manifest {
         toml::from_str(src).unwrap()
+    }
+
+    fn slm(src: &str) -> SingleLeadManifest {
+        toml::from_str(src).unwrap()
+    }
+
+    #[test]
+    fn single_lead_merges_defaults_env_into_lead() {
+        // Regression test: the user's manifest had `[defaults.env]` set with
+        // ARTIFACTS_DIR / WORK_DIR / ADVENTURE_OUT, but the lead spawned with
+        // an empty env because `SingleLeadManifest` had no `defaults` field
+        // (silent drop) and `resolve_lead_spec` didn't read defaults anyway.
+        let m = slm(r#"
+            [run]
+            budget_usd = 1.0
+            max_workers = 2
+
+            [defaults]
+            model = "claude-sonnet-4-6"
+
+            [defaults.env]
+            WORK_DIR = "/tmp/foo"
+            ARTIFACTS_DIR = "/tmp/bar"
+
+            [lead]
+            prompt = "test"
+            allow_subleads = true
+
+            [lead.sublead_defaults]
+            read_down = true
+            "#);
+        let r = resolve_single_lead(m, None).unwrap();
+        let lead = r.lead.as_ref().unwrap();
+        assert_eq!(
+            lead.env.get("WORK_DIR"),
+            Some(&"/tmp/foo".to_string()),
+            "defaults.env.WORK_DIR must propagate to the lead"
+        );
+        assert_eq!(
+            lead.env.get("ARTIFACTS_DIR"),
+            Some(&"/tmp/bar".to_string()),
+            "defaults.env.ARTIFACTS_DIR must propagate to the lead"
+        );
+    }
+
+    #[test]
+    fn single_lead_merges_defaults_model_when_lead_omits() {
+        let m = slm(r#"
+            [defaults]
+            model = "claude-sonnet-4-6"
+
+            [lead]
+            prompt = "x"
+            "#);
+        let r = resolve_single_lead(m, None).unwrap();
+        assert_eq!(r.lead.as_ref().unwrap().model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn single_lead_lead_model_overrides_defaults_model() {
+        let m = slm(r#"
+            [defaults]
+            model = "claude-haiku-4-5"
+
+            [lead]
+            prompt = "x"
+            model = "claude-opus-4-7"
+            "#);
+        let r = resolve_single_lead(m, None).unwrap();
+        assert_eq!(r.lead.as_ref().unwrap().model, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn single_lead_lead_env_overrides_defaults_env_on_collision() {
+        let m = slm(r#"
+            [defaults.env]
+            SHARED = "default-value"
+
+            [lead]
+            prompt = "x"
+
+            [lead.env]
+            SHARED = "lead-override"
+            EXTRA = "lead-only"
+            "#);
+        let r = resolve_single_lead(m, None).unwrap();
+        let env = &r.lead.as_ref().unwrap().env;
+        assert_eq!(env.get("SHARED"), Some(&"lead-override".to_string()));
+        assert_eq!(env.get("EXTRA"), Some(&"lead-only".to_string()));
+    }
+
+    #[test]
+    fn single_lead_merges_defaults_tools_when_lead_omits() {
+        let m = slm(r#"
+            [defaults]
+            tools = ["Read", "Bash"]
+
+            [lead]
+            prompt = "x"
+            "#);
+        let r = resolve_single_lead(m, None).unwrap();
+        assert_eq!(r.lead.as_ref().unwrap().tools, vec!["Read", "Bash"]);
+    }
+
+    #[test]
+    fn single_lead_unknown_top_level_section_rejected() {
+        // [default] (singular) is a common typo for [defaults]. With
+        // deny_unknown_fields, this fails at parse instead of silently
+        // dropping the operator's intent.
+        let result: Result<SingleLeadManifest, _> = toml::from_str(
+            r#"
+            [default]
+            model = "claude-sonnet-4-6"
+
+            [lead]
+            prompt = "x"
+            "#,
+        );
+        assert!(result.is_err(), "expected parse error for [default] typo");
     }
 
     #[test]
