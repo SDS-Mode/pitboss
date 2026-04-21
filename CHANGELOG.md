@@ -113,6 +113,31 @@ This project uses [Semantic Versioning](https://semver.org/).
   (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
   changed from `uuid::Uuid` to `String` to match the server's
   `req-<uuid>` wire format.
+- **`wait_actor` / `wait_for_worker` blocked indefinitely on
+  sub-lead-spawned workers because completion fired the wrong
+  broadcast.** Each `LayerState` carries its own `done_tx`; worker
+  termination called `layer.done_tx.send(task_id)` — for a
+  sub-lead-spawned worker that's the SUBLEAD's broadcast, not
+  root's. `wait_for_actor_internal` always subscribes via
+  `state.root.done_tx`, so the parent sub-lead's `wait_actor` on
+  its own worker missed the completion entirely and blocked until
+  the timeout (or the sub-lead's `lead_timeout_secs` SIGTERM'd it).
+  Smoke-test evidence: workers completed in ~10s, sub-leads timed
+  out at the 180s mark with `MCP error -32000: Connection closed`
+  on the wait_actor reply (the connection died when the sub-lead
+  was killed, not because the wait itself errored). Fixed by
+  fanning worker termination broadcasts to root's `done_tx` in
+  addition to the worker's own layer — applied at both the normal
+  exit path and the SpawnFailed early-exit path.
+- **`wait_for_actor_internal` had a subscribe-after-check race.**
+  Fast-path Done check + existence check ran before
+  `state.done_tx.subscribe()`; a completion that landed in the
+  microsecond gap was missed and the wait blocked until timeout.
+  In v0.5/v0.6 this was unreachable for sub-leads (which got
+  `unknown actor_id` before the cross-layer-lookup fix in d134289),
+  but the same fix exposed the race. Subscribe FIRST, then re-check
+  — guarantees no completion is lost regardless of how short the
+  worker is.
 - **Sub-lead-spawned workers SpawnFailed at `/tmp` when no
   `directory` arg was passed.** `derive_sublead_manifest` clears
   `lead` on the sub-manifest, and `handle_spawn_worker`'s fallback

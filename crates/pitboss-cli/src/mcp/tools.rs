@@ -659,7 +659,13 @@ async fn run_worker(
                     .write()
                     .await
                     .insert(task_id.clone(), WorkerState::Done(rec));
-                let _ = layer.done_tx.send(task_id);
+                // Fan out to root so cross-layer wait_actor subscribers wake
+                // even on early-exit paths like SpawnFailed. Same rationale
+                // as the normal-exit fan-out below.
+                let _ = layer.done_tx.send(task_id.clone());
+                if !std::sync::Arc::ptr_eq(&layer, &state.root) {
+                    let _ = state.root.done_tx.send(task_id);
+                }
                 return;
             }
         }
@@ -860,7 +866,18 @@ async fn run_worker(
     if released_count > 0 {
         tracing::info!(worker_id = %task_id, count = released_count, "auto-released run-global leases on worker termination");
     }
-    let _ = layer.done_tx.send(task_id);
+    // Broadcast termination on the worker's own layer AND on root.
+    // wait_for_actor_internal (the engine for wait_actor / wait_for_worker)
+    // always subscribes via state.root.done_tx — regardless of which layer
+    // the caller is in — so a sublead-spawned worker that only fired its
+    // own layer's done_tx would be invisible to its parent sub-lead's
+    // wait_actor (which subscribes to root). Fan out to root so every
+    // wait_actor caller, anywhere in the tree, wakes on every worker
+    // completion. Cheap; broadcast.send is O(subscribers).
+    let _ = layer.done_tx.send(task_id.clone());
+    if !std::sync::Arc::ptr_eq(&layer, &state.root) {
+        let _ = state.root.done_tx.send(task_id);
+    }
 }
 
 /// Remove `task_id`'s spawn-time reservation from `reserved_usd` on the
@@ -1807,6 +1824,22 @@ async fn wait_for_actor_internal(
     actor_id: &str,
     timeout_secs: Option<u64>,
 ) -> Result<ActorTerminalRecord> {
+    // ── Subscribe FIRST so a completion that races the fast-path checks
+    //    is captured by the broadcast subscription. The original code
+    //    subscribed AFTER the fast-path + existence checks, which works
+    //    fine for root-lead callers (the worker can't complete in the
+    //    microseconds between the existence check and the subscribe in
+    //    practice) but exposed a real race once cross-layer worker
+    //    visibility (commit d134289) let sub-leads call wait_actor on
+    //    their own workers. Sub-lead callers' workers run very short
+    //    (smoke-test workers finished in 12s) and their wait_actor calls
+    //    are issued immediately after spawn_worker — giving the worker
+    //    time to complete before the sublead's wait subscribes. The
+    //    broadcast is missed and the wait blocks until either the
+    //    timeout fires or the sublead itself is killed by lead_timeout.
+    //    Subscribing first guarantees no completion is lost.
+    let mut rx = state.done_tx.subscribe();
+
     // ── Fast path: already Done ────────────────────────────────────────────────
     // 1. Worker already Done? (scan all layers — the worker may be in a
     //    sub-lead's layer, not root.)
@@ -1835,8 +1868,6 @@ async fn wait_for_actor_internal(
         }
     }
 
-    // Subscribe to done events and wait.
-    let mut rx = state.done_tx.subscribe();
     let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
 
     loop {
