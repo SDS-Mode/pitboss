@@ -521,6 +521,34 @@ async fn execute_task(
     }
 }
 
+/// Claude CLI flags every pitboss-spawned subprocess gets for plugin /
+/// skill isolation. Without these, the operator's `~/.claude/`
+/// settings (skills, MCP servers, plugins, agents, hooks registered
+/// by the human's interactive claude setup) bleed into pitboss-
+/// spawned claude processes — observable during v2.1 dispatch testing
+/// as workers invoking `Skill{superpowers:brainstorming}` as their
+/// very first tool call, following the skill's "explore and ask
+/// questions first" rubric, and exiting without producing any
+/// content despite `Success exit=0`.
+///
+/// - `--strict-mcp-config` — only load MCP servers from the
+///   `--mcp-config` file we generate, ignore user-level MCP config
+/// - `--disable-slash-commands` — disable all skills (slash commands)
+///   registered at user level, including operator-installed plugins
+///   like `superpowers`. Pitboss MCP tools are unaffected (they come
+///   via `--mcp-config`, not the slash-command registry).
+///
+/// We don't use `--bare` even though it would be more thorough,
+/// because `--bare` forces `ANTHROPIC_API_KEY` auth and disables
+/// keychain reads — many operators auth via keychain/OAuth and would
+/// need explicit key management for pitboss runs.
+///
+/// Applied uniformly to `spawn_args` (flat tasks), `lead_spawn_args`,
+/// `lead_resume_spawn_args`, `sublead_spawn_args`, and
+/// `crate::mcp::tools::worker_spawn_args`. Any new spawn-args site
+/// MUST include the same two flags; there is a regression test
+/// (`every_spawn_variant_has_plugin_isolation_flags`) that asserts
+/// this.
 fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     // claude CLI requires --verbose when combining -p (print mode) with
     // --output-format stream-json. Without it, claude rejects the invocation
@@ -529,6 +557,11 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
     if !task.tools.is_empty() {
         args.push("--allowedTools".into());
@@ -647,6 +680,10 @@ pub fn lead_spawn_args(
         "--verbose".into(),
         // Pitboss is the permission authority — see fn doc comment.
         "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation: prevent operator's ~/.claude/ plugins
+        // (skills, MCP servers, agents, hooks) from bleeding in.
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
@@ -695,6 +732,9 @@ pub fn lead_resume_spawn_args(
         "--verbose".into(),
         // Permission authority is pitboss (see lead_spawn_args doc).
         "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
     let mut allowed: Vec<String> = lead.tools.clone();
     for t in PITBOSS_MCP_TOOLS {
@@ -752,6 +792,9 @@ pub fn sublead_spawn_args(
         "--verbose".into(),
         // Permission authority is pitboss (see lead_spawn_args doc).
         "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
@@ -1318,16 +1361,31 @@ mod tests {
     }
 
     #[test]
-    fn every_spawn_variant_passes_dangerously_skip_permissions() {
-        // Pitboss is the permission authority — every spawned claude must
-        // run with `--dangerously-skip-permissions`. Without this, headless
-        // dispatch silently stalls on bash-with-`$VAR`, file-write-outside-
-        // cwd, and every other claude-side gate that has no `-p`-mode
-        // answer. This test exists so the flag can't be dropped accidentally
-        // (the smoke-test failure mode is silent — empty registries and
-        // null kv reads, no operator-visible error).
-        use crate::manifest::resolve::ResolvedLead;
+    fn every_spawn_variant_has_all_isolation_flags() {
+        // Canary for all three hardening flags every pitboss-spawned claude
+        // must carry:
+        //   - `--dangerously-skip-permissions`: pitboss is the permission
+        //     authority; without this, headless dispatch silently stalls on
+        //     bash-with-`$VAR`, write-outside-cwd, etc.
+        //   - `--strict-mcp-config` + `--disable-slash-commands`: prevents
+        //     operator's ~/.claude/ plugins (skills, MCP servers, agents)
+        //     from bleeding into spawned subprocesses.
+        use crate::manifest::resolve::{ResolvedLead, ResolvedTask};
         use std::path::PathBuf;
+
+        let task = ResolvedTask {
+            id: "t".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
         let lead = ResolvedLead {
             id: "l".into(),
             directory: PathBuf::from("/tmp"),
@@ -1348,6 +1406,7 @@ mod tests {
         };
         let cfg = PathBuf::from("/tmp/cfg.json");
         let cases: Vec<(&str, Vec<String>)> = vec![
+            ("flat task", spawn_args(&task)),
             ("lead", lead_spawn_args(&lead, &cfg)),
             (
                 "lead_resume",
@@ -1366,6 +1425,14 @@ mod tests {
             assert!(
                 argv.iter().any(|a| a == "--dangerously-skip-permissions"),
                 "{name} spawn args missing --dangerously-skip-permissions: {argv:?}"
+            );
+            assert!(
+                argv.iter().any(|a| a == "--strict-mcp-config"),
+                "{name} spawn args missing --strict-mcp-config: {argv:?}"
+            );
+            assert!(
+                argv.iter().any(|a| a == "--disable-slash-commands"),
+                "{name} spawn args missing --disable-slash-commands: {argv:?}"
             );
         }
     }
