@@ -22,7 +22,21 @@ const TAIL_LINES: usize = 2000;
 /// within this window, without re-parsing multi-megabyte logs every poll.
 const TAIL_BYTES: u64 = 256 * 1024;
 /// A task is considered "running" if its log was modified within this many seconds.
-const RUNNING_FRESHNESS_SECS: u64 = 5;
+/// If the worker's stdout.log has been written to within this window,
+/// render as Running; otherwise Pending. Pure display heuristic since
+/// the TUI can't read pitboss's in-process WorkerState from outside the
+/// run. Bumped from 5s → 30s: Sonnet extended-thinking blocks and long
+/// Anthropic API calls routinely have 15–30s silent windows during
+/// normal work, which flipped healthy workers into Pending then back
+/// to Running each time they produced a chunk. 30s eliminates almost
+/// all legitimate-work flicker at the cost of a slightly longer lag
+/// before a genuinely-stalled worker shows as Pending.
+///
+/// Proper fix tracked in task #66: have pitboss emit a
+/// WorkerStateChanged event on the control-socket stream on every
+/// transition, and drive the TUI from that rather than log-mtime
+/// inference.
+const RUNNING_FRESHNESS_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
 // resolved.json schema (only the fields we care about)
