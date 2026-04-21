@@ -405,7 +405,11 @@ pub async fn run_hierarchical(
     store.append_record(run_id, &lead_record).await?;
     // Broadcast classified failure so the TUI and any attached client see
     // why the root lead died (rate-limit / network / auth / ...).
+    // Root-lead dying generally ends the run, but still record into
+    // api_health for completeness — any subleads spawned after this point
+    // (rare) will see the gate.
     if let Some(reason) = lead_record.failure_reason.clone() {
+        state.api_health.record(&reason).await;
         crate::dispatch::failure_detection::broadcast_worker_failed(
             &state.root,
             lead.id.clone(),

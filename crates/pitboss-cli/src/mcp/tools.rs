@@ -364,6 +364,28 @@ pub async fn handle_spawn_worker(
         bail!("run is draining: no new workers accepted");
     }
 
+    // Guard 1a: API health. If a recent worker classified as rate-limited
+    // or auth-failed, refuse new spawns until the condition clears. The
+    // lead's Claude session sees a structured error and can plan around
+    // the outage (wait for reset, report to operator) rather than firing
+    // another doomed subprocess. See `dispatch::failure_detection` for
+    // the gate rules.
+    if let Err(gate) = state.api_health.check_can_spawn().await {
+        use crate::dispatch::failure_detection::SpawnGateReason;
+        match gate {
+            SpawnGateReason::RateLimited { retry_after } => bail!(
+                "api rate-limited: refusing to spawn new workers until {} (retry_after); a \
+                 prior worker hit the limit",
+                retry_after.to_rfc3339()
+            ),
+            SpawnGateReason::AuthFailed { clears_at } => bail!(
+                "api auth failed on a recent worker; refusing to spawn new workers until {} \
+                 (clears_at). Rotate credentials or cancel the run",
+                clears_at.to_rfc3339()
+            ),
+        }
+    }
+
     // Guard 1b: plan approval. When the manifest opts in with
     // `[run].require_plan_approval = true`, the lead must call
     // `propose_plan` and get operator approval before any worker
@@ -791,7 +813,11 @@ async fn run_worker(
     // Broadcast structured failure to any connected TUI so operators see
     // *why* the worker failed without opening logs, and so a parent lead
     // can react (back off on RateLimit, fail fast on AuthFailure).
+    // Also record into `api_health` so the next spawn call short-circuits
+    // while the condition persists — one dead worker is enough; a loop
+    // of them burns budget faster than any operator can intervene.
     if let Some(reason) = rec.failure_reason.clone() {
+        state.api_health.record(&reason).await;
         crate::dispatch::failure_detection::broadcast_worker_failed(
             &state.root,
             task_id.clone(),
@@ -1083,6 +1109,7 @@ pub async fn spawn_resume_worker(
         };
         let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {
+            state_bg.api_health.record(&reason).await;
             crate::dispatch::failure_detection::broadcast_worker_failed(
                 &state_bg.root,
                 task_id_bg.clone(),
@@ -2059,6 +2086,56 @@ mod tests {
         };
         let err = handle_spawn_worker(&state, args).await.unwrap_err();
         assert!(err.to_string().contains("budget exceeded"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_when_api_rate_limited() {
+        use pitboss_core::store::FailureReason;
+        let state = test_state().await;
+        // Simulate a just-finished worker that hit rate-limit with a
+        // reset 10 minutes in the future — any new spawn must refuse.
+        let future = chrono::Utc::now() + chrono::Duration::minutes(10);
+        state
+            .api_health
+            .record(&FailureReason::RateLimit {
+                resets_at: Some(future),
+            })
+            .await;
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+            meta: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("rate-limited"),
+            "err should mention rate-limited: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_when_api_auth_failed() {
+        use pitboss_core::store::FailureReason;
+        let state = test_state().await;
+        state.api_health.record(&FailureReason::AuthFailure).await;
+        let args = SpawnWorkerArgs {
+            prompt: "p".into(),
+            directory: None,
+            branch: None,
+            tools: None,
+            timeout_secs: None,
+            model: None,
+            meta: None,
+        };
+        let err = handle_spawn_worker(&state, args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("auth failed"),
+            "err should mention auth failed: {err}"
+        );
     }
 
     #[tokio::test]

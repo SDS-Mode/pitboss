@@ -270,6 +270,13 @@ pub struct DispatchState {
     /// silent exits as `TaskStatus::ApprovalRejected`. See the
     /// `LastApprovalResponse` doc for the full lifecycle.
     pub last_approval_response: RwLock<HashMap<String, LastApprovalResponse>>,
+    /// Rolling view of Anthropic API health derived from classified worker
+    /// failures. Consulted by `handle_spawn_worker` /
+    /// `handle_spawn_sublead` to refuse new spawns while rate-limit or
+    /// auth conditions persist — otherwise a loop of failing workers
+    /// burns budget faster than the operator can intervene. Updated
+    /// alongside the `TaskRecord` persist in every completion path.
+    pub api_health: Arc<crate::dispatch::failure_detection::ApiHealth>,
 }
 
 /// CAUTION: This Deref always resolves to the root layer, which is correct
@@ -345,6 +352,7 @@ impl DispatchState {
             worker_layer_index: RwLock::new(HashMap::new()),
             run_leases: Arc::new(RunLeaseRegistry::new()),
             last_approval_response: RwLock::new(HashMap::new()),
+            api_health: Arc::new(crate::dispatch::failure_detection::ApiHealth::new()),
         }
     }
 

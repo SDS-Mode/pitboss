@@ -23,10 +23,112 @@ use std::path::Path;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use pitboss_core::store::FailureReason;
+use tokio::sync::RwLock;
 
 use crate::control::protocol::{ControlEvent, EventEnvelope};
 use crate::dispatch::actor::ActorPath;
 use crate::dispatch::layer::LayerState;
+
+/// Minimum back-off after a `RateLimit` failure when the CLI didn't emit a
+/// parseable `resets_at` timestamp. 5 minutes is long enough to cover most
+/// transient burst-limit windows; callers fall through to the timestamp when
+/// one was parsed.
+const RATE_LIMIT_DEFAULT_BACKOFF_SECS: i64 = 300;
+
+/// How long an `AuthFailure` is treated as fatal. Auth errors are almost
+/// never transient — a bad API key stays bad — so we set this high enough
+/// that the operator has time to notice and either kill the run or rotate
+/// credentials. 10 minutes.
+const AUTH_FAILURE_BACKOFF_SECS: i64 = 600;
+
+/// Rolling per-run view of the Anthropic API's recent behavior, derived from
+/// classified worker failures. Used by `handle_spawn_worker` /
+/// `handle_spawn_sublead` to reject new spawns while a known-bad condition
+/// persists (rate-limited, auth-broken) rather than burning budget on
+/// subprocesses that will immediately fail with the same error.
+///
+/// Only `RateLimit` and `AuthFailure` populate state here. `NetworkError` is
+/// intentionally *not* tracked — networks recover on their own and the
+/// spawn retry is cheap; flagging network blips as a gate would cause
+/// spurious refusals. `ContextExceeded`/`InvalidArgument`/`Unknown` are
+/// per-task payload problems, not API health.
+#[derive(Debug, Default)]
+pub struct ApiHealth {
+    rate_limit: RwLock<Option<RateLimitState>>,
+    auth_failure: RwLock<Option<DateTime<Utc>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateLimitState {
+    hit_at: DateTime<Utc>,
+    /// `None` when the CLI marker had no parseable timestamp — we fall back
+    /// to `RATE_LIMIT_DEFAULT_BACKOFF_SECS` from `hit_at`.
+    resets_at: Option<DateTime<Utc>>,
+}
+
+/// Why `ApiHealth::check_can_spawn` refused. Carries enough information for
+/// the spawn handler to return a helpful error to the lead (so its Claude
+/// session can plan around the outage rather than retrying immediately).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnGateReason {
+    /// API is rate-limited. `retry_after` is best-effort: the parsed
+    /// `resets_at` from the CLI when available, else a default-backoff
+    /// projection from `hit_at`.
+    RateLimited { retry_after: DateTime<Utc> },
+    /// API auth failed recently. `clears_at` is a conservative 10-minute
+    /// projection so repeated spawns don't hammer the API while the
+    /// operator rotates credentials.
+    AuthFailed { clears_at: DateTime<Utc> },
+}
+
+impl ApiHealth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update health state from a classified failure. No-op for reasons that
+    /// don't affect spawn gating (`NetworkError`, `ContextExceeded`,
+    /// `InvalidArgument`, `Unknown`). Safe to call from any path that
+    /// received a `Some(FailureReason)`.
+    pub async fn record(&self, reason: &FailureReason) {
+        match reason {
+            FailureReason::RateLimit { resets_at } => {
+                *self.rate_limit.write().await = Some(RateLimitState {
+                    hit_at: Utc::now(),
+                    resets_at: *resets_at,
+                });
+            }
+            FailureReason::AuthFailure => {
+                *self.auth_failure.write().await = Some(Utc::now());
+            }
+            FailureReason::NetworkError { .. }
+            | FailureReason::ContextExceeded
+            | FailureReason::InvalidArgument { .. }
+            | FailureReason::Unknown { .. } => {}
+        }
+    }
+
+    /// Return `Err(SpawnGateReason)` when a new spawn should be refused,
+    /// `Ok(())` otherwise. Checks the most severe gate first (auth, then
+    /// rate-limit) so the returned reason is the most actionable.
+    pub async fn check_can_spawn(&self) -> Result<(), SpawnGateReason> {
+        if let Some(hit_at) = *self.auth_failure.read().await {
+            let clears_at = hit_at + chrono::Duration::seconds(AUTH_FAILURE_BACKOFF_SECS);
+            if Utc::now() < clears_at {
+                return Err(SpawnGateReason::AuthFailed { clears_at });
+            }
+        }
+        if let Some(state) = *self.rate_limit.read().await {
+            let retry_after = state.resets_at.unwrap_or_else(|| {
+                state.hit_at + chrono::Duration::seconds(RATE_LIMIT_DEFAULT_BACKOFF_SECS)
+            });
+            if Utc::now() < retry_after {
+                return Err(SpawnGateReason::RateLimited { retry_after });
+            }
+        }
+        Ok(())
+    }
+}
 
 /// How many bytes from the end of stdout+stderr to scan. Markers land at the
 /// tail of a session, and claude's final error block is typically <1 KiB —
@@ -423,6 +525,98 @@ mod tests {
         let tail = read_tail(f.path(), 100);
         assert!(tail.ends_with("MARKER"));
         assert!(tail.len() <= 100);
+    }
+
+    #[tokio::test]
+    async fn api_health_fresh_allows_spawn() {
+        let h = ApiHealth::new();
+        assert!(h.check_can_spawn().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn api_health_records_rate_limit_and_refuses_spawn() {
+        let h = ApiHealth::new();
+        let future = Utc::now() + chrono::Duration::minutes(10);
+        h.record(&FailureReason::RateLimit {
+            resets_at: Some(future),
+        })
+        .await;
+        match h.check_can_spawn().await {
+            Err(SpawnGateReason::RateLimited { retry_after }) => {
+                assert_eq!(retry_after, future);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn api_health_rate_limit_without_timestamp_uses_default_backoff() {
+        let h = ApiHealth::new();
+        h.record(&FailureReason::RateLimit { resets_at: None }).await;
+        match h.check_can_spawn().await {
+            Err(SpawnGateReason::RateLimited { retry_after }) => {
+                let remaining = (retry_after - Utc::now()).num_seconds();
+                assert!(remaining > 0, "retry_after should be in the future");
+                assert!(
+                    remaining <= RATE_LIMIT_DEFAULT_BACKOFF_SECS,
+                    "retry_after should be within the default backoff window"
+                );
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn api_health_past_rate_limit_clears() {
+        let h = ApiHealth::new();
+        let past = Utc::now() - chrono::Duration::minutes(10);
+        h.record(&FailureReason::RateLimit {
+            resets_at: Some(past),
+        })
+        .await;
+        assert!(h.check_can_spawn().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn api_health_auth_failure_refuses_spawn() {
+        let h = ApiHealth::new();
+        h.record(&FailureReason::AuthFailure).await;
+        assert!(matches!(
+            h.check_can_spawn().await,
+            Err(SpawnGateReason::AuthFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn api_health_ignores_non_gate_variants() {
+        let h = ApiHealth::new();
+        h.record(&FailureReason::NetworkError {
+            message: "ETIMEDOUT".into(),
+        })
+        .await;
+        h.record(&FailureReason::ContextExceeded).await;
+        h.record(&FailureReason::Unknown {
+            message: "boom".into(),
+        })
+        .await;
+        h.record(&FailureReason::InvalidArgument {
+            message: "bad".into(),
+        })
+        .await;
+        assert!(h.check_can_spawn().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn api_health_auth_takes_precedence_over_rate_limit() {
+        // Both gates active — auth is more actionable for the operator,
+        // so its error should be reported first.
+        let h = ApiHealth::new();
+        h.record(&FailureReason::RateLimit { resets_at: None }).await;
+        h.record(&FailureReason::AuthFailure).await;
+        assert!(matches!(
+            h.check_can_spawn().await,
+            Err(SpawnGateReason::AuthFailed { .. })
+        ));
     }
 
     #[tokio::test]

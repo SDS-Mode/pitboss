@@ -222,6 +222,29 @@ pub async fn spawn_sublead(
     state: &Arc<DispatchState>,
     req: SubleadSpawnRequest,
 ) -> Result<ActorId> {
+    // API health gate: refuse new sub-leads while a recent rate-limit or
+    // auth failure persists. Mirrors the check in `handle_spawn_worker`
+    // so the lead can't sidestep the gate by routing through a new
+    // sub-tree. See `dispatch::failure_detection` for the rules.
+    if let Err(gate) = state.api_health.check_can_spawn().await {
+        use crate::dispatch::failure_detection::SpawnGateReason;
+        match gate {
+            SpawnGateReason::RateLimited { retry_after } => {
+                bail!(
+                    "spawn_sublead: api rate-limited: refusing new sub-leads until {} (retry_after)",
+                    retry_after.to_rfc3339()
+                );
+            }
+            SpawnGateReason::AuthFailed { clears_at } => {
+                bail!(
+                    "spawn_sublead: api auth failed recently; refusing new sub-leads until {} \
+                     (clears_at). Rotate credentials or cancel the run",
+                    clears_at.to_rfc3339()
+                );
+            }
+        }
+    }
+
     // 1. Resolve envelope (apply defaults, check caps).
     let envelope = resolve_envelope(state, &req).await?;
 
@@ -760,8 +783,10 @@ async fn spawn_sublead_session(
             );
         }
         // Broadcast classified failure from the sub-lead so the root TUI
-        // sees why this branch of the tree died.
+        // sees why this branch of the tree died, and update api_health
+        // so further spawns across the tree see the gate.
         if let Some(reason) = rec.failure_reason.clone() {
+            state_bg.api_health.record(&reason).await;
             crate::dispatch::failure_detection::broadcast_worker_failed(
                 &state_bg.root,
                 sublead_id_bg.clone(),
