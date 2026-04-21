@@ -68,6 +68,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   does, and `deny_unknown_fields` is on so the next silent-drop bug
   fails loud at parse time. The `[default]` (singular, common typo
   for `[defaults]`) is now rejected with an actionable parse error.
+- **Sub-lead MCP bridge was silently broken since v0.6.** The CLI
+  `ActorRoleArg` enum defined only `Lead` and `Worker`, but
+  `build_sublead_mcp_config` wrote `--actor-role sublead` into every
+  sub-lead's mcp-config. When claude spawned the mcp-bridge subprocess
+  to talk to pitboss, clap rejected the argv (`invalid value 'sublead'
+  for '--actor-role'`), the bridge exited immediately, and claude
+  reported `pitboss: failed` in its init event — with zero pitboss MCP
+  tools registered for the sub-lead. Observable symptom: sub-leads
+  can't `kv_get`, `spawn_worker`, or any other pitboss tool; the lead
+  looks fine. The server-side `ALLOWED_ROLES` had always accepted
+  `sublead` (and `root_lead`); only the client-side argv parser was
+  rejecting valid traffic pitboss itself was emitting. Added `Sublead`
+  and `RootLead` variants, switched clap `rename_all` to `snake_case`
+  so `RootLead → root_lead`, and added a regression test pinning every
+  ActorRole variant to its server-side token.
 - **Root-lead `--allowedTools` was missing four real MCP tools, causing
   silent orchestration stalls.** `PITBOSS_MCP_TOOLS` omitted
   `wait_actor`, `propose_plan`, `run_lease_acquire`, and

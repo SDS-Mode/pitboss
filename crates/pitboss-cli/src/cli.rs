@@ -3,9 +3,21 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-#[clap(rename_all = "lowercase")]
+#[clap(rename_all = "snake_case")]
 pub enum ActorRoleArg {
+    /// Legacy v0.3-v0.5 flat-lead role. Kept for compat with
+    /// `lead_spawn_args`' mcp-config emitter, which writes `--actor-role lead`.
     Lead,
+    /// Depth-2 root lead. Accepted by the mcp-bridge subcommand so the
+    /// server-side role gate can enforce depth-2 invariants (e.g. only
+    /// RootLead may call `spawn_sublead`).
+    RootLead,
+    /// Depth-2 sub-tree lead. Required so `build_sublead_mcp_config`'s
+    /// `--actor-role sublead` passes clap parsing; without this variant the
+    /// mcp-bridge subprocess rejects argv at startup and the sub-lead's
+    /// claude reports `pitboss: failed` on every MCP call. Silent depth-2
+    /// break since v0.6.
+    Sublead,
     Worker,
 }
 
