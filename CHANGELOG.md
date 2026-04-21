@@ -68,6 +68,27 @@ This project uses [Semantic Versioning](https://semver.org/).
   does, and `deny_unknown_fields` is on so the next silent-drop bug
   fails loud at parse time. The `[default]` (singular, common typo
   for `[defaults]`) is now rejected with an actionable parse error.
+- **TUI approval modal stranded requests on `Esc`.** Hitting `Esc` to
+  dismiss an approval popup transitioned the TUI to normal mode without
+  sending any response, leaving the request pending server-side — the
+  run stayed blocked, the modal was gone, and pressing `a` to "retrieve"
+  the approval opened an empty list because `ApprovalRequest` events
+  were never populating `approval_list.items` in the first place (the
+  queue pane shipped for v0.6 but was only ever wired up in tests).
+  Operators reasonably concluded the TUI was hung and had no way to
+  proceed. Fixed: `ApprovalRequest` events now push an item into the
+  approval queue in addition to opening the modal (de-duplicated by
+  request_id to survive event replays on server restart); `Esc` from
+  any modal sub-mode drops the operator into the approval-list pane
+  with the dismissed item selected; `send_approve` removes items from
+  the queue on decision (clamping `selected_idx` when the last item
+  goes); re-opening a queued request preserves the `plan` payload and
+  `kind` discriminator so dismissed `propose_plan` approvals still
+  render as "PRE-FLIGHT PLAN" with structured plan view on re-open.
+  Modal title updated from the misleading `Esc=cancel` to `Esc=dismiss
+  (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
+  changed from `uuid::Uuid` to `String` to match the server's
+  `req-<uuid>` wire format.
 - **Sub-lead MCP bridge was silently broken since v0.6.** The CLI
   `ActorRoleArg` enum defined only `Lead` and `Worker`, but
   `build_sublead_mcp_config` wrote `--actor-role sublead` into every

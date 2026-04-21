@@ -1564,8 +1564,12 @@ fn render_approval_modal(
         ApprovalSubMode::Overview => {
             // When a typed plan is present, render structured fields as
             // a multi-section view. Plain summary otherwise.
+            // Esc is "dismiss" (request stays pending, retrievable from
+            // the approval list via `a`), NOT "cancel/reject". The old
+            // label misled operators into thinking Esc aborted the
+            // request; they'd then wonder why the run stayed blocked.
             let title = format!(
-                " [{badge}] Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=cancel "
+                " [{badge}] Approval from `{task_id}` — y=approve  n=reject  e=edit  Esc=dismiss (stays pending, press `a` to re-open) "
             );
             let block = Block::default().borders(Borders::ALL).title(title);
             let lines = plan.map_or_else(

@@ -318,12 +318,18 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
             }
             KeyCode::Enter => {
                 if let Some(item) = state.approval_list.current().cloned() {
+                    // Preserve plan + kind so a dismissed-and-reopened
+                    // `propose_plan` approval still shows its structured
+                    // plan view and its "PRE-FLIGHT PLAN" badge. Before
+                    // the list learned to carry those, re-opens lost the
+                    // payload and the operator got a less-informative
+                    // modal than the first presentation.
                     state.mode = Mode::ApprovalModal {
-                        request_id: item.id.to_string(),
+                        request_id: item.id.clone(),
                         task_id: item.actor_path.clone(),
                         summary: item.summary.clone(),
-                        plan: None,
-                        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+                        plan: item.plan.clone(),
+                        kind: item.kind,
                         sub_mode: crate::state::ApprovalSubMode::Overview,
                     };
                 }
@@ -530,6 +536,37 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
             plan,
             kind,
         } => {
+            // Push into the approval-list queue in addition to opening the
+            // modal. Without this, hitting Esc to dismiss the modal
+            // stranded the request: it stayed pending server-side but
+            // nothing in the TUI referenced it, so `'a'` opened an
+            // empty list pane and the operator had no retrieval path.
+            // De-dup by id so the same request never lands twice (can
+            // happen if a server restart replays events).
+            let actor_path = if task_id.is_empty() {
+                "root".to_string()
+            } else {
+                task_id.clone()
+            };
+            let category = match kind {
+                pitboss_cli::control::protocol::ApprovalKind::Plan => "plan",
+                pitboss_cli::control::protocol::ApprovalKind::Action => "action",
+            }
+            .to_string();
+            if !state.approval_list.items.iter().any(|i| i.id == request_id) {
+                state
+                    .approval_list
+                    .items
+                    .push_back(crate::state::ApprovalListItem {
+                        id: request_id.clone(),
+                        actor_path,
+                        category,
+                        summary: summary.clone(),
+                        plan: plan.clone(),
+                        kind,
+                        created_at: chrono::Utc::now(),
+                    });
+            }
             state.mode = Mode::ApprovalModal {
                 request_id,
                 task_id,
@@ -715,7 +752,23 @@ fn handle_approval_overview(state: &mut AppState, code: KeyCode, ctx: ApprovalCt
                 sub_mode: ApprovalSubMode::Editing { draft },
             };
         }
-        KeyCode::Esc => state.mode = Mode::Normal,
+        KeyCode::Esc => {
+            // Dismiss the modal without responding. The request stays
+            // pending server-side and is discoverable via the approval-
+            // list pane we just dropped the user into. Previously Esc
+            // transitioned to `Mode::Normal` with grid focus and the
+            // queue was invisible — the request looked lost.
+            state.mode = Mode::Normal;
+            state.pane_focus = PaneFocus::ApprovalList;
+            if let Some(pos) = state
+                .approval_list
+                .items
+                .iter()
+                .position(|i| i.id == ctx.request_id)
+            {
+                state.approval_list.selected_idx = pos;
+            }
+        }
         _ => {}
     }
 }
@@ -745,7 +798,20 @@ fn handle_approval_draft(
             return;
         }
         KeyCode::Esc => {
+            // Dismiss draft — request stays pending, visible in the
+            // approval list pane. Matches the Overview Esc behavior so
+            // the operator gets one consistent "escape" contract at
+            // every modal sub-mode.
             state.mode = Mode::Normal;
+            state.pane_focus = PaneFocus::ApprovalList;
+            if let Some(pos) = state
+                .approval_list
+                .items
+                .iter()
+                .position(|i| i.id == ctx.request_id)
+            {
+                state.approval_list.selected_idx = pos;
+            }
             return;
         }
         KeyCode::Char(c) => draft.push(c),
@@ -791,6 +857,25 @@ fn send_approve(
             reason,
         },
     );
+    // Drop from the approval-list queue optimistically — the server will
+    // ack the op before any subsequent ApprovalRequest with the same id
+    // could arrive, so a race that re-inserts a stale entry isn't
+    // reachable. Clamp `selected_idx` so an out-of-range index can't
+    // persist past the removal.
+    if let Some(pos) = state
+        .approval_list
+        .items
+        .iter()
+        .position(|i| i.id == request_id)
+    {
+        state.approval_list.items.remove(pos);
+    }
+    let len = state.approval_list.items.len();
+    if len == 0 {
+        state.approval_list.selected_idx = 0;
+    } else if state.approval_list.selected_idx >= len {
+        state.approval_list.selected_idx = len - 1;
+    }
 }
 
 // Fire-and-forget dispatch of a control op onto the runtime the
@@ -810,4 +895,82 @@ fn spawn_control_op(state: &AppState, op: pitboss_cli::control::protocol::Contro
     std::mem::drop(handle.spawn(async move {
         let _ = client.send_op(op).await;
     }));
+}
+
+#[cfg(test)]
+mod approval_queue_tests {
+    //! Regression coverage for the "Esc on approval modal strands the
+    //! request" papercut. Before these fixes, `ApprovalRequest` events
+    //! only opened the modal — they never populated the approval list
+    //! pane — so the moment the operator dismissed the modal the
+    //! request became unreachable from the TUI.
+
+    use super::*;
+    use pitboss_cli::control::protocol::{ApprovalKind, ControlEvent};
+
+    fn fresh_state() -> AppState {
+        AppState::new(PathBuf::from("/tmp/t"), "test-run".to_string())
+    }
+
+    fn mk_approval_event(request_id: &str, task_id: &str) -> ControlEvent {
+        ControlEvent::ApprovalRequest {
+            request_id: request_id.to_string(),
+            task_id: task_id.to_string(),
+            summary: "destructive rm -rf /".to_string(),
+            plan: None,
+            kind: ApprovalKind::Action,
+        }
+    }
+
+    #[test]
+    fn approval_request_populates_list_and_opens_modal() {
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.items[0].id, "req-A");
+        assert!(matches!(state.mode, Mode::ApprovalModal { .. }));
+    }
+
+    #[test]
+    fn empty_task_id_renders_as_root_actor_path() {
+        // Server emits `task_id: ""` for the root lead. An empty
+        // actor_path would render weirdly in the list line ("[]" prefix),
+        // so we substitute a stable label at event-receive time.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", ""));
+        assert_eq!(state.approval_list.items[0].actor_path, "root");
+    }
+
+    #[test]
+    fn duplicate_request_id_does_not_double_enqueue() {
+        // Server restarts may replay events; the queue must stay a set
+        // keyed on request_id or a single approval shows twice.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        assert_eq!(state.approval_list.items.len(), 1);
+    }
+
+    #[test]
+    fn send_approve_removes_matching_item_from_list() {
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
+        send_approve(&mut state, "req-A", true, None, None);
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.items[0].id, "req-B");
+        // selected_idx must stay in bounds after a removal.
+        assert!(state.approval_list.selected_idx < state.approval_list.items.len());
+    }
+
+    #[test]
+    fn send_approve_clamps_selected_idx_when_last_item_removed() {
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
+        state.approval_list.selected_idx = 1;
+        send_approve(&mut state, "req-B", false, None, None);
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.selected_idx, 0);
+    }
 }
