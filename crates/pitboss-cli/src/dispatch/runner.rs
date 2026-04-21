@@ -23,14 +23,22 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 /// Rationale: pitboss is the external permission authority (via
 /// `approval_policy`, `[[approval_policy]]` rules, and the TUI). Claude's
 /// own interactive permission gate is redundant under pitboss orchestration
-/// and causes silent 7-second-success failures in headless dispatch when no
-/// operator is present to approve each tool call.
+/// and causes silent stalls in headless dispatch when no operator is
+/// present to answer each prompt. The `sdk-ts` value tells claude "you're
+/// running under an SDK runtime that manages permissions externally."
 ///
-/// The `sdk-ts` value tells claude "you're running under an SDK runtime that
-/// manages permissions externally — don't prompt the TTY." Operators who want
-/// claude's own gate back for a specific actor can override via
-/// `[defaults.env]`, `[lead.env]`, `[[task]].env`, or the `env` field on
-/// `spawn_sublead`.
+/// **Companion flag**: every pitboss-spawned claude (lead, sub-lead, worker)
+/// also launches with `--dangerously-skip-permissions`. Together the env
+/// var and the flag close the full permission surface (MCP tools, file I/O,
+/// bash-with-`$VAR`, bash-with-`&&`). See `lead_spawn_args` for the
+/// detailed trust-model writeup.
+///
+/// Operators who want claude's own gate back for a specific actor can
+/// override `CLAUDE_CODE_ENTRYPOINT` via `[defaults.env]`, `[lead.env]`,
+/// `[[task]].env`, or the `env` field on `spawn_sublead` — but the
+/// `--dangerously-skip-permissions` CLI flag is set unconditionally and
+/// is not env-overridable. Operators who need the claude gate fully back
+/// should not use pitboss's headless dispatch.
 ///
 /// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
 /// for the deferred alternative (routing claude's gate through pitboss's
@@ -606,6 +614,22 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
 /// answered in `-p` (non-interactive) mode, so we always pre-allow the six
 /// pitboss MCP tools here. User-specified `tools` (from defaults / per-lead)
 /// are merged in alongside the MCP set.
+///
+/// **Trust model — `--dangerously-skip-permissions`:** every pitboss-spawned
+/// claude (lead, sub-lead, worker) launches with this flag. Pitboss is the
+/// external permission authority via `[run].approval_policy`,
+/// `[[approval_policy]]` rules, and the TUI's approve/reject modal — see
+/// `apply_pitboss_env_defaults` for the rationale we already adopted for
+/// MCP tools (CLAUDE_CODE_ENTRYPOINT=sdk-ts). The flag extends that
+/// "single permission authority" design to the rest of claude's gates
+/// (filesystem reads/writes, bash with `$VAR` expansion, bash with `&&`).
+/// Without it, headless dispatch silently stalls: under `-p`, claude's own
+/// prompts have no UI to answer them, so `echo x >> "$WORK_DIR/file"`
+/// returns "Contains simple_expansion" and the orchestration plan
+/// collapses with no operator-visible cause. Operators who want claude's
+/// own gate back for a specific run should not use pitboss's headless
+/// dispatch — they should drive the claude CLI interactively. See
+/// CHANGELOG entry under v0.7.1 for the security note.
 pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
     mcp_config: &std::path::Path,
@@ -614,6 +638,8 @@ pub fn lead_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Pitboss is the permission authority — see fn doc comment.
+        "--dangerously-skip-permissions".into(),
     ];
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
@@ -660,6 +686,8 @@ pub fn lead_resume_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
     ];
     let mut allowed: Vec<String> = lead.tools.clone();
     for t in PITBOSS_MCP_TOOLS {
@@ -715,6 +743,8 @@ pub fn sublead_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
     ];
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
@@ -1278,6 +1308,59 @@ mod tests {
             !args.iter().any(|a| a == "--resume"),
             "expected no --resume in args: {args:?}"
         );
+    }
+
+    #[test]
+    fn every_spawn_variant_passes_dangerously_skip_permissions() {
+        // Pitboss is the permission authority — every spawned claude must
+        // run with `--dangerously-skip-permissions`. Without this, headless
+        // dispatch silently stalls on bash-with-`$VAR`, file-write-outside-
+        // cwd, and every other claude-side gate that has no `-p`-mode
+        // answer. This test exists so the flag can't be dropped accidentally
+        // (the smoke-test failure mode is silent — empty registries and
+        // null kv reads, no operator-visible error).
+        use crate::manifest::resolve::ResolvedLead;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
+        };
+        let cfg = PathBuf::from("/tmp/cfg.json");
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            ("lead", lead_spawn_args(&lead, &cfg)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt"),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None),
+            ),
+            (
+                "sublead_resume",
+                sublead_spawn_args("sl-id", "p", "m", &cfg, Some("sess"), None),
+            ),
+        ];
+        for (name, argv) in cases {
+            assert!(
+                argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+                "{name} spawn args missing --dangerously-skip-permissions: {argv:?}"
+            );
+        }
     }
 
     #[test]

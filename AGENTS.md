@@ -271,17 +271,36 @@ section before writing manifests for headless dispatch.
 
 ### Permission model
 
-As of v0.7, pitboss auto-sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` on every
-spawned claude subprocess. This tells claude to bypass its built-in
-interactive permission gate; pitboss becomes the sole approval authority
-via `approval_policy` and `[[approval_policy]]` rules. Without this fix,
-sub-leads in headless dispatch would exit in ~7 seconds reporting
-`Success` with no output (claude apologizing that it can't get
-permission to write files, then giving up cleanly).
+**Pitboss is the sole permission authority for every claude subprocess
+it spawns.** As of v0.7.1 every spawned claude (lead, sub-lead, worker)
+receives:
 
-You can override this per-actor by setting `[defaults.env.CLAUDE_CODE_ENTRYPOINT]`
-to a different value in the manifest, but for headless dispatch you
-almost certainly want the default.
+1. `CLAUDE_CODE_ENTRYPOINT=sdk-ts` in env — closes claude's MCP-tool
+   permission gate. Operator-overridable via `[defaults.env]`.
+2. `--dangerously-skip-permissions` on the CLI — closes claude's
+   filesystem (read/write outside cwd), bash-with-`$VAR`-expansion, and
+   bash-with-`&&` gates. **Set unconditionally; not env-overridable.**
+
+Without (1) sub-leads in headless dispatch exited in ~7 seconds
+reporting `Success` with no output (apologizing that they couldn't get
+MCP permission). Without (2), even after the MCP gate was closed, every
+sublead's `echo x >> "$WORK_DIR/file"` returned `"Contains
+simple_expansion"` — `-p` mode has no UI to answer the prompt — and the
+orchestration plan collapsed silently with empty registries and null
+kv reads.
+
+Pitboss replaces the closed claude gates with its own approval surface:
+`[run].approval_policy` (block / auto_approve / auto_reject),
+`[[approval_policy]]` rules with TTL+fallback, the `request_approval`
+and `propose_plan` MCP tools, and the TUI's approve/reject modal. If
+you need claude's own gate fully back, do not use pitboss's headless
+dispatch — drive the claude CLI interactively instead.
+
+The trust boundary: anything you wouldn't run in your own claude
+session under `--dangerously-skip-permissions` should not be in a
+pitboss manifest. Operator-supplied prompts have full filesystem and
+shell access at the `[lead].directory` cwd. Treat manifests as
+production code.
 
 ### Approval policy — set `auto_approve` (or use rules)
 

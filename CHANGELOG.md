@@ -29,6 +29,30 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **`--dangerously-skip-permissions` is now passed to every spawned
+  claude (lead, sub-lead, worker).** Operators must read this entry.
+  Pitboss is the sole permission authority for orchestrated claude
+  subprocesses — see the v0.7 doc on `CLAUDE_CODE_ENTRYPOINT=sdk-ts`
+  for the original "single permission authority" rationale. The flag
+  extends that decision from MCP tools (which `sdk-ts` already
+  bypassed) to every other claude-side gate: filesystem reads/writes
+  outside cwd, bash with `$VAR` expansion, bash with `&&`. Without
+  the flag, headless dispatch silently stalls on these gates with no
+  operator-visible cause — the smoke test exposed this as empty
+  registries, null kv reads, and "no deliverable files written"
+  despite both subleads reporting `outcome=success`. Pitboss's own
+  approval surface (`approval_policy`, `[[approval_policy]]` rules,
+  TUI modal) replaces what claude's gate would have caught. The flag
+  is set unconditionally and is NOT env-overridable; operators who
+  need claude's own gate fully back should drive claude CLI
+  interactively, not via pitboss headless dispatch. **Trust
+  boundary**: anything you wouldn't run in your own claude session
+  under `--dangerously-skip-permissions` should not be in a pitboss
+  manifest. Operator-supplied prompts have full filesystem + shell
+  access at `[lead].directory`. Treat manifests as production code.
+  Locked in by regression tests — every spawn variant
+  (lead, lead-resume, sublead, sublead-resume, worker) is asserted
+  to carry the flag.
 - **SSRF / secret-exfiltration hardening on `[[notification]]` sinks.**
   See "Breaking changes" above for URL scheme / host and env-var
   substitution restrictions.

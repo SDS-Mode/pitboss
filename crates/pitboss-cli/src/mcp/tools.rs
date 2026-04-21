@@ -891,6 +891,11 @@ fn worker_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see runner::lead_spawn_args doc
+        // for the full rationale). Without this flag, headless workers
+        // silently stall on bash-with-`$VAR`, write-outside-cwd, and
+        // every other claude-side gate that has no `-p`-mode answer.
+        "--dangerously-skip-permissions".into(),
     ];
     // Workers always get the shared-store MCP tools in their allowlist when
     // an mcp-config is supplied, alongside their user-declared tools. Without
@@ -2000,6 +2005,26 @@ mod tests {
             None,
             std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
+    }
+
+    #[test]
+    fn worker_spawn_args_passes_dangerously_skip_permissions() {
+        // Companion to the runner-side test: worker spawns are emitted from
+        // a different module and must independently pass the flag. Without
+        // it, headless workers stall on bash-with-`$VAR` and write-outside-
+        // cwd gates that have no `-p`-mode answer — the failure mode is
+        // silent (worker exits "successfully" having written nothing).
+        use std::path::PathBuf;
+        let argv = worker_spawn_args(
+            "p",
+            "claude-haiku-4-5",
+            &["Read".to_string()],
+            Some(&PathBuf::from("/tmp/cfg.json")),
+        );
+        assert!(
+            argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "worker_spawn_args missing --dangerously-skip-permissions: {argv:?}"
+        );
     }
 
     #[tokio::test]
