@@ -51,6 +51,20 @@ This project uses [Semantic Versioning](https://semver.org/).
   now reads chunked with a 4 MiB per-line cap; a child that never emits
   `\n` closes the bridge instead of OOM-ing the host.
 
+### Docs
+
+- **`[[notification]]` field name correction** — documented as `type`
+  in AGENTS.md, `book/src/operator-guide/notifications.md`, and
+  `book/src/operator-guide/docker-compose.md`, but the actual struct
+  field (with no serde rename) is `kind`. An operator following the
+  docs verbatim would see `missing field 'kind'` from `pitboss
+  validate`. All examples in those three files now use `kind`, and
+  the notifications operator-guide page gains a callout noting that
+  `type = "slack"` will be rejected. Also documents the v0.7.1
+  security changes (`PITBOSS_`-prefixed env-var substitution, URL
+  scheme/host validation, Discord markdown escaping) that had
+  landed in code but weren't reflected in the notification page.
+
 ## [0.7.0] — 2026-04-20
 
 The headless-mode hardening release. Closes the silent "7-second

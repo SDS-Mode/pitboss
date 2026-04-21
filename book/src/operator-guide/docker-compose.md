@@ -163,7 +163,7 @@ lead_timeout_secs = 3600
 approval_policy = "block"
 
 [[notification]]
-type = "slack"
+kind = "slack"
 url = "${PITBOSS_SLACK_WEBHOOK_URL}"
 events = ["approval_pending", "run_finished"]
 severity_min = "info"
