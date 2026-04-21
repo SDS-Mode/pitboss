@@ -613,6 +613,44 @@ async fn dispatch_op(
             }
         }
         ControlOp::RepromptWorker { task_id, prompt } => {
+            // Route by task_id:
+            // - Sub-lead id → deliver via the sub-lead's own
+            //   reprompt_tx channel (sub_layer.send_synthetic_reprompt).
+            //   The sub-lead's background kill+resume loop (see
+            //   dispatch/sublead.rs:642) consumes reprompt_rx and
+            //   re-launches its claude subprocess with `--resume
+            //   <session_id>` and the new prompt.
+            // - Root-layer worker id → existing spawn_resume_worker
+            //   flow (below).
+            // - Everything else → unknown task_id.
+            //
+            // Pre-fix, sub-lead reprompts returned "unknown task_id"
+            // because the handler only looked at `state.workers`
+            // (= root layer via Deref). Sub-leads live in
+            // `state.subleads`, not `state.workers`, so the check
+            // always missed.
+            {
+                let subleads = state.subleads.read().await;
+                if let Some(sub_layer) = subleads.get(&task_id).cloned() {
+                    drop(subleads);
+                    let _ = crate::dispatch::events::append_event(
+                        &state.run_subdir,
+                        &task_id,
+                        &crate::dispatch::events::TaskEvent::Reprompt {
+                            at: chrono::Utc::now(),
+                            prompt_preview: prompt.chars().take(80).collect(),
+                            prior_session_id: String::new(),
+                        },
+                    )
+                    .await;
+                    sub_layer.send_synthetic_reprompt(&prompt).await;
+                    return ControlEvent::OpAcked {
+                        op: "reprompt_worker".into(),
+                        task_id: Some(task_id),
+                    };
+                }
+            }
+
             let current = state.workers.read().await.get(&task_id).cloned();
             let session_id = match current {
                 Some(crate::dispatch::state::WorkerState::Running {
