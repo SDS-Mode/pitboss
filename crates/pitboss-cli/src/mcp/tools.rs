@@ -1942,18 +1942,26 @@ pub async fn handle_wait_for_any(
         bail!("wait_for_any: task_ids is empty");
     }
 
-    // Fast path: any already Done?
-    {
-        let workers = state.workers.read().await;
-        for id in task_ids {
-            if let Some(WorkerState::Done(rec)) = workers.get(id) {
-                return Ok((id.clone(), rec.clone()));
-            }
-        }
-    }
-
+    // Subscribe FIRST so a completion that races the fast-path check is
+    // captured by the broadcast subscription. Same race fix pattern as
+    // wait_for_actor_internal (commit 70e2bd8). Without this, a worker
+    // that terminated between our existence check and our subscribe is
+    // lost and we block until timeout.
     let mut rx = state.done_tx.subscribe();
     let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
+
+    // Fast path: any already Done? Scan ALL layers — sub-lead-spawned
+    // workers are registered in the sub-lead layer's workers map, not
+    // root's. Pre-fix, this only checked `state.workers.read()` (= root
+    // via Deref) and so stayed blocked indefinitely on sub-lead-owned
+    // workers. Same bug class as commit d134289 (which fixed wait_actor
+    // + list_workers + worker_status) but this handler had its own
+    // lookup code that was missed by that fix.
+    for id in task_ids {
+        if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, id).await {
+            return Ok((id.clone(), rec));
+        }
+    }
 
     loop {
         let result = tokio::time::timeout(wait_duration, rx.recv()).await;
@@ -1963,18 +1971,20 @@ pub async fn handle_wait_for_any(
             Ok(Ok(completed_id)) => {
                 // Primary path: our target completed.
                 if task_ids.iter().any(|id| id == &completed_id) {
-                    let workers = state.workers.read().await;
-                    if let Some(WorkerState::Done(rec)) = workers.get(&completed_id) {
-                        return Ok((completed_id, rec.clone()));
+                    if let Some(WorkerState::Done(rec)) =
+                        find_worker_across_layers(state, &completed_id).await
+                    {
+                        return Ok((completed_id, rec));
                     }
                 }
-                // Defensive re-scan: a prior broadcast we missed, or a write-ordering race,
-                // might mean one of our targets is actually Done now even though the recv'd
-                // id isn't in our set. Cheap to check; returns only if found.
-                let workers = state.workers.read().await;
+                // Defensive re-scan: a prior broadcast we missed, or a
+                // write-ordering race, might mean one of our targets is
+                // actually Done now even though the recv'd id isn't in
+                // our set. Cheap to check; returns only if found.
                 for id in task_ids {
-                    if let Some(WorkerState::Done(rec)) = workers.get(id) {
-                        return Ok((id.clone(), rec.clone()));
+                    if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, id).await
+                    {
+                        return Ok((id.clone(), rec));
                     }
                 }
             }
