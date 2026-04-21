@@ -53,6 +53,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`[defaults]` block silently dropped in single-table `[lead]`
+  manifests.** The `SingleLeadManifest` parser had no `defaults` field
+  and no `deny_unknown_fields`, so the entire `[defaults]` section
+  (including `[defaults.env]`) was silently discarded at parse time —
+  a manifest setting `[defaults.env.WORK_DIR] = "/tmp/foo"` would never
+  see that variable reach the lead subprocess. The lead also wasn't
+  merging defaults for `model`, `tools`, `effort`, `timeout_secs`, or
+  `use_worktree` in this form; the single-lead path used only
+  `[lead]`-level values plus a hardcoded fallback, in contrast with
+  the array-form `[[lead]]` path which has done the merge correctly
+  since v0.3. Fixed: `SingleLeadManifest` now carries `defaults`,
+  `resolve_lead_spec` merges the same way `resolve_lead` (array form)
+  does, and `deny_unknown_fields` is on so the next silent-drop bug
+  fails loud at parse time. The `[default]` (singular, common typo
+  for `[defaults]`) is now rejected with an actionable parse error.
 - **`pitboss validate` now catches the `allow_subleads = true` +
   no-fallback footgun.** A manifest with `[lead] allow_subleads = true`
   but no `[lead.sublead_defaults]` would pass `validate` and then
