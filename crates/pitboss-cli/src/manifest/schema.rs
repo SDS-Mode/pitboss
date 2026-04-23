@@ -217,6 +217,7 @@ pub struct SingleLeadManifest {
 /// Defaults to a "no-op" state so existing manifests without this block
 /// continue to work identically.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LeadSpec {
     pub prompt: Option<String>,
     pub model: Option<String>,
@@ -257,6 +258,7 @@ pub struct LeadSpec {
 /// v0.6: optional `[lead.sublead_defaults]` block that supplies fallback values
 /// for `spawn_sublead` when the caller omits them.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SubleadDefaultsSpec {
     pub budget_usd: Option<f64>,
     pub max_workers: Option<u32>,

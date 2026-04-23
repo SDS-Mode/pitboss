@@ -411,16 +411,24 @@ fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> 
             }
             '{' => {
                 let mut name = String::new();
+                let mut closed = false;
                 for nc in iter.by_ref() {
                     if nc == '}' {
-                        let value = vars
-                            .get(&name)
-                            .ok_or_else(|| anyhow!("undeclared var '{}' in template", name))?;
-                        out.push_str(value);
+                        closed = true;
                         break;
                     }
                     name.push(nc);
                 }
+                if !closed {
+                    bail!(
+                        "unclosed '{{' in template string; expected '}}' after '{}'",
+                        name
+                    );
+                }
+                let value = vars
+                    .get(&name)
+                    .ok_or_else(|| anyhow!("undeclared var '{}' in template", name))?;
+                out.push_str(value);
             }
             other => out.push(other),
         }

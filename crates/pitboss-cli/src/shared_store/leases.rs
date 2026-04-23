@@ -48,14 +48,17 @@ impl LeaseRegistry {
         }
     }
 
+    /// Attempt to acquire `name`. Returns the new lease on success plus the
+    /// names of any leases evicted by TTL during this call — callers lift
+    /// those onto the lease notifier so waiters wake promptly.
     pub async fn acquire(
         &self,
         name: &str,
         ttl: Duration,
         caller: &CallerIdentity,
-    ) -> Result<Lease, StoreError> {
+    ) -> Result<(Lease, Vec<String>), StoreError> {
         let mut map = self.inner.lock().await;
-        Self::prune_expired(&mut map);
+        let evicted = Self::prune_expired(&mut map);
         if map.contains_key(name) {
             return Err(StoreError::Conflict);
         }
@@ -70,12 +73,18 @@ impl LeaseRegistry {
         };
         let deadline = Instant::now() + ttl;
         map.insert(name.to_string(), (lease.clone(), deadline));
-        Ok(lease)
+        Ok((lease, evicted))
     }
 
-    pub async fn release(&self, lease_id: &str, caller: &CallerIdentity) -> Result<(), StoreError> {
+    /// Release a lease by id. Returns the names of any leases evicted by
+    /// TTL during this call so the caller can wake waiters.
+    pub async fn release(
+        &self,
+        lease_id: &str,
+        caller: &CallerIdentity,
+    ) -> Result<Vec<String>, StoreError> {
         let mut map = self.inner.lock().await;
-        Self::prune_expired(&mut map);
+        let evicted = Self::prune_expired(&mut map);
         let found = map
             .iter()
             .find(|(_, (l, _))| l.lease_id == lease_id)
@@ -89,21 +98,24 @@ impl LeaseRegistry {
             return Err(StoreError::Forbidden("only the holder can release".into()));
         }
         map.remove(&name);
-        Ok(())
+        Ok(evicted)
     }
 
-    pub async fn list(&self) -> Vec<Lease> {
+    /// List active leases. Returns (list, evicted-by-ttl-names).
+    pub async fn list(&self) -> (Vec<Lease>, Vec<String>) {
         let mut map = self.inner.lock().await;
-        Self::prune_expired(&mut map);
-        map.values().map(|(l, _)| l.clone()).collect()
+        let evicted = Self::prune_expired(&mut map);
+        (map.values().map(|(l, _)| l.clone()).collect(), evicted)
     }
 
-    /// Release every lease currently held by the given actor. Returns the
-    /// lease names that were released. Called when an actor's MCP
-    /// connection drops.
-    pub async fn release_all_for_actor(&self, actor_id: &str) -> Vec<String> {
+    /// Release every lease currently held by the given actor. Returns
+    /// `(released, evicted_by_ttl)`.
+    pub async fn release_all_for_actor(
+        &self,
+        actor_id: &str,
+    ) -> (Vec<String>, Vec<String>) {
         let mut map = self.inner.lock().await;
-        Self::prune_expired(&mut map);
+        let evicted = Self::prune_expired(&mut map);
         let to_remove: Vec<String> = map
             .iter()
             .filter(|(_, (l, _))| l.holder == actor_id)
@@ -112,12 +124,20 @@ impl LeaseRegistry {
         for name in &to_remove {
             map.remove(name);
         }
-        to_remove
+        (to_remove, evicted)
     }
 
-    fn prune_expired(map: &mut HashMap<String, (Lease, Instant)>) {
+    fn prune_expired(map: &mut HashMap<String, (Lease, Instant)>) -> Vec<String> {
         let now = Instant::now();
-        map.retain(|_, (_, deadline)| *deadline > now);
+        let expired: Vec<String> = map
+            .iter()
+            .filter(|(_, (_, deadline))| *deadline <= now)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &expired {
+            map.remove(name);
+        }
+        expired
     }
 }
 
@@ -142,12 +162,13 @@ mod tests {
     #[tokio::test]
     async fn acquire_succeeds_when_free() {
         let reg = LeaseRegistry::new();
-        let lease = reg
+        let (lease, evicted) = reg
             .acquire("foo", Duration::from_secs(30), &caller("w1"))
             .await
             .unwrap();
         assert_eq!(lease.name, "foo");
         assert_eq!(lease.holder, "w1");
+        assert!(evicted.is_empty());
     }
 
     #[tokio::test]
@@ -166,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn release_succeeds_by_holder() {
         let reg = LeaseRegistry::new();
-        let lease = reg
+        let (lease, _) = reg
             .acquire("foo", Duration::from_secs(30), &caller("w1"))
             .await
             .unwrap();
@@ -179,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn release_rejected_for_non_holder() {
         let reg = LeaseRegistry::new();
-        let lease = reg
+        let (lease, _) = reg
             .acquire("foo", Duration::from_secs(30), &caller("w1"))
             .await
             .unwrap();
@@ -197,8 +218,10 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(60)).await;
-        reg.acquire("foo", Duration::from_secs(30), &caller("w2"))
+        let (_, evicted) = reg
+            .acquire("foo", Duration::from_secs(30), &caller("w2"))
             .await
             .unwrap();
+        assert_eq!(evicted, vec!["foo".to_string()]);
     }
 }

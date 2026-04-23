@@ -42,48 +42,44 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     let (ctrl_events_tx, ctrl_events_rx) =
         std::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>();
 
-    // Resolve the control socket path from the run dir. Best-effort: if the
-    // uuid parse or socket open fails, the TUI continues in observe-only mode.
-    let control_client = match uuid::Uuid::parse_str(&state.run_id) {
-        Ok(uuid) => {
-            let socket_path = pitboss_cli::control::control_socket_path(uuid, &state.run_dir);
-            let (bridge_tx, mut bridge_rx) =
-                tokio::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>(64);
-            // Forward async → sync so the render loop can pull without tokio.
-            let forward_tx = ctrl_events_tx.clone();
-            runtime.spawn(async move {
-                while let Some(ev) = bridge_rx.recv().await {
-                    if forward_tx.send(ev).is_err() {
-                        break;
+    // Connect to the run's control socket. Extracted into a closure so the
+    // same path can be used on both initial startup and when the user
+    // switches runs — without a fresh client, control ops after SwitchRun
+    // would still target the old run's socket.
+    let connect_control = |state: &mut AppState| {
+        let client = match uuid::Uuid::parse_str(&state.run_id) {
+            Ok(uuid) => {
+                let socket_path = pitboss_cli::control::control_socket_path(uuid, &state.run_dir);
+                let (bridge_tx, mut bridge_rx) =
+                    tokio::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>(64);
+                let forward_tx = ctrl_events_tx.clone();
+                runtime.spawn(async move {
+                    while let Some(ev) = bridge_rx.recv().await {
+                        if forward_tx.send(ev).is_err() {
+                            break;
+                        }
                     }
-                }
-            });
-            let client = runtime
-                .block_on(crate::control::ControlClient::connect(
-                    socket_path,
-                    bridge_tx,
-                ))
-                .ok();
-            client.map(Arc::new)
-        }
-        Err(_) => None,
+                });
+                runtime
+                    .block_on(crate::control::ControlClient::connect(
+                        socket_path,
+                        bridge_tx,
+                    ))
+                    .ok()
+                    .map(Arc::new)
+            }
+            Err(_) => None,
+        };
+        state.control_connected = client.as_ref().is_some_and(|c| c.is_connected());
+        state.control_client = client;
+        state.runtime_handle = Some(runtime.handle().clone());
     };
-    state.control_connected = control_client.as_ref().is_some_and(|c| c.is_connected());
-    state.control_client = control_client;
-    // Stash a handle to THE runtime the ControlClient was built under.
-    // `send_op` callers must spawn on this handle — spinning up a fresh
-    // runtime per call (as the removed `futures_block_on` helper did)
-    // left the socket writer registered with a dead reactor and every
-    // kill/pause/reprompt op hung without error.
-    state.runtime_handle = Some(runtime.handle().clone());
-    // `runtime` owns the background reader + forward tasks and must be kept
-    // alive for the full event loop. It falls out of scope at the end of
-    // `run()`; the tasks are dropped cleanly then.
-    let _runtime = runtime;
-    // Our local handle to `ctrl_events_tx` is unused past this point — the
-    // forward task owns the only clone that matters. Dropping makes the
-    // receiver observe a closed channel once the forwarder exits.
-    drop(ctrl_events_tx);
+
+    connect_control(&mut state);
+    // `ctrl_events_tx` and `runtime` are both held by `connect_control`
+    // (the closure clones the sender and spawns tasks on the runtime). They
+    // have to stay alive for the full event loop so a SwitchRun can rebuild
+    // the control client. Both fall out of scope at the end of `run()`.
 
     // Mutable channel endpoints so we can swap them when switching runs.
     let (mut snapshot_rx, mut focus_tx) = spawn_watcher(run_dir);
@@ -129,6 +125,11 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             state.focus = 0;
                             state.run_list.clear();
                             state.mode = Mode::Normal;
+                            // Rebuild the control client against the new run's
+                            // socket; without this, post-switch control ops
+                            // (cancel/pause/approve/reprompt) keep targeting
+                            // the previous run.
+                            connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
                             continue;
@@ -157,8 +158,9 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                         Action::Quit => break,
                         Action::SwitchRun { run_dir, run_id } => {
                             // Same transition as the keyboard-driven
-                            // SwitchRun path above — restart the watcher
-                            // and reset run-local state.
+                            // SwitchRun path above — restart the watcher,
+                            // rebuild the control client, and reset
+                            // run-local state.
                             let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
@@ -168,6 +170,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             state.focus = 0;
                             state.run_list.clear();
                             state.mode = Mode::Normal;
+                            connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
                             continue;

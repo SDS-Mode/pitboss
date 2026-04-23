@@ -51,6 +51,14 @@ impl SqliteStore {
     pub fn new(path: PathBuf) -> Result<Self, StoreError> {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| StoreError::Incomplete(format!("sqlite open: {e}")))?;
+        // Enable WAL so concurrent readers (e.g. `pitboss diff` opening the
+        // same DB file while the dispatcher is writing) don't hit SQLITE_BUSY
+        // from the default rollback journal. Pair with a generous busy_timeout
+        // so the rare contended write retries rather than bailing.
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| StoreError::Incomplete(format!("pragma journal_mode: {e}")))?;
+        conn.pragma_update(None, "busy_timeout", 5000)
+            .map_err(|e| StoreError::Incomplete(format!("pragma busy_timeout: {e}")))?;
         // Migration order matters: rename the legacy `shire_version` column
         // BEFORE init_schema runs its CREATE TABLE IF NOT EXISTS, otherwise
         // the pragma check below would still see the old column name for an
@@ -538,7 +546,7 @@ impl SessionStore for SqliteStore {
         let started_at = meta.started_at.to_rfc3339();
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap();
+            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .execute(
                     "INSERT OR REPLACE INTO runs \
@@ -567,7 +575,7 @@ impl SessionStore for SqliteStore {
         let run_id_str = run_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap();
+            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .execute(
                     "INSERT OR REPLACE INTO task_records \
@@ -633,7 +641,7 @@ impl SessionStore for SqliteStore {
         let was_interrupted = i64::from(summary.was_interrupted);
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap();
+            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let rows = guard
                 .execute(
                     "UPDATE runs \
@@ -664,7 +672,7 @@ impl SessionStore for SqliteStore {
         let conn = Arc::clone(&self.inner);
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap();
+            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             load_run_blocking(&guard, run_id)
         })
         .await
