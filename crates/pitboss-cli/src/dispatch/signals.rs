@@ -194,14 +194,15 @@ async fn cancel_actor_in_tree(state: &Arc<DispatchState>, target: &str) -> Resul
 /// Two-phase drain semantics are preserved at each layer: the existing
 /// per-layer logic respects its grace window before forceful termination.
 pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
-    let root_cancel = state.root.cancel.clone();
+    let root_cancel_drain = state.root.cancel.clone();
+    let state_drain = state.clone();
     tokio::spawn(async move {
         // Wait for the root layer to drain.
-        root_cancel.await_drain().await;
+        root_cancel_drain.await_drain().await;
         // Cascade to every registered sub-tree.
-        let subleads = state.subleads.read().await;
+        let subleads = state_drain.subleads.read().await;
         for (sublead_id, sub_layer) in subleads.iter() {
-            tracing::info!(sublead_id = %sublead_id, "cascading cancel to sub-tree");
+            tracing::info!(sublead_id = %sublead_id, "cascading drain to sub-tree");
             // Trip the sub-tree's own cancel token so its runner stops
             // spawning new work.
             sub_layer.cancel.drain();
@@ -214,17 +215,34 @@ pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
                 tracing::debug!(
                     sublead_id = %sublead_id,
                     worker_id = %worker_id,
-                    "cascading cancel to sub-tree worker"
+                    "cascading drain to sub-tree worker"
                 );
                 tok.drain();
             }
         }
-        // TODO(Phase 4): Currently only drain cascades; terminate does not.
-        // When Phase 4+ wires real sub-tree workers, sub-tree workers will
-        // receive drain but no terminate cascade — they'd hang waiting for
-        // terminate that never comes. Either add a parallel terminate cascade
-        // OR move worker cancellation into per-sub-tree runners that observe
-        // both their cancel and the run-level escalation.
+    });
+
+    // Parallel watcher for the escalation (second Ctrl-C) path. Without
+    // this, a double Ctrl-C force-terminates root-layer workers but leaves
+    // sub-tree workers only drained — they'd only die when the sublead
+    // itself exits, leaving stray `claude` processes behind.
+    let root_cancel_term = state.root.cancel.clone();
+    tokio::spawn(async move {
+        root_cancel_term.await_terminate().await;
+        let subleads = state.subleads.read().await;
+        for (sublead_id, sub_layer) in subleads.iter() {
+            tracing::info!(sublead_id = %sublead_id, "cascading terminate to sub-tree");
+            sub_layer.cancel.terminate();
+            let worker_cancels = sub_layer.worker_cancels.read().await;
+            for (worker_id, tok) in worker_cancels.iter() {
+                tracing::debug!(
+                    sublead_id = %sublead_id,
+                    worker_id = %worker_id,
+                    "cascading terminate to sub-tree worker"
+                );
+                tok.terminate();
+            }
+        }
     });
 }
 

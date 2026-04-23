@@ -440,7 +440,19 @@ impl SharedStore {
                     match res {
                         Err(_elapsed) => return Err(StoreError::Timeout),
                         Ok(Err(broadcast::error::RecvError::Closed)) => return Err(StoreError::Shutdown),
-                        Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                        Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                            // A burst of unrelated writes evicted entries from
+                            // the 256-slot channel. The write that satisfies
+                            // min may have been one of them — re-read the
+                            // store before waiting again, or we'd block until
+                            // timeout even when the condition is already met.
+                            if let Some(entry) = self.entries.read().await.get(&key) {
+                                if entry.version >= min {
+                                    return Ok(entry.clone());
+                                }
+                            }
+                            continue;
+                        }
                         Ok(Ok(evt)) => {
                             if evt.path == key && evt.version >= min {
                                 if let Some(entry) = self.entries.read().await.get(&key) {
@@ -472,7 +484,8 @@ impl SharedStore {
     ) -> Result<AcquireResult, StoreError> {
         // Non-blocking attempt first.
         match self.leases.acquire(name, ttl, caller).await {
-            Ok(lease) => {
+            Ok((lease, evicted)) => {
+                self.notify_lease_evictions(&evicted);
                 return Ok(AcquireResult {
                     acquired: true,
                     lease_id: Some(lease.lease_id),
@@ -519,7 +532,8 @@ impl SharedStore {
                         Ok(_) => {
                             // Something was released — retry.
                             match self.leases.acquire(name, ttl, caller).await {
-                                Ok(lease) => {
+                                Ok((lease, evicted)) => {
+                                    self.notify_lease_evictions(&evicted);
                                     return Ok(AcquireResult {
                                         acquired: true,
                                         lease_id: Some(lease.lease_id),
@@ -536,12 +550,19 @@ impl SharedStore {
         }
     }
 
+    fn notify_lease_evictions(&self, names: &[String]) {
+        for name in names {
+            let _ = self.lease_notifier.send(name.clone());
+        }
+    }
+
     pub async fn lease_release(
         &self,
         lease_id: &str,
         caller: &CallerIdentity,
     ) -> Result<(), StoreError> {
-        self.leases.release(lease_id, caller).await?;
+        let evicted = self.leases.release(lease_id, caller).await?;
+        self.notify_lease_evictions(&evicted);
         let _ = self.lease_notifier.send(lease_id.to_string());
         Ok(())
     }
@@ -550,7 +571,8 @@ impl SharedStore {
     /// actor's MCP connection drops (lease-on-connection semantics). Wakes
     /// any waiters subscribed via `lease_acquire(wait_secs > 0)`.
     pub async fn release_all_for_actor(&self, actor_id: &str) {
-        let released = self.leases.release_all_for_actor(actor_id).await;
+        let (released, evicted) = self.leases.release_all_for_actor(actor_id).await;
+        self.notify_lease_evictions(&evicted);
         for name in released {
             let _ = self.lease_notifier.send(name);
         }
@@ -591,7 +613,8 @@ impl SharedStore {
             })
             .collect();
         drop(entries);
-        let leases = self.leases.list().await;
+        let (leases, evicted) = self.leases.list().await;
+        self.notify_lease_evictions(&evicted);
         let dump = Dump {
             finalized_at: Utc::now(),
             entries: dump_entries,

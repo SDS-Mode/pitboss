@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-use pitboss_core::parser::{parse_line, Event};
+use pitboss_core::parser::{parse_line_all, Event};
 
 /// Poll cadence for new bytes. 200 ms feels responsive without burning
 /// CPU when a worker is idle between turns.
@@ -72,6 +72,18 @@ async fn run_async(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) 
         bail!("task id '{task_id}' resolves outside the run directory; refusing to follow",);
     }
     let log_path = task_dir_canon.join("stdout.log");
+    // stdout.log may itself be a symlink (e.g. if the task dir was pre-
+    // planted with one). The earlier starts_with() check covered the task
+    // dir but not the file, so re-canonicalize and repeat the containment
+    // assertion before opening it. Missing file is fine — follow_log
+    // handles absent logs; we only guard once it exists.
+    if log_path.exists() {
+        let log_canon = std::fs::canonicalize(&log_path)
+            .with_context(|| format!("canonicalize {}", log_path.display()))?;
+        if !log_canon.starts_with(&tasks_root_canon) {
+            bail!("stdout.log for task '{task_id}' resolves outside the run directory; refusing to follow");
+        }
+    }
 
     let mut stderr = std::io::stderr();
     writeln!(
@@ -120,6 +132,9 @@ fn default_runs_dir() -> PathBuf {
 /// directory. Mirrors the resolver in `main.rs` (used by `resume`)
 /// except the error messages are tailored for `attach`.
 fn resolve_run_dir(base: &Path, prefix: &str) -> Result<PathBuf> {
+    if prefix.is_empty() {
+        bail!("run id prefix must not be empty");
+    }
     let entries = std::fs::read_dir(base)
         .with_context(|| format!("cannot read runs directory {}", base.display()))?;
 
@@ -214,8 +229,8 @@ async fn follow_log(
                 // In raw mode we preserve the exact JSON line (newline
                 // appended below). No parse needed for the tail slice.
                 rendered.push(String::from_utf8_lossy(raw_line).into_owned());
-            } else if let Some(s) = format_event_capped(raw_line) {
-                rendered.push(s);
+            } else {
+                rendered.extend(format_event_capped(raw_line));
             }
         }
         let start = rendered.len().saturating_sub(history);
@@ -271,8 +286,10 @@ async fn follow_log(
                     if raw {
                         stdout.write_all(line)?;
                         stdout.write_all(b"\n")?;
-                    } else if let Some(s) = format_event_capped(line) {
-                        writeln!(stdout, "{s}")?;
+                    } else {
+                        for s in format_event_capped(line) {
+                            writeln!(stdout, "{s}")?;
+                        }
                     }
                     // Terminal event — claude wrote its final `result`.
                     // Emit, then exit so pipelines move on.
@@ -294,15 +311,32 @@ async fn follow_log(
 }
 
 fn is_result_event(line: &[u8]) -> bool {
-    matches!(parse_line(line), Ok(Event::Result { .. }))
+    parse_line_all(line)
+        .ok()
+        .is_some_and(|evs| evs.iter().any(|e| matches!(e, Event::Result { .. })))
 }
 
 /// Same shape + caps as the TUI watcher's `format_event` — parse one
-/// stream-json line and return a display string, or `None` to skip.
-/// Duplicated here rather than cross-crate imported so `attach` works
-/// without pulling pitboss-tui into pitboss-cli.
-fn format_event_capped(bytes: &[u8]) -> Option<String> {
-    match parse_line(bytes).ok()? {
+/// stream-json line and return the display string(s). Returns a Vec
+/// because an assistant message with multiple content blocks (e.g.
+/// `[text, tool_use, text]`) renders one line per block. Duplicated here
+/// rather than cross-crate imported so `attach` works without pulling
+/// pitboss-tui into pitboss-cli.
+fn format_event_capped(bytes: &[u8]) -> Vec<String> {
+    let Ok(events) = parse_line_all(bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        if let Some(s) = format_single_event_capped(event) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn format_single_event_capped(event: Event) -> Option<String> {
+    match event {
         Event::AssistantText { text } => {
             let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(&text);
             Some(format!("> {}", cap_with_marker(first, CAP_ASSISTANT_TEXT)))
@@ -389,17 +423,29 @@ mod tests {
     fn format_event_assistant_text_gets_arrow_prefix() {
         let line =
             br#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi there"}]}}"#;
-        let out = format_event_capped(line).unwrap();
-        assert!(out.starts_with("> "));
-        assert!(out.contains("hi there"));
+        let out = format_event_capped(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("> "));
+        assert!(out[0].contains("hi there"));
     }
 
     #[test]
     fn format_event_result_shows_usage() {
         let line = br#"{"type":"result","session_id":"s","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}"#;
-        let out = format_event_capped(line).unwrap();
-        assert!(out.contains("in=10"));
-        assert!(out.contains("out=5"));
+        let out = format_event_capped(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("in=10"));
+        assert!(out[0].contains("out=5"));
+    }
+
+    #[test]
+    fn format_event_capped_renders_all_blocks_of_multi_block_assistant() {
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"tool_use","name":"Read","input":{"file_path":"x"}},{"type":"text","text":"second"}]}}"#;
+        let out = format_event_capped(line);
+        assert_eq!(out.len(), 3, "expected 3 rendered lines, got {out:?}");
+        assert!(out[0].starts_with("> ") && out[0].contains("first"));
+        assert!(out[1].starts_with("* ") && out[1].contains("Read"));
+        assert!(out[2].starts_with("> ") && out[2].contains("second"));
     }
 
     #[test]

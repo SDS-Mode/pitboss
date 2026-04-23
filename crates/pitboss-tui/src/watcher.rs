@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use pitboss_core::parser::{parse_line, Event};
+use pitboss_core::parser::{parse_line_all, Event};
 use pitboss_core::store::{TaskRecord, TaskStatus};
 use serde::Deserialize;
 
@@ -539,9 +539,7 @@ fn tail_log(path: &Path, n: usize) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(display) = format_event(trimmed.as_bytes()) {
-            rendered.push(display);
-        }
+        rendered.extend(format_event(trimmed.as_bytes()));
     }
     if rendered.len() <= n {
         rendered
@@ -559,9 +557,25 @@ const CAP_ASSISTANT_TEXT: usize = 2000;
 const CAP_TOOL_INPUT: usize = 1000;
 const CAP_TOOL_RESULT: usize = 3000;
 
-/// Parse one stream-json line and return a display string, or `None` to skip.
-fn format_event(bytes: &[u8]) -> Option<String> {
-    let event = parse_line(bytes).ok()?;
+/// Parse one stream-json line and return the display string(s).
+///
+/// Returns a Vec because an assistant message can carry multiple content
+/// blocks (e.g. `[text, tool_use, text]`) — each renders to its own line
+/// so the operator sees every step of a multi-block turn.
+fn format_event(bytes: &[u8]) -> Vec<String> {
+    let Ok(events) = parse_line_all(bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        if let Some(s) = format_single_event(event) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn format_single_event(event: Event) -> Option<String> {
     match event {
         Event::AssistantText { text } => {
             let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(&text);
@@ -681,63 +695,68 @@ mod tests {
     fn format_event_assistant_text() {
         let line =
             br#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
-        let out = format_event(line).unwrap();
-        assert!(out.starts_with("> "));
-        assert!(out.contains("hello"));
+        let out = format_event(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("> "));
+        assert!(out[0].contains("hello"));
     }
 
     #[test]
     fn format_event_tool_use() {
         let line = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"x"}}]}}"#;
-        let out = format_event(line).unwrap();
-        assert!(out.starts_with("* "));
-        assert!(out.contains("Write"));
+        let out = format_event(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("* "));
+        assert!(out[0].contains("Write"));
     }
 
     #[test]
     fn format_event_tool_result() {
         let line =
             br#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
-        let out = format_event(line).unwrap();
-        assert!(out.starts_with("< "));
-        assert!(out.contains("ok"));
+        let out = format_event(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("< "));
+        assert!(out[0].contains("ok"));
     }
 
     #[test]
     fn format_event_result() {
         let line = br#"{"type":"result","session_id":"sess_abcdef12","usage":{"input_tokens":1,"output_tokens":2}}"#;
-        let out = format_event(line).unwrap();
-        assert!(out.starts_with("v "));
-        assert!(out.contains("sess_abc"));
-        assert!(out.contains("in=1"));
-        assert!(out.contains("out=2"));
+        let out = format_event(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("v "));
+        assert!(out[0].contains("sess_abc"));
+        assert!(out[0].contains("in=1"));
+        assert!(out[0].contains("out=2"));
     }
 
     #[test]
     fn format_event_rate_limit() {
         let line = br#"{"type":"rate_limit_event","rate_limit_info":{"status":"throttled","rateLimitType":"five_hour","resetsAt":1234}}"#;
-        let out = format_event(line).unwrap();
-        assert!(out.starts_with("! "));
-        assert!(out.contains("throttled"));
-        assert!(out.contains("five_hour"));
+        let out = format_event(line);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].starts_with("! "));
+        assert!(out[0].contains("throttled"));
+        assert!(out[0].contains("five_hour"));
     }
 
     #[test]
     fn format_event_skips_system() {
         let line = br#"{"type":"system","subtype":"init"}"#;
-        assert!(format_event(line).is_none());
+        assert!(format_event(line).is_empty());
     }
 
     #[test]
     fn format_event_skips_unknown() {
         let line = br#"{"type":"totally_new_event","payload":"x"}"#;
-        assert!(format_event(line).is_none());
+        assert!(format_event(line).is_empty());
     }
 
     #[test]
     fn format_event_skips_malformed() {
         let line = b"not json at all";
-        assert!(format_event(line).is_none());
+        assert!(format_event(line).is_empty());
     }
 
     #[test]
@@ -748,11 +767,27 @@ mod tests {
         let line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
         );
-        let out = format_event(line.as_bytes()).unwrap();
+        let out = format_event(line.as_bytes());
+        assert_eq!(out.len(), 1);
         // Output should contain the `… +N chars` marker and report the
         // correct delta (100 trimmed chars).
-        assert!(out.contains("… +100 chars"), "expected marker, got: {out}");
-        assert!(out.starts_with("> "));
+        assert!(
+            out[0].contains("… +100 chars"),
+            "expected marker, got: {}",
+            out[0]
+        );
+        assert!(out[0].starts_with("> "));
+    }
+
+    #[test]
+    fn format_event_renders_all_blocks_of_multi_block_assistant() {
+        // Layout: [text, tool_use, text] — every block should render.
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"tool_use","name":"Read","input":{"file_path":"x"}},{"type":"text","text":"second"}]}}"#;
+        let out = format_event(line);
+        assert_eq!(out.len(), 3, "expected 3 rendered blocks, got {out:?}");
+        assert!(out[0].starts_with("> ") && out[0].contains("first"));
+        assert!(out[1].starts_with("* ") && out[1].contains("Read"));
+        assert!(out[2].starts_with("> ") && out[2].contains("second"));
     }
 
     #[test]

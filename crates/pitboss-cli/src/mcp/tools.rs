@@ -431,13 +431,21 @@ pub async fn handle_spawn_worker(
     // semantics; for now treat None budget_usd on the target layer as
     // uncapped (no reservation placed, same as root-layer uncapped behavior).
     if let Some(budget) = target_layer.manifest.budget_usd {
-        let spent = *target_layer.spent_usd.lock().await;
-        let reserved = *target_layer.reserved_usd.lock().await;
         // Estimate this worker's cost using its intended model, as the median
         // of prior workers priced at their actual models (or a model-specific
         // fallback if no worker has completed yet).
         let estimate = estimate_new_worker_cost_for_layer(&target_layer, &worker_model).await;
+
+        // Hold `reserved_usd` across the whole compute/compare/add step so
+        // two concurrent spawn_workers can't both pass the budget check
+        // before either increments the reservation. Spent_usd is captured
+        // inside the same critical section to keep the arithmetic on a
+        // single consistent snapshot.
+        let mut reserved_guard = target_layer.reserved_usd.lock().await;
+        let spent = *target_layer.spent_usd.lock().await;
+        let reserved = *reserved_guard;
         if spent + reserved + estimate > budget {
+            drop(reserved_guard);
             if let Some(router) = target_layer.notification_router.clone() {
                 let envelope = crate::notify::NotificationEnvelope::new(
                     &state.run_id.to_string(),
@@ -457,7 +465,8 @@ pub async fn handle_spawn_worker(
             );
         }
         // Reserve against the target layer.
-        *target_layer.reserved_usd.lock().await += estimate;
+        *reserved_guard += estimate;
+        drop(reserved_guard);
         target_layer
             .worker_reservations
             .write()

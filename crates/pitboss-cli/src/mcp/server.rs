@@ -122,12 +122,25 @@ pub fn socket_path_for_run(run_id: Uuid, run_dir: &Path) -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(xdg).join("pitboss");
         if std::fs::create_dir_all(&p).is_ok() {
+            // XDG_RUNTIME_DIR itself is 0o700, but our subdirectory inherits
+            // the process umask; lock it down so other local users cannot
+            // observe the socket file's metadata.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700));
+            }
             return p.join(format!("{}.sock", run_id));
         }
     }
     // Fallback: alongside the run artifacts.
     let p = run_dir.join(run_id.to_string());
     let _ = std::fs::create_dir_all(&p);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700));
+    }
     p.join("mcp.sock")
 }
 
@@ -897,6 +910,15 @@ impl McpServer {
             let _ = std::fs::remove_file(&socket_path);
         }
         let listener = tokio::net::UnixListener::bind(&socket_path)?;
+        // Explicit hardening — inherited umask (e.g. 0022) would leave the
+        // socket world-readable, letting any local user connect and inject
+        // `actor_role: root_lead` in _meta to call spawn_worker / kv_set.
+        // 0o600 restricts to the running user.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+        }
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let handler = PitbossHandler::new(state);
 

@@ -128,28 +128,31 @@ impl ApprovalBridge {
 
         let (tx, rx) = oneshot::channel::<ApprovalResponse>();
 
-        // Does a TUI have the control writer?
-        let writer_present = self.state.control_writer.lock().await.is_some();
+        // Hold the control_writer lock across the `bridge.insert` and the
+        // `w.send(ev)`. A previous version released the writer lock between
+        // the "is it present?" check and the insert, so a TUI that
+        // disconnected in that window would leave the responder orphaned
+        // in `approval_bridge` — stuck until the bridge timeout.
+        let writer_guard = self.state.control_writer.lock().await;
 
-        if writer_present {
+        if let Some(w) = writer_guard.as_ref() {
             self.state
                 .approval_bridge
                 .lock()
                 .await
                 .insert(request_id.clone(), tx);
-            // Push the event to the TUI.
-            if let Some(w) = self.state.control_writer.lock().await.as_ref() {
-                let ev = crate::control::protocol::ControlEvent::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    task_id,
-                    summary,
-                    plan: plan.map(approval_plan_to_wire),
-                    kind,
-                };
-                // Best-effort send.
-                let _ = w.send(ev);
-            }
+            let ev = crate::control::protocol::ControlEvent::ApprovalRequest {
+                request_id: request_id.clone(),
+                task_id,
+                summary,
+                plan: plan.map(approval_plan_to_wire),
+                kind,
+            };
+            // Best-effort send.
+            let _ = w.send(ev);
+            drop(writer_guard);
         } else {
+            drop(writer_guard);
             // No TUI attached: policy decides.
             match self.state.approval_policy {
                 ApprovalPolicy::AutoApprove => {

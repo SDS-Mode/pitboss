@@ -8,7 +8,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-use crate::parser::{parse_line, Event, TokenUsage};
+use crate::parser::{parse_line_all, Event, TokenUsage};
 use crate::process::{ProcessSpawner, SpawnCmd};
 
 use super::{CancelToken, SessionOutcome, SessionState};
@@ -284,37 +284,42 @@ async fn stream_loop(
                     let _ = w.write_all(line.as_bytes()).await;
                     let _ = w.write_all(b"\n").await;
                 }
-                match parse_line(line.as_bytes()) {
-                    Ok(Event::AssistantText { text }) => {
-                        let mut a = accum.lock().await;
-                        // Prefer the longest nontrivial assistant text as the preview.
-                        // Rationale: claude often appends a short confirmation
-                        // ("Done.", "OK") after the real output; taking the last text
-                        // buries the real content. A length-keyed winner avoids that.
-                        let trimmed_len = text.trim().len();
-                        let current_len = a
-                            .last_text
-                            .as_deref()
-                            .map_or(0, |t| t.trim_end_matches('…').trim().len());
-                        if trimmed_len >= current_len {
-                            a.last_text = Some(truncate_preview(&text));
+                let Ok(events) = parse_line_all(line.as_bytes()) else {
+                    continue;
+                };
+                for ev in events {
+                    match ev {
+                        Event::AssistantText { text } => {
+                            let mut a = accum.lock().await;
+                            // Prefer the longest nontrivial assistant text as the preview.
+                            // Rationale: claude often appends a short confirmation
+                            // ("Done.", "OK") after the real output; taking the last text
+                            // buries the real content. A length-keyed winner avoids that.
+                            let trimmed_len = text.trim().len();
+                            let current_len = a
+                                .last_text
+                                .as_deref()
+                                .map_or(0, |t| t.trim_end_matches('…').trim().len());
+                            if trimmed_len >= current_len {
+                                a.last_text = Some(truncate_preview(&text));
+                            }
                         }
-                    }
-                    Ok(Event::Result {
-                        session_id: sid,
-                        usage: u,
-                        ..
-                    }) => {
-                        let mut a = accum.lock().await;
-                        if let Some(tx) = &session_id_tx {
-                            // Best-effort: if receiver is closed or full, drop the send.
-                            let _ = tx.try_send(sid.clone());
+                        Event::Result {
+                            session_id: sid,
+                            usage: u,
+                            ..
+                        } => {
+                            let mut a = accum.lock().await;
+                            if let Some(tx) = &session_id_tx {
+                                // Best-effort: if receiver is closed or full, drop the send.
+                                let _ = tx.try_send(sid.clone());
+                            }
+                            a.session_id = Some(sid);
+                            a.usage.add(&u);
+                            a.saw_result = true;
                         }
-                        a.session_id = Some(sid);
-                        a.usage.add(&u);
-                        a.saw_result = true;
+                        _ => {}
                     }
-                    Ok(_) | Err(_) => {}
                 }
             }
             Ok(None) | Err(_) => return,

@@ -6,7 +6,25 @@ pub use events::{Event, TokenUsage};
 
 use crate::error::ParseError;
 
+/// Parse a single stream-json line and return the first recognized event.
+/// For assistant messages with multiple content blocks, only the first
+/// block is returned — prefer [`parse_line_all`] when the downstream needs
+/// every block (e.g. mid-message `tool_use` after a text block).
+///
+/// Kept for source compatibility with existing callers and tests; new
+/// code should use [`parse_line_all`].
 pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
+    let mut events = parse_line_all(bytes)?;
+    // `parse_line_all` guarantees at least one element on Ok.
+    Ok(events.remove(0))
+}
+
+/// Parse a single stream-json line and return every event emitted by the
+/// line. For non-assistant lines this is always a single-element vec;
+/// assistant messages expand to one event per `text` / `tool_use` block so
+/// downstream consumers don't drop the tail of a `[text, tool_use, text]`
+/// layout.
+pub fn parse_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
     let raw = std::str::from_utf8(bytes)
         .map_err(|_| {
             ParseError::malformed("non-utf8 line", String::from_utf8_lossy(bytes).into_owned())
@@ -28,31 +46,32 @@ pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
                 .get("subtype")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            Ok(Event::System { subtype })
+            Ok(vec![Event::System { subtype }])
         }
         Some("assistant") => parse_assistant(&value, raw),
-        Some("user") => parse_user(&value, raw),
-        Some("result") => parse_result(&value, raw),
-        Some("rate_limit_event") => Ok(parse_rate_limit(&value)),
-        _ => Ok(Event::Unknown {
+        Some("user") => parse_user(&value, raw).map(|e| vec![e]),
+        Some("result") => parse_result(&value, raw).map(|e| vec![e]),
+        Some("rate_limit_event") => Ok(vec![parse_rate_limit(&value)]),
+        _ => Ok(vec![Event::Unknown {
             raw: raw.to_string(),
-        }),
+        }]),
     }
 }
 
-fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError> {
+fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, ParseError> {
     let content = value
         .get("message")
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_array())
         .ok_or_else(|| ParseError::malformed("assistant missing message.content", raw))?;
 
+    let mut events = Vec::new();
     for block in content {
         let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match btype {
             "text" => {
                 if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                    return Ok(Event::AssistantText {
+                    events.push(Event::AssistantText {
                         text: text.to_string(),
                     });
                 }
@@ -67,7 +86,7 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Event, ParseE
                     .get("input")
                     .map(ToString::to_string)
                     .unwrap_or_default();
-                return Ok(Event::AssistantToolUse {
+                events.push(Event::AssistantToolUse {
                     tool_name,
                     input_summary,
                 });
@@ -76,10 +95,13 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Event, ParseE
         }
     }
 
-    Err(ParseError::malformed(
-        "assistant content had no text or tool_use block",
-        raw,
-    ))
+    if events.is_empty() {
+        return Err(ParseError::malformed(
+            "assistant content had no text or tool_use block",
+            raw,
+        ));
+    }
+    Ok(events)
 }
 
 fn parse_user(value: &serde_json::Value, raw: &str) -> Result<Event, ParseError> {
