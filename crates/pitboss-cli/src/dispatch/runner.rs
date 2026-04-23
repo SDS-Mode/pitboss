@@ -849,40 +849,69 @@ pub fn install_approval_ttl_watcher(state: Arc<crate::dispatch::state::DispatchS
 }
 
 async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
+    // Root layer first.
+    expire_layer_approvals(state, &state.root).await;
+
+    // Then every sub-lead layer. Acquiring the outer `subleads` read lock
+    // first and each inner `approval_queue` lock in a fresh per-iteration
+    // scope matches the project-wide lock ordering rule (see DispatchState
+    // docs) and avoids holding both kinds of locks across await points.
+    let subleads = state.subleads.read().await;
+    for sub_layer in subleads.values() {
+        expire_layer_approvals(state, sub_layer).await;
+    }
+}
+
+async fn expire_layer_approvals(
+    state: &Arc<crate::dispatch::state::DispatchState>,
+    layer: &Arc<crate::dispatch::layer::LayerState>,
+) {
+    use crate::dispatch::state::ApprovalResponse;
     use crate::mcp::approval::ApprovalFallback;
 
     let now = chrono::Utc::now();
-    let mut queue = state.root.approval_queue.lock().await;
-    let to_resolve: Vec<_> = queue
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, a)| {
-            // Only process if TTL is set (None means never expires)
-            if let Some(ttl_secs) = a.ttl_secs {
-                let age = (now - a.created_at).num_seconds() as u64;
-                // Check if expired and not a Block fallback
-                if age > ttl_secs {
-                    let fallback = a.fallback.unwrap_or(ApprovalFallback::Block);
-                    if !matches!(fallback, ApprovalFallback::Block) {
-                        return Some((idx, a.request_id.clone(), fallback));
-                    }
-                }
-            }
-            None
-        })
-        .collect();
+    let mut queue = layer.approval_queue.lock().await;
 
-    // Remove expired in reverse so indices stay valid
-    for (idx, request_id, fallback) in to_resolve.into_iter().rev() {
-        queue.remove(idx);
+    let mut i = 0;
+    let mut expired = Vec::new();
+    while i < queue.len() {
+        let expired_now = match queue[i].ttl_secs {
+            Some(ttl_secs) => {
+                let age = (now - queue[i].created_at).num_seconds() as u64;
+                let fallback = queue[i].fallback.unwrap_or(ApprovalFallback::Block);
+                age > ttl_secs && !matches!(fallback, ApprovalFallback::Block)
+            }
+            None => false,
+        };
+        if expired_now {
+            expired.push(queue.remove(i).expect("index in range"));
+        } else {
+            i += 1;
+        }
+    }
+    drop(queue);
+
+    for entry in expired {
+        let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+        let approved = matches!(fallback, ApprovalFallback::AutoApprove);
         tracing::info!(
-            request_id = %request_id,
+            request_id = %entry.request_id,
+            task_id = %entry.task_id,
             fallback = ?fallback,
+            approved,
             "approval TTL expired, applying fallback"
         );
-        // Note: The response_tx was already consumed when the approval was enqueued.
-        // The actual response handling would be implemented when integrating with
-        // the request_approval flow to capture and send back responses.
+        let response = ApprovalResponse {
+            approved,
+            comment: Some("TTL expired".to_string()),
+            edited_summary: None,
+            reason: Some(format!("TTL expired: fallback={fallback:?}")),
+        };
+        state
+            .record_last_approval_response(&entry.task_id, approved)
+            .await;
+        // Best-effort: responder may have been dropped if the caller gave up.
+        let _ = entry.responder.send(response);
     }
 }
 

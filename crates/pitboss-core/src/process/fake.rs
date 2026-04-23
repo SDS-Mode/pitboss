@@ -81,6 +81,10 @@ struct FakeChild {
     stdout: Option<Pin<Box<DuplexStream>>>,
     stderr: Option<Pin<Box<DuplexStream>>>,
     exit_rx: Option<oneshot::Receiver<i32>>,
+    /// Populated if `try_wait` observed a ready exit code before `wait`
+    /// was called, so `wait` still returns the correct status instead of
+    /// the -1 fallback.
+    cached_exit_code: Option<i32>,
     kill_tx: Option<oneshot::Sender<()>>,
     pid: u32,
 }
@@ -93,7 +97,31 @@ impl ChildProcess for FakeChild {
     fn take_stderr(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + Unpin>>> {
         self.stderr.take().map(|s| s as _)
     }
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        if let Some(code) = self.cached_exit_code {
+            return Ok(Some(exit_status_from_code(code)));
+        }
+        if let Some(rx) = self.exit_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(code) => {
+                    self.cached_exit_code = Some(code);
+                    self.exit_rx = None;
+                    Ok(Some(exit_status_from_code(code)))
+                }
+                Err(oneshot::error::TryRecvError::Empty) => Ok(None),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.exit_rx = None;
+                    Ok(Some(exit_status_from_code(-1)))
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
     async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        if let Some(code) = self.cached_exit_code.take() {
+            return Ok(exit_status_from_code(code));
+        }
         let code = if let Some(rx) = self.exit_rx.take() {
             rx.await.unwrap_or(-1)
         } else {
@@ -166,6 +194,7 @@ impl ProcessSpawner for FakeSpawner {
             stdout: Some(Box::pin(stdout_r)),
             stderr: Some(Box::pin(stderr_r)),
             exit_rx: Some(exit_rx),
+            cached_exit_code: None,
             kill_tx: Some(kill_tx),
             pid: 1,
         }))

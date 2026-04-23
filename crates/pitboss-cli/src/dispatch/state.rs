@@ -136,13 +136,10 @@ pub struct LastApprovalResponse {
 /// Returned by `DispatchState::approval_driven_termination`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalTerminationKind {
-    /// Last approval returned `{approved: false}` from an operator action
-    /// or a `[[approval_policy]]` `auto_reject` rule.
+    /// Last approval returned `{approved: false}` from an operator action,
+    /// a `[[approval_policy]]` `auto_reject` rule, or a TTL fallback of
+    /// `auto_reject`.
     Rejected,
-    // Future: TimedOut variant when queue-TTL fallback is wired through to
-    // an actual {approved: false} response (today's expire_approvals removes
-    // the entry without responding, so the actor sees a bridge timeout
-    // rather than a clean rejection — that's a separate fix).
 }
 
 #[derive(Default, Clone, Debug)]
