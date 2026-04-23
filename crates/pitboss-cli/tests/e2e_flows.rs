@@ -418,9 +418,10 @@ async fn e2e_lead_cancels_worker_mid_flight() {
 
     assert_eq!(outcome.exit_code, Some(0), "exit non-zero: {outcome:?}");
 
-    // Give the backgrounded worker a moment to finalize as Cancelled after
-    // receiving the terminate signal from cancel_worker.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Give the backgrounded worker time to finalize as Cancelled.
+    // cancel_worker sends SIGTERM → fake-claude exits → SessionHandle records
+    // Done(Cancelled). Under CI load this takes longer than 200ms.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Worker should now be Cancelled.
     let workers = state.workers.read().await;

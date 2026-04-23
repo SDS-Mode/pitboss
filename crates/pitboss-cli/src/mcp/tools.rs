@@ -993,11 +993,11 @@ fn worker_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        // Permission authority is pitboss (see runner::lead_spawn_args doc
-        // for the full rationale). Without this flag, headless workers
-        // silently stall on bash-with-`$VAR`, write-outside-cwd, and
-        // every other claude-side gate that has no `-p`-mode answer.
+        // Permission authority is pitboss (see runner::lead_spawn_args doc).
         "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see runner::lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
     // Workers always get the shared-store MCP tools in their allowlist when
     // an mcp-config is supplied, alongside their user-declared tools. Without
@@ -2062,6 +2062,31 @@ mod tests {
     use super::*;
     use crate::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
     use std::sync::Arc;
+
+    #[test]
+    fn worker_spawn_args_has_plugin_isolation_flags() {
+        // Parallel to the runner-side
+        // `every_spawn_variant_has_plugin_isolation_flags` test.
+        // worker_spawn_args is emitted from this module, so it needs its
+        // own canary for task #67 (plugin isolation). Without both flags,
+        // the operator's superpowers / other `~/.claude/` plugins bleed
+        // into worker claude subprocesses and cause the Skill-trap bug.
+        use std::path::PathBuf;
+        let argv = worker_spawn_args(
+            "p",
+            "claude-haiku-4-5",
+            &["Read".to_string()],
+            Some(&PathBuf::from("/tmp/cfg.json")),
+        );
+        assert!(
+            argv.iter().any(|a| a == "--strict-mcp-config"),
+            "worker_spawn_args missing --strict-mcp-config: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "--disable-slash-commands"),
+            "worker_spawn_args missing --disable-slash-commands: {argv:?}"
+        );
+    }
 
     async fn test_state() -> Arc<DispatchState> {
         test_state_with_budget(5.0).await
