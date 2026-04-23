@@ -88,9 +88,12 @@ pub fn watch(
             }
 
             let snapshot = build_snapshot(&run_dir, focused_id.as_deref());
-            // If the receiver is gone (app quit), exit thread.
-            if snapshot_tx.try_send(snapshot).is_err() {
-                break;
+            // Full channel means the UI is temporarily behind (e.g. a blocking
+            // render tick). Drop this snapshot — the next tick will publish
+            // a fresh one. Only a disconnected receiver ends the watcher.
+            match snapshot_tx.try_send(snapshot) {
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => break,
             }
 
             // Wait up to POLL_INTERVAL_MS for the next tick, OR wake early

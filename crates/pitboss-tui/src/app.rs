@@ -194,7 +194,15 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
         }
 
         // --- Snapshot from watcher (non-blocking) ---
-        if let Ok(snapshot) = snapshot_rx.try_recv() {
+        // Drain: if multiple snapshots queued up while the main loop was
+        // busy (e.g. a slow render tick), keep the most recent and drop the
+        // stale ones. This also prevents the 4-capacity channel from
+        // staying full and tripping the watcher's backpressure path.
+        let mut latest_snapshot: Option<AppSnapshot> = None;
+        while let Ok(snapshot) = snapshot_rx.try_recv() {
+            latest_snapshot = Some(snapshot);
+        }
+        if let Some(snapshot) = latest_snapshot {
             state.apply_snapshot(snapshot);
             // If we're in snap-in mode and at the bottom, keep the view
             // scrolled to the last line as new log lines arrive.
