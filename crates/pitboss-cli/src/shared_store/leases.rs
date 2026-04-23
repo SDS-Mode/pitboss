@@ -110,10 +110,7 @@ impl LeaseRegistry {
 
     /// Release every lease currently held by the given actor. Returns
     /// `(released, evicted_by_ttl)`.
-    pub async fn release_all_for_actor(
-        &self,
-        actor_id: &str,
-    ) -> (Vec<String>, Vec<String>) {
+    pub async fn release_all_for_actor(&self, actor_id: &str) -> (Vec<String>, Vec<String>) {
         let mut map = self.inner.lock().await;
         let evicted = Self::prune_expired(&mut map);
         let to_remove: Vec<String> = map

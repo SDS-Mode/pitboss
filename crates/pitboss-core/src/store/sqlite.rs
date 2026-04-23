@@ -546,7 +546,9 @@ impl SessionStore for SqliteStore {
         let started_at = meta.started_at.to_rfc3339();
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .execute(
                     "INSERT OR REPLACE INTO runs \
@@ -641,7 +643,9 @@ impl SessionStore for SqliteStore {
         let was_interrupted = i64::from(summary.was_interrupted);
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let rows = guard
                 .execute(
                     "UPDATE runs \
@@ -672,7 +676,9 @@ impl SessionStore for SqliteStore {
         let conn = Arc::clone(&self.inner);
 
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             load_run_blocking(&guard, run_id)
         })
         .await
