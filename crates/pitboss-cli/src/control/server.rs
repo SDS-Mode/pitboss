@@ -376,13 +376,32 @@ async fn dispatch_op(
             }
         }
         ControlOp::CancelRun => {
-            // SIGCONT any frozen workers first — see CancelWorker above
-            // for the rationale. Also iterates every per-worker cancel
-            // token before flipping the run-level flag (run-level cancel
-            // is only observed by the lead's SessionHandle).
+            // Cascade cancel across the whole dispatch tree:
+            //   root lead   → state.cancel           (terminal)
+            //   root workers → state.worker_cancels  (per-worker tokens)
+            //   sub-leads   → sub_layer.cancel       (bridged to the
+            //                                          sub-lead's claude
+            //                                          proc_cancel at
+            //                                          sublead.rs:566)
+            //   sub-lead-owned workers → sub_layer.worker_cancels
+            //
+            // First phase: DRAIN the root cancel. This flips
+            // `state.cancel.is_draining()` to true, which
+            // `spawn_sublead_session` checks synchronously at sublead.rs
+            // :339 — any sublead spawn racing this handler sees the drain
+            // and self-cancels before its claude subprocess starts. Must
+            // precede the cascade iteration below, otherwise a sublead
+            // that appears in state.subleads between our snapshot and
+            // state.cancel.terminate() would slip through.
+            state.cancel.drain();
+
+            // SIGCONT any frozen workers (root + every sublead) so they
+            // respond to the subsequent terminate. Frozen via SIGSTOP
+            // can't act on a cancel token until SIGCONT'd. Mirrors the
+            // CancelWorker handler's behavior; now cascades to all layers.
             {
-                let workers = state.workers.read().await;
                 let pids = state.worker_pids.read().await;
+                let workers = state.workers.read().await;
                 for (id, w) in workers.iter() {
                     if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
                         let pid = pids
@@ -394,13 +413,54 @@ async fn dispatch_op(
                         }
                     }
                 }
+                drop(workers);
+                let subleads = state.subleads.read().await;
+                for sub_layer in subleads.values() {
+                    let sub_workers = sub_layer.workers.read().await;
+                    for (id, w) in sub_workers.iter() {
+                        if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
+                            let pid = pids
+                                .get(id)
+                                .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                                .unwrap_or(0);
+                            if pid > 0 {
+                                let _ = crate::dispatch::signals::resume_stopped(pid);
+                            }
+                        }
+                    }
+                }
             }
+
+            // Root-layer worker tokens.
             {
                 let cancels = state.worker_cancels.read().await;
                 for tok in cancels.values() {
                     tok.terminate();
                 }
             }
+
+            // Sub-lead layer cancels + each sub-lead's own workers.
+            // Terminating sub_layer.cancel cascades to the sub-lead's
+            // claude subprocess (via the tree_cancel → proc_cancel bridge
+            // installed in sublead.rs:566). We also explicitly iterate
+            // the sub-lead's worker_cancels because those workers have
+            // their own sibling tokens that aren't bridged to the
+            // sub-lead's cancel.
+            {
+                let subleads = state.subleads.read().await;
+                for sub_layer in subleads.values() {
+                    let sub_cancels = sub_layer.worker_cancels.read().await;
+                    for tok in sub_cancels.values() {
+                        tok.terminate();
+                    }
+                    drop(sub_cancels);
+                    sub_layer.cancel.terminate();
+                }
+            }
+
+            // Root cancel, last — the lead's SessionHandle observes this
+            // via `await_terminate()` and sends SIGTERM → SIGKILL to the
+            // root claude subprocess.
             state.cancel.terminate();
             ControlEvent::OpAcked {
                 op: "cancel_run".into(),
@@ -1079,6 +1139,133 @@ mod tests {
                 if op == "cancel_worker" && tid == "w-1"
         ));
         assert!(worker_token.is_terminated());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn cancel_run_op_cascades_to_sublead_layers() {
+        // Regression coverage for task #60: CancelRun used to fire only
+        // root.cancel + state.worker_cancels. Sub-lead claude
+        // subprocesses, plus any workers the sub-lead had spawned,
+        // stayed alive — their cancel tokens live on the sub-layer,
+        // not on root. Observable pre-fix: operator hits cancel, root
+        // lead dies, `ps aux | grep claude` shows orphans for up to
+        // lead_timeout_secs per sub-lead. Cascade must reach:
+        //   - sub_layer.cancel (bridged to the sub-lead's claude proc
+        //     via sublead.rs:566)
+        //   - every token in sub_layer.worker_cancels
+        //
+        // Also: root.cancel.drain() must fire BEFORE the iteration so
+        // any sub-lead being spawned synchronously (racing the cancel)
+        // sees is_draining()=true and self-cancels at sublead.rs:339.
+        use crate::dispatch::layer::LayerState;
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        // Build a sub-layer with its own cancel + two worker tokens.
+        let sub_cancel = pitboss_core::session::CancelToken::new();
+        let sub_w1 = pitboss_core::session::CancelToken::new();
+        let sub_w2 = pitboss_core::session::CancelToken::new();
+        let sub_manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::Never,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(50.0),
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+        };
+        let sub_layer = std::sync::Arc::new(LayerState::new(
+            run_id,
+            sub_manifest,
+            state.store.clone(),
+            sub_cancel.clone(),
+            "sublead-test".into(),
+            state.spawner.clone(),
+            std::path::PathBuf::from("/bin/true"),
+            state.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            dir.path().join(run_id.to_string()),
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+        sub_layer
+            .worker_cancels
+            .write()
+            .await
+            .insert("sub-w-1".into(), sub_w1.clone());
+        sub_layer
+            .worker_cancels
+            .write()
+            .await
+            .insert("sub-w-2".into(), sub_w2.clone());
+        state
+            .subleads
+            .write()
+            .await
+            .insert("sublead-test".into(), sub_layer.clone());
+
+        let sock = dir.path().join("cancel-run-sublead.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"cancel_run\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "cancel_run"
+        ));
+        assert!(
+            state.cancel.is_draining(),
+            "root cancel must be draining so racing sublead spawns self-cancel"
+        );
+        assert!(state.cancel.is_terminated(), "root cancel terminates last");
+        assert!(
+            sub_cancel.is_terminated(),
+            "sub-layer cancel must be terminated so the sub-lead's claude proc dies"
+        );
+        assert!(
+            sub_w1.is_terminated(),
+            "sub-lead-owned worker 1 token must be terminated"
+        );
+        assert!(
+            sub_w2.is_terminated(),
+            "sub-lead-owned worker 2 token must be terminated"
+        );
         drop(handle);
     }
 
