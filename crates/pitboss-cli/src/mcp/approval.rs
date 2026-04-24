@@ -146,6 +146,9 @@ impl ApprovalBridge {
                 crate::dispatch::state::BridgeEntry {
                     responder: tx,
                     task_id: task_id.clone(),
+                    summary: summary.clone(),
+                    plan: plan.clone(),
+                    kind,
                     ttl_secs,
                     fallback,
                     created_at: chrono::Utc::now(),
