@@ -1,6 +1,24 @@
 # Compatibility
 
-Pitboss makes specific backward-compatibility guarantees at each version boundary. This page summarizes the current compatibility posture for operators upgrading to or running v0.6.
+Pitboss makes specific backward-compatibility guarantees at each version boundary.
+
+## v0.8.0 — correctness hardening and new capabilities
+
+### Backward compatible with v0.7
+
+v0.8 is backward-compatible with v0.7 manifests and tooling with one caveat:
+
+- **Manifests**: All v0.7 manifests run unchanged. The new `[container]` and `permission_routing` fields are optional; their absence preserves v0.7 behavior. `permission_routing = "path_b"` is explicitly rejected with an error until the follow-on stabilization lands (see issues #92–#94).
+- **Wire format**: `ApprovalResponse` gains `from_ttl: bool` (default `false`). Existing consumers parsing approval responses see no change. `summary.json` and `summary.jsonl` gain `ApprovalTimedOut` as a `status` string value alongside existing `ApprovalRejected` and `Success`.
+- **Control protocol**: `ControlEvent::Hello` now includes `policy_rules` (skipped when empty). `ControlOp::UpdatePolicy` is a new op; v0.7 TUI clients that don't send it work unchanged.
+- **`approval_bridge` internal type change**: `BridgeEntry` replaces the bare `Sender<ApprovalResponse>` in the bridge map. Entirely internal; no wire or on-disk format change.
+- **`DispatchState` Deref removed**: This is an internal Rust type. Operators writing custom pitboss forks or extensions that compiled against pitboss-cli as a library will need to update call sites from `state.<field>` to `state.root.<field>`.
+
+### Nothing removed in v0.8
+
+No tools, manifest fields, CLI subcommands, or TUI behaviors were removed in v0.8. `pitboss container-dispatch` and `pitboss status` are additive.
+
+---
 
 ## v0.6.0 — depth-2 sub-leads
 

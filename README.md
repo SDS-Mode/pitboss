@@ -16,23 +16,18 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.7.0** is the headless-mode hardening release. A new
-`ghcr.io/sds-mode/pitboss-with-claude` container variant bundles a
-pinned Claude Code CLI so you can run pitboss without installing
-claude on the host — consume OAuth via a `~/.claude` bind mount. The
-Path A permission default (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` on every
-spawned claude subprocess) closes the silent "7-second success"
-failure mode where sub-leads apologized for not having permission and
-exited cleanly with no output. Approval-driven terminations are now
-distinguished from real success via new `ApprovalRejected` and
-`ApprovalTimedOut` terminal states. `spawn_sublead` gains optional
-`env` and `tools` parameters (matching `spawn_worker`). A dispatch-time
-warning fires on stderr when approval gates are configured without a
-TTY. `pitboss agents-md` prints the embedded reference doc; container
-images also carry `/usr/share/doc/pitboss/AGENTS.md`. CI elapsed time
-drops 62 min → 5 min via native arm64 runners (no QEMU). See
-`CHANGELOG.md` for the full per-version history and `AGENTS.md` for
-the MCP tool reference, keybindings, and manifest schema.
+**v0.8.0** is the correctness hardening and new-capabilities release.
+All 34 medium- and high-severity bugs catalogued since v0.7 are resolved.
+New subcommands: `pitboss container-dispatch` (run dispatch inside a
+Docker/Podman container with declarative bind mounts) and `pitboss status`
+(snapshot task table for any run, in-flight or finalized). The TUI gains a
+live policy editor (`P`) for editing `[[approval_policy]]` rules without
+restarting. Approval TTL is now fully wired end-to-end — `ApprovalTimedOut`
+correctly fires even when a TUI was connected during the approval window.
+`DispatchState` no longer implements `Deref` — layer misrouting is now a
+compile error. Per-sub-tree cancel cascade closes the second-Ctrl-C gap for
+sub-lead workers. See `CHANGELOG.md` for the full per-version history and
+`AGENTS.md` for the MCP tool reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency

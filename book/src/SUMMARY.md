@@ -19,6 +19,7 @@
 - [Approval policy reference](./operator-guide/approval-policy-reference.md)
 - [Leases & coordination](./operator-guide/leases.md)
 - [TUI](./operator-guide/tui.md)
+- [Container dispatch](./operator-guide/container-dispatch.md)
 - [Notifications](./operator-guide/notifications.md)
 - [Running with docker-compose](./operator-guide/docker-compose.md)
 - [Using Claude in a container](./operator-guide/using-claude-in-container.md)

@@ -7,6 +7,104 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-04-24
+
+The correctness hardening and new-capabilities release. Closes all 34 medium-
+and high-severity issues catalogued in the v0.8 audit cycle, ships three new
+subcommands (`container-dispatch`, `status`, and the TUI live policy editor),
+and completes the approval pipeline with full TTL coverage across both the
+queue and bridge paths.
+
+### Added
+
+- **`pitboss container-dispatch <manifest.toml>`** — assembles and execs a
+  Docker/Podman run command from a `[container]` section in the manifest.
+  Auto-injects `~/.claude` (OAuth auth) and the run artifact directory as
+  bind mounts. Operators declare project/reference mounts via
+  `[[container.mount]]`. UID alignment is handled automatically: rootless
+  podman gets `--userns=keep-id`; Docker gets `-u uid:gid` when needed. Use
+  `--dry-run` to print the assembled command without launching. The manifest
+  `[container]` section is stripped before being mounted into the container
+  so older image binaries don't reject the field.
+
+  ```toml
+  [container]
+  runtime = "podman"   # optional; auto-detected
+  workdir = "/project"
+
+  [[container.mount]]
+  host      = "~/projects/myproject"
+  container = "/project"
+  readonly  = false
+  ```
+
+- **`pitboss status <run-id> [--json]`** — prints a formatted task table for
+  any run (in-flight or finalized). Reads `summary.jsonl` (live) or
+  `summary.json` (finalized). Columns: task ID, status glyph, duration, start
+  time, exit code, and totals. `--json` flag emits structured JSON for
+  scripting. Run ID supports the same prefix matching as `attach`.
+
+- **TUI live policy editor** — press `P` in Normal mode to open a centered
+  overlay showing the current `[[approval_policy]]` rules. Navigate with
+  `j`/`k`, cycle an action with Space/Enter (`auto_approve` → `auto_reject` →
+  `block`), add a rule with `n`, delete with `d`, save and apply with `s`/F2,
+  cancel with Esc. Saving sends `ControlOp::UpdatePolicy` to the dispatcher
+  which re-installs the `PolicyMatcher` live — no restart required.
+
+- **`ApprovalTimedOut` terminal status wired end-to-end** — approval requests
+  now carry `ttl_secs` and `fallback` through `BridgeEntry` into the bridge
+  map, so the TTL watcher fires the correct fallback (`auto_reject` /
+  `auto_approve`) regardless of whether the entry is in the queue or has
+  already been drained to a connected TUI. Tasks that exit because an
+  approval TTL fired are now correctly classified as `ApprovalTimedOut`
+  rather than generic `Failed` or `Success`. `from_ttl: bool` on
+  `ApprovalResponse` distinguishes TTL-driven responses from operator
+  actions for downstream reclassification.
+
+- **Sub-lead resume** — `pitboss resume` now persists sub-lead session IDs
+  to `subleads.jsonl` at termination and reads them back at resume time,
+  populating `/resume/subleads` in the shared store. The root lead can
+  discover prior sub-lead sessions and reconnect without re-spawning.
+
+- **`permission_routing` manifest field** — `[lead] permission_routing =
+  "path_a"` (default) or `"path_b"`. Path A is the current behavior
+  (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypass). Path B will route claude's
+  built-in permission gate through pitboss's approval queue. Path B is
+  explicitly gated with a validation error until the follow-on
+  stabilization PRs land; see issues #92–#94 for tracking.
+
+### Changed
+
+- **`DispatchState` no longer implements `Deref<Target = LayerState>`.**
+  All handlers now reach the root layer via `state.root.<field>`. Handlers
+  that formerly used the Deref implicitly (routing to root silently) now
+  fail to compile, making cross-layer misrouting a compile-time error
+  rather than a runtime data corruption hazard. 270+ call sites migrated.
+
+- **Per-sub-tree cancel cascade** — a second Ctrl-C now cascades `terminate()`
+  to every sub-lead layer and its workers via dedicated per-sub-tree
+  cancel watchers (`install_sublead_cancel_watcher`). Previously only
+  `drain()` cascaded; workers under cancelled sub-leads would run to their
+  timeout.
+
+- **`BridgeEntry` carries TTL metadata in `approval_bridge`** — the bridge map
+  (`approval_bridge`) now stores `BridgeEntry { responder, task_id, ttl_secs,
+  fallback, created_at }` instead of a bare `Sender`. The TTL watcher scans
+  both `approval_queue` and `approval_bridge` so TTL coverage is preserved
+  even after a TUI connects and drains the queue to the bridge. Without this
+  fix, an operator who opened the TUI and left without responding would bypass
+  the TTL fallback entirely.
+
+- **Approval counter attribution fixed** — `approvals_requested`, `_approved`,
+  and `_rejected` in `worker_counters` are now credited to the actual
+  caller's `task_id` rather than always routing to the root `lead_id`.
+  Per-actor `TaskRecord` approval counts now reflect reality.
+
+- **Slack sink: Block Kit layout + mrkdwn escaping** — the Slack notification
+  sink now sends structured Block Kit payloads (header + section blocks) instead
+  of plain-text envelope serialization. Untrusted fields are backslash-escaped
+  via `escape_slack_mrkdwn()`, mirroring the existing Discord sink hardening.
+
 ### Breaking changes
 
 - **Notification webhook URLs: `${VAR}` substitution now requires the
@@ -1243,7 +1341,12 @@ published. Superseded by 0.5.3.
   SIGINT terminates.
 - Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
 
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/SDS-Mode/pitboss/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/SDS-Mode/pitboss/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/SDS-Mode/pitboss/compare/v0.5.5...v0.6.0
+[0.5.5]: https://github.com/SDS-Mode/pitboss/compare/v0.5.3...v0.5.5
+[0.5.3]: https://github.com/SDS-Mode/pitboss/compare/v0.5.0...v0.5.3
 [0.5.0]: https://github.com/SDS-Mode/pitboss/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/SDS-Mode/pitboss/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/SDS-Mode/pitboss/compare/v0.4.2...v0.4.3

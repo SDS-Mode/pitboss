@@ -95,12 +95,16 @@ Rules are evaluated first-match-wins in declaration order. A request that doesn'
 | `"auto_reject"` | Immediately reject. |
 | `"block"` | Force operator review regardless of run-level `approval_policy`. |
 
-## Approval TTL and fallback (v0.6+)
+## Approval TTL and fallback (v0.6+, fully wired in v0.8)
 
 Each approval request can carry an optional TTL:
 
-- `timeout_secs` — the lead can pass a timeout on its `request_approval` call.
+- `timeout_secs` — the lead passes a timeout on its `request_approval` call.
 - `fallback` — if the approval ages past its TTL without an operator response, the fallback fires (`auto_reject`, `auto_approve`, or `block`). Prevents an unreachable operator from permanently stalling the tree.
+
+In v0.8+, TTL coverage is complete regardless of TUI state. When a TUI connects and drains queued approvals into the bridge, the TTL metadata travels with each entry via `BridgeEntry`. The TTL watcher scans both the queue and the bridge on every 250ms tick. An approval that was pending when the operator opened the TUI — and left without acting — will still receive the declared fallback on time.
+
+Tasks whose approval TTL fires are classified as `ApprovalTimedOut` in `summary.json` and `pitboss status`. This is distinct from `ApprovalRejected` (operator explicitly rejected) and `Success`.
 
 ## TUI approval pane
 

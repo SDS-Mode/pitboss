@@ -11,6 +11,7 @@ Language models are stochastic. A well-run pit is not.
 | **Flat dispatch** | Declare N tasks up front; pitboss runs them in parallel under a concurrency cap. Each task runs in its own git worktree on its own branch. |
 | **Hierarchical dispatch** | Declare one lead; the lead observes the situation and dynamically spawns workers via MCP tools, under budget and worker-cap guardrails you set. |
 | **Depth-2 sub-leads** | *(v0.6+)* A root lead may spawn sub-leads, each with its own envelope and isolated coordination layer. Useful for multi-phase projects that each need their own context. |
+| **Container dispatch** | *(v0.8+)* `pitboss container-dispatch` runs dispatch inside a Docker/Podman container with declarative bind mounts — project directory, reference material, `~/.claude` auth. |
 | **Operator control** | Cancel, pause, freeze, or reprompt workers live. Gate actions on operator approval. The TUI shows everything in real time. |
 | **Structured artifacts** | Every run produces per-task logs, token usage, session ids, and a `summary.json`. Nothing disappears when the terminal closes. |
 
@@ -25,6 +26,6 @@ Language models are stochastic. A well-run pit is not.
 
 ## Current version
 
-**v0.7.0** — headless-mode hardening. Bundled-claude container variant (`ghcr.io/sds-mode/pitboss-with-claude`), `CLAUDE_CODE_ENTRYPOINT=sdk-ts` permission default (closes the "silent 7-second success" sub-lead failure), `ApprovalRejected`/`ApprovalTimedOut` terminal states, `spawn_sublead` gains optional `env` + `tools` parameters, dispatch-time TTY warning when approval gates are configured without an operator surface, `pitboss agents-md` subcommand + `/usr/share/doc/pitboss/AGENTS.md` in container images, native multi-arch CI (62 min → 5 min), GHA action bumps for Node 24 compatibility.
+**v0.8.0** — correctness hardening and new capabilities. All 34 medium/high-severity issues from the post-v0.7 audit resolved. New subcommands: `pitboss container-dispatch` (declarative bind-mount container dispatch), `pitboss status` (task snapshot table). TUI live policy editor (`P`). Full `ApprovalTimedOut` TTL wiring via `BridgeEntry`. `DispatchState` Deref removed — layer misrouting is now a compile error. Per-sub-tree cancel cascade. Sub-lead resume. Slack Block Kit notifications.
 
 See [Changelog](./reference/changelog.md) for the full version history.

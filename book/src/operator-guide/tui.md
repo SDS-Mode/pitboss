@@ -89,6 +89,32 @@ In the approval modal:
 | Right-click inside Detail | Exit back to grid |
 | Scroll wheel inside Detail | Scroll log 5 rows/tick |
 
+## Live policy editor (v0.8+)
+
+Press `P` in Normal mode to open the policy editor overlay. It shows the current `[[approval_policy]]` rules with their actions.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` / arrows | Navigate the rule list |
+| `Space` / `Enter` | Cycle the action (`auto_approve` → `auto_reject` → `block`) |
+| `n` | Add a new rule |
+| `d` | Delete the selected rule |
+| `s` / `F2` | Save and apply live (sends `UpdatePolicy` to the dispatcher) |
+| `Esc` | Cancel without saving |
+
+Changes take effect immediately without restarting dispatch.
+
+## `pitboss status` — headless run snapshot (v0.8+)
+
+For a quick table of task records without the full TUI:
+
+```bash
+pitboss status <run-id>          # formatted table
+pitboss status <run-id> --json   # JSON output for scripting
+```
+
+Run ID supports prefix matching identical to `attach`. Works on in-flight runs (reads `summary.jsonl`) and finalized runs (reads `summary.json`).
+
 ## `pitboss attach` — single-worker follow mode
 
 For a terminal-only follow view on one worker without the full TUI:

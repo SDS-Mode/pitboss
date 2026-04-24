@@ -110,6 +110,48 @@ Rules are evaluated in pure Rust — deterministic, fast, never LLM-evaluated.
 
 ---
 
+## `[container]` — container dispatch (v0.8+)
+
+Enables `pitboss container-dispatch`. When present, task and lead `directory`
+fields are container-side paths (host-filesystem existence is not checked at
+validation time).
+
+```toml
+[container]
+image   = "ghcr.io/sds-mode/pitboss-with-claude:latest"  # optional
+runtime = "auto"     # "docker", "podman", or "auto"
+workdir = "/project" # optional; defaults to first mount's container path
+
+[[container.mount]]
+host      = "~/projects/myapp"
+container = "/project"
+readonly  = false
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | string | Container image. Default: `ghcr.io/sds-mode/pitboss-with-claude:latest`. |
+| `runtime` | string | `"docker"`, `"podman"`, or `"auto"` (prefers podman when available). |
+| `extra_args` | string[] | Extra args inserted verbatim before the image name in the `run` invocation. |
+| `workdir` | path | Working directory inside the container. Defaults to the first mount's container path, or `/home/pitboss`. |
+| `[[container.mount]]` | array | Bind mount entries. |
+| `mount.host` | path | Absolute host path. Tilde (`~`) is expanded. |
+| `mount.container` | path | Absolute path inside the container. |
+| `mount.readonly` | bool | Mount read-only. Default: `false`. |
+
+Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory. See [Container dispatch](./container-dispatch.md) for the full guide.
+
+## `[lead].permission_routing` (v0.8+)
+
+Controls how claude's built-in permission gate is handled:
+
+| Value | Behavior |
+|-------|----------|
+| `"path_a"` | Default. Sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` — pitboss is the sole permission authority via `approval_policy` and the TUI. |
+| `"path_b"` | Routes claude's permission gate through pitboss's `permission_prompt` MCP tool. Not yet stable — rejected at validation time; see issues #92–#94. |
+
+---
+
 ## Annotated example
 
 The [pitboss.example.toml](https://github.com/SDS-Mode/pitboss/blob/main/pitboss.example.toml) in the repository root has every field annotated with usage notes. It is a good starting point for new manifests.
