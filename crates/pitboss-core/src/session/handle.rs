@@ -8,7 +8,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-use crate::parser::{parse_line, Event, TokenUsage};
+use crate::parser::{parse_line_all, Event, TokenUsage};
 use crate::process::{ProcessSpawner, SpawnCmd};
 
 use super::{CancelToken, SessionOutcome, SessionState};
@@ -78,6 +78,7 @@ impl SessionHandle {
     /// stdout.
     #[allow(clippy::too_many_lines)]
     pub async fn run_to_completion(self, cancel: CancelToken, timeout: Duration) -> SessionOutcome {
+        const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
         let _ = self.task_id; // kept for future logging
         let started_at = Utc::now();
 
@@ -153,15 +154,28 @@ impl SessionHandle {
             None
         };
 
-        let terminate_fut = cancel.await_terminate();
-        tokio::pin!(terminate_fut);
+        // Shortcut: if the child already exited before we reached this
+        // point (e.g. very fast subprocess, or a CancelToken that was
+        // pre-terminated before the session even entered the select), take
+        // that exit directly. Without this check the select below —
+        // especially with `biased` — can classify a cleanly-finished child
+        // as `Terminated`, discarding the exit code, token usage and
+        // claude_session_id.
+        let end_reason = if let Ok(Some(status)) = child.try_wait() {
+            EndReason::Exited(Some(status))
+        } else {
+            let terminate_fut = cancel.await_terminate();
+            tokio::pin!(terminate_fut);
 
-        // Primary race: child exit, terminate signal, or overall timeout.
-        let end_reason = tokio::select! {
-            biased;
-            () = &mut terminate_fut => EndReason::Terminated,
-            () = tokio::time::sleep(timeout) => EndReason::TimedOut,
-            status = child.wait() => EndReason::Exited(status.ok()),
+            // Primary race: child exit, terminate signal, or overall timeout.
+            // No `biased` — if both the child's exit and terminate are ready in
+            // the same poll, fair selection avoids systematically preferring
+            // cancellation over a clean completion.
+            tokio::select! {
+                () = &mut terminate_fut => EndReason::Terminated,
+                () = tokio::time::sleep(timeout) => EndReason::TimedOut,
+                status = child.wait() => EndReason::Exited(status.ok()),
+            }
         };
 
         // If we need to stop the child, send SIGTERM and wait up to TERMINATE_GRACE.
@@ -185,10 +199,25 @@ impl SessionHandle {
             }
         };
 
-        // Let stream_task + stderr_task wrap up briefly (they see EOF when child's pipes close).
-        let _ = tokio::time::timeout(Duration::from_secs(1), stream_task).await;
+        // Let the stream + stderr drain tasks finish. Stdout/stderr EOF is
+        // guaranteed once the child is reaped, so we can wait generously
+        // — a premature timeout here would throw away the final
+        // Event::Result (which carries token usage, cost, and the claude
+        // session id) and misclassify the task as `Failed { "no result
+        // event" }`. A multi-second ceiling is kept as a safety net so a
+        // hung log writer can't wedge the dispatcher indefinitely.
+        if tokio::time::timeout(STREAM_DRAIN_TIMEOUT, stream_task)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "stream drain exceeded {}s after child exit; final Event::Result \
+                 may be lost",
+                STREAM_DRAIN_TIMEOUT.as_secs()
+            );
+        }
         if let Some(t) = stderr_task {
-            let _ = tokio::time::timeout(Duration::from_secs(1), t).await;
+            let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, t).await;
         }
 
         let exit_code = exit_status
@@ -255,37 +284,42 @@ async fn stream_loop(
                     let _ = w.write_all(line.as_bytes()).await;
                     let _ = w.write_all(b"\n").await;
                 }
-                match parse_line(line.as_bytes()) {
-                    Ok(Event::AssistantText { text }) => {
-                        let mut a = accum.lock().await;
-                        // Prefer the longest nontrivial assistant text as the preview.
-                        // Rationale: claude often appends a short confirmation
-                        // ("Done.", "OK") after the real output; taking the last text
-                        // buries the real content. A length-keyed winner avoids that.
-                        let trimmed_len = text.trim().len();
-                        let current_len = a
-                            .last_text
-                            .as_deref()
-                            .map_or(0, |t| t.trim_end_matches('…').trim().len());
-                        if trimmed_len >= current_len {
-                            a.last_text = Some(truncate_preview(&text));
+                let Ok(events) = parse_line_all(line.as_bytes()) else {
+                    continue;
+                };
+                for ev in events {
+                    match ev {
+                        Event::AssistantText { text } => {
+                            let mut a = accum.lock().await;
+                            // Prefer the longest nontrivial assistant text as the preview.
+                            // Rationale: claude often appends a short confirmation
+                            // ("Done.", "OK") after the real output; taking the last text
+                            // buries the real content. A length-keyed winner avoids that.
+                            let trimmed_len = text.trim().len();
+                            let current_len = a
+                                .last_text
+                                .as_deref()
+                                .map_or(0, |t| t.trim_end_matches('…').trim().len());
+                            if trimmed_len >= current_len {
+                                a.last_text = Some(truncate_preview(&text));
+                            }
                         }
-                    }
-                    Ok(Event::Result {
-                        session_id: sid,
-                        usage: u,
-                        ..
-                    }) => {
-                        let mut a = accum.lock().await;
-                        if let Some(tx) = &session_id_tx {
-                            // Best-effort: if receiver is closed or full, drop the send.
-                            let _ = tx.try_send(sid.clone());
+                        Event::Result {
+                            session_id: sid,
+                            usage: u,
+                            ..
+                        } => {
+                            let mut a = accum.lock().await;
+                            if let Some(tx) = &session_id_tx {
+                                // Best-effort: if receiver is closed or full, drop the send.
+                                let _ = tx.try_send(sid.clone());
+                            }
+                            a.session_id = Some(sid);
+                            a.usage.add(&u);
+                            a.saw_result = true;
                         }
-                        a.session_id = Some(sid);
-                        a.usage.add(&u);
-                        a.saw_result = true;
+                        _ => {}
                     }
-                    Ok(_) | Err(_) => {}
                 }
             }
             Ok(None) | Err(_) => return,

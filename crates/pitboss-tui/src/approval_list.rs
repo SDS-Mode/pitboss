@@ -52,10 +52,12 @@ mod tests {
 
     fn mk_item(path: &str, summary: &str) -> ApprovalListItem {
         ApprovalListItem {
-            id: uuid::Uuid::now_v7(),
+            id: format!("req-{}", uuid::Uuid::now_v7()),
             actor_path: path.into(),
-            category: "tool_use".into(),
+            category: "action".into(),
             summary: summary.into(),
+            plan: None,
+            kind: pitboss_cli::control::protocol::ApprovalKind::Action,
             created_at: chrono::Utc::now(),
         }
     }
@@ -82,6 +84,6 @@ mod tests {
         let line = s.line_for(&mk_item("root→S1", "destructive op"));
         assert!(line.contains("root→S1"));
         assert!(line.contains("destructive op"));
-        assert!(line.contains("tool_use"));
+        assert!(line.contains("action"));
     }
 }

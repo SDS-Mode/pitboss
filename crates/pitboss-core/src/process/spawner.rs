@@ -24,6 +24,9 @@ pub trait ChildProcess: Send {
     fn take_stdout(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + Unpin>>>;
     /// Take stderr (consuming — may only be called once).
     fn take_stderr(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + Unpin>>>;
+    /// Non-blocking check: return `Ok(Some(status))` if the child has
+    /// already exited, `Ok(None)` if it's still running.
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>>;
     /// Wait for the child to exit. Must be called exactly once.
     async fn wait(&mut self) -> std::io::Result<ExitStatus>;
     /// Send SIGTERM (best effort).

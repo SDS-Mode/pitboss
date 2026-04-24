@@ -33,6 +33,10 @@ impl ChildProcess for TokioChild {
         self.inner.stderr.take().map(|s| Box::pin(s) as _)
     }
 
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.inner.try_wait()
+    }
+
     async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.inner.wait().await
     }

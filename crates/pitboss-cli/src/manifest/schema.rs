@@ -217,6 +217,7 @@ pub struct SingleLeadManifest {
 /// Defaults to a "no-op" state so existing manifests without this block
 /// continue to work identically.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LeadSpec {
     pub prompt: Option<String>,
     pub model: Option<String>,
@@ -252,11 +253,31 @@ pub struct LeadSpec {
     /// v0.6: optional defaults applied when `spawn_sublead` omits a param.
     #[serde(default)]
     pub sublead_defaults: Option<SubleadDefaultsSpec>,
+
+    // ── Tolerated-but-unused fields ────────────────────────────────────
+    //
+    // These belong on `[run]`, not `[lead]`, and have been silently
+    // dropped when placed on `[lead]` in manifests since the field was
+    // introduced. `deny_unknown_fields` (#67) would reject them as
+    // typos; listing them explicitly here preserves the historical
+    // accept-and-ignore behavior for existing manifests (e.g. the
+    // dogfood smoke-test set and sublead_flows tests) without
+    // compromising the typo guard for unrelated fields.
+    //
+    // Behavior: these values are parsed then discarded. The authoritative
+    // copies live on `[run]` and are what the dispatcher actually reads.
+    #[serde(default, rename = "budget_usd")]
+    pub _legacy_budget_usd: Option<f64>,
+    #[serde(default, rename = "max_workers")]
+    pub _legacy_max_workers: Option<u32>,
+    #[serde(default, rename = "lead_timeout_secs")]
+    pub _legacy_lead_timeout_secs: Option<u64>,
 }
 
 /// v0.6: optional `[lead.sublead_defaults]` block that supplies fallback values
 /// for `spawn_sublead` when the caller omits them.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SubleadDefaultsSpec {
     pub budget_usd: Option<f64>,
     pub max_workers: Option<u32>,

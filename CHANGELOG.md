@@ -29,6 +29,30 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **`--dangerously-skip-permissions` is now passed to every spawned
+  claude (lead, sub-lead, worker).** Operators must read this entry.
+  Pitboss is the sole permission authority for orchestrated claude
+  subprocesses — see the v0.7 doc on `CLAUDE_CODE_ENTRYPOINT=sdk-ts`
+  for the original "single permission authority" rationale. The flag
+  extends that decision from MCP tools (which `sdk-ts` already
+  bypassed) to every other claude-side gate: filesystem reads/writes
+  outside cwd, bash with `$VAR` expansion, bash with `&&`. Without
+  the flag, headless dispatch silently stalls on these gates with no
+  operator-visible cause — the smoke test exposed this as empty
+  registries, null kv reads, and "no deliverable files written"
+  despite both subleads reporting `outcome=success`. Pitboss's own
+  approval surface (`approval_policy`, `[[approval_policy]]` rules,
+  TUI modal) replaces what claude's gate would have caught. The flag
+  is set unconditionally and is NOT env-overridable; operators who
+  need claude's own gate fully back should drive claude CLI
+  interactively, not via pitboss headless dispatch. **Trust
+  boundary**: anything you wouldn't run in your own claude session
+  under `--dangerously-skip-permissions` should not be in a pitboss
+  manifest. Operator-supplied prompts have full filesystem + shell
+  access at `[lead].directory`. Treat manifests as production code.
+  Locked in by regression tests — every spawn variant
+  (lead, lead-resume, sublead, sublead-resume, worker) is asserted
+  to carry the flag.
 - **SSRF / secret-exfiltration hardening on `[[notification]]` sinks.**
   See "Breaking changes" above for URL scheme / host and env-var
   substitution restrictions.
@@ -68,6 +92,132 @@ This project uses [Semantic Versioning](https://semver.org/).
   does, and `deny_unknown_fields` is on so the next silent-drop bug
   fails loud at parse time. The `[default]` (singular, common typo
   for `[defaults]`) is now rejected with an actionable parse error.
+- **TUI approval modal stranded requests on `Esc`.** Hitting `Esc` to
+  dismiss an approval popup transitioned the TUI to normal mode without
+  sending any response, leaving the request pending server-side — the
+  run stayed blocked, the modal was gone, and pressing `a` to "retrieve"
+  the approval opened an empty list because `ApprovalRequest` events
+  were never populating `approval_list.items` in the first place (the
+  queue pane shipped for v0.6 but was only ever wired up in tests).
+  Operators reasonably concluded the TUI was hung and had no way to
+  proceed. Fixed: `ApprovalRequest` events now push an item into the
+  approval queue in addition to opening the modal (de-duplicated by
+  request_id to survive event replays on server restart); `Esc` from
+  any modal sub-mode drops the operator into the approval-list pane
+  with the dismissed item selected; `send_approve` removes items from
+  the queue on decision (clamping `selected_idx` when the last item
+  goes); re-opening a queued request preserves the `plan` payload and
+  `kind` discriminator so dismissed `propose_plan` approvals still
+  render as "PRE-FLIGHT PLAN" with structured plan view on re-open.
+  Modal title updated from the misleading `Esc=cancel` to `Esc=dismiss
+  (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
+  changed from `uuid::Uuid` to `String` to match the server's
+  `req-<uuid>` wire format.
+- **`wait_actor` / `wait_for_worker` blocked indefinitely on
+  sub-lead-spawned workers because completion fired the wrong
+  broadcast.** Each `LayerState` carries its own `done_tx`; worker
+  termination called `layer.done_tx.send(task_id)` — for a
+  sub-lead-spawned worker that's the SUBLEAD's broadcast, not
+  root's. `wait_for_actor_internal` always subscribes via
+  `state.root.done_tx`, so the parent sub-lead's `wait_actor` on
+  its own worker missed the completion entirely and blocked until
+  the timeout (or the sub-lead's `lead_timeout_secs` SIGTERM'd it).
+  Smoke-test evidence: workers completed in ~10s, sub-leads timed
+  out at the 180s mark with `MCP error -32000: Connection closed`
+  on the wait_actor reply (the connection died when the sub-lead
+  was killed, not because the wait itself errored). Fixed by
+  fanning worker termination broadcasts to root's `done_tx` in
+  addition to the worker's own layer — applied at both the normal
+  exit path and the SpawnFailed early-exit path.
+- **`wait_for_actor_internal` had a subscribe-after-check race.**
+  Fast-path Done check + existence check ran before
+  `state.done_tx.subscribe()`; a completion that landed in the
+  microsecond gap was missed and the wait blocked until timeout.
+  In v0.5/v0.6 this was unreachable for sub-leads (which got
+  `unknown actor_id` before the cross-layer-lookup fix in d134289),
+  but the same fix exposed the race. Subscribe FIRST, then re-check
+  — guarantees no completion is lost regardless of how short the
+  worker is.
+- **Sub-lead-spawned workers SpawnFailed at `/tmp` when no
+  `directory` arg was passed.** `derive_sublead_manifest` clears
+  `lead` on the sub-manifest, and `handle_spawn_worker`'s fallback
+  chain only consulted `target_layer.manifest.lead.directory` before
+  defaulting to `/tmp`. Sub-lead callers therefore landed on `/tmp`
+  whenever they didn't supply an explicit directory — git worktree
+  creation then failed loudly with `"not inside a git work-tree:
+  /tmp"` and the worker was marked SpawnFailed. The failure was
+  visible in `summary.jsonl` but **not** in the sub-lead's
+  `wait_for_worker` reply (which sees the SpawnFailed task record
+  but doesn't surface the cwd that caused it), so a sub-lead's only
+  signal was a worker that never produced output — easy to misread
+  as a model-side problem. Fixed by extending the fallback chain
+  through the **root lead's** directory before falling back to
+  `/tmp`. Same fix applied to `tools`, `timeout_secs`, and
+  `use_worktree` resolution so sub-lead workers honor the operator's
+  root-level defaults instead of either crashing on `/tmp` or
+  silently using a different `use_worktree` setting than root.
+- **Sub-lead-spawned workers looked "unknown" to every downstream
+  lookup.** `handle_list_workers`, `handle_worker_status`, and
+  `wait_for_actor_internal` (the engine behind `wait_actor` /
+  `wait_for_worker`) all read `state.workers` — which under the
+  DispatchState → LayerState Deref resolves to the root layer's
+  workers map. Workers spawned by a sub-lead are registered in the
+  sub-lead's `LayerState.workers` via `target_layer.workers.write()`
+  in `handle_spawn_worker`, so a sub-lead calling `spawn_worker` got
+  back a valid task_id but the very next `wait_actor` on that id
+  returned `MCP error -32600: unknown actor_id: worker-...` and
+  `list_workers` returned `[]`. Silent depth-2 break since v0.6 —
+  sub-leads cannot manage their own workers. Fixed by introducing
+  `find_worker_across_layers` that scans root + every active
+  sub-lead layer, and routing all four handlers through it.
+  Confirmed via the depth-2 smoke test: before the fix, the sublead
+  got "unknown actor_id" on every wait; after, the wait completes
+  against the correct layer's worker record.
+- **Workers spawned with an empty env — `[defaults.env]` never
+  reached them.** `run_worker` and `spawn_resume_worker` both built
+  their `SpawnCmd` with `env: Default::default()`, so manifest-level
+  env vars (e.g. `WORK_DIR`, `ARTIFACTS_DIR`) propagated lead → sublead
+  (after prior fixes) but dead-ended before hitting workers. Observable
+  symptom: a sublead asking a worker to write `"$WORK_DIR/file.md"`
+  resolved `$WORK_DIR` to empty and the worker's bash either errored
+  or wrote to an unexpected path. Same bug class as the sublead-env
+  regression; third occurrence of "env stops at layer N". Fixed by
+  re-using `compose_sublead_env` at both worker-spawn paths, seeding
+  from `layer.manifest.lead.env` (initial) / `state.manifest.lead.env`
+  (resume) so the same lead → sublead → worker env chain holds across
+  depth-2, pause/continue, and reprompt. `SpawnWorkerArgs` still has
+  no per-spawn `env` override — operator env stays at the manifest
+  level for now.
+- **Sub-leads couldn't read project files without a permission
+  prompt.** Every sub-lead's claude subprocess started with
+  `cwd = ~/.local/share/pitboss/runs/<run_id>/`, which put the operator's
+  project directory (and anything `[defaults.env]` pointed into it)
+  outside claude's cwd-rooted trust zone. Claude would prompt on every
+  read, and under `-p` headless mode the prompt is unanswerable —
+  sub-leads effectively couldn't see any project artifact. The v0.6
+  author's own comment flagged this as a placeholder ("sub-leads don't
+  get separate worktrees in v0.6 — revisit in future"). Fixed: sub-lead
+  cwd is now the root lead's manifest `directory` (not `lead_cwd` —
+  when the lead uses a worktree, sub-leads still cwd the canonical
+  project dir so they can't lose cwd mid-flight if the lead's worktree
+  is cleaned up, and they see committed project state rather than the
+  lead's in-flight edits). Applied at both initial spawn and the
+  kill+resume path.
+- **Sub-lead MCP bridge was silently broken since v0.6.** The CLI
+  `ActorRoleArg` enum defined only `Lead` and `Worker`, but
+  `build_sublead_mcp_config` wrote `--actor-role sublead` into every
+  sub-lead's mcp-config. When claude spawned the mcp-bridge subprocess
+  to talk to pitboss, clap rejected the argv (`invalid value 'sublead'
+  for '--actor-role'`), the bridge exited immediately, and claude
+  reported `pitboss: failed` in its init event — with zero pitboss MCP
+  tools registered for the sub-lead. Observable symptom: sub-leads
+  can't `kv_get`, `spawn_worker`, or any other pitboss tool; the lead
+  looks fine. The server-side `ALLOWED_ROLES` had always accepted
+  `sublead` (and `root_lead`); only the client-side argv parser was
+  rejecting valid traffic pitboss itself was emitting. Added `Sublead`
+  and `RootLead` variants, switched clap `rename_all` to `snake_case`
+  so `RootLead → root_lead`, and added a regression test pinning every
+  ActorRole variant to its server-side token.
 - **Root-lead `--allowedTools` was missing four real MCP tools, causing
   silent orchestration stalls.** `PITBOSS_MCP_TOOLS` omitted
   `wait_actor`, `propose_plan`, `run_lease_acquire`, and

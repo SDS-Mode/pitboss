@@ -274,6 +274,9 @@ fn resolve_run_dir(
     base_runs_dir: &std::path::Path,
     run_id_prefix: &str,
 ) -> Result<std::path::PathBuf> {
+    if run_id_prefix.is_empty() {
+        anyhow::bail!("run id prefix must not be empty");
+    }
     let entries = match std::fs::read_dir(base_runs_dir) {
         Ok(e) => e,
         Err(e) => {

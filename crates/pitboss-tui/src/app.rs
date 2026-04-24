@@ -42,48 +42,44 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     let (ctrl_events_tx, ctrl_events_rx) =
         std::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>();
 
-    // Resolve the control socket path from the run dir. Best-effort: if the
-    // uuid parse or socket open fails, the TUI continues in observe-only mode.
-    let control_client = match uuid::Uuid::parse_str(&state.run_id) {
-        Ok(uuid) => {
-            let socket_path = pitboss_cli::control::control_socket_path(uuid, &state.run_dir);
-            let (bridge_tx, mut bridge_rx) =
-                tokio::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>(64);
-            // Forward async → sync so the render loop can pull without tokio.
-            let forward_tx = ctrl_events_tx.clone();
-            runtime.spawn(async move {
-                while let Some(ev) = bridge_rx.recv().await {
-                    if forward_tx.send(ev).is_err() {
-                        break;
+    // Connect to the run's control socket. Extracted into a closure so the
+    // same path can be used on both initial startup and when the user
+    // switches runs — without a fresh client, control ops after SwitchRun
+    // would still target the old run's socket.
+    let connect_control = |state: &mut AppState| {
+        let client = match uuid::Uuid::parse_str(&state.run_id) {
+            Ok(uuid) => {
+                let socket_path = pitboss_cli::control::control_socket_path(uuid, &state.run_dir);
+                let (bridge_tx, mut bridge_rx) =
+                    tokio::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>(64);
+                let forward_tx = ctrl_events_tx.clone();
+                runtime.spawn(async move {
+                    while let Some(ev) = bridge_rx.recv().await {
+                        if forward_tx.send(ev).is_err() {
+                            break;
+                        }
                     }
-                }
-            });
-            let client = runtime
-                .block_on(crate::control::ControlClient::connect(
-                    socket_path,
-                    bridge_tx,
-                ))
-                .ok();
-            client.map(Arc::new)
-        }
-        Err(_) => None,
+                });
+                runtime
+                    .block_on(crate::control::ControlClient::connect(
+                        socket_path,
+                        bridge_tx,
+                    ))
+                    .ok()
+                    .map(Arc::new)
+            }
+            Err(_) => None,
+        };
+        state.control_connected = client.as_ref().is_some_and(|c| c.is_connected());
+        state.control_client = client;
+        state.runtime_handle = Some(runtime.handle().clone());
     };
-    state.control_connected = control_client.as_ref().is_some_and(|c| c.is_connected());
-    state.control_client = control_client;
-    // Stash a handle to THE runtime the ControlClient was built under.
-    // `send_op` callers must spawn on this handle — spinning up a fresh
-    // runtime per call (as the removed `futures_block_on` helper did)
-    // left the socket writer registered with a dead reactor and every
-    // kill/pause/reprompt op hung without error.
-    state.runtime_handle = Some(runtime.handle().clone());
-    // `runtime` owns the background reader + forward tasks and must be kept
-    // alive for the full event loop. It falls out of scope at the end of
-    // `run()`; the tasks are dropped cleanly then.
-    let _runtime = runtime;
-    // Our local handle to `ctrl_events_tx` is unused past this point — the
-    // forward task owns the only clone that matters. Dropping makes the
-    // receiver observe a closed channel once the forwarder exits.
-    drop(ctrl_events_tx);
+
+    connect_control(&mut state);
+    // `ctrl_events_tx` and `runtime` are both held by `connect_control`
+    // (the closure clones the sender and spawns tasks on the runtime). They
+    // have to stay alive for the full event loop so a SwitchRun can rebuild
+    // the control client. Both fall out of scope at the end of `run()`.
 
     // Mutable channel endpoints so we can swap them when switching runs.
     let (mut snapshot_rx, mut focus_tx) = spawn_watcher(run_dir);
@@ -129,6 +125,11 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             state.focus = 0;
                             state.run_list.clear();
                             state.mode = Mode::Normal;
+                            // Rebuild the control client against the new run's
+                            // socket; without this, post-switch control ops
+                            // (cancel/pause/approve/reprompt) keep targeting
+                            // the previous run.
+                            connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
                             continue;
@@ -157,8 +158,9 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                         Action::Quit => break,
                         Action::SwitchRun { run_dir, run_id } => {
                             // Same transition as the keyboard-driven
-                            // SwitchRun path above — restart the watcher
-                            // and reset run-local state.
+                            // SwitchRun path above — restart the watcher,
+                            // rebuild the control client, and reset
+                            // run-local state.
                             let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
@@ -168,6 +170,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             state.focus = 0;
                             state.run_list.clear();
                             state.mode = Mode::Normal;
+                            connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
                             continue;
@@ -194,7 +197,15 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
         }
 
         // --- Snapshot from watcher (non-blocking) ---
-        if let Ok(snapshot) = snapshot_rx.try_recv() {
+        // Drain: if multiple snapshots queued up while the main loop was
+        // busy (e.g. a slow render tick), keep the most recent and drop the
+        // stale ones. This also prevents the 4-capacity channel from
+        // staying full and tripping the watcher's backpressure path.
+        let mut latest_snapshot: Option<AppSnapshot> = None;
+        while let Ok(snapshot) = snapshot_rx.try_recv() {
+            latest_snapshot = Some(snapshot);
+        }
+        if let Some(snapshot) = latest_snapshot {
             state.apply_snapshot(snapshot);
             // If we're in snap-in mode and at the bottom, keep the view
             // scrolled to the last line as new log lines arrive.
@@ -318,12 +329,18 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
             }
             KeyCode::Enter => {
                 if let Some(item) = state.approval_list.current().cloned() {
+                    // Preserve plan + kind so a dismissed-and-reopened
+                    // `propose_plan` approval still shows its structured
+                    // plan view and its "PRE-FLIGHT PLAN" badge. Before
+                    // the list learned to carry those, re-opens lost the
+                    // payload and the operator got a less-informative
+                    // modal than the first presentation.
                     state.mode = Mode::ApprovalModal {
-                        request_id: item.id.to_string(),
+                        request_id: item.id.clone(),
                         task_id: item.actor_path.clone(),
                         summary: item.summary.clone(),
-                        plan: None,
-                        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+                        plan: item.plan.clone(),
+                        kind: item.kind,
                         sub_mode: crate::state::ApprovalSubMode::Overview,
                     };
                 }
@@ -530,6 +547,37 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
             plan,
             kind,
         } => {
+            // Push into the approval-list queue in addition to opening the
+            // modal. Without this, hitting Esc to dismiss the modal
+            // stranded the request: it stayed pending server-side but
+            // nothing in the TUI referenced it, so `'a'` opened an
+            // empty list pane and the operator had no retrieval path.
+            // De-dup by id so the same request never lands twice (can
+            // happen if a server restart replays events).
+            let actor_path = if task_id.is_empty() {
+                "root".to_string()
+            } else {
+                task_id.clone()
+            };
+            let category = match kind {
+                pitboss_cli::control::protocol::ApprovalKind::Plan => "plan",
+                pitboss_cli::control::protocol::ApprovalKind::Action => "action",
+            }
+            .to_string();
+            if !state.approval_list.items.iter().any(|i| i.id == request_id) {
+                state
+                    .approval_list
+                    .items
+                    .push_back(crate::state::ApprovalListItem {
+                        id: request_id.clone(),
+                        actor_path,
+                        category,
+                        summary: summary.clone(),
+                        plan: plan.clone(),
+                        kind,
+                        created_at: chrono::Utc::now(),
+                    });
+            }
             state.mode = Mode::ApprovalModal {
                 request_id,
                 task_id,
@@ -618,8 +666,21 @@ fn handle_prompt_reprompt(state: &mut AppState, code: KeyCode, modifiers: KeyMod
             state.mode = Mode::Normal;
             return Action::Continue;
         }
-        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
-            // Ctrl+Enter: submit.
+        // Submit the reprompt. Multiple accepted chords because most
+        // terminal emulators (konsole, gnome-terminal, default VTE-based
+        // terminals, default xterm/alacritty/tilix without CSI-u /
+        // kitty-keyboard) DON'T distinguish Ctrl+Enter from Enter —
+        // crossterm only sees `Enter` with no CTRL modifier, and we'd
+        // silently swallow the submission. F2 is unambiguous across
+        // every terminal I know of; Alt+Enter is reliably distinct in
+        // most terminals because the Alt/Meta modifier survives even
+        // when Ctrl doesn't. Kept Ctrl+Enter for the terminals that
+        // DO route it (kitty with keyboard protocol, wezterm, iTerm2).
+        KeyCode::F(2) | KeyCode::Enter
+            if matches!(code, KeyCode::F(2))
+                || modifiers.contains(KeyModifiers::CONTROL)
+                || modifiers.contains(KeyModifiers::ALT) =>
+        {
             if !draft.is_empty() {
                 spawn_control_op(
                     state,
@@ -715,7 +776,23 @@ fn handle_approval_overview(state: &mut AppState, code: KeyCode, ctx: ApprovalCt
                 sub_mode: ApprovalSubMode::Editing { draft },
             };
         }
-        KeyCode::Esc => state.mode = Mode::Normal,
+        KeyCode::Esc => {
+            // Dismiss the modal without responding. The request stays
+            // pending server-side and is discoverable via the approval-
+            // list pane we just dropped the user into. Previously Esc
+            // transitioned to `Mode::Normal` with grid focus and the
+            // queue was invisible — the request looked lost.
+            state.mode = Mode::Normal;
+            state.pane_focus = PaneFocus::ApprovalList;
+            if let Some(pos) = state
+                .approval_list
+                .items
+                .iter()
+                .position(|i| i.id == ctx.request_id)
+            {
+                state.approval_list.selected_idx = pos;
+            }
+        }
         _ => {}
     }
 }
@@ -735,7 +812,15 @@ fn handle_approval_draft(
 ) {
     use crate::state::ApprovalSubMode;
     match code {
-        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+        // Submit. Same multi-chord fallback as the reprompt modal — see
+        // handle_prompt_reprompt for the full rationale. Ctrl+Enter is
+        // often swallowed by VTE-based terminals; F2 and Alt+Enter
+        // survive.
+        KeyCode::F(2) | KeyCode::Enter
+            if matches!(code, KeyCode::F(2))
+                || modifiers.contains(KeyModifiers::CONTROL)
+                || modifiers.contains(KeyModifiers::ALT) =>
+        {
             if editing {
                 send_approve(state, &ctx.request_id, true, None, Some(draft));
             } else {
@@ -745,7 +830,20 @@ fn handle_approval_draft(
             return;
         }
         KeyCode::Esc => {
+            // Dismiss draft — request stays pending, visible in the
+            // approval list pane. Matches the Overview Esc behavior so
+            // the operator gets one consistent "escape" contract at
+            // every modal sub-mode.
             state.mode = Mode::Normal;
+            state.pane_focus = PaneFocus::ApprovalList;
+            if let Some(pos) = state
+                .approval_list
+                .items
+                .iter()
+                .position(|i| i.id == ctx.request_id)
+            {
+                state.approval_list.selected_idx = pos;
+            }
             return;
         }
         KeyCode::Char(c) => draft.push(c),
@@ -791,6 +889,25 @@ fn send_approve(
             reason,
         },
     );
+    // Drop from the approval-list queue optimistically — the server will
+    // ack the op before any subsequent ApprovalRequest with the same id
+    // could arrive, so a race that re-inserts a stale entry isn't
+    // reachable. Clamp `selected_idx` so an out-of-range index can't
+    // persist past the removal.
+    if let Some(pos) = state
+        .approval_list
+        .items
+        .iter()
+        .position(|i| i.id == request_id)
+    {
+        state.approval_list.items.remove(pos);
+    }
+    let len = state.approval_list.items.len();
+    if len == 0 {
+        state.approval_list.selected_idx = 0;
+    } else if state.approval_list.selected_idx >= len {
+        state.approval_list.selected_idx = len - 1;
+    }
 }
 
 // Fire-and-forget dispatch of a control op onto the runtime the
@@ -810,4 +927,82 @@ fn spawn_control_op(state: &AppState, op: pitboss_cli::control::protocol::Contro
     std::mem::drop(handle.spawn(async move {
         let _ = client.send_op(op).await;
     }));
+}
+
+#[cfg(test)]
+mod approval_queue_tests {
+    //! Regression coverage for the "Esc on approval modal strands the
+    //! request" papercut. Before these fixes, `ApprovalRequest` events
+    //! only opened the modal — they never populated the approval list
+    //! pane — so the moment the operator dismissed the modal the
+    //! request became unreachable from the TUI.
+
+    use super::*;
+    use pitboss_cli::control::protocol::{ApprovalKind, ControlEvent};
+
+    fn fresh_state() -> AppState {
+        AppState::new(PathBuf::from("/tmp/t"), "test-run".to_string())
+    }
+
+    fn mk_approval_event(request_id: &str, task_id: &str) -> ControlEvent {
+        ControlEvent::ApprovalRequest {
+            request_id: request_id.to_string(),
+            task_id: task_id.to_string(),
+            summary: "destructive rm -rf /".to_string(),
+            plan: None,
+            kind: ApprovalKind::Action,
+        }
+    }
+
+    #[test]
+    fn approval_request_populates_list_and_opens_modal() {
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.items[0].id, "req-A");
+        assert!(matches!(state.mode, Mode::ApprovalModal { .. }));
+    }
+
+    #[test]
+    fn empty_task_id_renders_as_root_actor_path() {
+        // Server emits `task_id: ""` for the root lead. An empty
+        // actor_path would render weirdly in the list line ("[]" prefix),
+        // so we substitute a stable label at event-receive time.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", ""));
+        assert_eq!(state.approval_list.items[0].actor_path, "root");
+    }
+
+    #[test]
+    fn duplicate_request_id_does_not_double_enqueue() {
+        // Server restarts may replay events; the queue must stay a set
+        // keyed on request_id or a single approval shows twice.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        assert_eq!(state.approval_list.items.len(), 1);
+    }
+
+    #[test]
+    fn send_approve_removes_matching_item_from_list() {
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
+        send_approve(&mut state, "req-A", true, None, None);
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.items[0].id, "req-B");
+        // selected_idx must stay in bounds after a removal.
+        assert!(state.approval_list.selected_idx < state.approval_list.items.len());
+    }
+
+    #[test]
+    fn send_approve_clamps_selected_idx_when_last_item_removed() {
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
+        state.approval_list.selected_idx = 1;
+        send_approve(&mut state, "req-B", false, None, None);
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.selected_idx, 0);
+    }
 }

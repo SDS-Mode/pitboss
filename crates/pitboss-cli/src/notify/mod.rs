@@ -204,7 +204,10 @@ impl NotificationRouter {
 }
 
 /// Try emitting 3 times with exponential backoff: 100ms, 300ms, 900ms.
-/// Returns Ok on first success; Err on final failure.
+/// Returns Ok on first success; Err on final failure. Non-retryable 4xx
+/// client errors (except 429) short-circuit without further attempts —
+/// they will fail identically every time and the delay just postpones the
+/// inevitable failure notification.
 async fn emit_with_retry(
     sink: &Arc<dyn NotificationSink>,
     env: &NotificationEnvelope,
@@ -213,6 +216,14 @@ async fn emit_with_retry(
     for (attempt, &delay_ms) in backoffs.iter().enumerate() {
         match sink.emit(env).await {
             Ok(()) => return Ok(()),
+            Err(e) if is_fatal(&e) => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    error = %e,
+                    "notification emit failed fatally, not retrying"
+                );
+                return Err(e);
+            }
             Err(e) if attempt < 2 => {
                 tracing::warn!(
                     attempt = attempt + 1,
@@ -231,8 +242,18 @@ async fn emit_with_retry(
 }
 
 /// Heuristic for determining if an error is fatal (should not retry).
-/// v0.4.1: always false — retry everything.
-fn is_fatal(_err: &anyhow::Error) -> bool {
+/// A 4xx response (except 429 Too Many Requests) means the request is
+/// malformed or unauthenticated — retrying doesn't help. Everything else
+/// (network errors, 5xx, unknown) remains retryable.
+fn is_fatal(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = reqwest_err.status() {
+                return status.is_client_error()
+                    && status != reqwest::StatusCode::TOO_MANY_REQUESTS;
+            }
+        }
+    }
     false
 }
 

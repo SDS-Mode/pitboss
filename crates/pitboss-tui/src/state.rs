@@ -88,15 +88,25 @@ pub enum PaneFocus {
 /// A single pending approval shown in the right-rail approval list pane.
 #[derive(Debug, Clone)]
 pub struct ApprovalListItem {
-    /// Opaque request id (forwarded to `ControlOp::Approve`).
-    pub id: uuid::Uuid,
+    /// Opaque request id (forwarded verbatim to `ControlOp::Approve`).
+    /// Server-generated format is `req-<uuidv7>`, so this is a string
+    /// rather than a parsed `Uuid` — no meaningful operation treats the
+    /// inner uuid as a uuid, only as a stable handle.
+    pub id: String,
     /// Human-readable path to the actor that raised the request
     /// (e.g. `"root"` or `"root→S1"`).
     pub actor_path: String,
-    /// Free-form category tag (e.g. `"tool_use"`, `"plan"`, …).
+    /// Free-form category tag (e.g. `"plan"`, `"action"`).
     pub category: String,
     /// One-line summary of the requested action.
     pub summary: String,
+    /// Optional typed plan payload carried by `propose_plan` requests.
+    /// None for `request_approval` calls. Preserved in the list so
+    /// re-opening a dismissed plan approval renders the structured
+    /// plan view (not just the summary).
+    pub plan: Option<pitboss_cli::control::protocol::ApprovalPlanWire>,
+    /// Discriminator for modal rendering (Plan vs Action badge).
+    pub kind: pitboss_cli::control::protocol::ApprovalKind,
     /// Wall-clock time when the request arrived.
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -640,19 +650,37 @@ impl AppState {
 /// Compute `git diff --stat HEAD` in the given directory. Walks up to
 /// find the enclosing git worktree (so passing in `<run-dir>/tasks/<id>/`
 /// works — git discovers the worktree via the parent hierarchy). Returns
-/// `None` if the shell-out fails or the directory isn't inside a worktree.
+/// `None` if the shell-out fails, the directory isn't inside a worktree,
+/// or the command exceeds the wall-clock timeout.
 ///
-/// Blocks the caller for ~20-50 ms. Only called once on detail-view entry;
-/// cached in `AppState.cached_git_diff` thereafter.
+/// Blocks the caller until git returns or `GIT_DIFF_TIMEOUT` elapses.
+/// Callers that run this on the event loop should wrap it in a background
+/// thread (see `AppState` for the polling pattern) — without that, a
+/// slow or contended `.git` freezes input handling.
+///
+/// `--no-optional-locks` avoids taking the index lock, so a concurrent
+/// `git commit` / `gc` can't contend with the TUI's read.
 pub(crate) fn compute_git_diff_summary(worktree: &std::path::Path) -> Option<GitDiffSummary> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .arg("diff")
-        .arg("--shortstat")
-        .arg("HEAD")
-        .output()
-        .ok()?;
+    const GIT_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worktree = worktree.to_path_buf();
+    std::thread::spawn(move || {
+        let output = std::process::Command::new("git")
+            .arg("--no-optional-locks")
+            .arg("-C")
+            .arg(&worktree)
+            .arg("diff")
+            .arg("--shortstat")
+            .arg("HEAD")
+            .output();
+        let _ = tx.send(output);
+    });
+
+    let Ok(Ok(output)) = rx.recv_timeout(GIT_DIFF_TIMEOUT) else {
+        return None;
+    };
+
     if !output.status.success() {
         return None;
     }

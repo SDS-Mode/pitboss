@@ -23,14 +23,22 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 /// Rationale: pitboss is the external permission authority (via
 /// `approval_policy`, `[[approval_policy]]` rules, and the TUI). Claude's
 /// own interactive permission gate is redundant under pitboss orchestration
-/// and causes silent 7-second-success failures in headless dispatch when no
-/// operator is present to approve each tool call.
+/// and causes silent stalls in headless dispatch when no operator is
+/// present to answer each prompt. The `sdk-ts` value tells claude "you're
+/// running under an SDK runtime that manages permissions externally."
 ///
-/// The `sdk-ts` value tells claude "you're running under an SDK runtime that
-/// manages permissions externally — don't prompt the TTY." Operators who want
-/// claude's own gate back for a specific actor can override via
-/// `[defaults.env]`, `[lead.env]`, `[[task]].env`, or the `env` field on
-/// `spawn_sublead`.
+/// **Companion flag**: every pitboss-spawned claude (lead, sub-lead, worker)
+/// also launches with `--dangerously-skip-permissions`. Together the env
+/// var and the flag close the full permission surface (MCP tools, file I/O,
+/// bash-with-`$VAR`, bash-with-`&&`). See `lead_spawn_args` for the
+/// detailed trust-model writeup.
+///
+/// Operators who want claude's own gate back for a specific actor can
+/// override `CLAUDE_CODE_ENTRYPOINT` via `[defaults.env]`, `[lead.env]`,
+/// `[[task]].env`, or the `env` field on `spawn_sublead` — but the
+/// `--dangerously-skip-permissions` CLI flag is set unconditionally and
+/// is not env-overridable. Operators who need the claude gate fully back
+/// should not use pitboss's headless dispatch.
 ///
 /// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
 /// for the deferred alternative (routing claude's gate through pitboss's
@@ -513,6 +521,34 @@ async fn execute_task(
     }
 }
 
+/// Claude CLI flags every pitboss-spawned subprocess gets for plugin /
+/// skill isolation. Without these, the operator's `~/.claude/`
+/// settings (skills, MCP servers, plugins, agents, hooks registered
+/// by the human's interactive claude setup) bleed into pitboss-
+/// spawned claude processes — observable during v2.1 dispatch testing
+/// as workers invoking `Skill{superpowers:brainstorming}` as their
+/// very first tool call, following the skill's "explore and ask
+/// questions first" rubric, and exiting without producing any
+/// content despite `Success exit=0`.
+///
+/// - `--strict-mcp-config` — only load MCP servers from the
+///   `--mcp-config` file we generate, ignore user-level MCP config
+/// - `--disable-slash-commands` — disable all skills (slash commands)
+///   registered at user level, including operator-installed plugins
+///   like `superpowers`. Pitboss MCP tools are unaffected (they come
+///   via `--mcp-config`, not the slash-command registry).
+///
+/// We don't use `--bare` even though it would be more thorough,
+/// because `--bare` forces `ANTHROPIC_API_KEY` auth and disables
+/// keychain reads — many operators auth via keychain/OAuth and would
+/// need explicit key management for pitboss runs.
+///
+/// Applied uniformly to `spawn_args` (flat tasks), `lead_spawn_args`,
+/// `lead_resume_spawn_args`, `sublead_spawn_args`, and
+/// `crate::mcp::tools::worker_spawn_args`. Any new spawn-args site
+/// MUST include the same two flags; there is a regression test
+/// (`every_spawn_variant_has_plugin_isolation_flags`) that asserts
+/// this.
 fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     // claude CLI requires --verbose when combining -p (print mode) with
     // --output-format stream-json. Without it, claude rejects the invocation
@@ -521,6 +557,11 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
     if !task.tools.is_empty() {
         args.push("--allowedTools".into());
@@ -613,6 +654,22 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
 /// answered in `-p` (non-interactive) mode, so we always pre-allow the six
 /// pitboss MCP tools here. User-specified `tools` (from defaults / per-lead)
 /// are merged in alongside the MCP set.
+///
+/// **Trust model — `--dangerously-skip-permissions`:** every pitboss-spawned
+/// claude (lead, sub-lead, worker) launches with this flag. Pitboss is the
+/// external permission authority via `[run].approval_policy`,
+/// `[[approval_policy]]` rules, and the TUI's approve/reject modal — see
+/// `apply_pitboss_env_defaults` for the rationale we already adopted for
+/// MCP tools (CLAUDE_CODE_ENTRYPOINT=sdk-ts). The flag extends that
+/// "single permission authority" design to the rest of claude's gates
+/// (filesystem reads/writes, bash with `$VAR` expansion, bash with `&&`).
+/// Without it, headless dispatch silently stalls: under `-p`, claude's own
+/// prompts have no UI to answer them, so `echo x >> "$WORK_DIR/file"`
+/// returns "Contains simple_expansion" and the orchestration plan
+/// collapses with no operator-visible cause. Operators who want claude's
+/// own gate back for a specific run should not use pitboss's headless
+/// dispatch — they should drive the claude CLI interactively. See
+/// CHANGELOG entry under v0.7.1 for the security note.
 pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
     mcp_config: &std::path::Path,
@@ -621,6 +678,12 @@ pub fn lead_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Pitboss is the permission authority — see fn doc comment.
+        "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation: prevent operator's ~/.claude/ plugins
+        // (skills, MCP servers, agents, hooks) from bleeding in.
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
@@ -667,6 +730,11 @@ pub fn lead_resume_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
     let mut allowed: Vec<String> = lead.tools.clone();
     for t in PITBOSS_MCP_TOOLS {
@@ -722,6 +790,11 @@ pub fn sublead_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
@@ -776,40 +849,69 @@ pub fn install_approval_ttl_watcher(state: Arc<crate::dispatch::state::DispatchS
 }
 
 async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
+    // Root layer first.
+    expire_layer_approvals(state, &state.root).await;
+
+    // Then every sub-lead layer. Acquiring the outer `subleads` read lock
+    // first and each inner `approval_queue` lock in a fresh per-iteration
+    // scope matches the project-wide lock ordering rule (see DispatchState
+    // docs) and avoids holding both kinds of locks across await points.
+    let subleads = state.subleads.read().await;
+    for sub_layer in subleads.values() {
+        expire_layer_approvals(state, sub_layer).await;
+    }
+}
+
+async fn expire_layer_approvals(
+    state: &Arc<crate::dispatch::state::DispatchState>,
+    layer: &Arc<crate::dispatch::layer::LayerState>,
+) {
+    use crate::dispatch::state::ApprovalResponse;
     use crate::mcp::approval::ApprovalFallback;
 
     let now = chrono::Utc::now();
-    let mut queue = state.root.approval_queue.lock().await;
-    let to_resolve: Vec<_> = queue
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, a)| {
-            // Only process if TTL is set (None means never expires)
-            if let Some(ttl_secs) = a.ttl_secs {
-                let age = (now - a.created_at).num_seconds() as u64;
-                // Check if expired and not a Block fallback
-                if age > ttl_secs {
-                    let fallback = a.fallback.unwrap_or(ApprovalFallback::Block);
-                    if !matches!(fallback, ApprovalFallback::Block) {
-                        return Some((idx, a.request_id.clone(), fallback));
-                    }
-                }
-            }
-            None
-        })
-        .collect();
+    let mut queue = layer.approval_queue.lock().await;
 
-    // Remove expired in reverse so indices stay valid
-    for (idx, request_id, fallback) in to_resolve.into_iter().rev() {
-        queue.remove(idx);
+    let mut i = 0;
+    let mut expired = Vec::new();
+    while i < queue.len() {
+        let expired_now = match queue[i].ttl_secs {
+            Some(ttl_secs) => {
+                let age = (now - queue[i].created_at).num_seconds() as u64;
+                let fallback = queue[i].fallback.unwrap_or(ApprovalFallback::Block);
+                age > ttl_secs && !matches!(fallback, ApprovalFallback::Block)
+            }
+            None => false,
+        };
+        if expired_now {
+            expired.push(queue.remove(i).expect("index in range"));
+        } else {
+            i += 1;
+        }
+    }
+    drop(queue);
+
+    for entry in expired {
+        let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+        let approved = matches!(fallback, ApprovalFallback::AutoApprove);
         tracing::info!(
-            request_id = %request_id,
+            request_id = %entry.request_id,
+            task_id = %entry.task_id,
             fallback = ?fallback,
+            approved,
             "approval TTL expired, applying fallback"
         );
-        // Note: The response_tx was already consumed when the approval was enqueued.
-        // The actual response handling would be implemented when integrating with
-        // the request_approval flow to capture and send back responses.
+        let response = ApprovalResponse {
+            approved,
+            comment: Some("TTL expired".to_string()),
+            edited_summary: None,
+            reason: Some(format!("TTL expired: fallback={fallback:?}")),
+        };
+        state
+            .record_last_approval_response(&entry.task_id, approved)
+            .await;
+        // Best-effort: responder may have been dropped if the caller gave up.
+        let _ = entry.responder.send(response);
     }
 }
 
@@ -1285,6 +1387,83 @@ mod tests {
             !args.iter().any(|a| a == "--resume"),
             "expected no --resume in args: {args:?}"
         );
+    }
+
+    #[test]
+    fn every_spawn_variant_has_all_isolation_flags() {
+        // Canary for all three hardening flags every pitboss-spawned claude
+        // must carry:
+        //   - `--dangerously-skip-permissions`: pitboss is the permission
+        //     authority; without this, headless dispatch silently stalls on
+        //     bash-with-`$VAR`, write-outside-cwd, etc.
+        //   - `--strict-mcp-config` + `--disable-slash-commands`: prevents
+        //     operator's ~/.claude/ plugins (skills, MCP servers, agents)
+        //     from bleeding into spawned subprocesses.
+        use crate::manifest::resolve::{ResolvedLead, ResolvedTask};
+        use std::path::PathBuf;
+
+        let task = ResolvedTask {
+            id: "t".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
+        };
+        let cfg = PathBuf::from("/tmp/cfg.json");
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            ("flat task", spawn_args(&task)),
+            ("lead", lead_spawn_args(&lead, &cfg)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt"),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None),
+            ),
+            (
+                "sublead_resume",
+                sublead_spawn_args("sl-id", "p", "m", &cfg, Some("sess"), None),
+            ),
+        ];
+        for (name, argv) in cases {
+            assert!(
+                argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+                "{name} spawn args missing --dangerously-skip-permissions: {argv:?}"
+            );
+            assert!(
+                argv.iter().any(|a| a == "--strict-mcp-config"),
+                "{name} spawn args missing --strict-mcp-config: {argv:?}"
+            );
+            assert!(
+                argv.iter().any(|a| a == "--disable-slash-commands"),
+                "{name} spawn args missing --disable-slash-commands: {argv:?}"
+            );
+        }
     }
 
     #[test]

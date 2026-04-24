@@ -431,13 +431,21 @@ pub async fn handle_spawn_worker(
     // semantics; for now treat None budget_usd on the target layer as
     // uncapped (no reservation placed, same as root-layer uncapped behavior).
     if let Some(budget) = target_layer.manifest.budget_usd {
-        let spent = *target_layer.spent_usd.lock().await;
-        let reserved = *target_layer.reserved_usd.lock().await;
         // Estimate this worker's cost using its intended model, as the median
         // of prior workers priced at their actual models (or a model-specific
         // fallback if no worker has completed yet).
         let estimate = estimate_new_worker_cost_for_layer(&target_layer, &worker_model).await;
+
+        // Hold `reserved_usd` across the whole compute/compare/add step so
+        // two concurrent spawn_workers can't both pass the budget check
+        // before either increments the reservation. Spent_usd is captured
+        // inside the same critical section to keep the arithmetic on a
+        // single consistent snapshot.
+        let mut reserved_guard = target_layer.reserved_usd.lock().await;
+        let spent = *target_layer.spent_usd.lock().await;
+        let reserved = *reserved_guard;
         if spent + reserved + estimate > budget {
+            drop(reserved_guard);
             if let Some(router) = target_layer.notification_router.clone() {
                 let envelope = crate::notify::NotificationEnvelope::new(
                     &state.run_id.to_string(),
@@ -457,7 +465,8 @@ pub async fn handle_spawn_worker(
             );
         }
         // Reserve against the target layer.
-        *target_layer.reserved_usd.lock().await += estimate;
+        *reserved_guard += estimate;
+        drop(reserved_guard);
         target_layer
             .worker_reservations
             .write()
@@ -508,19 +517,38 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), worker_model.clone());
 
-    // Resolve the worker's directory: args override -> lead.directory fallback.
+    // Resolve the worker's directory and worktree-use, falling back through:
+    //   1. `args.directory` / per-args overrides — operator's spawn_worker call
+    //   2. target_layer's lead — set for root-lead callers, NOT for sub-leads
+    //      (derive_sublead_manifest clears `lead` on the sub-manifest)
+    //   3. ROOT lead — always present in hierarchical runs and pinned to the
+    //      operator's project directory
+    //   4. /tmp — last-ditch fallback (git worktree creation will fail loudly,
+    //      which is the right outcome for a malformed run)
+    //
+    // Pre-fix, sub-lead-spawned workers without an explicit `directory` arg
+    // landed at /tmp because step 2 returned None and we skipped to step 4
+    // immediately. Worker spawn then SpawnFailed with "not inside a git
+    // work-tree: /tmp", visible in summary.jsonl but not in the sublead's
+    // wait_for_worker reply (which sees the SpawnFailed task record but
+    // doesn't surface the cwd that caused it). Smoke-test artifact:
+    // sublead-1's only worker SpawnFailed; sublead-2's first worker
+    // SpawnFailed and its second only succeeded because haiku retried with
+    // an explicit directory after seeing the failure.
+    let root_lead = state.root.manifest.lead.as_ref();
     let worker_dir: std::path::PathBuf = args
         .directory
         .as_ref()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
+        .or_else(|| {
             target_layer
                 .manifest
                 .lead
                 .as_ref()
                 .map(|l| l.directory.clone())
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        });
+        })
+        .or_else(|| root_lead.map(|l| l.directory.clone()))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     // Resolve tools, timeout: per-args override -> lead defaults -> fallback.
     // (worker_model was resolved above for the budget guard.)
@@ -528,13 +556,22 @@ pub async fn handle_spawn_worker(
         .tools
         .clone()
         .or_else(|| lead.map(|l| l.tools.clone()))
+        .or_else(|| root_lead.map(|l| l.tools.clone()))
         .unwrap_or_default();
     let worker_timeout_secs = args
         .timeout_secs
         .or_else(|| lead.map(|l| l.timeout_secs))
+        .or_else(|| root_lead.map(|l| l.timeout_secs))
         .unwrap_or(3600);
     let worker_branch = args.branch.clone();
-    let worker_use_worktree = lead.is_none_or(|l| l.use_worktree);
+    // Mirror the directory cascade: target lead → root lead → default(true).
+    // Without the root-lead step, sub-lead workers always made a worktree
+    // (lead.is_none_or → true) regardless of root's `use_worktree` setting,
+    // surprising operators who set `use_worktree = false` at the root level.
+    let worker_use_worktree = lead
+        .map(|l| l.use_worktree)
+        .or_else(|| root_lead.map(|l| l.use_worktree))
+        .unwrap_or(true);
 
     // Retrieve the per-worker cancel token we inserted above.
     let worker_cancel_bg = target_layer
@@ -654,7 +691,13 @@ async fn run_worker(
                     .write()
                     .await
                     .insert(task_id.clone(), WorkerState::Done(rec));
-                let _ = layer.done_tx.send(task_id);
+                // Fan out to root so cross-layer wait_actor subscribers wake
+                // even on early-exit paths like SpawnFailed. Same rationale
+                // as the normal-exit fan-out below.
+                let _ = layer.done_tx.send(task_id.clone());
+                if !std::sync::Arc::ptr_eq(&layer, &state.root) {
+                    let _ = state.root.done_tx.send(task_id);
+                }
                 return;
             }
         }
@@ -692,11 +735,43 @@ async fn run_worker(
         }
     };
 
+    // Worker env: inherit from the parent layer's resolved lead env (which
+    // already merges `[defaults.env]` + `[lead.env]`), then apply pitboss
+    // defaults to fill gaps like `CLAUDE_CODE_ENTRYPOINT=sdk-ts`. Matches
+    // the precedence used at sublead spawn time.
+    //
+    // Previous behavior was `env: Default::default()` (empty env). A
+    // manifest setting `[defaults.env.WORK_DIR] = "/project/out"` would
+    // reach the lead and sublead subprocesses but NOT workers — a
+    // sublead's bash call to `echo ... >> "$WORK_DIR/file"` would get an
+    // empty `WORK_DIR` and drop output to `/file`. Same bug class as the
+    // sublead-env regression fixed earlier; this closes the worker hole.
+    //
+    // `SpawnWorkerArgs` has no `env` field today, so the operator-env
+    // layer is an empty HashMap. If we ever add one, pass it here.
+    //
+    // Same target_layer.lead = None pitfall as the worker_dir cascade
+    // above: sub-leads have `lead` cleared on their derived manifest, so
+    // a sub-lead-spawned worker would otherwise get an empty env even
+    // though the operator set `[defaults.env]` at the manifest level.
+    // Fall back through the root lead (always populated, carries the
+    // merged [defaults.env] + [lead.env]) before defaulting to empty.
+    let lead_env_for_worker = layer
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.env.clone())
+        .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
+        .unwrap_or_default();
+    let worker_env = crate::dispatch::sublead::compose_sublead_env(
+        &lead_env_for_worker,
+        &std::collections::HashMap::new(),
+    );
     let cmd = SpawnCmd {
         program: layer.claude_binary.clone(),
         args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref()),
         cwd: cwd.clone(),
-        env: Default::default(),
+        env: worker_env,
     };
 
     let outcome = {
@@ -849,7 +924,18 @@ async fn run_worker(
     if released_count > 0 {
         tracing::info!(worker_id = %task_id, count = released_count, "auto-released run-global leases on worker termination");
     }
-    let _ = layer.done_tx.send(task_id);
+    // Broadcast termination on the worker's own layer AND on root.
+    // wait_for_actor_internal (the engine for wait_actor / wait_for_worker)
+    // always subscribes via state.root.done_tx — regardless of which layer
+    // the caller is in — so a sublead-spawned worker that only fired its
+    // own layer's done_tx would be invisible to its parent sub-lead's
+    // wait_actor (which subscribes to root). Fan out to root so every
+    // wait_actor caller, anywhere in the tree, wakes on every worker
+    // completion. Cheap; broadcast.send is O(subscribers).
+    let _ = layer.done_tx.send(task_id.clone());
+    if !std::sync::Arc::ptr_eq(&layer, &state.root) {
+        let _ = state.root.done_tx.send(task_id);
+    }
 }
 
 /// Remove `task_id`'s spawn-time reservation from `reserved_usd` on the
@@ -916,6 +1002,11 @@ fn worker_spawn_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // Permission authority is pitboss (see runner::lead_spawn_args doc).
+        "--dangerously-skip-permissions".into(),
+        // Plugin/skill isolation (see runner::lead_spawn_args doc).
+        "--strict-mcp-config".into(),
+        "--disable-slash-commands".into(),
     ];
     // Workers always get the shared-store MCP tools in their allowlist when
     // an mcp-config is supplied, alongside their user-declared tools. Without
@@ -1024,11 +1115,24 @@ pub async fn spawn_resume_worker(
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
 
+    // Resume path mirrors the initial spawn: inherit the parent lead's
+    // resolved env so `[defaults.env]` and `[lead.env]` survive a
+    // pause/continue or reprompt cycle.
+    let lead_env_for_resume = state
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.env.clone())
+        .unwrap_or_default();
+    let resume_env = crate::dispatch::sublead::compose_sublead_env(
+        &lead_env_for_resume,
+        &std::collections::HashMap::new(),
+    );
     let cmd = pitboss_core::process::SpawnCmd {
         program: state.claude_binary.clone(),
         args: spawn_args_v,
         cwd,
-        env: Default::default(),
+        env: resume_env,
     };
     let task_dir = state.run_subdir.join("tasks").join(&task_id);
     let _ = tokio::fs::create_dir_all(&task_dir).await;
@@ -1147,57 +1251,80 @@ pub(crate) fn initial_estimate_for(model: &str) -> f64 {
 }
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
-    let workers = state.workers.read().await;
+    // Collect from every layer (root + each active sub-lead). Previously
+    // this read only `state.workers` (= root via Deref), so sub-leads
+    // calling `list_workers` got an empty list even when they had their
+    // own workers active — the workers were registered in the sub-lead
+    // layer's own `workers` map by `handle_spawn_worker`'s
+    // `target_layer.workers.write()`.
+    //
+    // Lead id filtering: excludes the root lead id. Sub-lead ids aren't
+    // registered as workers so they don't need filtering here.
+    let mut summaries: Vec<WorkerSummary> = Vec::new();
     let prompts = state.worker_prompts.read().await;
-    workers
-        .iter()
-        .filter(|(id, _)| *id != &state.lead_id)
-        .map(|(id, w)| {
-            let (state_str, started_at) = match w {
-                WorkerState::Pending => ("Pending".to_string(), None),
-                WorkerState::Running { started_at, .. } => {
-                    ("Running".to_string(), Some(started_at.to_rfc3339()))
-                }
-                WorkerState::Paused { paused_at, .. } => {
-                    ("Paused".to_string(), Some(paused_at.to_rfc3339()))
-                }
-                WorkerState::Frozen { started_at, .. } => {
-                    ("Frozen".to_string(), Some(started_at.to_rfc3339()))
-                }
-                WorkerState::Done(rec) => (
-                    match rec.status {
-                        pitboss_core::store::TaskStatus::Success => "Completed",
-                        pitboss_core::store::TaskStatus::Failed => "Failed",
-                        pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
-                        pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
-                        pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
-                        pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
-                        pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
-                    }
-                    .to_string(),
-                    Some(rec.started_at.to_rfc3339()),
-                ),
-            };
-            let prompt_preview = prompts.get(id).cloned().unwrap_or_default();
-            WorkerSummary {
-                task_id: id.clone(),
-                state: state_str,
-                prompt_preview,
-                started_at,
+    let render = |id: &String, w: &WorkerState| -> WorkerSummary {
+        let (state_str, started_at) = match w {
+            WorkerState::Pending => ("Pending".to_string(), None),
+            WorkerState::Running { started_at, .. } => {
+                ("Running".to_string(), Some(started_at.to_rfc3339()))
             }
-        })
-        .collect()
+            WorkerState::Paused { paused_at, .. } => {
+                ("Paused".to_string(), Some(paused_at.to_rfc3339()))
+            }
+            WorkerState::Frozen { started_at, .. } => {
+                ("Frozen".to_string(), Some(started_at.to_rfc3339()))
+            }
+            WorkerState::Done(rec) => (
+                match rec.status {
+                    pitboss_core::store::TaskStatus::Success => "Completed",
+                    pitboss_core::store::TaskStatus::Failed => "Failed",
+                    pitboss_core::store::TaskStatus::TimedOut => "TimedOut",
+                    pitboss_core::store::TaskStatus::Cancelled => "Cancelled",
+                    pitboss_core::store::TaskStatus::SpawnFailed => "SpawnFailed",
+                    pitboss_core::store::TaskStatus::ApprovalRejected => "ApprovalRejected",
+                    pitboss_core::store::TaskStatus::ApprovalTimedOut => "ApprovalTimedOut",
+                }
+                .to_string(),
+                Some(rec.started_at.to_rfc3339()),
+            ),
+        };
+        WorkerSummary {
+            task_id: id.clone(),
+            state: state_str,
+            prompt_preview: prompts.get(id).cloned().unwrap_or_default(),
+            started_at,
+        }
+    };
+    for (id, w) in state.workers.read().await.iter() {
+        if id != &state.lead_id {
+            summaries.push(render(id, w));
+        }
+    }
+    let subleads = state.subleads.read().await;
+    for layer in subleads.values() {
+        for (id, w) in layer.workers.read().await.iter() {
+            // Sub-lead layers hold the sub-lead itself as a "worker" entry
+            // (the claude subprocess registered via workers.write() in
+            // finalize_sublead_spawn). Filter by layer.lead_id so the
+            // sub-lead doesn't show up as one of its own workers.
+            if id != &layer.lead_id {
+                summaries.push(render(id, w));
+            }
+        }
+    }
+    summaries
 }
 
 pub async fn handle_worker_status(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Result<WorkerStatus> {
-    let workers = state.workers.read().await;
-    let w = workers
-        .get(task_id)
+    // Scan all layers — same rationale as find_worker_across_layers:
+    // a sub-lead's own workers are registered in the sub-lead's layer.
+    let w = find_worker_across_layers(state, task_id)
+        .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
-    let (state_str, started_at, partial_usage, last_text_preview) = match w {
+    let (state_str, started_at, partial_usage, last_text_preview) = match &w {
         WorkerState::Pending => (
             "Pending".to_string(),
             None,
@@ -1739,18 +1866,59 @@ pub async fn handle_propose_plan(
     }
 }
 
+/// Look up a worker by task_id across the root layer AND every active
+/// sub-lead layer. Returns the first matching `WorkerState`.
+///
+/// Workers spawned by a sub-lead are registered in that sub-lead's
+/// `LayerState.workers`, not in root's. Before this helper existed the
+/// v0.6 MCP handlers all read `state.workers` (= root via Deref), so a
+/// sub-lead's own worker looked "unknown" to every downstream tool
+/// (`wait_for_worker`, `wait_actor`, `worker_status`, `list_workers`).
+/// Surfaced via the depth-2 smoke test: sub-lead calls `spawn_worker`,
+/// gets a task_id, then `wait_actor` on that id immediately returns
+/// `unknown actor_id: worker-...`.
+async fn find_worker_across_layers(
+    state: &Arc<DispatchState>,
+    task_id: &str,
+) -> Option<WorkerState> {
+    if let Some(w) = state.workers.read().await.get(task_id).cloned() {
+        return Some(w);
+    }
+    let subleads = state.subleads.read().await;
+    for layer in subleads.values() {
+        if let Some(w) = layer.workers.read().await.get(task_id).cloned() {
+            return Some(w);
+        }
+    }
+    None
+}
+
 async fn wait_for_actor_internal(
     state: &Arc<DispatchState>,
     actor_id: &str,
     timeout_secs: Option<u64>,
 ) -> Result<ActorTerminalRecord> {
+    // ── Subscribe FIRST so a completion that races the fast-path checks
+    //    is captured by the broadcast subscription. The original code
+    //    subscribed AFTER the fast-path + existence checks, which works
+    //    fine for root-lead callers (the worker can't complete in the
+    //    microseconds between the existence check and the subscribe in
+    //    practice) but exposed a real race once cross-layer worker
+    //    visibility (commit d134289) let sub-leads call wait_actor on
+    //    their own workers. Sub-lead callers' workers run very short
+    //    (smoke-test workers finished in 12s) and their wait_actor calls
+    //    are issued immediately after spawn_worker — giving the worker
+    //    time to complete before the sublead's wait subscribes. The
+    //    broadcast is missed and the wait blocks until either the
+    //    timeout fires or the sublead itself is killed by lead_timeout.
+    //    Subscribing first guarantees no completion is lost.
+    let mut rx = state.done_tx.subscribe();
+
     // ── Fast path: already Done ────────────────────────────────────────────────
-    // 1. Worker already Done?
-    {
-        let workers = state.workers.read().await;
-        if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-            return Ok(ActorTerminalRecord::Worker(rec.clone()));
-        }
+    // 1. Worker already Done? (scan all layers — the worker may be in a
+    //    sub-lead's layer, not root.)
+    if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, actor_id).await {
+        return Ok(ActorTerminalRecord::Worker(rec));
     }
     // 2. Sub-lead already terminated?
     {
@@ -1760,17 +1928,20 @@ async fn wait_for_actor_internal(
         }
     }
 
-    // 3. Is actor_id known at all (worker in any state OR active sub-lead)?
+    // 3. Is actor_id known at all (worker in any layer OR active sub-lead)?
     {
-        let workers = state.workers.read().await;
         let subleads = state.subleads.read().await;
-        if !workers.contains_key(actor_id) && !subleads.contains_key(actor_id) {
+        let is_sublead = subleads.contains_key(actor_id);
+        // Drop the subleads lock before scanning layers to avoid deadlock
+        // (find_worker_across_layers re-acquires it in read mode — RwLock
+        // permits multiple readers, but keep the surface tight).
+        drop(subleads);
+        let is_worker = find_worker_across_layers(state, actor_id).await.is_some();
+        if !is_worker && !is_sublead {
             bail!("unknown actor_id: {actor_id}");
         }
     }
 
-    // Subscribe to done events and wait.
-    let mut rx = state.done_tx.subscribe();
     let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
 
     loop {
@@ -1780,12 +1951,12 @@ async fn wait_for_actor_internal(
             Ok(Err(_)) => bail!("completion channel closed"),
             Ok(Ok(completed_id)) => {
                 if completed_id == actor_id {
-                    // Check workers first.
+                    // Check workers first (all layers — sub-lead-owned
+                    // workers aren't in root's workers map).
+                    if let Some(WorkerState::Done(rec)) =
+                        find_worker_across_layers(state, actor_id).await
                     {
-                        let workers = state.workers.read().await;
-                        if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-                            return Ok(ActorTerminalRecord::Worker(rec.clone()));
-                        }
+                        return Ok(ActorTerminalRecord::Worker(rec));
                     }
                     // Then check sublead_results.
                     {
@@ -1796,12 +1967,12 @@ async fn wait_for_actor_internal(
                     }
                     bail!("internal: actor_id marked done but record not present");
                 }
-                // Defensive: our target may actually be Done now; re-check.
+                // Defensive: our target may actually be Done now; re-check
+                // across all layers.
+                if let Some(WorkerState::Done(rec)) =
+                    find_worker_across_layers(state, actor_id).await
                 {
-                    let workers = state.workers.read().await;
-                    if let Some(WorkerState::Done(rec)) = workers.get(actor_id) {
-                        return Ok(ActorTerminalRecord::Worker(rec.clone()));
-                    }
+                    return Ok(ActorTerminalRecord::Worker(rec));
                 }
                 {
                     let results = state.sublead_results.read().await;
@@ -1845,18 +2016,26 @@ pub async fn handle_wait_for_any(
         bail!("wait_for_any: task_ids is empty");
     }
 
-    // Fast path: any already Done?
-    {
-        let workers = state.workers.read().await;
-        for id in task_ids {
-            if let Some(WorkerState::Done(rec)) = workers.get(id) {
-                return Ok((id.clone(), rec.clone()));
-            }
-        }
-    }
-
+    // Subscribe FIRST so a completion that races the fast-path check is
+    // captured by the broadcast subscription. Same race fix pattern as
+    // wait_for_actor_internal (commit 70e2bd8). Without this, a worker
+    // that terminated between our existence check and our subscribe is
+    // lost and we block until timeout.
     let mut rx = state.done_tx.subscribe();
     let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
+
+    // Fast path: any already Done? Scan ALL layers — sub-lead-spawned
+    // workers are registered in the sub-lead layer's workers map, not
+    // root's. Pre-fix, this only checked `state.workers.read()` (= root
+    // via Deref) and so stayed blocked indefinitely on sub-lead-owned
+    // workers. Same bug class as commit d134289 (which fixed wait_actor
+    // + list_workers + worker_status) but this handler had its own
+    // lookup code that was missed by that fix.
+    for id in task_ids {
+        if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, id).await {
+            return Ok((id.clone(), rec));
+        }
+    }
 
     loop {
         let result = tokio::time::timeout(wait_duration, rx.recv()).await;
@@ -1866,18 +2045,20 @@ pub async fn handle_wait_for_any(
             Ok(Ok(completed_id)) => {
                 // Primary path: our target completed.
                 if task_ids.iter().any(|id| id == &completed_id) {
-                    let workers = state.workers.read().await;
-                    if let Some(WorkerState::Done(rec)) = workers.get(&completed_id) {
-                        return Ok((completed_id, rec.clone()));
+                    if let Some(WorkerState::Done(rec)) =
+                        find_worker_across_layers(state, &completed_id).await
+                    {
+                        return Ok((completed_id, rec));
                     }
                 }
-                // Defensive re-scan: a prior broadcast we missed, or a write-ordering race,
-                // might mean one of our targets is actually Done now even though the recv'd
-                // id isn't in our set. Cheap to check; returns only if found.
-                let workers = state.workers.read().await;
+                // Defensive re-scan: a prior broadcast we missed, or a
+                // write-ordering race, might mean one of our targets is
+                // actually Done now even though the recv'd id isn't in
+                // our set. Cheap to check; returns only if found.
                 for id in task_ids {
-                    if let Some(WorkerState::Done(rec)) = workers.get(id) {
-                        return Ok((id.clone(), rec.clone()));
+                    if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, id).await
+                    {
+                        return Ok((id.clone(), rec));
                     }
                 }
             }
@@ -1890,6 +2071,31 @@ mod tests {
     use super::*;
     use crate::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
     use std::sync::Arc;
+
+    #[test]
+    fn worker_spawn_args_has_plugin_isolation_flags() {
+        // Parallel to the runner-side
+        // `every_spawn_variant_has_plugin_isolation_flags` test.
+        // worker_spawn_args is emitted from this module, so it needs its
+        // own canary for task #67 (plugin isolation). Without both flags,
+        // the operator's superpowers / other `~/.claude/` plugins bleed
+        // into worker claude subprocesses and cause the Skill-trap bug.
+        use std::path::PathBuf;
+        let argv = worker_spawn_args(
+            "p",
+            "claude-haiku-4-5",
+            &["Read".to_string()],
+            Some(&PathBuf::from("/tmp/cfg.json")),
+        );
+        assert!(
+            argv.iter().any(|a| a == "--strict-mcp-config"),
+            "worker_spawn_args missing --strict-mcp-config: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "--disable-slash-commands"),
+            "worker_spawn_args missing --disable-slash-commands: {argv:?}"
+        );
+    }
 
     async fn test_state() -> Arc<DispatchState> {
         test_state_with_budget(5.0).await
@@ -1975,6 +2181,26 @@ mod tests {
             None,
             std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         ))
+    }
+
+    #[test]
+    fn worker_spawn_args_passes_dangerously_skip_permissions() {
+        // Companion to the runner-side test: worker spawns are emitted from
+        // a different module and must independently pass the flag. Without
+        // it, headless workers stall on bash-with-`$VAR` and write-outside-
+        // cwd gates that have no `-p`-mode answer — the failure mode is
+        // silent (worker exits "successfully" having written nothing).
+        use std::path::PathBuf;
+        let argv = worker_spawn_args(
+            "p",
+            "claude-haiku-4-5",
+            &["Read".to_string()],
+            Some(&PathBuf::from("/tmp/cfg.json")),
+        );
+        assert!(
+            argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "worker_spawn_args missing --dangerously-skip-permissions: {argv:?}"
+        );
     }
 
     #[tokio::test]
