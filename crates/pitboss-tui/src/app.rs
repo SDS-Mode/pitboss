@@ -901,18 +901,14 @@ fn handle_policy_editor(state: &mut AppState, code: KeyCode) -> Action {
 
     match code {
         // Navigation.
-        KeyCode::Char('j') | KeyCode::Down => {
-            if !rules.is_empty() {
-                *selected = (*selected + 1) % rules.len();
-            }
+        KeyCode::Char('j') | KeyCode::Down if !rules.is_empty() => {
+            *selected = (*selected + 1) % rules.len();
         }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if !rules.is_empty() {
-                if *selected == 0 {
-                    *selected = rules.len() - 1;
-                } else {
-                    *selected -= 1;
-                }
+        KeyCode::Char('k') | KeyCode::Up if !rules.is_empty() => {
+            if *selected == 0 {
+                *selected = rules.len() - 1;
+            } else {
+                *selected -= 1;
             }
         }
 
