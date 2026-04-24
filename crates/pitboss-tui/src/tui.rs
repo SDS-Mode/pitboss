@@ -878,28 +878,53 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
         .map(|t| status_label(&t.status))
         .unwrap_or_default();
 
+    // Full-frame block so wrapped content can't bleed outside the pane's
+    // rect when the terminal is tight or long log lines wrap unexpectedly.
+    // Prior `Borders::TOP` had no side/bottom to clip against.
     let block = Block::default()
-        .borders(Borders::TOP)
+        .borders(Borders::ALL)
         .title(format!(" Focus: {focused_id} ({status_str}) "))
         .border_style(theme::idle_border());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Render last N lines of log that fit in the area height.
-    let height = inner.height as usize;
-    let log_slice = if state.focus_log.len() > height {
-        &state.focus_log[state.focus_log.len() - height..]
-    } else {
-        &state.focus_log
-    };
+    // Tail behavior: source-line slicing alone is incorrect when `wrap` is
+    // enabled — wrapped lines expand beyond `inner.height` and Paragraph
+    // shows the *head* of the slice. Cap source lines to a generous
+    // multiple of the visible height, then ask Paragraph for the
+    // width-aware wrapped line count and scroll to the bottom.
+    let source_cap = (inner.height as usize).saturating_mul(4).max(32);
+    let start = state.focus_log.len().saturating_sub(source_cap);
+    let log_slice = &state.focus_log[start..];
 
     let lines: Vec<Line> = log_slice
         .iter()
         .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
         .collect();
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Estimate wrapped row count per source line so we can scroll to the
+    // bottom. `Paragraph::line_count` is gated behind an unstable ratatui
+    // feature; a div-by-width approximation matches its behavior closely
+    // enough for bottom-anchor scroll. Uses char count (not grapheme
+    // width) — accurate for the ASCII + stream-json content pitboss tails.
+    let width = (inner.width as usize).max(1);
+    let total_rows: usize = lines
+        .iter()
+        .map(|l| {
+            let w = l.width();
+            if w == 0 {
+                1
+            } else {
+                w.div_ceil(width)
+            }
+        })
+        .sum();
+    let scroll =
+        u16::try_from(total_rows.saturating_sub(inner.height as usize)).unwrap_or(u16::MAX);
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(para, inner);
 }
 
