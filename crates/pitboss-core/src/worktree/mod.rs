@@ -12,8 +12,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn init_repo(root: &std::path::Path) {
+        // Pin the initial branch name to `master` so these tests don't depend
+        // on the runner's `init.defaultBranch` git config. libgit2's worktree
+        // creation resolves HEAD → `refs/heads/master` when the manager is
+        // invoked without an explicit branch; runners that default HEAD to
+        // `main` (GitHub Actions post-Oct 2020) previously failed all 8
+        // tests here with "reference 'refs/heads/master' not found".
         Command::new("git")
-            .args(["init", "-q"])
+            .args(["init", "-q", "--initial-branch=master"])
             .current_dir(root)
             .status()
             .unwrap();
@@ -24,6 +30,14 @@ mod tests {
             .unwrap();
         Command::new("git")
             .args(["config", "user.name", "t"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        // Disable commit signing so the init commit succeeds regardless of
+        // the developer's global git config (CI runners don't sign; some
+        // local setups do and fail without a signing key available).
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
             .current_dir(root)
             .status()
             .unwrap();
