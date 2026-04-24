@@ -99,6 +99,8 @@ impl ApprovalBridge {
         plan: Option<crate::mcp::tools::ApprovalPlan>,
         kind: crate::control::protocol::ApprovalKind,
         timeout: Duration,
+        ttl_secs: Option<u64>,
+        fallback: Option<ApprovalFallback>,
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
         let _ = crate::dispatch::events::append_event(
@@ -164,6 +166,7 @@ impl ApprovalBridge {
                         comment: None,
                         edited_summary: None,
                         reason: None,
+                        from_ttl: false,
                     });
                 }
                 ApprovalPolicy::AutoReject => {
@@ -172,10 +175,14 @@ impl ApprovalBridge {
                         comment: Some("no operator available".into()),
                         edited_summary: None,
                         reason: None,
+                        from_ttl: false,
                     });
                 }
                 ApprovalPolicy::Block => {
                     // Queue; drain when a TUI connects (see control/server.rs).
+                    // Pass ttl_secs + fallback from the request so the TTL watcher
+                    // can expire and fire a from_ttl=true response before the
+                    // bridge timeout fires (which would return a generic error).
                     self.state
                         .root
                         .approval_queue
@@ -188,8 +195,8 @@ impl ApprovalBridge {
                             plan,
                             kind,
                             responder: tx,
-                            ttl_secs: None, // v0.5 compat: no expiration by default
-                            fallback: None, // v0.5 compat: Block fallback
+                            ttl_secs,
+                            fallback,
                             created_at: chrono::Utc::now(),
                         });
 
@@ -220,7 +227,16 @@ impl ApprovalBridge {
             .or_default()
             .approvals_requested += 1;
 
-        match tokio::time::timeout(timeout, rx).await {
+        // When a per-request TTL is set, the TTL watcher fires the response
+        // with from_ttl=true before the bridge timeout. Add 60 s of buffer so
+        // the TTL watcher always wins the race; the bridge timeout then becomes
+        // a safety net only.
+        let effective_timeout = match ttl_secs {
+            Some(t) => Duration::from_secs(t + 60),
+            None => timeout,
+        };
+
+        match tokio::time::timeout(effective_timeout, rx).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
             Err(_) => {
@@ -352,6 +368,8 @@ mod tests {
                 None,
                 crate::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(1),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -369,6 +387,8 @@ mod tests {
                 None,
                 crate::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(1),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -387,6 +407,8 @@ mod tests {
                 None,
                 crate::control::protocol::ApprovalKind::Action,
                 Duration::from_millis(50),
+                None,
+                None,
             )
             .await
             .unwrap_err();

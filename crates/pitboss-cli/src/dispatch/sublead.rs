@@ -760,14 +760,18 @@ async fn spawn_sublead_session(
         };
 
         // Reclassify silent exits driven by a recent rejected approval. A
-        // sub-lead that called propose_plan, got auto_reject, and exited
-        // would otherwise show as Success. See run_worker for the same
-        // pattern.
+        // sub-lead that called propose_plan, got auto_reject or a TTL
+        // fallback, and exited would otherwise show as Success. See
+        // run_worker for the same pattern.
         if matches!(sublead_outcome, SubleadOutcome::Success) {
-            if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
-                state_bg.approval_driven_termination(&sublead_id_bg).await
-            {
-                sublead_outcome = SubleadOutcome::ApprovalRejected;
+            match state_bg.approval_driven_termination(&sublead_id_bg).await {
+                Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) => {
+                    sublead_outcome = SubleadOutcome::ApprovalRejected;
+                }
+                Some(crate::dispatch::state::ApprovalTerminationKind::TimedOut) => {
+                    sublead_outcome = SubleadOutcome::ApprovalTimedOut;
+                }
+                None => {}
             }
         }
 

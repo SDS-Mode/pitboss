@@ -323,24 +323,38 @@ Setting `[run].require_plan_approval = true` blocks the run until an
 operator approves the lead's first `propose_plan` call. In headless mode
 this hangs unless the lead's `propose_plan` includes a `ttl_secs` +
 `fallback`. If you see a task land with `status: "ApprovalRejected"` (v0.7+)
-or `"ApprovalTimedOut"` (when queue-TTL plumbing lands), this gate is
+or `"ApprovalTimedOut"` (v0.8+, TTL elapsed and fallback fired), this gate is
 the most likely cause.
 
-### Hierarchical mode requires a git repo even with `use_worktree = false`
+### Hierarchical mode with `use_worktree = true` requires a git repo
 
-Lead setup runs a git-repo check regardless of the worktree setting.
-Before dispatching a hierarchical manifest in a fresh workspace:
+When `use_worktree = true` (the default), both the lead and each worker
+directory must be inside a git repository — pitboss calls `git worktree add`
+to create an isolated checkout per actor. With `use_worktree = false` no git
+repository is required; actors share the directory directly.
+
+If you dispatch a hierarchical manifest in a fresh workspace with worktrees
+enabled, initialise the repo first:
 
 ```bash
 git init /workspace
 git -C /workspace commit --allow-empty -m "init"
 ```
 
-Flat mode (`[[task]]` only, no `[[lead]]`) does not have this requirement.
+Flat mode (`[[task]]` only, no `[[lead]]`) follows the same rule — it only
+needs a git repo when `use_worktree = true`.
 
 ### Reading run status without the TUI
 
-There is no `pitboss status` subcommand (yet). Use:
+```bash
+# Snapshot table of all tasks (in-flight or completed):
+pitboss status <run-id-prefix>
+
+# Machine-readable JSON array:
+pitboss status <run-id-prefix> --json
+```
+
+Other low-level options:
 
 - `pitboss attach <run-prefix> <task-id>` — follow a specific worker's stream-json
 - `cat <run-dir>/summary.jsonl` — completed tasks (streamed append-only)

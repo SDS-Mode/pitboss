@@ -892,6 +892,7 @@ async fn dispatch_op(
                     comment,
                     edited_summary,
                     reason,
+                    from_ttl: false,
                 });
                 // Write an approval_response event + bump counters so the
                 // control-socket path produces the same audit trail as

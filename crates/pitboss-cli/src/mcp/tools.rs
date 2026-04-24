@@ -831,13 +831,18 @@ async fn run_worker(
     // worker calls request_approval / propose_plan, gets {approved: false}
     // (operator action or [[approval_policy]] auto_reject), and exits
     // shortly after, the claude subprocess exits 0 and we'd otherwise
-    // mark Success. Now distinguished as ApprovalRejected so headless
-    // operators can tell the difference.
+    // mark Success. Now distinguished as ApprovalRejected (operator) or
+    // ApprovalTimedOut (TTL-fired fallback) so headless operators can
+    // tell the difference.
     if matches!(status, TaskStatus::Success) {
-        if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
-            state.approval_driven_termination(&task_id).await
-        {
-            status = TaskStatus::ApprovalRejected;
+        match state.approval_driven_termination(&task_id).await {
+            Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) => {
+                status = TaskStatus::ApprovalRejected;
+            }
+            Some(crate::dispatch::state::ApprovalTerminationKind::TimedOut) => {
+                status = TaskStatus::ApprovalTimedOut;
+            }
+            None => {}
         }
     }
 
@@ -1182,10 +1187,14 @@ pub async fn spawn_resume_worker(
         // Reclassify silent exits driven by a recent rejected approval (see
         // run_worker for the same pattern + rationale).
         if matches!(status, TaskStatus::Success) {
-            if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
-                state_bg.approval_driven_termination(&task_id_bg).await
-            {
-                status = TaskStatus::ApprovalRejected;
+            match state_bg.approval_driven_termination(&task_id_bg).await {
+                Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) => {
+                    status = TaskStatus::ApprovalRejected;
+                }
+                Some(crate::dispatch::state::ApprovalTerminationKind::TimedOut) => {
+                    status = TaskStatus::ApprovalTimedOut;
+                }
+                None => {}
             }
         }
         let counters = state_bg
@@ -1697,7 +1706,7 @@ pub async fn handle_request_approval(
                         "auto-approved by policy"
                     );
                     state
-                        .record_last_approval_response(&pending.requesting_actor_id, true)
+                        .record_last_approval_response(&pending.requesting_actor_id, true, false)
                         .await;
                     return Ok(ApprovalToolResponse {
                         approved: true,
@@ -1712,7 +1721,7 @@ pub async fn handle_request_approval(
                         "auto-rejected by policy"
                     );
                     state
-                        .record_last_approval_response(&pending.requesting_actor_id, false)
+                        .record_last_approval_response(&pending.requesting_actor_id, false, false)
                         .await;
                     return Ok(ApprovalToolResponse {
                         approved: false,
@@ -1728,11 +1737,11 @@ pub async fn handle_request_approval(
         }
     }
 
-    let timeout = Duration::from_secs(
-        args.timeout_secs
-            .or(state.root.manifest.lead_timeout_secs)
-            .unwrap_or(3600),
-    );
+    let ttl_secs = args
+        .timeout_secs
+        .or(state.root.manifest.lead_timeout_secs)
+        .unwrap_or(3600);
+    let timeout = Duration::from_secs(ttl_secs);
     let caller_id_for_record = caller_id.clone();
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
@@ -1742,12 +1751,18 @@ pub async fn handle_request_approval(
             args.plan,
             crate::control::protocol::ApprovalKind::Action,
             timeout,
+            Some(ttl_secs),
+            Some(crate::mcp::approval::ApprovalFallback::AutoReject),
         )
         .await
     {
         Ok(resp) => {
             state
-                .record_last_approval_response(&caller_id_for_record, resp.approved)
+                .record_last_approval_response(
+                    &caller_id_for_record,
+                    resp.approved,
+                    resp.from_ttl,
+                )
                 .await;
             Ok(ApprovalToolResponse {
                 approved: resp.approved,
@@ -1846,7 +1861,7 @@ pub async fn handle_propose_plan(
                         .plan_approved
                         .store(true, std::sync::atomic::Ordering::Release);
                     state
-                        .record_last_approval_response(&pending.requesting_actor_id, true)
+                        .record_last_approval_response(&pending.requesting_actor_id, true, false)
                         .await;
                     return Ok(ApprovalToolResponse {
                         approved: true,
@@ -1861,7 +1876,7 @@ pub async fn handle_propose_plan(
                         "plan auto-rejected by policy"
                     );
                     state
-                        .record_last_approval_response(&pending.requesting_actor_id, false)
+                        .record_last_approval_response(&pending.requesting_actor_id, false, false)
                         .await;
                     return Ok(ApprovalToolResponse {
                         approved: false,
@@ -1877,11 +1892,11 @@ pub async fn handle_propose_plan(
         }
     }
 
-    let timeout = Duration::from_secs(
-        args.timeout_secs
-            .or(state.root.manifest.lead_timeout_secs)
-            .unwrap_or(3600),
-    );
+    let ttl_secs = args
+        .timeout_secs
+        .or(state.root.manifest.lead_timeout_secs)
+        .unwrap_or(3600);
+    let timeout = Duration::from_secs(ttl_secs);
     // Reuse the summary from the plan as the modal headline — a plan
     // approval without the structured fields would be useless, but the
     // summary still anchors the audit trail.
@@ -1895,6 +1910,8 @@ pub async fn handle_propose_plan(
             Some(args.plan),
             crate::control::protocol::ApprovalKind::Plan,
             timeout,
+            Some(ttl_secs),
+            Some(crate::mcp::approval::ApprovalFallback::AutoReject),
         )
         .await
     {
@@ -1905,7 +1922,7 @@ pub async fn handle_propose_plan(
                     .store(true, std::sync::atomic::Ordering::Release);
             }
             state
-                .record_last_approval_response(&caller_id_for_record, resp.approved)
+                .record_last_approval_response(&caller_id_for_record, resp.approved, resp.from_ttl)
                 .await;
             Ok(ApprovalToolResponse {
                 approved: resp.approved,

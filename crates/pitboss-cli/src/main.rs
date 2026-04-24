@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp};
+use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp, status};
 
 use cli::{Cli, Command};
 
@@ -39,6 +39,9 @@ fn main() -> Result<()> {
             lines,
         } => {
             std::process::exit(attach::run(&run_id, &task_id, raw, lines)?);
+        }
+        Command::Status { run_id, run_dir, json } => {
+            std::process::exit(status::run(&run_id, json, run_dir)?);
         }
         Command::McpBridge {
             socket,

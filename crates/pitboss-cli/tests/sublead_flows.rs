@@ -843,6 +843,7 @@ async fn reject_with_reason_propagates_to_caller() {
         comment: None,
         edited_summary: None,
         reason: Some("output should be CSV not JSON".into()),
+        from_ttl: false,
     };
     assert!(!resp.approved);
     assert_eq!(

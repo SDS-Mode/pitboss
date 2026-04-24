@@ -907,9 +907,10 @@ async fn expire_layer_approvals(
             comment: Some("TTL expired".to_string()),
             edited_summary: None,
             reason: Some(format!("TTL expired: fallback={fallback:?}")),
+            from_ttl: true,
         };
         state
-            .record_last_approval_response(&entry.task_id, approved)
+            .record_last_approval_response(&entry.task_id, approved, true)
             .await;
         // Best-effort: responder may have been dropped if the caller gave up.
         let _ = entry.responder.send(response);
