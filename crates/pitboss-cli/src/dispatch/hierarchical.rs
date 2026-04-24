@@ -214,7 +214,7 @@ pub async fn run_hierarchical(
         env: lead_env,
     };
 
-    state.workers.write().await.insert(
+    state.root.workers.write().await.insert(
         lead.id.clone(),
         crate::dispatch::state::WorkerState::Running {
             started_at: Utc::now(),
@@ -262,7 +262,7 @@ pub async fn run_hierarchical(
 
         // Capture session_id from either the mid-run channel or the final result.
         if let Ok(sid) = session_id_rx.try_recv() {
-            state.workers.write().await.insert(
+            state.root.workers.write().await.insert(
                 lead.id.clone(),
                 crate::dispatch::state::WorkerState::Running {
                     started_at: overall_started_at,
@@ -302,7 +302,7 @@ pub async fn run_hierarchical(
                     env: resume_env,
                 };
                 // Reset the workers map entry to Running (session_id TBD).
-                state.workers.write().await.insert(
+                state.root.workers.write().await.insert(
                     lead.id.clone(),
                     crate::dispatch::state::WorkerState::Running {
                         started_at: overall_started_at,
@@ -329,10 +329,11 @@ pub async fn run_hierarchical(
 
     // Build lead TaskRecord using the accumulated data from all iterations.
     let lead_counters = state
+        .root
         .worker_counters
         .read()
         .await
-        .get(&state.lead_id)
+        .get(&state.root.lead_id)
         .cloned()
         .unwrap_or_default();
     // Merge the loop's own reprompt_count into the counter-based one.
@@ -419,11 +420,11 @@ pub async fn run_hierarchical(
         )
         .await;
     }
-    state.workers.write().await.insert(
+    state.root.workers.write().await.insert(
         lead.id.clone(),
         crate::dispatch::state::WorkerState::Done(lead_record.clone()),
     );
-    let _ = state.done_tx.send(lead.id.clone());
+    let _ = state.root.done_tx.send(lead.id.clone());
 
     // 4. Finalize.
     // Capture the ORIGINAL cancel state BEFORE we call terminate() below.
@@ -434,12 +435,12 @@ pub async fn run_hierarchical(
     // Any in-flight workers get cancelled. `cancel` is the RUN-level token
     // (observed only by the lead's SessionHandle), so terminating it alone
     // leaves workers orphaned — their sessions use per-task tokens in
-    // `state.worker_cancels`. Cascade to every live worker so their
+    // `state.root.worker_cancels`. Cascade to every live worker so their
     // SessionHandles SIGTERM the child claude processes too. Without this
     // cascade, `ps` showed live claude workers after the run "finished"
     // and the summary marked them Cancelled with no actual termination.
     {
-        let cancels = state.worker_cancels.read().await;
+        let cancels = state.root.worker_cancels.read().await;
         for tok in cancels.values() {
             tok.terminate();
         }
@@ -449,8 +450,8 @@ pub async fn run_hierarchical(
     tokio::time::sleep(pitboss_core::session::TERMINATE_GRACE).await;
 
     let worker_records: Vec<pitboss_core::store::TaskRecord> = {
-        let workers = state.workers.read().await;
-        let worker_models = state.worker_models.read().await;
+        let workers = state.root.workers.read().await;
+        let worker_models = state.root.worker_models.read().await;
         workers
             .iter()
             .filter(|(id, _)| *id != &lead.id) // don't double-count the lead
@@ -519,7 +520,7 @@ pub async fn run_hierarchical(
     // Optional post-mortem dump of shared-store contents.
     if resolved.dump_shared_store {
         let dump_path = run_subdir.join("shared-store.json");
-        if let Err(e) = state.shared_store.dump_to_path(&dump_path).await {
+        if let Err(e) = state.root.shared_store.dump_to_path(&dump_path).await {
             tracing::warn!(?e, "shared-store dump failed");
         }
     }

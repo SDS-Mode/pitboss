@@ -3,12 +3,21 @@
 //! populated as the root lead spawns sub-leads). The run-global
 //! `LeaseRegistry` lives here too — added in Phase 3.
 //!
-//! Backward-compatible constructor signature: depth-1 callers continue
-//! to use `DispatchState::new(...)` with the existing 13 arguments.
+//! ## Layer access is explicit
 //!
-//! `DispatchState` implements `Deref<Target = LayerState>` so every
-//! existing field access (e.g. `state.workers`, `state.cancel`) continues
-//! to work without callers knowing about the indirection.
+//! `DispatchState` does NOT implement `Deref<Target = LayerState>`. Every
+//! caller picks a layer explicitly:
+//!
+//! - Root-layer access: `state.root.<field>` (or `state.root_layer()` for
+//!   an `&Arc<LayerState>`).
+//! - Sub-tree access: look up the sub-lead in `state.subleads.read().await`.
+//! - Routed access (the canonical path for MCP tool handlers that dispatch
+//!   on `_meta.actor_role`): use `crate::mcp::server::resolve_layer_for_caller`,
+//!   which returns the correct layer for `Lead`/`Sublead`/`Worker` callers.
+//!
+//! The previous `Deref` impl silently aliased the root layer, which made it
+//! easy for new handlers to misroute sub-lead operations to root-layer state
+//! without any compile-time signal. See issue #56.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -226,8 +235,11 @@ pub struct QueuedApproval {
 /// Run-level wrapper. Holds the root `LayerState` plus (in Phase 2+) a map
 /// of sub-tree `LayerState`s keyed by sub-lead id.
 ///
-/// Implements `Deref<Target = LayerState>` so all existing callsites that
-/// access fields like `state.workers`, `state.cancel`, etc. compile unchanged.
+/// Layer access is explicit: callers reach the root layer via
+/// `state.root.<field>` (or `state.root_layer()`), and sub-tree layers via
+/// `state.subleads.read().await.get(sublead_id)`. Handlers that dispatch on
+/// `_meta.actor_role` should route through
+/// `crate::mcp::server::resolve_layer_for_caller`.
 ///
 /// ## Lock access rule (DO NOT VIOLATE)
 ///
@@ -282,19 +294,6 @@ pub struct DispatchState {
     /// burns budget faster than the operator can intervene. Updated
     /// alongside the `TaskRecord` persist in every completion path.
     pub api_health: Arc<crate::dispatch::failure_detection::ApiHealth>,
-}
-
-/// CAUTION: This Deref always resolves to the root layer, which is correct
-/// for depth-1 code. Phase 2+ code dispatching on `_meta.actor_role` MUST
-/// explicitly look up the correct layer: root-lead callers use `&state.root`,
-/// while sub-lead callers must call `state.subleads.read().await.get(sublead_id)`.
-/// See Phase 3.1's `resolve_layer_for_caller` helper for canonical resolution.
-impl std::ops::Deref for DispatchState {
-    type Target = LayerState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.root
-    }
 }
 
 impl std::fmt::Debug for DispatchState {
@@ -472,21 +471,21 @@ mod tests {
     #[tokio::test]
     async fn active_worker_count_is_zero_on_new_state() {
         let st = mk_state(None, None);
-        assert_eq!(st.active_worker_count().await, 0);
+        assert_eq!(st.root.active_worker_count().await, 0);
     }
 
     #[tokio::test]
     async fn budget_remaining_reflects_spent() {
         let st = mk_state(Some(10.0), None);
-        assert_eq!(st.budget_remaining().await, Some(10.0));
-        *st.spent_usd.lock().await = 3.5;
-        assert_eq!(st.budget_remaining().await, Some(6.5));
+        assert_eq!(st.root.budget_remaining().await, Some(10.0));
+        *st.root.spent_usd.lock().await = 3.5;
+        assert_eq!(st.root.budget_remaining().await, Some(6.5));
     }
 
     #[tokio::test]
     async fn budget_remaining_is_none_when_uncapped() {
         let st = mk_state(None, None);
-        assert_eq!(st.budget_remaining().await, None);
+        assert_eq!(st.root.budget_remaining().await, None);
     }
 
     #[test]
@@ -511,19 +510,20 @@ mod tests {
     #[tokio::test]
     async fn state_initializes_new_v04_fields() {
         let st = mk_state(None, None);
-        assert!(st.approval_bridge.lock().await.is_empty());
-        assert!(st.approval_queue.lock().await.is_empty());
+        assert!(st.root.approval_bridge.lock().await.is_empty());
+        assert!(st.root.approval_queue.lock().await.is_empty());
         assert!(matches!(
-            st.approval_policy,
+            st.root.approval_policy,
             crate::dispatch::state::ApprovalPolicy::Block
         ));
-        assert!(st.control_writer.lock().await.is_none());
+        assert!(st.root.control_writer.lock().await.is_none());
     }
 
     #[tokio::test]
     async fn worker_counters_default_zero() {
         let st = mk_state(None, None);
         let c = st
+            .root
             .worker_counters
             .read()
             .await

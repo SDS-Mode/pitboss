@@ -71,11 +71,12 @@ async fn pause_op_writes_events_jsonl() {
     ));
     let worker_token = CancelToken::new();
     state
+        .root
         .worker_cancels
         .write()
         .await
         .insert("w-1".into(), worker_token);
-    state.workers.write().await.insert(
+    state.root.workers.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -289,7 +290,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
 
     // Give the request a moment to queue.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(state.approval_queue.lock().await.len(), 1);
+    assert_eq!(state.root.approval_queue.lock().await.len(), 1);
 
     // Connect a TUI. The server drains the queue on connect.
     let sock = dir.path().join("block-drain.sock");
@@ -599,6 +600,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         .unwrap();
     assert!(resp.approved);
     assert!(state
+        .root
         .plan_approved
         .load(std::sync::atomic::Ordering::Acquire));
 

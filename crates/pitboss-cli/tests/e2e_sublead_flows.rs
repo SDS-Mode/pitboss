@@ -376,7 +376,7 @@ async fn root_kill_cascades_to_sublead_workers() {
 ///
 /// Using `mk_state_hold_workers` (hold-until-signal FakeScript) keeps both
 /// sub-lead subprocesses alive for the duration of the test so no reconcile
-/// fires until `state.cancel.terminate()` cascades the shutdown.
+/// fires until `state.root.cancel.terminate()` cascades the shutdown.
 #[tokio::test]
 async fn run_global_lease_serializes_two_subleads() {
     use serde_json::json;
@@ -473,7 +473,7 @@ async fn run_global_lease_serializes_two_subleads() {
         acq3.err()
     );
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 // ── Test 4: Reject-with-reason reaches sub-lead session ──────────────────────
@@ -494,7 +494,9 @@ async fn reject_with_reason_reaches_sublead_session() {
     let (run_id, state) = mk_state(dir.path());
 
     // create run subdir so events.jsonl writes don't fail
-    tokio::fs::create_dir_all(&state.run_subdir).await.unwrap();
+    tokio::fs::create_dir_all(&state.root.run_subdir)
+        .await
+        .unwrap();
 
     let mcp_sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
@@ -603,7 +605,7 @@ async fn reject_with_reason_reaches_sublead_session() {
     );
 
     // Rejection counter is keyed by the root layer's lead_id ("root"), since
-    // ApprovalBridge::new receives the root DispatchState and uses state.lead_id.
+    // ApprovalBridge::new receives the root DispatchState and uses state.root.lead_id.
     let counters = state
         .root
         .worker_counters
@@ -617,7 +619,7 @@ async fn reject_with_reason_reaches_sublead_session() {
         "rejections counter on root lead should be 1 after sub-lead rejection"
     );
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 // ── Test 5: Budget envelope returns to root pool ──────────────────────────────
@@ -913,5 +915,5 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         "root.reserved_usd should be 0 after reconcile"
     );
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }

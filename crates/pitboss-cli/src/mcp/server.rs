@@ -943,7 +943,7 @@ impl McpServer {
                                 // returns without racing the moved handler.
                                 let h = handler.for_connection();
                                 let actor_slot = h.connection_actor_handle();
-                                let store_for_cleanup = h.state.shared_store.clone();
+                                let store_for_cleanup = h.state.root.shared_store.clone();
                                 let run_leases_for_cleanup = h.state.run_leases.clone();
                                 let cancel_inner = cancel_outer.clone();
                                 // Track the spawned session task so Drop can signal cancellation

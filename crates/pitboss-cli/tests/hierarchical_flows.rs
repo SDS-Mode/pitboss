@@ -22,7 +22,7 @@ use uuid::Uuid;
 fn mk_state() -> (TempDir, Arc<DispatchState>) {
     let dir = TempDir::new().unwrap();
     // Lead with use_worktree=false so background worker spawns don't require
-    // an actual git repo at state.manifest.lead.directory.
+    // an actual git repo at state.root.manifest.lead.directory.
     let lead = ResolvedLead {
         id: "lead".into(),
         directory: PathBuf::from("/tmp"),
@@ -87,7 +87,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
 #[tokio::test]
 async fn mcp_spawn_and_list_round_trip() {
     let (_dir, state) = mk_state();
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -118,7 +118,7 @@ async fn mcp_spawn_and_list_round_trip() {
 #[tokio::test]
 async fn mcp_spawn_over_max_workers_returns_error() {
     let (_dir, state) = mk_state(); // max_workers = 4
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -161,8 +161,8 @@ async fn mcp_spawn_over_max_workers_returns_error() {
 #[tokio::test]
 async fn mcp_spawn_over_budget_returns_error() {
     let (_dir, state) = mk_state(); // budget_usd = 5.0
-    *state.spent_usd.lock().await = 5.0;
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    *state.root.spent_usd.lock().await = 5.0;
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -194,8 +194,8 @@ async fn mcp_spawn_over_budget_returns_error() {
 #[tokio::test]
 async fn mcp_spawn_while_draining_returns_error() {
     let (_dir, state) = mk_state();
-    state.cancel.drain();
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    state.root.cancel.drain();
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -237,7 +237,7 @@ async fn wait_actor_alias_resolves_worker_id() {
     use std::time::Duration;
 
     let (_dir, state) = mk_state();
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -280,9 +280,9 @@ async fn wait_actor_alias_resolves_worker_id() {
             model: None,
             failure_reason: None,
         };
-        let mut w = state_clone.workers.write().await;
+        let mut w = state_clone.root.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
-        let _ = state_clone.done_tx.send(worker_id_clone);
+        let _ = state_clone.root.done_tx.send(worker_id_clone);
     });
 
     // wait_actor should accept a worker id (back-compat path) and

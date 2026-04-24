@@ -289,7 +289,7 @@ async fn dogfood_isolation_strict_tree() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -509,7 +509,7 @@ async fn dogfood_kill_cascade_drain() {
     // depth-first drain reaches every worker within the grace window.
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -650,7 +650,7 @@ async fn dogfood_run_lease_contention() {
     // acquires. Demonstrates the run_lease_* API for cross-tree coordination.
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -789,7 +789,7 @@ async fn dogfood_policy_auto_filter() {
     // - Only S2's tool-use and S1's plan blocked in queue (2 entries)
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1059,7 +1059,7 @@ async fn dogfood_envelope_cap_rejection() {
         (dir, state)
     };
 
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();

@@ -102,8 +102,8 @@ impl ApprovalBridge {
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
         let _ = crate::dispatch::events::append_event(
-            &self.state.run_subdir,
-            &self.state.lead_id,
+            &self.state.root.run_subdir,
+            &self.state.root.lead_id,
             &crate::dispatch::events::TaskEvent::ApprovalRequest {
                 at: chrono::Utc::now(),
                 request_id: request_id.clone(),
@@ -112,9 +112,9 @@ impl ApprovalBridge {
         )
         .await;
 
-        if let Some(router) = self.state.notification_router.clone() {
+        if let Some(router) = self.state.root.notification_router.clone() {
             let envelope = crate::notify::NotificationEnvelope::new(
-                &self.state.run_id.to_string(),
+                &self.state.root.run_id.to_string(),
                 crate::notify::Severity::Warning,
                 crate::notify::PitbossEvent::ApprovalRequest {
                     request_id: request_id.clone(),
@@ -133,10 +133,11 @@ impl ApprovalBridge {
         // the "is it present?" check and the insert, so a TUI that
         // disconnected in that window would leave the responder orphaned
         // in `approval_bridge` — stuck until the bridge timeout.
-        let writer_guard = self.state.control_writer.lock().await;
+        let writer_guard = self.state.root.control_writer.lock().await;
 
         if let Some(w) = writer_guard.as_ref() {
             self.state
+                .root
                 .approval_bridge
                 .lock()
                 .await
@@ -154,7 +155,7 @@ impl ApprovalBridge {
         } else {
             drop(writer_guard);
             // No TUI attached: policy decides.
-            match self.state.approval_policy {
+            match self.state.root.approval_policy {
                 ApprovalPolicy::AutoApprove => {
                     let _ = tx.send(ApprovalResponse {
                         approved: true,
@@ -174,6 +175,7 @@ impl ApprovalBridge {
                 ApprovalPolicy::Block => {
                     // Queue; drain when a TUI connects (see control/server.rs).
                     self.state
+                        .root
                         .approval_queue
                         .lock()
                         .await
@@ -190,9 +192,9 @@ impl ApprovalBridge {
                         });
 
                     // Fire approval_pending notification
-                    if let Some(router) = self.state.notification_router.clone() {
+                    if let Some(router) = self.state.root.notification_router.clone() {
                         let envelope = crate::notify::NotificationEnvelope::new(
-                            &self.state.run_id.to_string(),
+                            &self.state.root.run_id.to_string(),
                             crate::notify::Severity::Warning,
                             crate::notify::PitbossEvent::ApprovalPending {
                                 request_id: request_id.clone(),
@@ -208,10 +210,11 @@ impl ApprovalBridge {
         }
 
         self.state
+            .root
             .worker_counters
             .write()
             .await
-            .entry(self.state.lead_id.clone())
+            .entry(self.state.root.lead_id.clone())
             .or_default()
             .approvals_requested += 1;
 
@@ -220,11 +223,17 @@ impl ApprovalBridge {
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
             Err(_) => {
                 // Timeout: remove the pending entry so a late respond doesn't panic.
-                self.state.approval_bridge.lock().await.remove(&request_id);
+                self.state
+                    .root
+                    .approval_bridge
+                    .lock()
+                    .await
+                    .remove(&request_id);
                 // Also evict from the TUI-drain queue (Block policy, no TUI connected).
                 // Without this, a TUI that connects after the timeout fires sees a stale
                 // approval modal for a request that has already resolved.
                 self.state
+                    .root
                     .approval_queue
                     .lock()
                     .await
@@ -242,14 +251,15 @@ impl ApprovalBridge {
     ) -> Result<(), ApprovalError> {
         let tx = self
             .state
+            .root
             .approval_bridge
             .lock()
             .await
             .remove(request_id)
             .ok_or(ApprovalError::ControlDisconnected)?;
         let _ = crate::dispatch::events::append_event(
-            &self.state.run_subdir,
-            &self.state.lead_id,
+            &self.state.root.run_subdir,
+            &self.state.root.lead_id,
             &crate::dispatch::events::TaskEvent::ApprovalResponse {
                 at: chrono::Utc::now(),
                 request_id: request_id.to_string(),
@@ -261,8 +271,8 @@ impl ApprovalBridge {
         let approved = resp.approved;
         tx.send(resp).map_err(|_| ApprovalError::Cancelled)?;
         {
-            let mut guard = self.state.worker_counters.write().await;
-            let entry = guard.entry(self.state.lead_id.clone()).or_default();
+            let mut guard = self.state.root.worker_counters.write().await;
+            let entry = guard.entry(self.state.root.lead_id.clone()).or_default();
             if approved {
                 entry.approvals_approved += 1;
             } else {
