@@ -66,7 +66,11 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
     // into the STATUS column when sub-lead ids are long (#96).
     const TASK_ID_MIN: usize = 30;
     const TASK_ID_MAX: usize = 60;
-    let observed_max = records.iter().map(|r| r.task_id.chars().count()).max().unwrap_or(0);
+    let observed_max = records
+        .iter()
+        .map(|r| r.task_id.chars().count())
+        .max()
+        .unwrap_or(0);
     let task_id_width = observed_max.clamp(TASK_ID_MIN, TASK_ID_MAX);
     let sep_width = task_id_width + 1 + 16 + 1 + 10 + 1 + 24 + 1 + 6;
 

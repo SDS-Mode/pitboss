@@ -1137,10 +1137,12 @@ mod approval_queue_tests {
         let mut state = fresh_state();
         apply_control_event(&mut state, mk_approval_event("old-req-A", "root"));
         apply_control_event(&mut state, mk_approval_event("old-req-B", "sublead-1"));
-        state.policy_rules.push(pitboss_cli::mcp::policy::ApprovalRule {
-            r#match: pitboss_cli::mcp::policy::ApprovalMatch::default(),
-            action: pitboss_cli::mcp::policy::ApprovalAction::Block,
-        });
+        state
+            .policy_rules
+            .push(pitboss_cli::mcp::policy::ApprovalRule {
+                r#match: pitboss_cli::mcp::policy::ApprovalMatch::default(),
+                action: pitboss_cli::mcp::policy::ApprovalAction::Block,
+            });
         assert_eq!(state.approval_list.items.len(), 2);
         assert_eq!(state.policy_rules.len(), 1);
 
