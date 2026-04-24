@@ -5,6 +5,25 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// How the pitboss-spawned claude handles its built-in per-tool permission gate.
+///
+/// **`PathA`** (default) sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts`, which tells claude
+/// it is running inside an SDK that manages permissions externally. Claude never
+/// prompts; pitboss is the sole permission authority via its own approval queue / TUI.
+///
+/// **`PathB`** leaves the entrypoint unset (claude's own permission gate is active),
+/// but pitboss registers a `permission_prompt` MCP tool. When claude asks for
+/// permission to use a tool, it calls `permission_prompt`; pitboss routes the request
+/// through its approval queue and TUI. The calling actor blocks until an operator
+/// (or an `[[approval_policy]]` rule) responds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRouting {
+    #[default]
+    PathA,
+    PathB,
+}
+
 /// Optional `[container]` section for `pitboss container-dispatch`.
 /// When present, `pitboss container-dispatch` uses this config to build
 /// the `docker`/`podman run` invocation. `directory` fields in tasks/lead
@@ -273,6 +292,13 @@ pub struct LeadSpec {
     pub use_worktree: Option<bool>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    /// v0.8: how claude's built-in tool-permission gate is handled.
+    /// `"path_a"` (default): `CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypasses the gate entirely.
+    /// `"path_b"`: pitboss registers a `permission_prompt` MCP tool; claude routes
+    /// each permission check through it and into pitboss's approval queue / TUI.
+    #[serde(default)]
+    pub permission_routing: PermissionRouting,
 
     /// v0.6: when true, root lead's MCP toolset includes `spawn_sublead`.
     /// Defaults to false for v0.5 backward compatibility.

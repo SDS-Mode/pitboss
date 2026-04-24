@@ -765,13 +765,28 @@ async fn run_worker(
         .map(|l| l.env.clone())
         .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
         .unwrap_or_default();
+    let worker_routing = layer
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.permission_routing)
+        .or_else(|| {
+            state
+                .root
+                .manifest
+                .lead
+                .as_ref()
+                .map(|l| l.permission_routing)
+        })
+        .unwrap_or_default();
     let worker_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_worker,
         &std::collections::HashMap::new(),
+        worker_routing,
     );
     let cmd = SpawnCmd {
         program: layer.claude_binary.clone(),
-        args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref()),
+        args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref(), worker_routing),
         cwd: cwd.clone(),
         env: worker_env,
     };
@@ -1004,17 +1019,20 @@ fn worker_spawn_args(
     model: &str,
     tools: &[String],
     mcp_config: Option<&std::path::Path>,
+    permission_routing: crate::manifest::schema::PermissionRouting,
 ) -> Vec<String> {
+    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        // Permission authority is pitboss (see runner::lead_spawn_args doc).
-        "--dangerously-skip-permissions".into(),
-        // Plugin/skill isolation (see runner::lead_spawn_args doc).
-        "--strict-mcp-config".into(),
-        "--disable-slash-commands".into(),
     ];
+    if permission_routing == PermissionRouting::PathA {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    // Plugin/skill isolation (see runner::lead_spawn_args doc).
+    args.push("--strict-mcp-config".into());
+    args.push("--disable-slash-commands".into());
     // Workers always get the shared-store MCP tools in their allowlist when
     // an mcp-config is supplied, alongside their user-declared tools. Without
     // this, kv_set / lease_acquire / etc. hit the permission prompt which
@@ -1023,6 +1041,10 @@ fn worker_spawn_args(
     if mcp_config.is_some() {
         for t in PITBOSS_WORKER_MCP_TOOLS {
             allowed.push((*t).to_string());
+        }
+        // Path B: pre-allow permission_prompt so workers can route checks.
+        if permission_routing == PermissionRouting::PathB {
+            allowed.push("mcp__pitboss__permission_prompt".into());
         }
     }
     if !allowed.is_empty() {
@@ -1122,8 +1144,16 @@ pub async fn spawn_resume_worker(
         }
     };
 
+    let resume_routing = state
+        .root
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.permission_routing)
+        .unwrap_or_default();
     // Build spawn args with --resume.
-    let mut spawn_args_v = worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref());
+    let mut spawn_args_v =
+        worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref(), resume_routing);
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
 
@@ -1140,6 +1170,7 @@ pub async fn spawn_resume_worker(
     let resume_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_resume,
         &std::collections::HashMap::new(),
+        resume_routing,
     );
     let cmd = pitboss_core::process::SpawnCmd {
         program: state.root.claude_binary.clone(),
@@ -2135,6 +2166,108 @@ pub async fn handle_wait_for_any(
     }
 }
 
+/// Claude Code's permission gate payload for the `permission_prompt` MCP tool.
+/// Fields are forwarded as-is from Claude's permission check request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PermissionPromptArgs {
+    /// Name of the tool Claude wants to use (e.g. "Bash", "Write").
+    pub tool_name: String,
+    /// Optional structured input Claude intends to pass. Shown to the
+    /// operator in the approval modal for context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<serde_json::Value>,
+    /// Caller identity injected by mcp-bridge.
+    #[serde(rename = "_meta", default, skip_serializing)]
+    #[schemars(skip)]
+    pub meta: Option<crate::shared_store::tools::MetaField>,
+}
+
+/// Response shape matching Claude Code's permission gate contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PermissionPromptResponse {
+    /// `"allow"` or `"deny"`.
+    pub decision: String,
+    /// Present when `decision == "allow"`. `"allow_once"` keeps the gate
+    /// active for future tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<String>,
+}
+
+/// Handle Path B `permission_prompt`: routes claude's per-tool permission
+/// check through pitboss's approval queue and TUI. Returns the Claude Code
+/// permission gate response shape (`decision` + `behavior`).
+pub async fn handle_permission_prompt(
+    state: &Arc<DispatchState>,
+    args: PermissionPromptArgs,
+) -> Result<PermissionPromptResponse> {
+    let (caller_id, actor_path) = build_caller_identity(state, args.meta.as_ref()).await;
+
+    let summary = format!("Permission request: {}", args.tool_name);
+    let pending = crate::dispatch::state::PendingApproval {
+        id: uuid::Uuid::now_v7(),
+        requesting_actor_id: caller_id.clone(),
+        actor_path,
+        category: crate::mcp::approval::ApprovalCategory::ToolUse,
+        summary: summary.clone(),
+        plan: None,
+        blocks: vec![caller_id.clone()],
+        created_at: chrono::Utc::now(),
+        ttl_secs: state
+            .root
+            .manifest
+            .lead_timeout_secs
+            .unwrap_or(3600),
+        fallback: crate::mcp::approval::ApprovalFallback::AutoReject,
+    };
+
+    // Evaluate operator-declared policy first.
+    {
+        let matcher_guard = state.root.policy_matcher.lock().await;
+        if let Some(matcher) = matcher_guard.as_ref() {
+            match matcher.evaluate(&pending, Some(&args.tool_name), None) {
+                Some(crate::mcp::policy::ApprovalAction::AutoApprove) => {
+                    return Ok(PermissionPromptResponse {
+                        decision: "allow".into(),
+                        behavior: Some("allow_once".into()),
+                    });
+                }
+                Some(crate::mcp::policy::ApprovalAction::AutoReject) => {
+                    return Ok(PermissionPromptResponse {
+                        decision: "deny".into(),
+                        behavior: None,
+                    });
+                }
+                Some(crate::mcp::policy::ApprovalAction::Block) | None => {}
+            }
+        }
+    }
+
+    let ttl_secs = state.root.manifest.lead_timeout_secs.unwrap_or(3600);
+    let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
+    match bridge
+        .request(
+            caller_id,
+            summary,
+            None,
+            crate::control::protocol::ApprovalKind::Action,
+            Duration::from_secs(ttl_secs),
+            Some(ttl_secs),
+            Some(crate::mcp::approval::ApprovalFallback::AutoReject),
+        )
+        .await
+    {
+        Ok(resp) if resp.approved => Ok(PermissionPromptResponse {
+            decision: "allow".into(),
+            behavior: Some("allow_once".into()),
+        }),
+        Ok(_) => Ok(PermissionPromptResponse {
+            decision: "deny".into(),
+            behavior: None,
+        }),
+        Err(e) => anyhow::bail!("permission_prompt failed: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2155,6 +2288,7 @@ mod tests {
             "claude-haiku-4-5",
             &["Read".to_string()],
             Some(&PathBuf::from("/tmp/cfg.json")),
+            Default::default(),
         );
         assert!(
             argv.iter().any(|a| a == "--strict-mcp-config"),
@@ -2197,6 +2331,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -2266,6 +2401,7 @@ mod tests {
             "claude-haiku-4-5",
             &["Read".to_string()],
             Some(&PathBuf::from("/tmp/cfg.json")),
+            Default::default(),
         );
         assert!(
             argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -2659,6 +2795,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -3273,6 +3410,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -3333,6 +3471,100 @@ mod tests {
         assert!(resp.approved);
     }
 
+    /// Path B: `permission_prompt` routes to the approval queue and returns
+    /// Claude Code's gate response shape (`decision`/`behavior`).
+    #[tokio::test]
+    async fn permission_prompt_auto_approves_and_returns_gate_response() {
+        use crate::dispatch::state::ApprovalPolicy;
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, PermissionRouting, WorktreeCleanup};
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::process::ProcessSpawner;
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let lead = ResolvedLead {
+            id: "lead".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "claude-haiku-4-5".into(),
+            effort: Effort::High,
+            tools: vec![],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            permission_routing: PermissionRouting::PathB,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
+        };
+        let manifest = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: None,
+            approval_policy: Some(ApprovalPolicy::AutoApprove),
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let script = FakeScript::new().hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_id = Uuid::now_v7();
+        let run_subdir = dir.path().join(run_id.to_string());
+        std::mem::forget(dir);
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            ApprovalPolicy::AutoApprove,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+        ));
+        let resp = handle_permission_prompt(
+            &state,
+            PermissionPromptArgs {
+                tool_name: "Bash".into(),
+                tool_input: None,
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.decision, "allow", "auto-approve should yield allow");
+        assert_eq!(
+            resp.behavior.as_deref(),
+            Some("allow_once"),
+            "allow_once behavior expected"
+        );
+    }
+
     /// Build a `DispatchState` with the specified approval policy and
     /// `require_plan_approval` flag. Mirrors `handle_request_approval_auto_approves`
     /// test scaffolding but parameterized so plan-approval tests can share it.
@@ -3366,6 +3598,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,

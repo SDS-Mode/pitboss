@@ -47,6 +47,13 @@ pub struct ResolvedLead {
     #[serde(default)]
     pub resume_session_id: Option<String>,
 
+    // ── v0.8 permission-routing ──────────────────────────────────────────────
+    /// Path A (default): `CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypasses the gate.
+    /// Path B: pitboss registers `permission_prompt` MCP tool; claude routes
+    /// each permission check through it into pitboss's approval queue.
+    #[serde(default)]
+    pub permission_routing: crate::manifest::schema::PermissionRouting,
+
     // ── v0.6 depth-2 cap fields ──────────────────────────────────────────────
     /// When true, `spawn_sublead` is included in the root lead's MCP toolset.
     /// Default false preserves v0.5 behavior.
@@ -215,6 +222,8 @@ fn resolve_lead(lead: &Lead, defaults: &Defaults, run: &RunConfig) -> Result<Res
         use_worktree: lead.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
         resume_session_id: None,
+        // v0.8 permission routing: not present in [[lead]] array format; default to PathA.
+        permission_routing: crate::manifest::schema::PermissionRouting::default(),
         // v0.6 depth-2 fields: not present in [[lead]] array format; default to
         // off/None so existing v0.5 manifests behave identically.
         allow_subleads: false,
@@ -382,6 +391,8 @@ fn resolve_lead_spec(
         use_worktree: spec.use_worktree.or(defaults.use_worktree).unwrap_or(true),
         env,
         resume_session_id: None,
+        // v0.8 permission routing:
+        permission_routing: spec.permission_routing,
         // v0.6 depth-2 fields:
         allow_subleads: spec.allow_subleads,
         max_subleads: spec.max_subleads,

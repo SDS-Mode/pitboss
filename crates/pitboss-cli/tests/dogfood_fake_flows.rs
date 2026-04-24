@@ -67,6 +67,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: true,
         max_subleads: None,
         max_sublead_budget_usd: None,
@@ -1013,6 +1014,7 @@ async fn dogfood_envelope_cap_rejection() {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: Some(3.0), // ← Cap: max $3 per sub-lead

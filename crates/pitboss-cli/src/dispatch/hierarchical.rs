@@ -230,7 +230,7 @@ pub async fn run_hierarchical(
     //     (last_session_id, overall_started_at, total_token_usage) adds no
     //     overhead on the common path.
     let mut lead_env = lead.env.clone();
-    crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env);
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
         args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
@@ -318,7 +318,10 @@ pub async fn run_hierarchical(
                     &new_prompt,
                 );
                 let mut resume_env = lead.env.clone();
-                crate::dispatch::runner::apply_pitboss_env_defaults(&mut resume_env);
+                crate::dispatch::runner::apply_pitboss_env_defaults(
+                    &mut resume_env,
+                    lead.permission_routing,
+                );
                 current_cmd = pitboss_core::process::SpawnCmd {
                     program: claude_binary.clone(),
                     args: resume_args,
