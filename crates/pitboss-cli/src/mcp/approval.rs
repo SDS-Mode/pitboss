@@ -221,6 +221,14 @@ impl ApprovalBridge {
             Err(_) => {
                 // Timeout: remove the pending entry so a late respond doesn't panic.
                 self.state.approval_bridge.lock().await.remove(&request_id);
+                // Also evict from the TUI-drain queue (Block policy, no TUI connected).
+                // Without this, a TUI that connects after the timeout fires sees a stale
+                // approval modal for a request that has already resolved.
+                self.state
+                    .approval_queue
+                    .lock()
+                    .await
+                    .retain(|q| q.request_id != request_id);
                 Err(ApprovalError::Timeout)
             }
         }
