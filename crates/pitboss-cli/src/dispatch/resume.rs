@@ -141,6 +141,14 @@ pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
     })
 }
 
+/// Entry in `subleads.jsonl` — one line per terminated sub-lead that had a
+/// session id. Written by `spawn_sublead_session` at sub-lead termination.
+#[derive(serde::Deserialize)]
+struct SubleadSessionEntry {
+    sublead_id: String,
+    session_id: String,
+}
+
 /// Hierarchical-mode counterpart to `build_resume_manifest`. Reads
 /// `resolved.json` and `summary.json` from a prior hierarchical run, extracts
 /// the lead's `claude_session_id`, and returns a `ResolvedManifest` whose
@@ -148,12 +156,18 @@ pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
 /// `--resume`. Workers are NOT resumed — the lead decides what work to
 /// dispatch.
 ///
+/// Also reads `subleads.jsonl` (if present) and returns a map of
+/// `sublead_id → claude_session_id` so the caller can seed the shared store
+/// for the root lead to discover prior sub-lead sessions.
+///
 /// Errors if:
 /// - `resolved.json` / `summary.json` missing or unparseable
 /// - the prior run was not hierarchical (`lead.is_none()` in `resolved.json`)
 /// - the lead's record is not in `summary.json`
 /// - the lead has no `claude_session_id` (e.g. SpawnFailed before any output)
-pub fn build_resume_hierarchical(run_dir: &Path) -> Result<ResolvedManifest> {
+pub fn build_resume_hierarchical(
+    run_dir: &Path,
+) -> Result<(ResolvedManifest, HashMap<String, String>)> {
     let resolved_path = run_dir.join("resolved.json");
     let bytes = std::fs::read(&resolved_path)
         .with_context(|| format!("reading {}", resolved_path.display()))?;
@@ -209,7 +223,41 @@ pub fn build_resume_hierarchical(run_dir: &Path) -> Result<ResolvedManifest> {
     // downstream flat-mode code path can't accidentally pick them up.
     resolved.tasks.clear();
 
-    Ok(resolved)
+    // Read subleads.jsonl if present; ignore missing / corrupt lines
+    // (best-effort — a partial file from an interrupted run is OK).
+    let mut sublead_sessions: HashMap<String, String> = HashMap::new();
+    let subleads_jsonl = run_dir.join("subleads.jsonl");
+    if subleads_jsonl.exists() {
+        if let Ok(content) = std::fs::read_to_string(&subleads_jsonl) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<SubleadSessionEntry>(line) {
+                    Ok(entry) => {
+                        if let Err(e) = validate_session_id(&entry.session_id) {
+                            tracing::warn!(
+                                sublead_id = %entry.sublead_id,
+                                error = %e,
+                                "skipping sublead entry with invalid session_id in subleads.jsonl"
+                            );
+                        } else {
+                            sublead_sessions.insert(entry.sublead_id, entry.session_id);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "skipping unparseable line in subleads.jsonl"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((resolved, sublead_sessions))
 }
 
 #[cfg(test)]
@@ -475,6 +523,7 @@ mod tests {
                 use_worktree: false,
                 env: Default::default(),
                 resume_session_id: None,
+                permission_routing: Default::default(),
                 allow_subleads: false,
                 max_subleads: None,
                 max_sublead_budget_usd: None,
@@ -538,9 +587,10 @@ mod tests {
         )
         .unwrap();
 
-        let resumed = build_resume_hierarchical(run_dir).unwrap();
+        let (resumed, sublead_sessions) = build_resume_hierarchical(run_dir).unwrap();
         let lead = resumed.lead.unwrap();
         assert_eq!(lead.resume_session_id.as_deref(), Some("session-abc-123"));
+        assert!(sublead_sessions.is_empty(), "no subleads.jsonl → empty map");
 
         // Silence unused warning on the un-reserialized resolved.
         let _ = resolved.lead.take();
@@ -578,6 +628,7 @@ mod tests {
                 use_worktree: true,
                 env: Default::default(),
                 resume_session_id: None,
+                permission_routing: Default::default(),
                 allow_subleads: false,
                 max_subleads: None,
                 max_sublead_budget_usd: None,
@@ -653,6 +704,129 @@ mod tests {
         assert!(
             msg.contains("worktree_cleanup = \"never\""),
             "expected remediation hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_resume_hierarchical_reads_subleads_jsonl() {
+        use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+        use crate::manifest::schema::{Effort, WorktreeCleanup};
+        use std::io::Write;
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let run_dir = dir.path();
+
+        let resolved = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: run_dir.to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(ResolvedLead {
+                id: "root-lead".into(),
+                directory: PathBuf::from("/tmp"),
+                prompt: "root".into(),
+                branch: None,
+                model: "claude-haiku-4-5".into(),
+                effort: Effort::High,
+                tools: vec![],
+                timeout_secs: 600,
+                use_worktree: false,
+                env: Default::default(),
+                resume_session_id: None,
+                permission_routing: Default::default(),
+                allow_subleads: true,
+                max_subleads: None,
+                max_sublead_budget_usd: None,
+                max_workers_across_tree: None,
+                sublead_defaults: None,
+            }),
+            max_workers: Some(4),
+            budget_usd: Some(10.0),
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+        };
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec_pretty(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        let lead_record = TaskRecord {
+            task_id: "root-lead".into(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: PathBuf::new(),
+            token_usage: Default::default(),
+            claude_session_id: Some("root-sess-001".into()),
+            final_message_preview: None,
+            parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+            failure_reason: None,
+        };
+        let summary = RunSummary {
+            run_id: Uuid::now_v7(),
+            manifest_path: PathBuf::new(),
+            pitboss_version: "0.8.0".into(),
+            claude_version: None,
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            total_duration_ms: 0,
+            tasks_total: 1,
+            tasks_failed: 0,
+            was_interrupted: false,
+            tasks: vec![lead_record],
+        };
+        std::fs::write(
+            run_dir.join("summary.json"),
+            serde_json::to_vec_pretty(&summary).unwrap(),
+        )
+        .unwrap();
+
+        // Write a subleads.jsonl with two entries (one valid, one corrupt).
+        let subleads_jsonl = run_dir.join("subleads.jsonl");
+        let mut f = std::fs::File::create(&subleads_jsonl).unwrap();
+        writeln!(
+            f,
+            r#"{{"sublead_id":"sublead-aaa","session_id":"sub-sess-aaa"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"sublead_id":"sublead-bbb","session_id":"sub-sess-bbb"}}"#
+        )
+        .unwrap();
+        writeln!(f, "{{not valid json}}").unwrap(); // should be skipped gracefully
+
+        let (resumed, sessions) = build_resume_hierarchical(run_dir).unwrap();
+        assert_eq!(
+            resumed.lead.unwrap().resume_session_id.as_deref(),
+            Some("root-sess-001")
+        );
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions.get("sublead-aaa").map(String::as_str),
+            Some("sub-sess-aaa")
+        );
+        assert_eq!(
+            sessions.get("sublead-bbb").map(String::as_str),
+            Some("sub-sess-bbb")
         );
     }
 }

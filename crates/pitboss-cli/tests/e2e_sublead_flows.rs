@@ -52,6 +52,7 @@ fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: true,
         max_subleads: Some(4),
         max_sublead_budget_usd: Some(5.0),
@@ -119,6 +120,7 @@ fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: true,
         max_subleads: Some(4),
         max_sublead_budget_usd: Some(5.0),
@@ -198,6 +200,7 @@ async fn root_spawns_sublead_which_completes() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -291,6 +294,7 @@ async fn root_kill_cascades_to_sublead_workers() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -606,19 +610,19 @@ async fn reject_with_reason_reaches_sublead_session() {
         "reason should flow back to the sub-lead; got: {approval_resp}"
     );
 
-    // Rejection counter is keyed by the root layer's lead_id ("root"), since
-    // ApprovalBridge::new receives the root DispatchState and uses state.root.lead_id.
+    // Rejection counter is keyed by the caller's task_id (s1_id), not root.lead_id.
+    // ApprovalBridge credits the counter to the actor that submitted the request.
     let counters = state
         .root
         .worker_counters
         .read()
         .await
-        .get("root")
+        .get(&s1_id)
         .cloned()
         .unwrap_or_default();
     assert_eq!(
         counters.approvals_rejected, 1,
-        "rejections counter on root lead should be 1 after sub-lead rejection"
+        "rejections counter on sub-lead s1 should be 1 after rejection"
     );
 
     state.root.cancel.terminate();
@@ -656,6 +660,7 @@ async fn budget_envelope_returns_to_root_pool() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -757,6 +762,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: true,
         max_subleads: Some(4),
         max_sublead_budget_usd: Some(5.0),
@@ -849,6 +855,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await

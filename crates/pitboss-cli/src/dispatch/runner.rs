@@ -43,9 +43,23 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 /// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
 /// for the deferred alternative (routing claude's gate through pitboss's
 /// approval queue rather than bypassing it).
-pub fn apply_pitboss_env_defaults(env: &mut std::collections::HashMap<String, String>) {
-    env.entry("CLAUDE_CODE_ENTRYPOINT".to_string())
-        .or_insert_with(|| "sdk-ts".to_string());
+pub fn apply_pitboss_env_defaults(
+    env: &mut std::collections::HashMap<String, String>,
+    permission_routing: crate::manifest::schema::PermissionRouting,
+) {
+    use crate::manifest::schema::PermissionRouting;
+    match permission_routing {
+        PermissionRouting::PathA => {
+            // Path A (default): sdk-ts entrypoint bypasses claude's built-in gate.
+            env.entry("CLAUDE_CODE_ENTRYPOINT".to_string())
+                .or_insert_with(|| "sdk-ts".to_string());
+        }
+        PermissionRouting::PathB => {
+            // Path B: leave the entrypoint unset so claude's gate is active.
+            // Pitboss registers `permission_prompt` MCP tool to intercept checks.
+            // Do NOT set sdk-ts — that would bypass the gate we want to route.
+        }
+    }
 }
 
 /// Check whether a manifest has approval gates that will block indefinitely
@@ -462,7 +476,7 @@ async fn execute_task(
     };
 
     let mut cmd_env = task.env.clone();
-    apply_pitboss_env_defaults(&mut cmd_env);
+    apply_pitboss_env_defaults(&mut cmd_env, Default::default());
     let cmd = SpawnCmd {
         program: claude.to_path_buf(),
         args: spawn_args(task),
@@ -675,17 +689,21 @@ pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
     mcp_config: &std::path::Path,
 ) -> Vec<String> {
+    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        // Pitboss is the permission authority — see fn doc comment.
-        "--dangerously-skip-permissions".into(),
-        // Plugin/skill isolation: prevent operator's ~/.claude/ plugins
-        // (skills, MCP servers, agents, hooks) from bleeding in.
-        "--strict-mcp-config".into(),
-        "--disable-slash-commands".into(),
     ];
+    // Path A (default): pitboss is the permission authority; bypass claude's gate.
+    // Path B: leave gate active; permission_prompt MCP tool routes each check.
+    if lead.permission_routing == PermissionRouting::PathA {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    // Plugin/skill isolation: prevent operator's ~/.claude/ plugins
+    // (skills, MCP servers, agents, hooks) from bleeding in.
+    args.push("--strict-mcp-config".into());
+    args.push("--disable-slash-commands".into());
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
     let mut allowed: Vec<String> = lead.tools.clone();
@@ -697,6 +715,10 @@ pub fn lead_spawn_args(
     // list_tools already gates visibility; this only widens the CLI allowlist.
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
+    }
+    // Path B: pre-allow permission_prompt so claude can route checks without stalling.
+    if lead.permission_routing == PermissionRouting::PathB {
+        allowed.push("mcp__pitboss__permission_prompt".into());
     }
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
@@ -727,22 +749,27 @@ pub fn lead_resume_spawn_args(
     session_id: &str,
     new_prompt: &str,
 ) -> Vec<String> {
+    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        // Permission authority is pitboss (see lead_spawn_args doc).
-        "--dangerously-skip-permissions".into(),
-        // Plugin/skill isolation (see lead_spawn_args doc).
-        "--strict-mcp-config".into(),
-        "--disable-slash-commands".into(),
     ];
+    if lead.permission_routing == PermissionRouting::PathA {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    // Plugin/skill isolation (see lead_spawn_args doc).
+    args.push("--strict-mcp-config".into());
+    args.push("--disable-slash-commands".into());
     let mut allowed: Vec<String> = lead.tools.clone();
     for t in PITBOSS_MCP_TOOLS {
         allowed.push((*t).to_string());
     }
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
+    }
+    if lead.permission_routing == PermissionRouting::PathB {
+        allowed.push("mcp__pitboss__permission_prompt".into());
     }
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
@@ -779,6 +806,8 @@ pub fn lead_resume_spawn_args(
 ///   the allow-list alongside the standard sublead MCP toolset. When
 ///   `None`, only the MCP toolset is included (preserves v0.6 behavior).
 ///   De-duplicated to keep the resulting `--allowedTools` flag tidy.
+/// - `permission_routing`: controls whether `--dangerously-skip-permissions`
+///   is included and whether `permission_prompt` is pre-allowed.
 pub fn sublead_spawn_args(
     _sublead_id: &str,
     prompt: &str,
@@ -786,17 +815,20 @@ pub fn sublead_spawn_args(
     mcp_config_path: &std::path::Path,
     resume_session_id: Option<&str>,
     tools_override: Option<&[String]>,
+    permission_routing: crate::manifest::schema::PermissionRouting,
 ) -> Vec<String> {
+    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        // Permission authority is pitboss (see lead_spawn_args doc).
-        "--dangerously-skip-permissions".into(),
-        // Plugin/skill isolation (see lead_spawn_args doc).
-        "--strict-mcp-config".into(),
-        "--disable-slash-commands".into(),
     ];
+    if permission_routing == PermissionRouting::PathA {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    // Plugin/skill isolation (see lead_spawn_args doc).
+    args.push("--strict-mcp-config".into());
+    args.push("--disable-slash-commands".into());
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
     // listed first; pitboss MCP tools always appended so the sub-lead can
@@ -807,6 +839,9 @@ pub fn sublead_spawn_args(
     };
     for t in SUBLEAD_MCP_TOOLS {
         allowed.push((*t).to_string());
+    }
+    if permission_routing == PermissionRouting::PathB {
+        allowed.push("mcp__pitboss__permission_prompt".into());
     }
     // De-duplicate while preserving order.
     let mut seen = std::collections::HashSet::new();
@@ -871,10 +906,12 @@ async fn expire_layer_approvals(
     use crate::mcp::approval::ApprovalFallback;
 
     let now = chrono::Utc::now();
-    let mut queue = layer.approval_queue.lock().await;
 
+    // ── Scan approval_queue ───────────────────────────────────────────────────
+    // Entries here have not yet been seen by any TUI.
+    let mut queue = layer.approval_queue.lock().await;
     let mut i = 0;
-    let mut expired = Vec::new();
+    let mut expired_queue = Vec::new();
     while i < queue.len() {
         let expired_now = match queue[i].ttl_secs {
             Some(ttl_secs) => {
@@ -885,14 +922,14 @@ async fn expire_layer_approvals(
             None => false,
         };
         if expired_now {
-            expired.push(queue.remove(i).expect("index in range"));
+            expired_queue.push(queue.remove(i).expect("index in range"));
         } else {
             i += 1;
         }
     }
     drop(queue);
 
-    for entry in expired {
+    for entry in expired_queue {
         let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
         let approved = matches!(fallback, ApprovalFallback::AutoApprove);
         tracing::info!(
@@ -900,19 +937,68 @@ async fn expire_layer_approvals(
             task_id = %entry.task_id,
             fallback = ?fallback,
             approved,
-            "approval TTL expired, applying fallback"
+            "approval queue TTL expired, applying fallback"
         );
         let response = ApprovalResponse {
             approved,
             comment: Some("TTL expired".to_string()),
             edited_summary: None,
             reason: Some(format!("TTL expired: fallback={fallback:?}")),
+            from_ttl: true,
         };
         state
-            .record_last_approval_response(&entry.task_id, approved)
+            .record_last_approval_response(&entry.task_id, approved, true)
             .await;
-        // Best-effort: responder may have been dropped if the caller gave up.
         let _ = entry.responder.send(response);
+    }
+
+    // ── Scan approval_bridge ──────────────────────────────────────────────────
+    // Entries here were drained to a TUI that may have disconnected before
+    // responding. Without this scan they would silently miss their TTL.
+    let expired_bridge_ids: Vec<String> = {
+        let bridge = layer.approval_bridge.lock().await;
+        bridge
+            .iter()
+            .filter_map(|(id, entry)| {
+                let ttl = entry.ttl_secs?;
+                let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+                if matches!(fallback, ApprovalFallback::Block) {
+                    return None;
+                }
+                let age = (now - entry.created_at).num_seconds() as u64;
+                if age > ttl {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    for request_id in expired_bridge_ids {
+        let entry = layer.approval_bridge.lock().await.remove(&request_id);
+        if let Some(entry) = entry {
+            let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+            let approved = matches!(fallback, ApprovalFallback::AutoApprove);
+            tracing::info!(
+                request_id = %request_id,
+                task_id = %entry.task_id,
+                fallback = ?fallback,
+                approved,
+                "approval bridge TTL expired, applying fallback"
+            );
+            let response = ApprovalResponse {
+                approved,
+                comment: Some("TTL expired".to_string()),
+                edited_summary: None,
+                reason: Some(format!("TTL expired: fallback={fallback:?}")),
+                from_ttl: true,
+            };
+            state
+                .record_last_approval_response(&entry.task_id, approved, true)
+                .await;
+            let _ = entry.responder.send(response);
+        }
     }
 }
 
@@ -930,7 +1016,7 @@ mod tests {
     #[test]
     fn apply_pitboss_env_defaults_sets_entrypoint_when_absent() {
         let mut env: HashMap<String, String> = HashMap::new();
-        apply_pitboss_env_defaults(&mut env);
+        apply_pitboss_env_defaults(&mut env, Default::default());
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"sdk-ts".to_string()),
@@ -942,7 +1028,7 @@ mod tests {
     fn apply_pitboss_env_defaults_honors_operator_override() {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
-        apply_pitboss_env_defaults(&mut env);
+        apply_pitboss_env_defaults(&mut env, Default::default());
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"cli".to_string()),
@@ -954,7 +1040,7 @@ mod tests {
     fn apply_pitboss_env_defaults_preserves_other_keys() {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        apply_pitboss_env_defaults(&mut env);
+        apply_pitboss_env_defaults(&mut env, Default::default());
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
@@ -1432,6 +1518,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -1448,11 +1535,19 @@ mod tests {
             ),
             (
                 "sublead",
-                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None),
+                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None, Default::default()),
             ),
             (
                 "sublead_resume",
-                sublead_spawn_args("sl-id", "p", "m", &cfg, Some("sess"), None),
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    Some("sess"),
+                    None,
+                    Default::default(),
+                ),
             ),
         ];
         for (name, argv) in cases {
@@ -1487,6 +1582,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -1517,6 +1613,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -1558,6 +1655,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
+            permission_routing: Default::default(),
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -1602,6 +1700,7 @@ mod tests {
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
             None,
+            Default::default(),
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1627,6 +1726,7 @@ mod tests {
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
             None,
+            Default::default(),
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1651,6 +1751,7 @@ mod tests {
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
             None,
+            Default::default(),
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1670,6 +1771,7 @@ mod tests {
             &PathBuf::from("/tmp/sublead-cfg.json"),
             Some("resume-session-123"),
             None,
+            Default::default(),
         );
         // Verify the basic arg structure is correct
         assert!(args.contains(&"--output-format".to_string()));
@@ -1695,6 +1797,7 @@ mod tests {
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
             Some(&custom),
+            Default::default(),
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1720,10 +1823,49 @@ mod tests {
             &PathBuf::from("/tmp/sublead-cfg.json"),
             None,
             Some(&custom),
+            Default::default(),
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
         let count = list.matches("mcp__pitboss__spawn_worker").count();
         assert_eq!(count, 1, "spawn_worker appears {count} times in {list}");
+    }
+
+    #[test]
+    fn path_b_lead_omits_dangerously_skip_and_includes_permission_prompt() {
+        use crate::manifest::resolve::ResolvedLead;
+        use crate::manifest::schema::PermissionRouting;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec![],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            permission_routing: PermissionRouting::PathB,
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_workers_across_tree: None,
+            sublead_defaults: None,
+        };
+        let cfg = PathBuf::from("/tmp/cfg.json");
+        let args = lead_spawn_args(&lead, &cfg);
+        assert!(
+            !args.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "Path B lead must NOT have --dangerously-skip-permissions: {args:?}"
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        assert!(
+            list.contains("mcp__pitboss__permission_prompt"),
+            "Path B lead allowedTools must include permission_prompt: {list}"
+        );
     }
 }

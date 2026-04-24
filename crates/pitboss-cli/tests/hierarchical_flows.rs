@@ -35,6 +35,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: false,
         max_subleads: None,
         max_sublead_budget_usd: None,

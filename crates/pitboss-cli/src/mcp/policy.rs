@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use crate::dispatch::state::PendingApproval;
 use crate::mcp::approval::ApprovalCategory;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRule {
     #[serde(default)]
     pub r#match: ApprovalMatch,
     pub action: ApprovalAction,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalMatch {
     /// Match exact actor path (e.g., "root→S1")
     #[serde(default)]
@@ -50,6 +50,10 @@ pub struct PolicyMatcher {
 impl PolicyMatcher {
     pub fn new(rules: Vec<ApprovalRule>) -> Self {
         Self { rules }
+    }
+
+    pub fn rules(&self) -> &[ApprovalRule] {
+        &self.rules
     }
 
     /// Returns the first matching action, or None if no rule matches.

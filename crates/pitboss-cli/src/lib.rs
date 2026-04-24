@@ -14,4 +14,5 @@ pub mod manifest;
 pub mod mcp;
 pub mod notify;
 pub mod shared_store;
+pub mod status;
 pub mod tui_table;

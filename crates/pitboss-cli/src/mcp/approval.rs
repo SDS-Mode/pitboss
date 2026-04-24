@@ -92,6 +92,7 @@ impl ApprovalBridge {
     /// `kind` distinguishes `request_approval` (in-flight, `Action`) from
     /// `propose_plan` (pre-flight, `Plan`) — passed through to the TUI
     /// modal so the operator can tell them apart.
+    #[allow(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         task_id: String,
@@ -99,8 +100,12 @@ impl ApprovalBridge {
         plan: Option<crate::mcp::tools::ApprovalPlan>,
         kind: crate::control::protocol::ApprovalKind,
         timeout: Duration,
+        ttl_secs: Option<u64>,
+        fallback: Option<ApprovalFallback>,
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
+        // Clone before task_id is moved into bridge/queue/event structures below.
+        let task_id_for_counter = task_id.clone();
         let _ = crate::dispatch::events::append_event(
             &self.state.root.run_subdir,
             &self.state.root.lead_id,
@@ -136,12 +141,16 @@ impl ApprovalBridge {
         let writer_guard = self.state.root.control_writer.lock().await;
 
         if let Some(w) = writer_guard.as_ref() {
-            self.state
-                .root
-                .approval_bridge
-                .lock()
-                .await
-                .insert(request_id.clone(), tx);
+            self.state.root.approval_bridge.lock().await.insert(
+                request_id.clone(),
+                crate::dispatch::state::BridgeEntry {
+                    responder: tx,
+                    task_id: task_id.clone(),
+                    ttl_secs,
+                    fallback,
+                    created_at: chrono::Utc::now(),
+                },
+            );
             let ev = crate::control::protocol::ControlEvent::ApprovalRequest {
                 request_id: request_id.clone(),
                 task_id,
@@ -164,6 +173,7 @@ impl ApprovalBridge {
                         comment: None,
                         edited_summary: None,
                         reason: None,
+                        from_ttl: false,
                     });
                 }
                 ApprovalPolicy::AutoReject => {
@@ -172,10 +182,14 @@ impl ApprovalBridge {
                         comment: Some("no operator available".into()),
                         edited_summary: None,
                         reason: None,
+                        from_ttl: false,
                     });
                 }
                 ApprovalPolicy::Block => {
                     // Queue; drain when a TUI connects (see control/server.rs).
+                    // Pass ttl_secs + fallback from the request so the TTL watcher
+                    // can expire and fire a from_ttl=true response before the
+                    // bridge timeout fires (which would return a generic error).
                     self.state
                         .root
                         .approval_queue
@@ -188,8 +202,8 @@ impl ApprovalBridge {
                             plan,
                             kind,
                             responder: tx,
-                            ttl_secs: None, // v0.5 compat: no expiration by default
-                            fallback: None, // v0.5 compat: Block fallback
+                            ttl_secs,
+                            fallback,
                             created_at: chrono::Utc::now(),
                         });
 
@@ -211,16 +225,30 @@ impl ApprovalBridge {
             }
         }
 
+        // task_id may have been moved into the ControlEvent or QueuedApproval
+        // above; use the request_id as the lookup key is not right — we need
+        // the caller id. Both branches clone task_id before consuming it, so
+        // we capture a clone here at the top of the function instead.
+        // (The clone is taken at function entry via task_id_for_counter below.)
         self.state
             .root
             .worker_counters
             .write()
             .await
-            .entry(self.state.root.lead_id.clone())
+            .entry(task_id_for_counter.clone())
             .or_default()
             .approvals_requested += 1;
 
-        match tokio::time::timeout(timeout, rx).await {
+        // When a per-request TTL is set, the TTL watcher fires the response
+        // with from_ttl=true before the bridge timeout. Add 60 s of buffer so
+        // the TTL watcher always wins the race; the bridge timeout then becomes
+        // a safety net only.
+        let effective_timeout = match ttl_secs {
+            Some(t) => Duration::from_secs(t + 60),
+            None => timeout,
+        };
+
+        match tokio::time::timeout(effective_timeout, rx).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(ApprovalError::Cancelled),
             Err(_) => {
@@ -230,10 +258,10 @@ impl ApprovalBridge {
                     .approval_bridge
                     .lock()
                     .await
-                    .remove(&request_id);
-                // Also evict from the TUI-drain queue (Block policy, no TUI connected).
-                // Without this, a TUI that connects after the timeout fires sees a stale
-                // approval modal for a request that has already resolved.
+                    .remove(&request_id); // removes BridgeEntry; responder dropped
+                                          // Also evict from the TUI-drain queue (Block policy, no TUI connected).
+                                          // Without this, a TUI that connects after the timeout fires sees a stale
+                                          // approval modal for a request that has already resolved.
                 self.state
                     .root
                     .approval_queue
@@ -251,7 +279,7 @@ impl ApprovalBridge {
         request_id: &str,
         resp: ApprovalResponse,
     ) -> Result<(), ApprovalError> {
-        let tx = self
+        let bridge_entry = self
             .state
             .root
             .approval_bridge
@@ -271,10 +299,14 @@ impl ApprovalBridge {
         )
         .await;
         let approved = resp.approved;
-        tx.send(resp).map_err(|_| ApprovalError::Cancelled)?;
+        let caller_id = bridge_entry.task_id.clone();
+        bridge_entry
+            .responder
+            .send(resp)
+            .map_err(|_| ApprovalError::Cancelled)?;
         {
             let mut guard = self.state.root.worker_counters.write().await;
-            let entry = guard.entry(self.state.root.lead_id.clone()).or_default();
+            let entry = guard.entry(caller_id).or_default();
             if approved {
                 entry.approvals_approved += 1;
             } else {
@@ -352,6 +384,8 @@ mod tests {
                 None,
                 crate::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(1),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -369,6 +403,8 @@ mod tests {
                 None,
                 crate::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(1),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -387,6 +423,8 @@ mod tests {
                 None,
                 crate::control::protocol::ApprovalKind::Action,
                 Duration::from_millis(50),
+                None,
+                None,
             )
             .await
             .unwrap_err();

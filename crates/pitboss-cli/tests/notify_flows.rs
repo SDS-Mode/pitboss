@@ -287,6 +287,8 @@ async fn approval_pending_notification_fires_on_enqueue() {
                     None,
                     pitboss_cli::control::protocol::ApprovalKind::Action,
                     Duration::from_secs(1),
+                    None,
+                    None,
                 )
                 .await;
         })

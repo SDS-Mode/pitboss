@@ -35,6 +35,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: true,
         max_subleads: None,
         max_sublead_budget_usd: None,
@@ -99,6 +100,7 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         use_worktree: false,
         env: Default::default(),
         resume_session_id: None,
+        permission_routing: Default::default(),
         allow_subleads: true,
         max_subleads: None,
         max_sublead_budget_usd: Some(cap),
@@ -487,6 +489,7 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = pitboss_cli::dispatch::sublead::spawn_sublead(&state, req)
         .await
@@ -843,6 +846,7 @@ async fn reject_with_reason_propagates_to_caller() {
         comment: None,
         edited_summary: None,
         reason: Some("output should be CSV not JSON".into()),
+        from_ttl: false,
     };
     assert!(!resp.approved);
     assert_eq!(
@@ -1102,6 +1106,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1162,6 +1167,7 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1628,6 +1634,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await

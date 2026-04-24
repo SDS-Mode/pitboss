@@ -286,6 +286,8 @@ async fn block_policy_queue_drains_on_tui_connect() {
                 None,
                 pitboss_cli::control::protocol::ApprovalKind::Action,
                 Duration::from_secs(5),
+                None,
+                None,
             )
             .await
     });
@@ -393,6 +395,8 @@ async fn auto_approve_policy_responds_without_tui() {
             None,
             pitboss_cli::control::protocol::ApprovalKind::Action,
             Duration::from_millis(200),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -450,6 +454,8 @@ async fn auto_reject_policy_responds_without_tui() {
             None,
             pitboss_cli::control::protocol::ApprovalKind::Action,
             Duration::from_millis(200),
+            None,
+            None,
         )
         .await
         .unwrap();

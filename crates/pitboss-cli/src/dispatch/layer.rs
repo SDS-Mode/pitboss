@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::dispatch::state::{
-    ApprovalPolicy, ApprovalResponse, QueuedApproval, WorkerCounters, WorkerState,
+    ApprovalPolicy, BridgeEntry, QueuedApproval, WorkerCounters, WorkerState,
 };
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::policy::PolicyMatcher;
@@ -88,7 +88,13 @@ pub struct LayerState {
     pub run_subdir: PathBuf,
     /// Approval bridge: maps request_id → sender that completes when the
     /// TUI responds to an approval request.
-    pub approval_bridge: Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalResponse>>>,
+    /// Live-TUI approval requests keyed by request_id.
+    ///
+    /// Values are `BridgeEntry` (not bare senders) so the TTL watcher can
+    /// expire bridge entries that the operator never acted on. Without TTL
+    /// metadata here, an approval that moves from `approval_queue` to the
+    /// bridge on TUI connect loses its auto-resolve guarantee.
+    pub approval_bridge: Mutex<HashMap<String, BridgeEntry>>,
     /// Queued approval requests waiting for a TUI to attach.
     pub approval_queue: Mutex<VecDeque<QueuedApproval>>,
     /// Approval policy from the manifest.

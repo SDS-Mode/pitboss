@@ -310,6 +310,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
         Mode::ConfirmKill { .. } => handle_confirm_kill(state, code),
         Mode::PromptReprompt { .. } => handle_prompt_reprompt(state, code, modifiers),
         Mode::ApprovalModal { .. } => handle_approval_modal(state, code, modifiers),
+        Mode::PolicyEditor { .. } => handle_policy_editor(state, code),
     }
 }
 
@@ -442,6 +443,11 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
             }
         }
 
+        // v0.8 — open policy editor overlay.
+        KeyCode::Char('P') => {
+            state.enter_policy_editor();
+        }
+
         // Refresh — watcher already polls every 500ms; render at loop top
         // covers forced redraw. All other keys are intentionally ignored.
         _ => {}
@@ -540,6 +546,10 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
     use crate::state::SubtreeView;
     use pitboss_cli::control::protocol::ControlEvent as E;
     match ev {
+        E::Hello { policy_rules, .. } => {
+            // Sync our local rule cache from the dispatcher's snapshot.
+            state.policy_rules = policy_rules;
+        }
         E::ApprovalRequest {
             request_id,
             task_id,
@@ -866,6 +876,95 @@ fn handle_approval_draft(
         kind: ctx.kind,
         sub_mode,
     };
+}
+
+/// Handle key presses inside the policy-editor overlay.
+///
+/// Navigation: j/k or arrow keys move the selection.
+/// Mutation:
+///   Space / Enter  — cycle the selected rule's action
+///                    (`AutoApprove` → `AutoReject` → `Block` → `AutoApprove`).
+///   n              — append a blank catch-all / `AutoApprove` rule.
+///   d              — delete the selected rule.
+///   s / F2         — send `UpdatePolicy` and close (saves to server).
+///   Esc            — cancel without saving.
+fn handle_policy_editor(state: &mut AppState, code: KeyCode) -> Action {
+    use pitboss_cli::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule};
+
+    let Mode::PolicyEditor {
+        ref mut rules,
+        ref mut selected,
+    } = state.mode
+    else {
+        return Action::Continue;
+    };
+
+    match code {
+        // Navigation.
+        KeyCode::Char('j') | KeyCode::Down if !rules.is_empty() => {
+            *selected = (*selected + 1) % rules.len();
+        }
+        KeyCode::Char('k') | KeyCode::Up if !rules.is_empty() => {
+            if *selected == 0 {
+                *selected = rules.len() - 1;
+            } else {
+                *selected -= 1;
+            }
+        }
+
+        // Cycle action of the selected rule.
+        KeyCode::Char(' ') | KeyCode::Enter if !rules.is_empty() => {
+            let idx = *selected;
+            let next = match rules[idx].action {
+                ApprovalAction::AutoApprove => ApprovalAction::AutoReject,
+                ApprovalAction::AutoReject => ApprovalAction::Block,
+                ApprovalAction::Block => ApprovalAction::AutoApprove,
+            };
+            rules[idx].action = next;
+        }
+
+        // Append a blank catch-all rule.
+        KeyCode::Char('n') => {
+            rules.push(ApprovalRule {
+                r#match: ApprovalMatch::default(),
+                action: ApprovalAction::AutoApprove,
+            });
+            *selected = rules.len() - 1;
+        }
+
+        // Delete selected rule.
+        KeyCode::Char('d') if !rules.is_empty() => {
+            let idx = *selected;
+            rules.remove(idx);
+            if !rules.is_empty() && *selected >= rules.len() {
+                *selected = rules.len() - 1;
+            }
+        }
+
+        // Save and close.
+        KeyCode::Char('s') | KeyCode::F(2) => {
+            let rules_to_send = rules.clone();
+            // Update our local cache so the editor re-opens with the latest
+            // rules rather than the stale snapshot from connect time.
+            state.policy_rules.clone_from(&rules_to_send);
+            state.mode = Mode::Normal;
+            spawn_control_op(
+                state,
+                pitboss_cli::control::protocol::ControlOp::UpdatePolicy {
+                    rules: rules_to_send,
+                },
+            );
+            return Action::Continue;
+        }
+
+        // Cancel without saving.
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.mode = Mode::Normal;
+        }
+
+        _ => {}
+    }
+    Action::Continue
 }
 
 fn send_approve(

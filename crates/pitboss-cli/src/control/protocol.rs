@@ -89,7 +89,11 @@ fn is_default_approval_kind(k: &ApprovalKind) -> bool {
 }
 
 /// An operation sent from the TUI (client) to the dispatcher (server).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Note: `Eq` is NOT derived — `UpdatePolicy` carries `Vec<ApprovalRule>`,
+/// whose `ApprovalMatch.cost_over: Option<f64>` does not implement `Eq`.
+/// Use `PartialEq` comparisons; `assert_eq!` continues to work correctly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlOp {
     Hello {
@@ -127,6 +131,13 @@ pub enum ControlOp {
         reason: Option<String>,
     },
     ListWorkers,
+    /// Replace the dispatcher's live `[[approval_policy]]` rule set. Takes
+    /// effect immediately: the next `evaluate_policy` call uses these rules.
+    /// An empty `rules` vec removes all declarative rules (every approval
+    /// falls through to the legacy `ApprovalPolicy` / operator-queue path).
+    UpdatePolicy {
+        rules: Vec<crate::mcp::policy::ApprovalRule>,
+    },
 }
 
 /// An event pushed from the dispatcher (server) to the TUI (client).
@@ -144,6 +155,12 @@ pub enum ControlEvent {
         run_id: String,
         run_kind: String,
         workers: Vec<String>,
+        /// Current `[[approval_policy]]` rule set at connect time. Empty when
+        /// no declarative rules are configured. `#[serde(default)]` keeps the
+        /// field backward-compatible with pre-v0.8 dispatchers that don't send
+        /// it — they simply see no rules (the TUI editor starts from blank).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        policy_rules: Vec<crate::mcp::policy::ApprovalRule>,
     },
     OpAcked {
         op: String,
@@ -363,8 +380,57 @@ mod tests {
             run_id: "019d...".into(),
             run_kind: "hierarchical".into(),
             workers: vec!["triage".into(), "w-1".into()],
+            policy_rules: vec![],
         };
         assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    #[test]
+    fn hello_event_policy_rules_omitted_when_empty() {
+        // Empty rules must be omitted on the wire (skip_serializing_if = Vec::is_empty).
+        let ev = ControlEvent::Hello {
+            server_version: "0.4.0".into(),
+            run_id: "r".into(),
+            run_kind: "flat".into(),
+            workers: vec![],
+            policy_rules: vec![],
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(
+            !s.contains("policy_rules"),
+            "empty rules must be elided: {s}"
+        );
+    }
+
+    #[test]
+    fn hello_event_policy_rules_absent_deserializes_to_empty() {
+        // Pre-v0.8 dispatcher omits the field; TUI must default to empty vec.
+        let raw = r#"{"event":"hello","server_version":"0.4.0","run_id":"r","run_kind":"flat","workers":[]}"#;
+        let ev: ControlEvent = serde_json::from_str(raw).unwrap();
+        match ev {
+            ControlEvent::Hello { policy_rules, .. } => {
+                assert!(policy_rules.is_empty(), "should default to empty vec");
+            }
+            _ => panic!("expected Hello"),
+        }
+    }
+
+    #[test]
+    fn update_policy_roundtrips() {
+        use crate::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule};
+        let op = ControlOp::UpdatePolicy {
+            rules: vec![ApprovalRule {
+                r#match: ApprovalMatch {
+                    category: Some(crate::mcp::approval::ApprovalCategory::ToolUse),
+                    ..Default::default()
+                },
+                action: ApprovalAction::AutoApprove,
+            }],
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"op\":\"update_policy\""), "{s}");
+        let op2: ControlOp = serde_json::from_str(&s).unwrap();
+        assert_eq!(op, op2);
     }
 
     #[test]

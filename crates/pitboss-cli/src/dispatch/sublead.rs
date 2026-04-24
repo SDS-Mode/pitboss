@@ -37,10 +37,11 @@ use pitboss_core::worktree::CleanupPolicy;
 pub fn compose_sublead_env(
     lead_env: &HashMap<String, String>,
     operator_env: &HashMap<String, String>,
+    permission_routing: crate::manifest::schema::PermissionRouting,
 ) -> HashMap<String, String> {
     let mut out = lead_env.clone();
     out.extend(operator_env.clone());
-    crate::dispatch::runner::apply_pitboss_env_defaults(&mut out);
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut out, permission_routing);
     out
 }
 
@@ -98,6 +99,11 @@ pub struct SubleadSpawnRequest {
     /// (`mcp__pitboss__*`) are always included regardless so the sub-lead
     /// can still orchestrate workers.
     pub tools: Vec<String>,
+    /// When set, pass `--resume <id>` to the sub-lead's claude subprocess so
+    /// it continues a prior session. Populated by the root lead after
+    /// `pitboss resume` seeds `/resume/subleads` in the shared store with
+    /// prior session IDs. `None` for fresh spawns.
+    pub resume_session_id: Option<String>,
 }
 
 /// Validated, defaults-applied resource envelope for a sub-lead spawn.
@@ -333,6 +339,11 @@ pub async fn spawn_sublead(
             .await
             .insert(sublead_id.clone(), sub_layer.clone());
 
+        // Install the per-sublead cancel cascade watcher so that draining /
+        // terminating sub_layer.cancel propagates to its workers without the
+        // root cascade watcher needing to reach into worker_cancels directly.
+        crate::dispatch::signals::install_sublead_cancel_watcher(sub_layer.clone());
+
         // Emit SubleadSpawned lifecycle event to the control plane.
         {
             let (budget_usd_val, max_workers_val) = match &envelope {
@@ -355,12 +366,13 @@ pub async fn spawn_sublead(
             state.root.broadcast_control_event(ev).await;
         }
 
-        // I-1: If root has entered cascade-drain phase AFTER this read-lock snapshot,
-        // immediately drain the new sub-tree's cancel token before spawning the session.
-        // This guarantees any sub-lead spawned post-drain inherits the cancellation
-        // synchronously, avoiding the race where the cascade watcher's snapshot would
-        // miss this sub-lead entirely.
-        if state.root.cancel.is_draining() {
+        // I-1: If root has entered cascade-drain or cascade-terminate phase AFTER this
+        // read-lock snapshot, immediately propagate to the new sub-tree so it doesn't
+        // miss the cascade-watcher snapshot (which only fires once per run).
+        if state.root.cancel.is_terminated() {
+            sub_layer.cancel.terminate();
+            tracing::info!(sublead_id = %sublead_id, "spawned during cascade terminate; immediate cascade applied");
+        } else if state.root.cancel.is_draining() {
             sub_layer.cancel.drain();
             tracing::info!(sublead_id = %sublead_id, "spawned during cascade drain; immediate cascade applied");
         }
@@ -374,6 +386,7 @@ pub async fn spawn_sublead(
             envelope,
             req.env,
             req.tools,
+            req.resume_session_id,
         )
         .await
         .context("sub-lead claude session spawn failed")?;
@@ -460,6 +473,7 @@ async fn spawn_sublead_session(
     envelope: ResolvedEnvelope,
     operator_env: std::collections::HashMap<String, String>,
     tools_override: Vec<String>,
+    resume_session_id: Option<String>,
 ) -> Result<()> {
     use crate::dispatch::hierarchical::build_sublead_mcp_config;
     use crate::dispatch::runner::sublead_spawn_args;
@@ -480,19 +494,27 @@ async fn spawn_sublead_session(
         .context("build sublead mcp-config")?;
 
     // 3. Build the CLI args: sublead toolset (or operator override),
-    //    model, prompt, no --resume on first spawn.
+    //    model, prompt, and optional --resume when continuing a prior session.
     let tools_for_args: Option<&[String]> = if tools_override.is_empty() {
         None
     } else {
         Some(&tools_override)
     };
+    let spawn_routing = state
+        .root
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.permission_routing)
+        .unwrap_or_default();
     let args = sublead_spawn_args(
         &sublead_id,
         &prompt,
         &model,
         &mcp_config_path,
-        None,
+        resume_session_id.as_deref(),
         tools_for_args,
+        spawn_routing,
     );
 
     // 4. Task log directory (mirrors workers' layout for consistency).
@@ -539,7 +561,14 @@ async fn spawn_sublead_session(
         .as_ref()
         .map(|l| l.env.clone())
         .unwrap_or_default();
-    let sublead_env = compose_sublead_env(&lead_env, &operator_env);
+    let routing = state
+        .root
+        .manifest
+        .lead
+        .as_ref()
+        .map(|l| l.permission_routing)
+        .unwrap_or_default();
+    let sublead_env = compose_sublead_env(&lead_env, &operator_env, routing);
     let sublead_cwd = state
         .root
         .manifest
@@ -680,6 +709,13 @@ async fn spawn_sublead_session(
                     } else {
                         Some(&tools_override_bg)
                     };
+                    let resume_routing = state_bg
+                        .root
+                        .manifest
+                        .lead
+                        .as_ref()
+                        .map(|l| l.permission_routing)
+                        .unwrap_or_default();
                     let resume_args = sublead_spawn_args(
                         &sublead_id_bg,
                         &new_prompt,
@@ -687,6 +723,7 @@ async fn spawn_sublead_session(
                         &mcp_config_path_bg,
                         Some(sid.as_str()),
                         tools_for_resume,
+                        resume_routing,
                     );
                     // Same env precedence as the initial spawn (see
                     // compose_sublead_env): lead → operator → pitboss defaults.
@@ -697,7 +734,15 @@ async fn spawn_sublead_session(
                         .as_ref()
                         .map(|l| l.env.clone())
                         .unwrap_or_default();
-                    let resume_env = compose_sublead_env(&lead_env_resume, &operator_env_bg);
+                    let resume_routing = state_bg
+                        .root
+                        .manifest
+                        .lead
+                        .as_ref()
+                        .map(|l| l.permission_routing)
+                        .unwrap_or_default();
+                    let resume_env =
+                        compose_sublead_env(&lead_env_resume, &operator_env_bg, resume_routing);
                     // Same cwd rationale as the initial spawn: lead.directory
                     // (not lead_cwd). See the long comment in
                     // finalize_sublead_spawn.
@@ -760,14 +805,18 @@ async fn spawn_sublead_session(
         };
 
         // Reclassify silent exits driven by a recent rejected approval. A
-        // sub-lead that called propose_plan, got auto_reject, and exited
-        // would otherwise show as Success. See run_worker for the same
-        // pattern.
+        // sub-lead that called propose_plan, got auto_reject or a TTL
+        // fallback, and exited would otherwise show as Success. See
+        // run_worker for the same pattern.
         if matches!(sublead_outcome, SubleadOutcome::Success) {
-            if let Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) =
-                state_bg.approval_driven_termination(&sublead_id_bg).await
-            {
-                sublead_outcome = SubleadOutcome::ApprovalRejected;
+            match state_bg.approval_driven_termination(&sublead_id_bg).await {
+                Some(crate::dispatch::state::ApprovalTerminationKind::Rejected) => {
+                    sublead_outcome = SubleadOutcome::ApprovalRejected;
+                }
+                Some(crate::dispatch::state::ApprovalTerminationKind::TimedOut) => {
+                    sublead_outcome = SubleadOutcome::ApprovalTimedOut;
+                }
+                None => {}
             }
         }
 
@@ -821,6 +870,33 @@ async fn spawn_sublead_session(
                 "failed to persist sub-lead TaskRecord"
             );
         }
+
+        // Persist the session_id mapping so `pitboss resume` can seed the
+        // shared store with prior sub-lead session IDs on the next run.
+        if let Some(ref sid) = last_session_id {
+            let entry = serde_json::json!({
+                "sublead_id": sublead_id_bg,
+                "session_id": sid,
+            });
+            let subleads_jsonl = sub_layer_bg.run_subdir.join("subleads.jsonl");
+            if let Ok(mut line) = serde_json::to_string(&entry) {
+                line.push('\n');
+                // Best-effort: failure to persist is not fatal.
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&subleads_jsonl)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()))
+                {
+                    tracing::warn!(
+                        sublead_id = %sublead_id_bg,
+                        error = %e,
+                        "failed to append sublead session to subleads.jsonl"
+                    );
+                }
+            }
+        }
+
         // Broadcast classified failure from the sub-lead so the root TUI
         // sees why this branch of the tree died, and update api_health
         // so further spawns across the tree see the gate.
@@ -962,7 +1038,7 @@ mod env_composition_tests {
             ("ARTIFACTS_DIR", "/run/artifacts"),
             ("ADVENTURE_OUT", "/run/out"),
         ]);
-        let out = compose_sublead_env(&lead, &HashMap::new());
+        let out = compose_sublead_env(&lead, &HashMap::new(), Default::default());
         assert_eq!(out.get("WORK_DIR").map(String::as_str), Some("/run/work"));
         assert_eq!(
             out.get("ARTIFACTS_DIR").map(String::as_str),
@@ -980,7 +1056,7 @@ mod env_composition_tests {
         // specific sublead to a different WORK_DIR without editing the manifest.
         let lead = env(&[("WORK_DIR", "/lead/path")]);
         let operator = env(&[("WORK_DIR", "/operator/path")]);
-        let out = compose_sublead_env(&lead, &operator);
+        let out = compose_sublead_env(&lead, &operator, Default::default());
         assert_eq!(
             out.get("WORK_DIR").map(String::as_str),
             Some("/operator/path")
@@ -992,14 +1068,14 @@ mod env_composition_tests {
         // CLAUDE_CODE_ENTRYPOINT is only set when neither lead nor operator
         // supplied it. If either did, that value wins.
         let empty = HashMap::new();
-        let out = compose_sublead_env(&empty, &empty);
+        let out = compose_sublead_env(&empty, &empty, Default::default());
         assert_eq!(
             out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
             Some("sdk-ts")
         );
 
         let lead = env(&[("CLAUDE_CODE_ENTRYPOINT", "cli")]);
-        let out = compose_sublead_env(&lead, &HashMap::new());
+        let out = compose_sublead_env(&lead, &HashMap::new(), Default::default());
         assert_eq!(
             out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
             Some("cli"),
@@ -1011,7 +1087,7 @@ mod env_composition_tests {
     fn empty_lead_env_still_applies_pitboss_defaults() {
         // No [defaults.env] and no operator env → sublead still gets
         // CLAUDE_CODE_ENTRYPOINT so the MCP permission bypass engages.
-        let out = compose_sublead_env(&HashMap::new(), &HashMap::new());
+        let out = compose_sublead_env(&HashMap::new(), &HashMap::new(), Default::default());
         assert!(out.contains_key("CLAUDE_CODE_ENTRYPOINT"));
     }
 }

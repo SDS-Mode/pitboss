@@ -125,6 +125,18 @@ pub enum Command {
         #[arg(long)]
         runtime: Option<String>,
     },
+    /// Print a snapshot of all task records for a prior run.
+    /// Reads summary.jsonl (in-flight) or summary.json (finalized).
+    Status {
+        /// Run id (full UUID or unique prefix).
+        run_id: String,
+        /// Override run_dir, same semantics as Dispatch.
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print shell completion script for the given shell (bash, zsh, fish,
     /// elvish, powershell) to stdout.
     Completions {

@@ -19,11 +19,12 @@ use crate::dispatch::layer::LayerState;
 use crate::dispatch::signals::cancel_actor_with_reason;
 use crate::dispatch::state::DispatchState;
 use crate::mcp::tools::{
-    handle_continue_worker, handle_list_workers, handle_pause_worker, handle_propose_plan,
-    handle_reprompt_worker, handle_request_approval, handle_spawn_worker, handle_wait_for_actor,
-    handle_wait_for_any, handle_wait_for_worker, handle_worker_status, ContinueWorkerArgs,
-    PauseWorkerArgs, ProposePlanArgs, RepromptWorkerArgs, RequestApprovalArgs, SpawnWorkerArgs,
-    TaskIdArgs, WaitActorRequest, WaitForAnyArgs, WaitForWorkerArgs,
+    handle_continue_worker, handle_list_workers, handle_pause_worker, handle_permission_prompt,
+    handle_propose_plan, handle_reprompt_worker, handle_request_approval, handle_spawn_worker,
+    handle_wait_for_actor, handle_wait_for_any, handle_wait_for_worker, handle_worker_status,
+    ContinueWorkerArgs, PauseWorkerArgs, PermissionPromptArgs, ProposePlanArgs, RepromptWorkerArgs,
+    RequestApprovalArgs, SpawnWorkerArgs, TaskIdArgs, WaitActorRequest, WaitForAnyArgs,
+    WaitForWorkerArgs,
 };
 
 #[allow(dead_code)]
@@ -64,6 +65,12 @@ struct SpawnSubleadRequest {
     /// always included on top so the sub-lead can still spawn workers etc.
     #[serde(default)]
     tools: Vec<String>,
+    /// When set, pass `--resume <id>` to the sub-lead's claude subprocess.
+    /// The root lead discovers prior session IDs from `/resume/subleads` in
+    /// the shared store after `pitboss resume` seeds it at startup. Callers
+    /// that omit this field get a fresh sub-lead session (default behavior).
+    #[serde(default)]
+    resume_session_id: Option<String>,
     /// Caller identity injected by mcp-bridge (actor_id + actor_role).
     #[serde(rename = "_meta", default)]
     #[schemars(skip)]
@@ -343,6 +350,7 @@ impl PitbossHandler {
             read_down: req.read_down,
             env: req.env,
             tools: req.tools,
+            resume_session_id: req.resume_session_id,
         };
 
         match do_spawn(&self.state, spawn_req).await {
@@ -807,6 +815,23 @@ impl PitbossHandler {
             "released": released
         }))
     }
+
+    /// Path B permission gate. Claude calls this when it encounters a
+    /// tool-use that requires operator approval. Only visible (list_tools)
+    /// and callable when `[lead] permission_routing = "path_b"` is set.
+    #[tool(
+        name = "permission_prompt",
+        description = "Route a Claude tool-permission request to pitboss's approval queue. Returns {decision, behavior}."
+    )]
+    async fn permission_prompt(
+        &self,
+        Parameters(args): Parameters<PermissionPromptArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match handle_permission_prompt(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
 }
 
 impl ServerHandler for PitbossHandler {
@@ -839,29 +864,26 @@ impl ServerHandler for PitbossHandler {
         self.tool_router.call(tcc).await
     }
 
-    /// Return the tool list, conditionally excluding `spawn_sublead` when the
-    /// manifest does not have `allow_subleads = true` (v0.6 depth-2 gate).
-    ///
-    /// When `allow_subleads` is absent or false (v0.5 manifests), `spawn_sublead`
-    /// is not listed so agents never see it in their available tools.
+    /// Return the tool list, conditionally excluding tools based on manifest
+    /// configuration:
+    /// - `spawn_sublead`: hidden unless `allow_subleads = true` (v0.6 depth-2 gate)
+    /// - `permission_prompt`: hidden unless `permission_routing = "path_b"` (v0.8)
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParam>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        let allow_subleads = self
-            .state
-            .root
-            .manifest
-            .lead
-            .as_ref()
-            .is_some_and(|l| l.allow_subleads);
+        use crate::manifest::schema::PermissionRouting;
+        let lead = self.state.root.manifest.lead.as_ref();
+        let allow_subleads = lead.is_some_and(|l| l.allow_subleads);
+        let path_b = lead.is_some_and(|l| l.permission_routing == PermissionRouting::PathB);
 
         let tools: Vec<rmcp::model::Tool> = self
             .tool_router
             .list_all()
             .into_iter()
             .filter(|t| allow_subleads || t.name != "spawn_sublead")
+            .filter(|t| path_b || t.name != "permission_prompt")
             .collect();
 
         Ok(rmcp::model::ListToolsResult::with_all_items(tools))

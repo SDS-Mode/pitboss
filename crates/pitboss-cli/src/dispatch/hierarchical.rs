@@ -17,6 +17,10 @@ use crate::dispatch::state::DispatchState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::{socket_path_for_run, McpServer};
 
+// `sublead_sessions`: prior sub-lead session IDs from `subleads.jsonl`,
+// read by `build_resume_hierarchical`. Empty for fresh dispatches. When
+// non-empty, seeded into the root shared store at `/resume/subleads` so the
+// root lead can pass `resume_session_id` to `spawn_sublead`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_hierarchical(
     resolved: ResolvedManifest,
@@ -26,6 +30,7 @@ pub async fn run_hierarchical(
     claude_version: Option<String>,
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
+    sublead_sessions: std::collections::HashMap<String, String>,
 ) -> Result<i32> {
     // Surface headless approval-gate mis-configurations early, before any
     // claude subprocess launches. Runs silently if stdout is a TTY (the
@@ -132,6 +137,21 @@ pub async fn run_hierarchical(
     ));
     let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
+    // Seed /resume/subleads with prior sub-lead session IDs so the root lead
+    // can read them on a resume run and pass resume_session_id to spawn_sublead.
+    // Skipped on fresh dispatches (sublead_sessions is empty).
+    if !sublead_sessions.is_empty() {
+        let value = serde_json::to_vec(&sublead_sessions).unwrap_or_default();
+        if let Err(e) = state
+            .root
+            .shared_store
+            .set("/resume/subleads", value, "pitboss")
+            .await
+        {
+            tracing::warn!(error = %e, "failed to seed /resume/subleads in shared store");
+        }
+    }
+
     // Load declarative approval policy from the manifest into the root layer.
     // Empty approval_rules → no PolicyMatcher is installed (legacy path unchanged).
     if !resolved.approval_rules.is_empty() {
@@ -210,7 +230,7 @@ pub async fn run_hierarchical(
     //     (last_session_id, overall_started_at, total_token_usage) adds no
     //     overhead on the common path.
     let mut lead_env = lead.env.clone();
-    crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env);
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
         args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
@@ -298,7 +318,10 @@ pub async fn run_hierarchical(
                     &new_prompt,
                 );
                 let mut resume_env = lead.env.clone();
-                crate::dispatch::runner::apply_pitboss_env_defaults(&mut resume_env);
+                crate::dispatch::runner::apply_pitboss_env_defaults(
+                    &mut resume_env,
+                    lead.permission_routing,
+                );
                 current_cmd = pitboss_core::process::SpawnCmd {
                     program: claude_binary.clone(),
                     args: resume_args,

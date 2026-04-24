@@ -1,10 +1,11 @@
-use crate::notify::{NotificationEnvelope, NotificationSink};
+use crate::notify::{NotificationEnvelope, NotificationSink, PitbossEvent, Severity};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Emits notifications via Slack webhook.
+/// Emits notifications via Slack incoming webhook using Block Kit layout.
 pub struct SlackSink {
     id: String,
     url: String,
@@ -20,6 +21,118 @@ impl SlackSink {
         };
         Self { id, url, http }
     }
+
+    fn severity_emoji(sev: Severity) -> &'static str {
+        match sev {
+            Severity::Info => ":information_source:",
+            Severity::Warning => ":warning:",
+            Severity::Error => ":x:",
+            Severity::Critical => ":rotating_light:",
+        }
+    }
+
+    fn build_body(&self, env: &NotificationEnvelope) -> Value {
+        let emoji = Self::severity_emoji(env.severity);
+        let (header, detail) = match &env.event {
+            PitbossEvent::ApprovalRequest {
+                request_id,
+                task_id,
+                summary,
+            } => {
+                let header = format!("{} Pitboss approval requested", emoji);
+                let detail = format!(
+                    "*Request:* {}\n*Task:* {}\n*Summary:* {}",
+                    escape_slack_mrkdwn(request_id),
+                    escape_slack_mrkdwn(task_id),
+                    escape_slack_mrkdwn(summary),
+                );
+                (header, detail)
+            }
+            PitbossEvent::ApprovalPending {
+                request_id,
+                task_id,
+                summary,
+            } => {
+                let header = format!("{} Pitboss approval pending operator action", emoji);
+                let detail = format!(
+                    "*Request:* {}\n*Task:* {}\n*Summary:* {}",
+                    escape_slack_mrkdwn(request_id),
+                    escape_slack_mrkdwn(task_id),
+                    escape_slack_mrkdwn(summary),
+                );
+                (header, detail)
+            }
+            PitbossEvent::RunFinished {
+                run_id,
+                tasks_total,
+                tasks_failed,
+                duration_ms,
+                spent_usd,
+            } => {
+                let icon = if *tasks_failed > 0 {
+                    ":warning:"
+                } else {
+                    ":white_check_mark:"
+                };
+                let header = format!("{} Pitboss run finished", icon);
+                let duration_sec = duration_ms / 1000;
+                let detail = format!(
+                    "*Run:* {}\n*Tasks:* {} / {}\n*Duration:* {}s\n*Cost:* ${:.2}",
+                    escape_slack_mrkdwn(run_id),
+                    tasks_total - tasks_failed,
+                    tasks_total,
+                    duration_sec,
+                    spent_usd,
+                );
+                (header, detail)
+            }
+            PitbossEvent::BudgetExceeded {
+                run_id,
+                spent_usd,
+                budget_usd,
+            } => {
+                let header = format!("{} Pitboss budget exceeded", emoji);
+                let detail = format!(
+                    "*Run:* {}\n*Spent:* ${:.2}\n*Budget:* ${:.2}",
+                    escape_slack_mrkdwn(run_id),
+                    spent_usd,
+                    budget_usd,
+                );
+                (header, detail)
+            }
+        };
+
+        json!({
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": { "type": "plain_text", "text": header, "emoji": true }
+                },
+                {
+                    "type": "section",
+                    "text": { "type": "mrkdwn", "text": detail }
+                }
+            ]
+        })
+    }
+}
+
+/// Escape characters that Slack mrkdwn interprets as formatting or mention
+/// triggers in untrusted fields. Backslash-escapes `* _ ~ ` ` | > # [ ] ( ) @ < :`.
+/// Newlines are preserved.
+fn escape_slack_mrkdwn(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '*' | '_' | '~' | '`' | '|' | '>' | '#' | '[' | ']' | '(' | ')' | '@' | '<'
+            | ':' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -31,10 +144,11 @@ impl NotificationSink for SlackSink {
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
         crate::notify::config::pre_request_ssrf_check(&self.url).await?;
 
+        let body = self.build_body(env);
         let response = self
             .http
             .post(&self.url)
-            .json(env)
+            .json(&body)
             .timeout(Duration::from_secs(30))
             .send()
             .await?;
@@ -59,6 +173,47 @@ mod tests {
     use chrono::Utc;
     use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn escape_neutralises_mrkdwn_injection() {
+        let out = escape_slack_mrkdwn("@here see [evil](https://x) *bold* `code`");
+        assert!(out.contains("\\@here"), "got: {out}");
+        assert!(out.contains("\\["), "got: {out}");
+        assert!(out.contains("\\]"), "got: {out}");
+        assert!(out.contains("\\("), "got: {out}");
+        assert!(out.contains("\\)"), "got: {out}");
+        assert!(out.contains("\\*bold\\*"), "got: {out}");
+        assert!(out.contains("\\`code\\`"), "got: {out}");
+    }
+
+    #[test]
+    fn build_body_escapes_untrusted_fields() {
+        let sink = SlackSink::new(
+            0,
+            "https://example.com".into(),
+            Arc::new(reqwest::Client::new()),
+        );
+        let env = NotificationEnvelope::new(
+            "run-1",
+            Severity::Warning,
+            PitbossEvent::ApprovalRequest {
+                request_id: "req".into(),
+                task_id: "worker-1".into(),
+                summary: "@here run this *now*".into(),
+            },
+            Utc::now(),
+        );
+        let body = sink.build_body(&env);
+        let detail = body["blocks"][1]["text"]["text"].as_str().unwrap();
+        assert!(
+            detail.contains("\\@here"),
+            "untrusted @here must be escaped: {detail}"
+        );
+        assert!(
+            detail.contains("\\*now\\*"),
+            "untrusted *now* must be escaped: {detail}"
+        );
+    }
+
     #[tokio::test]
     async fn slack_sink_posts_valid_body_on_approval_request() {
         let mock_server = MockServer::start().await;
@@ -70,7 +225,6 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // Will fail: SlackSink doesn't exist yet
         let sink = super::SlackSink::new(0, url, std::sync::Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
