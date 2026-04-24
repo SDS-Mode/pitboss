@@ -503,6 +503,23 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), worker_cancel);
 
+    // Plug the post-register cascade gap (#99): `install_sublead_cancel_watcher`
+    // is fire-once — it snapshots `worker_cancels`, propagates, then exits. A
+    // worker registered after the watcher has already fired never receives the
+    // signal. Check the target layer's cancel state now and propagate eagerly
+    // before the background task starts. `is_terminated` is checked first
+    // since terminate subsumes drain.
+    {
+        let cancels = target_layer.worker_cancels.read().await;
+        if let Some(w) = cancels.get(&task_id) {
+            if target_layer.cancel.is_terminated() {
+                w.terminate();
+            } else if target_layer.cancel.is_draining() {
+                w.drain();
+            }
+        }
+    }
+
     // Record the prompt preview before spawning the background task.
     let prompt_preview: String = args.prompt.chars().take(80).collect();
     target_layer
@@ -1109,6 +1126,15 @@ pub async fn spawn_resume_worker(
         .map(|l| l.directory.clone())
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     let worker_cancel = pitboss_core::session::CancelToken::new();
+    // Same post-register cascade plug as `handle_spawn_worker` (#99): if the
+    // root layer's cancel has already fired, the fire-once watcher won't
+    // re-issue to this token — propagate synchronously before we register a
+    // Running worker against it.
+    if state.root.cancel.is_terminated() {
+        worker_cancel.terminate();
+    } else if state.root.cancel.is_draining() {
+        worker_cancel.drain();
+    }
     state
         .root
         .worker_cancels

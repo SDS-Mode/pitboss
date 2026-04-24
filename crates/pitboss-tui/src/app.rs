@@ -119,12 +119,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
-                            state.run_dir = run_dir;
-                            state.run_id = run_id;
-                            state.tasks = vec![];
-                            state.focus = 0;
-                            state.run_list.clear();
-                            state.mode = Mode::Normal;
+                            reset_state_for_switch(&mut state, run_dir, run_id);
                             // Rebuild the control client against the new run's
                             // socket; without this, post-switch control ops
                             // (cancel/pause/approve/reprompt) keep targeting
@@ -160,16 +155,13 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             // Same transition as the keyboard-driven
                             // SwitchRun path above — restart the watcher,
                             // rebuild the control client, and reset
-                            // run-local state.
+                            // run-local state via the shared helper so mouse
+                            // and key paths can't drift on per-run cleanup
+                            // (e.g. missing approval_list clear — #95).
                             let (new_rx, new_tx) = spawn_watcher(run_dir.clone());
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
-                            state.run_dir = run_dir;
-                            state.run_id = run_id;
-                            state.tasks = vec![];
-                            state.focus = 0;
-                            state.run_list.clear();
-                            state.mode = Mode::Normal;
+                            reset_state_for_switch(&mut state, run_dir, run_id);
                             connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
@@ -232,6 +224,35 @@ enum Action {
     Continue,
     Quit,
     SwitchRun { run_dir: PathBuf, run_id: String },
+}
+
+/// Reset all per-run state when the operator switches runs from the picker.
+/// Leaves non-run state (runtime handle, control_client slot which the caller
+/// rebuilds) untouched. Kept as a free function so the SwitchRun path can be
+/// unit-tested without running the full event loop.
+fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String) {
+    state.run_dir = run_dir;
+    state.run_id = run_id;
+    state.tasks = vec![];
+    state.focus = 0;
+    state.run_list.clear();
+    state.mode = Mode::Normal;
+    // Pending approvals from the prior run's dispatcher reference request_ids
+    // that no longer exist on the new run's bridge. Leaving them in the list
+    // makes the approval-list pane lie about state; the new server will
+    // re-emit its own pending approvals on Hello and those must land cleanly.
+    state.approval_list.items.clear();
+    state.approval_list.selected_idx = 0;
+    state.policy_rules.clear();
+    state.subtrees.clear();
+    state.expanded.clear();
+    state.focused_subtree_idx = 0;
+    state.pane_focus = crate::state::PaneFocus::Grid;
+    state.store_activity.clear();
+    state.cached_git_diff.clear();
+    state.failed_count = 0;
+    state.run_started_at = None;
+    state.focus_log.clear();
 }
 
 /// The visible height used for snap-in scroll calculations.
@@ -1103,5 +1124,59 @@ mod approval_queue_tests {
         send_approve(&mut state, "req-B", false, None, None);
         assert_eq!(state.approval_list.items.len(), 1);
         assert_eq!(state.approval_list.selected_idx, 0);
+    }
+
+    #[test]
+    fn switch_run_clears_stale_approval_list_and_policy_rules() {
+        // Issue #95: when the operator navigates from the run selector to a
+        // different run, per-run state (approval queue, policy rules, subtree
+        // cache) must be cleared so the new run's Hello + queue-drain lands
+        // against a fresh slate. Leaving stale entries behind means the
+        // approval list pane shows requests that no longer have valid
+        // responders on the new run's bridge.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("old-req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("old-req-B", "sublead-1"));
+        state.policy_rules.push(pitboss_cli::mcp::policy::ApprovalRule {
+            r#match: pitboss_cli::mcp::policy::ApprovalMatch::default(),
+            action: pitboss_cli::mcp::policy::ApprovalAction::Block,
+        });
+        assert_eq!(state.approval_list.items.len(), 2);
+        assert_eq!(state.policy_rules.len(), 1);
+
+        reset_state_for_switch(
+            &mut state,
+            PathBuf::from("/tmp/new-run"),
+            "new-run-id".to_string(),
+        );
+
+        assert_eq!(state.approval_list.items.len(), 0);
+        assert_eq!(state.approval_list.selected_idx, 0);
+        assert_eq!(state.policy_rules.len(), 0);
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.run_id, "new-run-id");
+        assert_eq!(state.run_dir, PathBuf::from("/tmp/new-run"));
+    }
+
+    #[test]
+    fn switch_run_lets_new_approval_request_open_modal_cleanly() {
+        // The reset is a precondition for the modal path: after it runs, a
+        // fresh ApprovalRequest from the new run's dispatcher must be able
+        // to populate the list AND open the modal with no stale siblings.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("old-req", "root"));
+        assert!(matches!(state.mode, Mode::ApprovalModal { .. }));
+
+        reset_state_for_switch(
+            &mut state,
+            PathBuf::from("/tmp/new-run"),
+            "new-run-id".to_string(),
+        );
+        assert!(matches!(state.mode, Mode::Normal));
+
+        apply_control_event(&mut state, mk_approval_event("new-req", "root"));
+        assert_eq!(state.approval_list.items.len(), 1);
+        assert_eq!(state.approval_list.items[0].id, "new-req");
+        assert!(matches!(state.mode, Mode::ApprovalModal { .. }));
     }
 }
