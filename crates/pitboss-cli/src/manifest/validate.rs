@@ -25,7 +25,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         crate::notify::config::validate(cfg)?;
     }
     if resolved.lead.is_some() {
-        validate_lead(resolved)?;
+        validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
         validate_sublead_defaults_adequate(resolved)?;
     } else {
@@ -61,7 +61,7 @@ fn validate_mode(r: &ResolvedManifest) -> Result<()> {
     Ok(())
 }
 
-fn validate_lead(r: &ResolvedManifest) -> Result<()> {
+fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     let lead = r.lead.as_ref().unwrap();
     if lead.id.is_empty() {
         bail!("lead id is required");
@@ -73,7 +73,7 @@ fn validate_lead(r: &ResolvedManifest) -> Result<()> {
     {
         bail!("lead id '{}' contains invalid characters", lead.id);
     }
-    if !lead.directory.is_dir() {
+    if !skip_dir_check && !lead.directory.is_dir() {
         bail!(
             "lead directory does not exist: {}",
             lead.directory.display()

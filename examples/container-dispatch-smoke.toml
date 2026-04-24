@@ -1,0 +1,72 @@
+# Container-dispatch smoke test
+#
+# Exercises the `pitboss container-dispatch` feature (branch: claude/dynamic-container-pitboss-cEGMU).
+# Mounts the pitboss source tree read-only into the container and spawns
+# three workers (one per crate) to produce short summaries. Cheap and fast
+# (~2-3 min, ~$0.15).
+#
+# Dry-run (inspect generated podman/docker command — no container launched):
+#   pitboss container-dispatch examples/container-dispatch-smoke.toml --dry-run
+#
+# Live run:
+#   pitboss container-dispatch examples/container-dispatch-smoke.toml
+#
+# Attach TUI in a second terminal after the run starts:
+#   pitboss-tui
+#
+# Verify pass:
+#   grep "PASS" ~/.local/share/pitboss/runs/<latest-uuid>/tasks/container-smoke-lead/stdout.log
+
+# ── Container config ─────────────────────────────────────────────────────────
+[container]
+# runtime auto-detected (prefers podman on this system)
+workdir = "/project"
+
+[[container.mount]]
+host      = "/run/media/system/Dos/Projects/agentshire"
+container = "/project"
+readonly  = true
+
+# ── Run caps ─────────────────────────────────────────────────────────────────
+[run]
+max_workers       = 3
+budget_usd        = 0.50
+lead_timeout_secs = 180
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+[defaults]
+model        = "claude-haiku-4-5"
+use_worktree = false
+
+# ── Lead ──────────────────────────────────────────────────────────────────────
+[[lead]]
+id        = "container-smoke-lead"
+directory = "/project"
+prompt    = """
+You are running inside a pitboss container-dispatch smoke test.
+The pitboss source tree is mounted read-only at /project.
+
+Your task: spawn one worker per crate, collect their summaries, and report a pass/fail result.
+
+Step 1 — Spawn three workers using mcp__pitboss__spawn_worker.
+
+  Worker A:
+    prompt    = "Read the file /project/crates/pitboss-core/src/lib.rs and print a 2-sentence summary of pitboss-core's purpose and its main public modules. Begin your response with 'CORE:'"
+    directory = "/project/crates/pitboss-core/src"
+
+  Worker B:
+    prompt    = "Read the file /project/crates/pitboss-cli/src/lib.rs and print a 2-sentence summary of pitboss-cli's purpose and its main subsystems. Begin your response with 'CLI:'"
+    directory = "/project/crates/pitboss-cli/src"
+
+  Worker C:
+    prompt    = "Read the file /project/crates/pitboss-tui/src/lib.rs and print a 2-sentence summary of pitboss-tui's purpose and its main components. Begin your response with 'TUI:'"
+    directory = "/project/crates/pitboss-tui/src"
+
+Step 2 — Use mcp__pitboss__wait_actor for each of the three task_ids returned in step 1.
+
+Step 3 — Print the final_message_preview from each wait_actor result.
+
+Step 4 — Count how many workers returned status = "Success".
+  - If all 3 succeeded: print exactly "CONTAINER-DISPATCH SMOKE TEST: PASS — 3/3 workers completed inside container"
+  - Otherwise:          print exactly "CONTAINER-DISPATCH SMOKE TEST: FAIL — <N>/3 workers succeeded; details above"
+"""
