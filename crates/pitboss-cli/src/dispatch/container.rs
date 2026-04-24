@@ -182,7 +182,12 @@ fn detect_runtime(
 ) -> Result<String> {
     let preferred = runtime_override
         .or(manifest_runtime)
-        .or_else(|| std::env::var("PITBOSS_CONTAINER_RUNTIME").ok().as_deref().map(|_| ""))
+        .or_else(|| {
+            std::env::var("PITBOSS_CONTAINER_RUNTIME")
+                .ok()
+                .as_deref()
+                .map(|_| "")
+        })
         .unwrap_or("auto");
 
     // Normalise the env var case separately (borrow-checker friendly).
@@ -291,18 +296,17 @@ fn strip_container_section(manifest_abs: &Path) -> Result<PathBuf> {
     let text = std::fs::read_to_string(manifest_abs)
         .with_context(|| format!("reading manifest {}", manifest_abs.display()))?;
 
-    let mut val: toml::Value = toml::from_str(&text)
-        .with_context(|| "parsing manifest to strip [container] section")?;
+    let mut val: toml::Value =
+        toml::from_str(&text).with_context(|| "parsing manifest to strip [container] section")?;
 
     if let toml::Value::Table(ref mut table) = val {
         table.remove("container");
     }
 
-    let stripped = toml::to_string_pretty(&val)
-        .with_context(|| "re-serialising stripped manifest")?;
+    let stripped =
+        toml::to_string_pretty(&val).with_context(|| "re-serialising stripped manifest")?;
 
-    let tmp = std::env::temp_dir()
-        .join(format!("pitboss-manifest-{}.toml", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("pitboss-manifest-{}.toml", std::process::id()));
 
     std::fs::write(&tmp, stripped)
         .with_context(|| format!("writing stripped manifest to {}", tmp.display()))?;
@@ -333,8 +337,10 @@ mod tests {
     /// that previously passed a nonexistent path need a real file.
     fn temp_manifest() -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("pitboss-test-manifest-{}-{n}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "pitboss-test-manifest-{}-{n}.toml",
+            std::process::id()
+        ));
         std::fs::write(
             &path,
             r#"
@@ -356,7 +362,10 @@ prompt = "hi"
         let args = build_run_args("podman", &cfg, &manifest, None).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("pitboss"), "should call pitboss: {joined}");
-        assert!(joined.contains("dispatch"), "should call dispatch: {joined}");
+        assert!(
+            joined.contains("dispatch"),
+            "should call dispatch: {joined}"
+        );
         assert!(
             joined.contains("/run/pitboss.toml"),
             "manifest path: {joined}"
@@ -454,7 +463,10 @@ prompt = "hi"
             .windows(2)
             .filter(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.claude:"))
             .count();
-        assert_eq!(mount_count, 1, "claude mount should appear exactly once: {args:?}");
+        assert_eq!(
+            mount_count, 1,
+            "claude mount should appear exactly once: {args:?}"
+        );
     }
 
     #[test]
@@ -478,7 +490,11 @@ prompt = "hi"
         let cfg = make_config(vec![]);
         let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
-        assert_eq!(args[w_pos + 1], "/home/pitboss", "fallback workdir: {args:?}");
+        assert_eq!(
+            args[w_pos + 1],
+            "/home/pitboss",
+            "fallback workdir: {args:?}"
+        );
     }
 
     #[test]
@@ -494,7 +510,11 @@ prompt = "hi"
         };
         let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
-        assert_eq!(args[w_pos + 1], "/project/sub", "explicit workdir: {args:?}");
+        assert_eq!(
+            args[w_pos + 1],
+            "/project/sub",
+            "explicit workdir: {args:?}"
+        );
     }
 
     #[test]
@@ -508,10 +528,7 @@ prompt = "hi"
             .iter()
             .position(|a| a == "--network=host")
             .expect("--network");
-        let img_pos = args
-            .iter()
-            .position(|a| a == DEFAULT_IMAGE)
-            .expect("image");
+        let img_pos = args.iter().position(|a| a == DEFAULT_IMAGE).expect("image");
         assert!(net_pos < img_pos, "extra_args before image: {args:?}");
     }
 
@@ -537,9 +554,7 @@ prompt = "hi"
     fn run_dir_mount_uses_override() {
         let custom = PathBuf::from("/tmp/my-runs");
         let cfg = make_config(vec![]);
-        let args =
-            build_run_args("docker", &cfg, &temp_manifest(), Some(custom.clone()))
-                .unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), Some(custom.clone())).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/tmp/my-runs"),

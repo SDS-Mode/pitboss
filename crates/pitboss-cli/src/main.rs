@@ -242,7 +242,9 @@ fn run_container_dispatch(
             std::process::exit(2);
         }
     };
-    match dispatch::container::run_container_dispatch(manifest, container, run_dir, dry_run, runtime) {
+    match dispatch::container::run_container_dispatch(
+        manifest, container, run_dir, dry_run, runtime,
+    ) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
             eprintln!("container-dispatch: {e:#}");
