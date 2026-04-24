@@ -671,6 +671,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -757,6 +758,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

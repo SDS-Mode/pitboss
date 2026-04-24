@@ -967,6 +967,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1225,6 +1226,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,

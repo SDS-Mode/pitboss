@@ -9,6 +9,17 @@ use super::resolve::ResolvedManifest;
 
 /// Run all v0.1 validations. Call after [`crate::manifest::resolve::resolve`].
 pub fn validate(resolved: &ResolvedManifest) -> Result<()> {
+    validate_inner(resolved, false)
+}
+
+/// Like `validate` but skips the directory-existence check.
+/// Used by `container-dispatch` where task `directory` fields are
+/// container-side paths that don't exist on the host.
+pub fn validate_skip_dir_check(resolved: &ResolvedManifest) -> Result<()> {
+    validate_inner(resolved, true)
+}
+
+fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     validate_mode(resolved)?;
     for cfg in &resolved.notifications {
         crate::notify::config::validate(cfg)?;
@@ -20,7 +31,9 @@ pub fn validate(resolved: &ResolvedManifest) -> Result<()> {
     } else {
         // Flat-mode validations unchanged.
         validate_ids(resolved)?;
-        validate_directories(resolved)?;
+        if !skip_dir_check {
+            validate_directories(resolved)?;
+        }
         validate_branch_conflicts(resolved)?;
         validate_ranges(resolved)?;
     }
@@ -305,6 +318,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         }
     }
 
@@ -329,6 +343,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         f(&mut m);
         m
@@ -409,6 +424,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -436,6 +452,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("max_workers"), "got: {err}");
@@ -460,6 +477,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         assert!(validate(&r).is_err());
     }
@@ -483,6 +501,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         assert!(validate(&r).is_err());
     }
@@ -513,6 +532,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         (d, r)
     }
@@ -631,6 +651,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");

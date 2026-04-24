@@ -47,6 +47,14 @@ fn main() -> Result<()> {
         } => {
             run_mcp_bridge(&socket, &actor_id, actor_role);
         }
+        Command::ContainerDispatch {
+            manifest,
+            run_dir,
+            dry_run,
+            runtime,
+        } => {
+            run_container_dispatch(&manifest, run_dir, dry_run, runtime.as_deref());
+        }
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();
@@ -207,6 +215,40 @@ fn run_dispatch(
         }
     });
     std::process::exit(code);
+}
+
+fn run_container_dispatch(
+    manifest: &std::path::Path,
+    run_dir: Option<std::path::PathBuf>,
+    dry_run: bool,
+    runtime: Option<&str>,
+) -> ! {
+    let env_mp = parse_env_max_parallel();
+    let resolved = match manifest::load_manifest_skip_dir_check(manifest, env_mp) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("validation failed: {e:#}");
+            std::process::exit(2);
+        }
+    };
+    let container = match resolved.container {
+        Some(ref c) => c,
+        None => {
+            eprintln!(
+                "pitboss container-dispatch: manifest has no [container] section.\n\
+                 Add a [container] block with at least [[container.mount]] entries \
+                 to use container-dispatch."
+            );
+            std::process::exit(2);
+        }
+    };
+    match dispatch::container::run_container_dispatch(manifest, container, run_dir, dry_run, runtime) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("container-dispatch: {e:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn parse_env_max_parallel() -> Option<u32> {

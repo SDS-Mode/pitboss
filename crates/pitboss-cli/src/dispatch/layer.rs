@@ -414,6 +414,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(FakeScript::new()));

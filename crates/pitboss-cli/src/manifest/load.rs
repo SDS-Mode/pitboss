@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use super::resolve::{resolve, resolve_single_lead, ResolvedManifest};
 use super::schema::{Manifest, SingleLeadManifest};
-use super::validate::validate;
+use super::validate::{validate, validate_skip_dir_check};
 
 /// Load, parse, resolve, and validate a manifest from disk.
 ///
@@ -58,6 +58,44 @@ pub fn load_manifest(path: &Path, env_max_parallel: Option<u32>) -> Result<Resol
             // Add similar shape-only checks here as they get factored out of
             // validate() — the goal is parity between the two manifest forms
             // for everything that doesn't require real on-disk state.
+            super::validate::validate_sublead_defaults_adequate(&resolved)?;
+            Ok(resolved)
+        }
+    }
+}
+
+/// Like `load_manifest` but skips the directory-existence check.
+/// Used by `pitboss container-dispatch` where task/lead `directory` fields
+/// are container-side paths that don't exist on the host.
+pub fn load_manifest_skip_dir_check(
+    path: &Path,
+    env_max_parallel: Option<u32>,
+) -> Result<ResolvedManifest> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading manifest at {}", path.display()))?;
+
+    match toml::from_str::<Manifest>(&text) {
+        Ok(mut manifest) => {
+            expand_paths(&mut manifest)?;
+            let resolved = resolve(manifest, env_max_parallel)?;
+            validate_skip_dir_check(&resolved)?;
+            Ok(resolved)
+        }
+        Err(primary_err) => {
+            let err_str = primary_err.to_string();
+            let is_lead_type_mismatch =
+                err_str.contains("expected a sequence") || err_str.contains("invalid type: map");
+            if !is_lead_type_mismatch {
+                return Err(primary_err)
+                    .with_context(|| format!("parsing manifest at {}", path.display()));
+            }
+            let single: SingleLeadManifest = toml::from_str(&text).with_context(|| {
+                format!(
+                    "parsing manifest at {} as single-lead format (primary error: {primary_err})",
+                    path.display()
+                )
+            })?;
+            let resolved = resolve_single_lead(single, env_max_parallel)?;
             super::validate::validate_sublead_defaults_adequate(&resolved)?;
             Ok(resolved)
         }

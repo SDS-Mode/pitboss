@@ -489,6 +489,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -591,6 +592,7 @@ mod tests {
             dump_shared_store: false,
             require_plan_approval: false,
             approval_rules: vec![],
+            container: None,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
