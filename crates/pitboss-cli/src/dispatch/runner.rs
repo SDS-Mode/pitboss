@@ -258,6 +258,7 @@ pub async fn execute(
     // list_workers still apply.
     let notification_router_for_emit = notification_router.clone();
     let shared_store = Arc::new(crate::shared_store::SharedStore::new());
+    shared_store.start_lease_pruner();
     let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
         run_id,
         resolved.clone(),

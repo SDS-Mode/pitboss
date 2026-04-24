@@ -149,8 +149,10 @@ impl ApprovalBridge {
                 plan: plan.map(approval_plan_to_wire),
                 kind,
             };
-            // Best-effort send.
-            let _ = w.send(ev);
+            // Best-effort send. A full queue drops the event; the bridge
+            // timeout will then expire and the caller sees a timeout —
+            // same end state as a permanently-disconnected TUI.
+            let _ = w.sender.try_send(ev);
             drop(writer_guard);
         } else {
             drop(writer_guard);

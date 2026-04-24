@@ -197,11 +197,18 @@ pub async fn broadcast_worker_failed(
 
 /// Public for unit tests — classify a pre-read log blob without touching the
 /// filesystem.
+///
+/// Auth is checked before rate-limit: when both markers coexist (e.g. an
+/// expired key hits burst-limit before the 401 is returned) the run would
+/// otherwise cycle indefinitely — rate-limit back-off clears on its own,
+/// auth failure does not. Classifying as `AuthFailure` terminates the run
+/// promptly via `ApiHealth`'s longer gate window, which is the correct
+/// response when credentials are broken.
 pub fn classify(blob: &str) -> FailureReason {
-    if let Some(reason) = match_rate_limit(blob) {
+    if let Some(reason) = match_auth(blob) {
         return reason;
     }
-    if let Some(reason) = match_auth(blob) {
+    if let Some(reason) = match_rate_limit(blob) {
         return reason;
     }
     if let Some(reason) = match_context_exceeded(blob) {
@@ -406,6 +413,16 @@ mod tests {
     fn non_zero_with_no_logs_is_unknown() {
         let r = detect_failure_reason(Some(1), None, None).unwrap();
         assert!(matches!(r, FailureReason::Unknown { .. }));
+    }
+
+    #[test]
+    fn coincident_auth_and_rate_limit_classifies_as_auth() {
+        // Expired key hitting burst limits emits both markers. Auth must
+        // win so `ApiHealth` applies the longer (terminal-in-practice)
+        // gate instead of cycling through rate-limit resets.
+        let blob = "You've hit your limit · resets Apr 23, 3pm\n\
+                    authentication_error: invalid_api_key";
+        assert!(matches!(classify(blob), FailureReason::AuthFailure));
     }
 
     #[test]
@@ -675,8 +692,13 @@ mod tests {
             Arc::new(SharedStore::new()),
             None,
         );
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlEvent>();
-        *layer.control_writer.lock().await = Some(tx);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ControlEvent>(
+            crate::dispatch::layer::CONTROL_EVENT_QUEUE_CAP,
+        );
+        *layer.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: uuid::Uuid::now_v7(),
+            sender: tx,
+        });
 
         broadcast_worker_failed(
             &layer,

@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::leases::AcquireResult;
-use super::{ActorRole, CallerIdentity, Entry, ListMetadata, SharedStore, StoreError};
+use super::{ActorRole, CallerIdentity, Entry, SharedStore, StoreError};
 
 // ---------- Meta field injected by the bridge ----------
 
@@ -202,12 +202,12 @@ pub async fn handle_kv_cas(
 pub async fn handle_kv_list(
     store: &Arc<SharedStore>,
     args: KvListArgs,
-) -> Result<Vec<ListMetadata>, StoreError> {
+) -> Result<crate::shared_store::ListResult, StoreError> {
     if let Some(m) = &args.meta {
         store.note_kv_op(&m.actor_id).await;
     }
     let glob = require_identity_for_self(&args.glob, args.meta.as_ref())?;
-    store.list(&glob).await
+    store.list_with_truncation(&glob).await
 }
 
 pub async fn handle_kv_wait(

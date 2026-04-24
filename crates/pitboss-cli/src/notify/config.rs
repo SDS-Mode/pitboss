@@ -159,6 +159,53 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pre-request SSRF check against the current DNS answer for `url`. Call
+/// this from each sink immediately before dispatching the HTTP request.
+///
+/// `validate_webhook_url` runs at config-parse time and only blocks
+/// literal-IP hosts — a DNS-name host whose A/AAAA record later points
+/// at a private address (DNS rebinding, or simply a mutable CNAME) slips
+/// past that check entirely. This helper re-resolves the host at
+/// dispatch time and rejects private / loopback / link-local answers.
+///
+/// Fast-path: if the URL's host is already a literal IP, the config-time
+/// check has already classified it — skip the re-resolution.
+pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| anyhow::anyhow!("webhook url {url:?} is not a valid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("webhook url {url:?} has no host"))?;
+    let host_unbracketed = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if host_unbracketed.parse::<IpAddr>().is_ok() {
+        // Literal IP: already classified at config-time validation.
+        return Ok(());
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let target = format!("{host_unbracketed}:{port}");
+    let mut saw_any = false;
+    let iter = tokio::net::lookup_host(&target)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhook url {url:?} DNS lookup failed: {e}"))?;
+    for addr in iter {
+        saw_any = true;
+        if is_disallowed_ip(&addr.ip()) {
+            bail!(
+                "webhook url {url:?} resolved to a private / loopback / link-local \
+                 address ({}); refusing to dispatch (SSRF guard)",
+                addr.ip()
+            );
+        }
+    }
+    if !saw_any {
+        bail!("webhook url {url:?} DNS returned no addresses");
+    }
+    Ok(())
+}
+
 fn is_disallowed_v4(v4: &Ipv4Addr) -> bool {
     v4.is_loopback()
         || v4.is_private()

@@ -116,9 +116,22 @@ impl WorktreeManager {
 
         let repo = Repository::open(&wt.repo_root)?;
         if let Ok(handle) = repo.find_worktree(&wt.name) {
+            let admin_path = handle.path().to_path_buf();
             let mut opts = git2::WorktreePruneOptions::new();
             opts.valid(true).locked(true).working_tree(true);
-            let _ = handle.prune(Some(&mut opts));
+            if let Err(err) = handle.prune(Some(&mut opts)) {
+                // Prune failed mid-way: the `.git/worktrees/<name>/`
+                // administrative entry may still exist. Surface the path
+                // so operators can run `git worktree prune` manually —
+                // leaving the entry behind causes libgit2 to report
+                // false `BranchConflict` on subsequent reuse.
+                tracing::warn!(
+                    worktree = %wt.name,
+                    admin_path = %admin_path.display(),
+                    "git worktree prune failed: {err}; administrative entry \
+                     may be stale — run `git worktree prune` to clean up",
+                );
+            }
         }
         if wt.path.exists() {
             std::fs::remove_dir_all(&wt.path)?;

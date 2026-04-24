@@ -98,78 +98,70 @@ pub async fn cancel_actor_with_reason(
     target: &str,
     reason: Option<String>,
 ) -> Result<()> {
-    // 1. Locate the target's parent lead identity (before cancellation so the
-    //    maps still contain the target).
-    let parent_lead_layer = find_parent_lead_layer(state, target).await;
+    // Walk the tree ONCE under held locks: identify the actor, cancel it,
+    // and capture its parent layer atomically. A two-pass lookup (find
+    // parent, drop lock, re-acquire, cancel) can race with the reaper —
+    // if the actor finishes between passes, we'd either bail with "unknown
+    // actor" (dropping the reprompt) or identify a parent that has
+    // already torn down. Folding both phases under a single tree
+    // traversal closes that window.
+    let parent_lead_layer = cancel_and_find_parent(state, target).await?;
 
-    // 2. Trigger cancellation: trip the CancelToken in whichever layer holds it.
-    cancel_actor_in_tree(state, target).await?;
-
-    // 3. If reason supplied AND a parent layer was found, deliver synthetic reprompt.
     if let (Some(reason_text), Some(layer)) = (reason, parent_lead_layer) {
         let synthetic_message = format!(
             "[SYSTEM] Actor {target} was killed by operator.\nReason: {reason_text}\nAdjust your plan accordingly."
         );
+        // `send_synthetic_reprompt` itself logs when the layer's delivery
+        // channel is absent (layer already terminated), so callers
+        // receive a trace rather than a silent drop.
         layer.send_synthetic_reprompt(&synthetic_message).await;
     }
 
     Ok(())
 }
 
-/// Find the `Arc<LayerState>` whose lead should receive the reason message
-/// when `target` is killed. Returns `None` when target is the root itself
-/// (no parent) or is not found in any layer.
-async fn find_parent_lead_layer(
+/// Trip the CancelToken for `target` and return the parent layer that
+/// should receive a synthetic reprompt. Holds the `subleads` read lock
+/// across the whole traversal so cancel + parent-identification are
+/// consistent against concurrent mutation.
+///
+/// Returns `Ok(None)` when the cancel succeeded but the actor has no
+/// parent to reprompt (e.g. target is a sub-lead whose parent is the
+/// root lead — in that case the function still returns `Some(root)`;
+/// `None` is reserved for the root itself, which cannot be cancel-with-
+/// reason'd because there is no parent to receive the reason).
+async fn cancel_and_find_parent(
     state: &Arc<DispatchState>,
     target: &str,
-) -> Option<Arc<crate::dispatch::layer::LayerState>> {
-    // Root-layer workers: parent = root lead
-    if state.root.worker_cancels.read().await.contains_key(target) {
-        return Some(state.root.clone());
-    }
-    // Sub-leads: parent = root lead
-    if state.subleads.read().await.contains_key(target) {
-        return Some(state.root.clone());
-    }
-    // Workers in a sub-tree: parent = that sub-tree's LayerState
-    let subleads = state.subleads.read().await;
-    for (_sublead_id, sub_layer) in subleads.iter() {
-        if sub_layer.worker_cancels.read().await.contains_key(target) {
-            return Some(sub_layer.clone());
-        }
-    }
-    // Root itself or completely unknown — no parent
-    None
-}
-
-/// Trip the CancelToken for `target` in whichever layer holds it.
-/// Searches root layer first, then sub-tree layers, then sub-lead's own cancel.
-async fn cancel_actor_in_tree(state: &Arc<DispatchState>, target: &str) -> Result<()> {
-    // Root-layer workers
+) -> Result<Option<Arc<crate::dispatch::layer::LayerState>>> {
+    // Root-layer workers: parent = root lead.
     {
         let cancels = state.root.worker_cancels.read().await;
         if let Some(tok) = cancels.get(target) {
             tok.terminate();
-            return Ok(());
+            return Ok(Some(state.root.clone()));
         }
     }
-    // Sub-tree workers
-    {
-        let subleads = state.subleads.read().await;
-        for (_sublead_id, sub_layer) in subleads.iter() {
-            let cancels = sub_layer.worker_cancels.read().await;
-            if let Some(tok) = cancels.get(target) {
-                tok.terminate();
-                return Ok(());
-            }
-        }
-        // Sub-leads themselves (trip their layer's own cancel token)
-        if let Some(sub_layer) = subleads.get(target) {
-            sub_layer.cancel.terminate();
-            return Ok(());
+
+    // Sub-leads + sub-tree workers share the `subleads` read lock.
+    let subleads = state.subleads.read().await;
+
+    // Sub-leads themselves: parent = root lead.
+    if let Some(sub_layer) = subleads.get(target) {
+        sub_layer.cancel.terminate();
+        return Ok(Some(state.root.clone()));
+    }
+
+    // Workers in a sub-tree: parent = that sub-tree's LayerState.
+    for (_sublead_id, sub_layer) in subleads.iter() {
+        let cancels = sub_layer.worker_cancels.read().await;
+        if let Some(tok) = cancels.get(target) {
+            tok.terminate();
+            return Ok(Some(sub_layer.clone()));
         }
     }
-    anyhow::bail!("cancel_actor_in_tree: unknown actor id: {target}")
+
+    anyhow::bail!("cancel_actor_with_reason: unknown actor id: {target}")
 }
 
 /// Spawn a background task that listens for root cancellation and

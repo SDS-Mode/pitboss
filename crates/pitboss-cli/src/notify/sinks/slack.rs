@@ -29,6 +29,8 @@ impl NotificationSink for SlackSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
+        crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+
         let response = self
             .http
             .post(&self.url)

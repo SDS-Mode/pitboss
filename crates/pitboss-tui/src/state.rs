@@ -662,23 +662,50 @@ impl AppState {
 /// `git commit` / `gc` can't contend with the TUI's read.
 pub(crate) fn compute_git_diff_summary(worktree: &std::path::Path) -> Option<GitDiffSummary> {
     const GIT_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let worktree = worktree.to_path_buf();
-    std::thread::spawn(move || {
-        let output = std::process::Command::new("git")
-            .arg("--no-optional-locks")
-            .arg("-C")
-            .arg(&worktree)
-            .arg("diff")
-            .arg("--shortstat")
-            .arg("HEAD")
-            .output();
-        let _ = tx.send(output);
-    });
+    // Spawn the git child ourselves (rather than `.output()` inside a
+    // throwaway thread) so a hang past the timeout is recoverable: we
+    // SIGKILL the child and reap the zombie rather than abandoning the
+    // thread and leaving the `.git/index` lock held for the lifetime
+    // of the TUI process.
+    let mut child = std::process::Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(worktree)
+        .arg("diff")
+        .arg("--shortstat")
+        .arg("HEAD")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
 
-    let Ok(Ok(output)) = rx.recv_timeout(GIT_DIFF_TIMEOUT) else {
-        return None;
+    let deadline = std::time::Instant::now() + GIT_DIFF_TIMEOUT;
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut buf);
+                }
+                break std::process::Output {
+                    status,
+                    stdout: buf,
+                    stderr: Vec::new(),
+                };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(_) => return None,
+        }
     };
 
     if !output.status.success() {
