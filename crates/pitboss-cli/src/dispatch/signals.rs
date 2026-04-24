@@ -164,60 +164,68 @@ async fn cancel_and_find_parent(
     anyhow::bail!("cancel_actor_with_reason: unknown actor id: {target}")
 }
 
+/// Install a per-sub-tree cancel-cascade watcher on `sub_layer`.
+///
+/// Spawns two background tasks that mirror the per-layer variant of the root
+/// cascade watcher:
+///
+/// * **drain watcher**: fires when `sub_layer.cancel` is drained → drains
+///   every worker cancel token registered on that layer at that moment.
+/// * **terminate watcher**: fires when `sub_layer.cancel` is terminated →
+///   terminates every worker cancel token registered on that layer.
+///
+/// Call exactly once at sub-lead spawn time (see `spawn_sublead`).  The root
+/// cascade watcher (`install_cascade_cancel_watcher`) only needs to signal
+/// `sub_layer.cancel`; this function handles the worker cascade so
+/// `DispatchState` never touches `sub_layer.worker_cancels` directly.
+pub fn install_sublead_cancel_watcher(sub_layer: Arc<crate::dispatch::layer::LayerState>) {
+    let layer_drain = sub_layer.clone();
+    tokio::spawn(async move {
+        layer_drain.cancel.await_drain().await;
+        let worker_cancels = layer_drain.worker_cancels.read().await;
+        for (worker_id, tok) in worker_cancels.iter() {
+            tracing::debug!(worker_id = %worker_id, "cascading drain to sub-tree worker");
+            tok.drain();
+        }
+    });
+
+    let layer_term = sub_layer;
+    tokio::spawn(async move {
+        layer_term.cancel.await_terminate().await;
+        let worker_cancels = layer_term.worker_cancels.read().await;
+        for (worker_id, tok) in worker_cancels.iter() {
+            tracing::debug!(worker_id = %worker_id, "cascading terminate to sub-tree worker");
+            tok.terminate();
+        }
+    });
+}
+
 /// Spawn a background task that listens for root cancellation and
-/// cascades the drain signal into every sub-tree LayerState. Each
-/// sub-tree's `cancel` token is drained, and every registered worker
-/// cancel token in the sub-tree is drained too — giving depth-first
-/// drain-then-terminate across the whole tree.
+/// cascades the signal into every registered sub-tree `LayerState` by
+/// tripping each sub-tree's own cancel token.  Each sub-tree's per-layer
+/// watcher (installed via `install_sublead_cancel_watcher` at spawn time)
+/// then cascades to the sub-tree's workers — `DispatchState` never
+/// reaches into `sub_layer.worker_cancels` directly.
 ///
 /// **Idempotency:** Call exactly once per dispatch run. Subsequent calls spawn
 /// additional watcher tasks; the result is benign (drain is idempotent on the
-/// watch::Sender) but creates duplicate tracing output and is not a substitute
-/// for a missed wakeup.
+/// watch::Sender) but creates duplicate tracing output.
 ///
 /// **Post-drain registration:** The watcher self-terminates after one cascade
 /// fire — re-installing after the cascade has fired will not catch sub-trees
 /// registered post-cascade. For that, see the spawn-time check in `spawn_sublead`.
-///
-/// Returns immediately after spawning the watcher task; the watcher
-/// terminates when the root drain signal fires AND all sub-trees
-/// have been signaled.
-///
-/// Two-phase drain semantics are preserved at each layer: the existing
-/// per-layer logic respects its grace window before forceful termination.
 pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
     let root_cancel_drain = state.root.cancel.clone();
     let state_drain = state.clone();
     tokio::spawn(async move {
-        // Wait for the root layer to drain.
         root_cancel_drain.await_drain().await;
-        // Cascade to every registered sub-tree.
         let subleads = state_drain.subleads.read().await;
         for (sublead_id, sub_layer) in subleads.iter() {
             tracing::info!(sublead_id = %sublead_id, "cascading drain to sub-tree");
-            // Trip the sub-tree's own cancel token so its runner stops
-            // spawning new work.
             sub_layer.cancel.drain();
-            // Also drain every worker cancel token registered in the
-            // sub-tree so in-flight workers receive the signal promptly.
-            // (The existing CancelToken type has no parent-child relationship,
-            // so we cascade explicitly rather than relying on inheritance.)
-            let worker_cancels = sub_layer.worker_cancels.read().await;
-            for (worker_id, tok) in worker_cancels.iter() {
-                tracing::debug!(
-                    sublead_id = %sublead_id,
-                    worker_id = %worker_id,
-                    "cascading drain to sub-tree worker"
-                );
-                tok.drain();
-            }
         }
     });
 
-    // Parallel watcher for the escalation (second Ctrl-C) path. Without
-    // this, a double Ctrl-C force-terminates root-layer workers but leaves
-    // sub-tree workers only drained — they'd only die when the sublead
-    // itself exits, leaving stray `claude` processes behind.
     let root_cancel_term = state.root.cancel.clone();
     tokio::spawn(async move {
         root_cancel_term.await_terminate().await;
@@ -225,15 +233,6 @@ pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
         for (sublead_id, sub_layer) in subleads.iter() {
             tracing::info!(sublead_id = %sublead_id, "cascading terminate to sub-tree");
             sub_layer.cancel.terminate();
-            let worker_cancels = sub_layer.worker_cancels.read().await;
-            for (worker_id, tok) in worker_cancels.iter() {
-                tracing::debug!(
-                    sublead_id = %sublead_id,
-                    worker_id = %worker_id,
-                    "cascading terminate to sub-tree worker"
-                );
-                tok.terminate();
-            }
         }
     });
 }
@@ -289,6 +288,172 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// `install_sublead_cancel_watcher` cascades drain to registered workers.
+    #[tokio::test]
+    async fn sublead_watcher_cascades_drain_to_workers() {
+        use crate::dispatch::layer::LayerState;
+        use crate::dispatch::state::ApprovalPolicy;
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            max_parallel: 1,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(1),
+            budget_usd: None,
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+        };
+        let store: Arc<dyn SessionStore> =
+            Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let shared = Arc::new(crate::shared_store::SharedStore::new());
+
+        let sub_layer = Arc::new(LayerState::new(
+            Uuid::now_v7(),
+            manifest,
+            store,
+            CancelToken::new(),
+            "sublead-1".into(),
+            spawner,
+            PathBuf::from("/bin/true"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            dir.path().to_path_buf(),
+            ApprovalPolicy::AutoApprove,
+            None,
+            shared,
+            None,
+        ));
+
+        // Register two worker cancel tokens.
+        let w1 = CancelToken::new();
+        let w2 = CancelToken::new();
+        {
+            let mut cancels = sub_layer.worker_cancels.write().await;
+            cancels.insert("w1".into(), w1.clone());
+            cancels.insert("w2".into(), w2.clone());
+        }
+
+        install_sublead_cancel_watcher(sub_layer.clone());
+
+        // Trip the sublead cancel token.
+        sub_layer.cancel.drain();
+
+        // Workers should be drained promptly (give the spawned task time to run).
+        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            loop {
+                if w1.is_draining() && w2.is_draining() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("worker drain should have cascaded within 200ms");
+    }
+
+    /// `install_sublead_cancel_watcher` cascades terminate to registered workers.
+    #[tokio::test]
+    async fn sublead_watcher_cascades_terminate_to_workers() {
+        use crate::dispatch::layer::LayerState;
+        use crate::dispatch::state::ApprovalPolicy;
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            max_parallel: 1,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(1),
+            budget_usd: None,
+            lead_timeout_secs: None,
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+        };
+        let store: Arc<dyn SessionStore> =
+            Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let shared = Arc::new(crate::shared_store::SharedStore::new());
+
+        let sub_layer = Arc::new(LayerState::new(
+            Uuid::now_v7(),
+            manifest,
+            store,
+            CancelToken::new(),
+            "sublead-1".into(),
+            spawner,
+            PathBuf::from("/bin/true"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            dir.path().to_path_buf(),
+            ApprovalPolicy::AutoApprove,
+            None,
+            shared,
+            None,
+        ));
+
+        let w1 = CancelToken::new();
+        {
+            let mut cancels = sub_layer.worker_cancels.write().await;
+            cancels.insert("w1".into(), w1.clone());
+        }
+
+        install_sublead_cancel_watcher(sub_layer.clone());
+
+        // Terminate the sublead cancel (skipping drain).
+        sub_layer.cancel.terminate();
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            loop {
+                if w1.is_terminated() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("worker terminate should have cascaded within 200ms");
     }
 
     #[cfg(target_os = "linux")]

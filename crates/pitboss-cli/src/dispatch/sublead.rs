@@ -338,6 +338,11 @@ pub async fn spawn_sublead(
             .await
             .insert(sublead_id.clone(), sub_layer.clone());
 
+        // Install the per-sublead cancel cascade watcher so that draining /
+        // terminating sub_layer.cancel propagates to its workers without the
+        // root cascade watcher needing to reach into worker_cancels directly.
+        crate::dispatch::signals::install_sublead_cancel_watcher(sub_layer.clone());
+
         // Emit SubleadSpawned lifecycle event to the control plane.
         {
             let (budget_usd_val, max_workers_val) = match &envelope {
@@ -360,12 +365,13 @@ pub async fn spawn_sublead(
             state.root.broadcast_control_event(ev).await;
         }
 
-        // I-1: If root has entered cascade-drain phase AFTER this read-lock snapshot,
-        // immediately drain the new sub-tree's cancel token before spawning the session.
-        // This guarantees any sub-lead spawned post-drain inherits the cancellation
-        // synchronously, avoiding the race where the cascade watcher's snapshot would
-        // miss this sub-lead entirely.
-        if state.root.cancel.is_draining() {
+        // I-1: If root has entered cascade-drain or cascade-terminate phase AFTER this
+        // read-lock snapshot, immediately propagate to the new sub-tree so it doesn't
+        // miss the cascade-watcher snapshot (which only fires once per run).
+        if state.root.cancel.is_terminated() {
+            sub_layer.cancel.terminate();
+            tracing::info!(sublead_id = %sublead_id, "spawned during cascade terminate; immediate cascade applied");
+        } else if state.root.cancel.is_draining() {
             sub_layer.cancel.drain();
             tracing::info!(sublead_id = %sublead_id, "spawned during cascade drain; immediate cascade applied");
         }
