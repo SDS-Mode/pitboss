@@ -124,6 +124,16 @@ impl LeaseRegistry {
         (to_remove, evicted)
     }
 
+    /// Evict expired leases without any other lock-requiring work. Used by
+    /// the background pruner to fire waiter notifications on TTL expiry
+    /// even when there is no concurrent `acquire`/`release`/`list` call
+    /// to drive prune-on-access. Returns the evicted names so the caller
+    /// can lift them onto `lease_notifier`.
+    pub async fn prune_expired_now(&self) -> Vec<String> {
+        let mut map = self.inner.lock().await;
+        Self::prune_expired(&mut map)
+    }
+
     fn prune_expired(map: &mut HashMap<String, (Lease, Instant)>) -> Vec<String> {
         let now = Instant::now();
         let expired: Vec<String> = map

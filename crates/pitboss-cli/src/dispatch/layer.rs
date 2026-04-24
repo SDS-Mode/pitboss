@@ -28,6 +28,28 @@ use crate::mcp::policy::PolicyMatcher;
 /// See `LayerState::reprompt_hook` and `install_reprompt_capture`.
 type RepromptHook = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
+/// Upper bound on queued outbound control events per TUI connection.
+/// Producers use `try_send` and drop on a full queue rather than block,
+/// so a frozen TUI socket does not wedge the dispatcher.
+///
+/// 512 events covers multi-second bursts (approvals, worker lifecycle
+/// fan-out) without meaningful memory cost. A frozen TUI simply misses
+/// events past the cap — an acceptable failure mode since reconnect
+/// re-syncs via the Hello snapshot.
+pub const CONTROL_EVENT_QUEUE_CAP: usize = 512;
+
+/// One installed outbound control-event sender.
+///
+/// `id` is a UUID minted when the connection is accepted. The disconnect
+/// cleanup path compares `id` against whatever currently occupies the
+/// slot before clearing — a racing reconnect that swapped in its own
+/// writer before the outgoing connection's cleanup runs will have a
+/// different id, and the clear is skipped.
+pub struct ControlWriterSlot {
+    pub id: Uuid,
+    pub sender: mpsc::Sender<crate::control::protocol::ControlEvent>,
+}
+
 /// All state owned by a single coordination layer (root layer or a
 /// sub-tree layer).
 ///
@@ -72,8 +94,18 @@ pub struct LayerState {
     /// Approval policy from the manifest.
     pub approval_policy: ApprovalPolicy,
     /// Outbound control-socket event channel.
-    pub control_writer:
-        Mutex<Option<mpsc::UnboundedSender<crate::control::protocol::ControlEvent>>>,
+    ///
+    /// `ControlWriterSlot` carries a per-connection `id` so disconnect
+    /// cleanup can verify it's clearing ITS OWN writer rather than one
+    /// a later connection installed mid-cleanup. Without the id check,
+    /// a reconnecting TUI races the outgoing connection's cleanup and
+    /// has its writer silently cleared.
+    ///
+    /// The sender is bounded (see `CONTROL_EVENT_QUEUE_CAP`) so a slow or
+    /// frozen TUI cannot cause unbounded memory growth on the producer
+    /// side — broadcasts use `try_send` and drop on a full queue rather
+    /// than block the dispatcher.
+    pub control_writer: Mutex<Option<ControlWriterSlot>>,
     /// Per-task event counters.
     pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
     /// v0.4.1: notification router.
@@ -313,7 +345,19 @@ impl LayerState {
             // envelope is available for future TUI display but is not
             // threaded through the channel in this task. Emit the inner
             // event so the TUI gets the lifecycle notification.
-            let _ = w.send(envelope.event);
+            //
+            // `try_send` drops the event on a full queue (slow/frozen
+            // TUI) rather than blocking the broadcaster.
+            if let Err(e) = w.sender.try_send(envelope.event) {
+                tracing::debug!(
+                    "control_writer try_send dropped event: {} ({})",
+                    match &e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => "queue full",
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => "receiver dropped",
+                    },
+                    std::any::type_name::<crate::control::protocol::ControlEvent>(),
+                );
+            }
         }
     }
 

@@ -29,6 +29,11 @@ impl NotificationSink for WebhookSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
+        // DNS rebinding / mutable-CNAME SSRF guard: re-validate the URL's
+        // currently-resolved IP against the private-range blocklist
+        // before sending.
+        crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+
         let response = self
             .http
             .post(&self.url)

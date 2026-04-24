@@ -116,6 +116,20 @@ pub enum ActorRole {
 
 const LIST_RESULT_CAP: usize = 1000;
 
+/// Result of a `kv_list` that preserves truncation information. Callers
+/// that see `entries.len() == LIST_RESULT_CAP` cannot otherwise distinguish
+/// "exactly cap matches" from "cap-or-more matches, truncated" — and
+/// either guess can silently break coordination across a large run.
+/// `total_matched` is the real match count prior to truncation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListResult {
+    pub entries: Vec<ListMetadata>,
+    /// `true` iff `total_matched > entries.len()`.
+    pub truncated: bool,
+    /// Total matches found before truncation to `LIST_RESULT_CAP`.
+    pub total_matched: u64,
+}
+
 fn authorize_write(
     path: &str,
     caller: &CallerIdentity,
@@ -354,6 +368,12 @@ impl SharedStore {
     }
 
     pub async fn list(&self, pattern: &str) -> Result<Vec<ListMetadata>, StoreError> {
+        Ok(self.list_with_truncation(pattern).await?.entries)
+    }
+
+    /// Same match logic as `list`, but surfaces the pre-truncation match
+    /// count and a `truncated` flag so callers can detect partial results.
+    pub async fn list_with_truncation(&self, pattern: &str) -> Result<ListResult, StoreError> {
         let pat = glob::Pattern::new(pattern)
             .map_err(|e| StoreError::InvalidArg(format!("bad glob: {e}")))?;
         let opts = glob::MatchOptions {
@@ -380,8 +400,14 @@ impl SharedStore {
             })
             .collect();
         out.sort_by(|a, b| a.path.cmp(&b.path));
+        let total_matched = out.len() as u64;
+        let truncated = out.len() > LIST_RESULT_CAP;
         out.truncate(LIST_RESULT_CAP);
-        Ok(out)
+        Ok(ListResult {
+            entries: out,
+            truncated,
+            total_matched,
+        })
     }
 
     pub async fn authorized_set(
@@ -473,6 +499,35 @@ impl SharedStore {
     /// `DispatchState` drop or explicit finalize.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Spawn a background task that periodically calls `prune_expired_now`
+    /// and forwards evicted lease names to `lease_notifier`. Covers the
+    /// "fully idle" window where no `acquire`/`release`/`list` call runs
+    /// between a holder's crash and a waiter's timeout — without this,
+    /// TTL-expired leases would not wake waiters until the waiter's own
+    /// deadline fires.
+    ///
+    /// Runs until `shutdown()` is called. Safe to call at most once per
+    /// store; subsequent calls spawn additional identical tasks (benign
+    /// but wasteful). 500 ms is quick enough that a waiter's wake-up
+    /// latency after a silent holder crash is bounded to a single tick.
+    pub fn start_lease_pruner(self: &std::sync::Arc<Self>) {
+        let store = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            const TICK: std::time::Duration = std::time::Duration::from_millis(500);
+            loop {
+                tokio::select! {
+                    () = store.cancel.cancelled() => break,
+                    () = tokio::time::sleep(TICK) => {
+                        let evicted = store.leases.prune_expired_now().await;
+                        if !evicted.is_empty() {
+                            store.notify_lease_evictions(&evicted);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub async fn lease_acquire(

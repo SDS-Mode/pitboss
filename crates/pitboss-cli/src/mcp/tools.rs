@@ -387,13 +387,14 @@ pub async fn handle_spawn_worker(
     }
 
     // Guard 1b: plan approval. When the manifest opts in with
-    // `[run].require_plan_approval = true`, the lead must call
+    // `[run].require_plan_approval = true`, each lead must call
     // `propose_plan` and get operator approval before any worker
-    // dispatches. The check happens here rather than earlier so draining
-    // runs still short-circuit with their clearer error.
+    // dispatches in its own layer. The gate is read from the TARGET layer
+    // (not `state.root`), so a sub-lead's approval only unblocks its own
+    // sub-tree — the root still needs its own plan approval before root-
+    // layer worker spawns succeed.
     if state.root.manifest.require_plan_approval
-        && !state
-            .root
+        && !target_layer
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire)
     {
@@ -1453,7 +1454,7 @@ pub async fn handle_pause_worker(
                     .read()
                     .await
                     .get(task_id)
-                    .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                    .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
                     .unwrap_or(0);
                 if pid == 0 {
                     anyhow::bail!("cannot freeze {task_id}: worker pid unknown (race with spawn?)");
@@ -1506,7 +1507,7 @@ pub async fn handle_continue_worker(
                 .read()
                 .await
                 .get(&args.task_id)
-                .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
                 .unwrap_or(0);
             if pid == 0 {
                 anyhow::bail!(
@@ -1759,10 +1760,21 @@ pub async fn handle_request_approval(
     }
 }
 
-/// Handle `propose_plan`: the lead submits a full execution plan for
+/// Handle `propose_plan`: a lead submits a full execution plan for
 /// pre-flight operator approval, distinct from `request_approval`'s
-/// in-flight per-action gating. Flips `state.root.plan_approved` to true on
-/// approval; leaves it false on rejection (lead can revise and retry).
+/// in-flight per-action gating. Flips the caller's **layer** `plan_approved`
+/// to true on approval; leaves it false on rejection (lead can revise and
+/// retry).
+///
+/// Plan approval is per-layer: the root lead's approval gates root-layer
+/// worker spawns; each sub-lead's approval gates its own sub-tree's
+/// worker spawns. Previously, every `propose_plan` acceptance flipped
+/// `state.root.plan_approved`, so a sub-lead's approval silently
+/// unblocked worker spawns for the root lead and every sibling sub-lead
+/// — bypassing the root's own plan gate. `spawn_worker` now reads from
+/// the target layer, and this handler writes to the caller's layer.
+///
+/// Workers cannot call propose_plan.
 ///
 /// Returns the same `ApprovalToolResponse` shape as `request_approval`
 /// so leads can share response-handling code — they just dispatch on
@@ -1774,6 +1786,28 @@ pub async fn handle_propose_plan(
     use crate::dispatch::state::PendingApproval;
     use crate::mcp::approval::{ApprovalCategory, ApprovalFallback};
     use crate::mcp::policy::ApprovalAction;
+    use crate::shared_store::ActorRole;
+
+    // Resolve the caller's layer — `plan_approved` is stored there, not
+    // on `state.root`, so a sub-lead's approval does not inadvertently
+    // open the root lead's spawn gate.
+    let caller_layer: Arc<LayerState> = match args.meta.as_ref() {
+        None => Arc::clone(&state.root),
+        Some(meta) => match meta.actor_role {
+            ActorRole::Lead => Arc::clone(&state.root),
+            ActorRole::Sublead => {
+                let subleads = state.subleads.read().await;
+                subleads
+                    .get(meta.actor_id.as_str())
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown sublead_id: {}", meta.actor_id))?
+            }
+            ActorRole::Worker => anyhow::bail!(
+                "propose_plan is not available to workers; only leads \
+                 and sub-leads may propose a plan"
+            ),
+        },
+    };
 
     // Determine the caller's identity from the _meta field injected by
     // mcp-bridge. Falls back to treating the caller as the root lead when
@@ -1808,8 +1842,7 @@ pub async fn handle_propose_plan(
                         actor = %pending.requesting_actor_id,
                         "plan auto-approved by policy"
                     );
-                    state
-                        .root
+                    caller_layer
                         .plan_approved
                         .store(true, std::sync::atomic::Ordering::Release);
                     state
@@ -1867,8 +1900,7 @@ pub async fn handle_propose_plan(
     {
         Ok(resp) => {
             if resp.approved {
-                state
-                    .root
+                caller_layer
                     .plan_approved
                     .store(true, std::sync::atomic::Ordering::Release);
             }

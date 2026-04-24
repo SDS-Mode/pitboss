@@ -520,17 +520,29 @@ impl PitbossHandler {
 
         // Strict peer-visibility check: /peer/<X>/* is readable only by X or
         // the layer's lead. Applied before the store lookup (fast-reject).
-        if !caller_id.is_empty() {
-            if let Some(target_id) = parse_peer_path(&args.path) {
-                if !can_read_peer_slot(layer, &caller_id, target_id) {
-                    return Err(shared_store_err(
-                        &crate::shared_store::StoreError::Forbidden(format!(
-                            "strict peer visibility: {caller_id} cannot read /peer/{target_id}/*; \
-                             only {target_id} itself or the layer lead ({}) may read this slot",
-                            layer.lead_id,
-                        )),
-                    ));
-                }
+        //
+        // An empty caller_id (no `_meta`) can only come from a direct socket
+        // connection that bypassed the bridge — legitimate agents always
+        // carry `_meta`. Reject /peer/* access from such connections rather
+        // than falling through to a root-layer read; otherwise any local
+        // process with socket access could enumerate peer slots.
+        if let Some(target_id) = parse_peer_path(&args.path) {
+            if caller_id.is_empty() {
+                return Err(shared_store_err(
+                    &crate::shared_store::StoreError::Forbidden(format!(
+                        "strict peer visibility: /peer/{target_id}/* requires caller \
+                         identity (_meta); rejecting anonymous read"
+                    )),
+                ));
+            }
+            if !can_read_peer_slot(layer, &caller_id, target_id) {
+                return Err(shared_store_err(
+                    &crate::shared_store::StoreError::Forbidden(format!(
+                        "strict peer visibility: {caller_id} cannot read /peer/{target_id}/*; \
+                         only {target_id} itself or the layer lead ({}) may read this slot",
+                        layer.lead_id,
+                    )),
+                ));
             }
         }
 
@@ -613,24 +625,39 @@ impl PitbossHandler {
         // Strict peer-visibility check for /peer/<X>/* globs.
         // Only exact /peer/<id>/... prefix patterns are checked — a broad
         // glob like /peer/** is rejected unless the caller is the layer lead.
-        if !caller_id.is_empty() {
-            if let Some(target_id) = parse_peer_path(&args.glob) {
-                if !can_read_peer_slot(layer, &caller_id, target_id) {
-                    return Err(shared_store_err(
-                        &crate::shared_store::StoreError::Forbidden(format!(
-                            "strict peer visibility: {caller_id} cannot list /peer/{target_id}/*; \
-                             only {target_id} itself or the layer lead ({}) may list this slot",
-                            layer.lead_id,
-                        )),
-                    ));
-                }
+        // Empty caller_id (no `_meta`) is rejected outright — legitimate
+        // agents always carry `_meta`, so falling through to a root-layer
+        // read would let a raw-socket client bypass peer isolation.
+        if let Some(target_id) = parse_peer_path(&args.glob) {
+            if caller_id.is_empty() {
+                return Err(shared_store_err(
+                    &crate::shared_store::StoreError::Forbidden(format!(
+                        "strict peer visibility: /peer/{target_id}/* requires caller \
+                         identity (_meta); rejecting anonymous list"
+                    )),
+                ));
+            }
+            if !can_read_peer_slot(layer, &caller_id, target_id) {
+                return Err(shared_store_err(
+                    &crate::shared_store::StoreError::Forbidden(format!(
+                        "strict peer visibility: {caller_id} cannot list /peer/{target_id}/*; \
+                         only {target_id} itself or the layer lead ({}) may list this slot",
+                        layer.lead_id,
+                    )),
+                ));
             }
         }
 
         match crate::shared_store::tools::handle_kv_list(&layer.shared_store, args).await {
-            // Wrap Vec<ListMetadata> in an object — MCP spec requires
-            // structuredContent to be a record.
-            Ok(v) => to_structured_result(&serde_json::json!({ "entries": v })),
+            // Wrap ListResult in an object — MCP spec requires
+            // structuredContent to be a record. `truncated` + `total_matched`
+            // are surfaced so callers can detect that the result is
+            // partial (rather than guessing from `entries.len()`).
+            Ok(r) => to_structured_result(&serde_json::json!({
+                "entries": r.entries,
+                "truncated": r.truncated,
+                "total_matched": r.total_matched,
+            })),
             Err(e) => Err(shared_store_err(&e)),
         }
     }
@@ -657,17 +684,26 @@ impl PitbossHandler {
 
         // Strict peer-visibility check: /peer/<X>/* is waiterable only by X or
         // the layer's lead. Applied before the store wait (fast-reject).
-        if !caller_id.is_empty() {
-            if let Some(target_id) = parse_peer_path(&args.path) {
-                if !can_read_peer_slot(layer, &caller_id, target_id) {
-                    return Err(shared_store_err(
-                        &crate::shared_store::StoreError::Forbidden(format!(
-                            "strict peer visibility: {caller_id} cannot wait on /peer/{target_id}/*; \
-                             only {target_id} itself or the layer lead ({}) may wait on this slot",
-                            layer.lead_id,
-                        )),
-                    ));
-                }
+        // Empty caller_id (no `_meta`) is rejected outright — otherwise a
+        // raw-socket client could block on another actor's slot
+        // indefinitely, acting as a side-channel oracle on slot writes.
+        if let Some(target_id) = parse_peer_path(&args.path) {
+            if caller_id.is_empty() {
+                return Err(shared_store_err(
+                    &crate::shared_store::StoreError::Forbidden(format!(
+                        "strict peer visibility: /peer/{target_id}/* requires caller \
+                         identity (_meta); rejecting anonymous wait"
+                    )),
+                ));
+            }
+            if !can_read_peer_slot(layer, &caller_id, target_id) {
+                return Err(shared_store_err(
+                    &crate::shared_store::StoreError::Forbidden(format!(
+                        "strict peer visibility: {caller_id} cannot wait on /peer/{target_id}/*; \
+                         only {target_id} itself or the layer lead ({}) may wait on this slot",
+                        layer.lead_id,
+                    )),
+                ));
             }
         }
 

@@ -102,9 +102,16 @@ impl SessionHandle {
         // Publish the child pid so the dispatcher's SIGSTOP freeze-pause
         // path can signal it directly. No-op if the caller didn't install
         // a slot (tests, flat mode without pause support).
+        //
+        // `Release` store pairs with `Acquire` loads at signal sites — a
+        // reader that observes a non-zero pid must also observe every
+        // write preceding this point (notably the child struct's
+        // process-state fields). `Relaxed` was insufficient: a reader on
+        // another thread could see the pid published but still observe
+        // the pre-spawn initial zero state of adjacent fields.
         if let Some(slot) = &self.pid_slot {
             if let Some(pid) = child.pid() {
-                slot.store(pid, std::sync::atomic::Ordering::Relaxed);
+                slot.store(pid, std::sync::atomic::Ordering::Release);
             }
         }
 
@@ -218,6 +225,16 @@ impl SessionHandle {
         }
         if let Some(t) = stderr_task {
             let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, t).await;
+        }
+
+        // Clear the pid slot now that the child has been reaped. Leaving
+        // the old pid published creates a use-after-free race: the OS may
+        // recycle that pid to an unrelated process, and a signal-sending
+        // reader that still observes the slot would then hit the wrong
+        // process. `Release` pairs with the `Acquire` loads at signal
+        // sites so a reader that sees 0 won't signal anything.
+        if let Some(slot) = &self.pid_slot {
+            slot.store(0, std::sync::atomic::Ordering::Release);
         }
 
         let exit_code = exit_status

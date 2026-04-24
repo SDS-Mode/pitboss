@@ -293,6 +293,7 @@ pub async fn spawn_sublead(
 
         // 5. Construct a fresh SharedStore for this sub-tree.
         let sub_store = Arc::new(SharedStore::new());
+        sub_store.start_lease_pruner();
 
         // 6. Snapshot-seed /ref/* from initial_ref.
         for (k, v) in &req.initial_ref {

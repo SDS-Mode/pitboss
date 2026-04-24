@@ -90,10 +90,13 @@ pub async fn start_control_server(
                             let run_id = run_id.clone();
                             let run_kind = run_kind.clone();
                             let state_inner = state_outer.clone();
-                            let workers_names: Vec<String> = {
-                                let guard = state_outer.root.workers.read().await;
-                                guard.keys().cloned().collect()
-                            };
+                            // Workers snapshot is deferred to *after* the
+                            // client Hello is received (inside
+                            // `serve_connection`). Taking it here would
+                            // miss any worker that spawned in the window
+                            // between accept and Hello arrival, leaving
+                            // the TUI with stale tiles until the next
+                            // broadcast.
                             tracker_outer.spawn(async move {
                                 tokio::select! {
                                     _ = cancel_inner.cancelled() => {},
@@ -102,7 +105,6 @@ pub async fn start_control_server(
                                         server_version,
                                         run_id,
                                         run_kind,
-                                        workers_names,
                                         state_inner,
                                     ) => {},
                                 }
@@ -135,7 +137,6 @@ async fn serve_connection(
     server_version: String,
     run_id: String,
     run_kind: String,
-    workers_names: Vec<String>,
     state: Arc<crate::dispatch::state::DispatchState>,
 ) {
     let (read_half, write_half) = stream.into_split();
@@ -175,6 +176,16 @@ async fn serve_connection(
         }
     }
 
+    // Snapshot the current worker set *after* receiving the client Hello,
+    // not at accept time. Any worker that spawned between accept and this
+    // point is now visible to the TUI on first paint; deferring avoids
+    // the previously-observed race where the snapshot was empty but a
+    // worker was already registered.
+    let workers_names: Vec<String> = {
+        let guard = state.root.workers.read().await;
+        guard.keys().cloned().collect()
+    };
+
     // Send server hello.
     let _ = send_event(
         &writer,
@@ -188,13 +199,22 @@ async fn serve_connection(
     .await;
 
     // Install this connection as the control_writer (displace any prior).
-    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ControlEvent>();
+    // The connection-unique `writer_id` lets the disconnect cleanup block
+    // verify the slot still holds OUR writer before clearing — a racing
+    // reconnect that swapped in its own writer between this install and
+    // our disconnect has a different id, so our cleanup skips the clear.
+    let writer_id = uuid::Uuid::now_v7();
+    let (ev_tx, mut ev_rx) =
+        tokio::sync::mpsc::channel::<ControlEvent>(crate::dispatch::layer::CONTROL_EVENT_QUEUE_CAP);
     {
         let mut cw = state.root.control_writer.lock().await;
         if let Some(old) = cw.take() {
-            let _ = old.send(ControlEvent::Superseded);
+            let _ = old.sender.try_send(ControlEvent::Superseded);
         }
-        *cw = Some(ev_tx.clone());
+        *cw = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: writer_id,
+            sender: ev_tx.clone(),
+        });
     }
 
     // Drain any queued approvals now that a TUI is connected.
@@ -209,13 +229,15 @@ async fn serve_connection(
                 .await
                 .insert(q.request_id.clone(), q.responder);
             // And push the event.
-            let _ = ev_tx.send(ControlEvent::ApprovalRequest {
-                request_id: q.request_id,
-                task_id: q.task_id,
-                summary: q.summary,
-                plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
-                kind: q.kind,
-            });
+            let _ = ev_tx
+                .send(ControlEvent::ApprovalRequest {
+                    request_id: q.request_id,
+                    task_id: q.task_id,
+                    summary: q.summary,
+                    plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
+                    kind: q.kind,
+                })
+                .await;
         }
     }
 
@@ -255,11 +277,13 @@ async fn serve_connection(
                     },
                 )
                 .collect();
-            if ev_tx_activity
-                .send(ControlEvent::StoreActivity { counters })
-                .is_err()
-            {
-                break;
+            // `try_send` — if the queue is full, skip this tick rather
+            // than block the activity pump; the next tick re-reads
+            // fresh counters anyway.
+            match ev_tx_activity.try_send(ControlEvent::StoreActivity { counters }) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
             }
         }
     });
@@ -279,10 +303,16 @@ async fn serve_connection(
         }
     }
 
-    // Clear control_writer on disconnect.
+    // Clear control_writer on disconnect — but ONLY if the slot still
+    // holds OUR writer. A reconnecting TUI can install its own writer
+    // between our read loop exiting and this cleanup block running; a
+    // blind clear would silently disconnect the reconnected client
+    // (events go nowhere, no diagnostic surface).
     {
         let mut cw = state.root.control_writer.lock().await;
-        *cw = None;
+        if cw.as_ref().is_some_and(|slot| slot.id == writer_id) {
+            *cw = None;
+        }
     }
     pump.abort();
     activity_pump.abort();
@@ -307,7 +337,7 @@ async fn thaw_if_frozen(state: &Arc<crate::dispatch::state::DispatchState>, task
         .read()
         .await
         .get(task_id)
-        .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+        .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
         .unwrap_or(0);
     if pid > 0 {
         if let Err(e) = crate::dispatch::signals::resume_stopped(pid) {
@@ -408,7 +438,7 @@ async fn dispatch_op(
                     if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
                         let pid = pids
                             .get(id)
-                            .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                            .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
                             .unwrap_or(0);
                         if pid > 0 {
                             let _ = crate::dispatch::signals::resume_stopped(pid);
@@ -423,7 +453,7 @@ async fn dispatch_op(
                         if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
                             let pid = pids
                                 .get(id)
-                                .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                                .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
                                 .unwrap_or(0);
                             if pid > 0 {
                                 let _ = crate::dispatch::signals::resume_stopped(pid);
@@ -505,7 +535,7 @@ async fn dispatch_op(
                                 .read()
                                 .await
                                 .get(&task_id)
-                                .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                                .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
                                 .unwrap_or(0);
                             if pid == 0 {
                                 return ControlEvent::OpFailed {
@@ -637,7 +667,7 @@ async fn dispatch_op(
                         .read()
                         .await
                         .get(&task_id)
-                        .map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed))
+                        .map(|slot| slot.load(std::sync::atomic::Ordering::Acquire))
                         .unwrap_or(0);
                     if pid == 0 {
                         return ControlEvent::OpFailed {
