@@ -74,6 +74,7 @@ fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         dump_shared_store: false,
         require_plan_approval: false,
         approval_rules: vec![],
+        container: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
     let worker_script = FakeScript::new()
@@ -140,6 +141,7 @@ fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         dump_shared_store: false,
         require_plan_approval: false,
         approval_rules: vec![],
+        container: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
     let hold_script = FakeScript::new().hold_until_signal();
@@ -777,6 +779,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         dump_shared_store: false,
         require_plan_approval: false,
         approval_rules: vec![],
+        container: None,
     };
 
     let store: std::sync::Arc<dyn pitboss_core::store::SessionStore> = std::sync::Arc::new(

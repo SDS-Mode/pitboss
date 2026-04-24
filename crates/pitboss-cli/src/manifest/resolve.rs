@@ -7,8 +7,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
-    Defaults, Effort, Lead, LeadSpec, Manifest, RunConfig, SingleLeadManifest, SubleadDefaultsSpec,
-    Task, Template, WorktreeCleanup,
+    ContainerConfig, Defaults, Effort, Lead, LeadSpec, Manifest, RunConfig, SingleLeadManifest,
+    SubleadDefaultsSpec, Task, Template, WorktreeCleanup,
 };
 
 /// Fully resolved task ready for dispatch.
@@ -109,6 +109,9 @@ pub struct ResolvedManifest {
     // [[approval_policy]] manifest blocks. Empty vec means no policy.
     #[serde(default)]
     pub approval_rules: Vec<crate::mcp::policy::ApprovalRule>,
+    // NEW — optional [container] section for `pitboss container-dispatch`.
+    #[serde(default)]
+    pub container: Option<ContainerConfig>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -177,6 +180,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         dump_shared_store: manifest.run.dump_shared_store,
         require_plan_approval: manifest.run.require_plan_approval,
         approval_rules,
+        container: manifest.container,
     })
 }
 
@@ -322,6 +326,7 @@ pub fn resolve_single_lead(
         dump_shared_store: manifest.run.dump_shared_store,
         require_plan_approval: manifest.run.require_plan_approval,
         approval_rules,
+        container: manifest.container,
     })
 }
 

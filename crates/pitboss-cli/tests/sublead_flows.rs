@@ -57,6 +57,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         dump_shared_store: false,
         require_plan_approval: false,
         approval_rules: vec![],
+        container: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -120,6 +121,7 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         dump_shared_store: false,
         require_plan_approval: false,
         approval_rules: vec![],
+        container: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();

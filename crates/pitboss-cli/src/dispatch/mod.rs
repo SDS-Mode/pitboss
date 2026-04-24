@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod container;
 pub mod events;
 pub mod failure_detection;
 pub mod hierarchical;

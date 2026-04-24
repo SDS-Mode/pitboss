@@ -110,6 +110,21 @@ pub enum Command {
         #[arg(long, value_enum)]
         actor_role: ActorRoleArg,
     },
+    /// Run a dispatch inside a container, assembling the docker/podman invocation
+    /// from the manifest's `[container]` section. Replaces the current process
+    /// with the container run (exec-style). Requires `[container]` in the manifest.
+    ContainerDispatch {
+        manifest: PathBuf,
+        /// Override run_dir from the manifest / default.
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+        /// Print the container run command and exit without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override container runtime detection ("docker" or "podman").
+        #[arg(long)]
+        runtime: Option<String>,
+    },
     /// Print shell completion script for the given shell (bash, zsh, fish,
     /// elvish, powershell) to stdout.
     Completions {

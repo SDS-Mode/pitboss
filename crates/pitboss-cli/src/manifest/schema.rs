@@ -5,6 +5,42 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Optional `[container]` section for `pitboss container-dispatch`.
+/// When present, `pitboss container-dispatch` uses this config to build
+/// the `docker`/`podman run` invocation. `directory` fields in tasks/lead
+/// must be valid container-side paths (after mounts are applied).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerConfig {
+    /// Container image. Default: `ghcr.io/sds-mode/pitboss-with-claude:latest`.
+    pub image: Option<String>,
+    /// Container runtime: `"docker"`, `"podman"`, or `"auto"` (default).
+    pub runtime: Option<String>,
+    /// Extra args inserted verbatim before the image name in the `run` call.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Host→container bind mounts (besides the auto-injected `~/.claude` and run_dir).
+    #[serde(default, rename = "mount")]
+    pub mounts: Vec<MountSpec>,
+    /// Working directory inside the container.
+    /// Defaults to the container path of the first `[[container.mount]]` entry,
+    /// or `/home/pitboss` if no mounts are declared.
+    pub workdir: Option<PathBuf>,
+}
+
+/// A single host→container bind mount entry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MountSpec {
+    /// Absolute path on the host (tilde expansion is performed at dispatch time).
+    pub host: PathBuf,
+    /// Absolute path inside the container.
+    pub container: PathBuf,
+    /// Mount as read-only. Default: false.
+    #[serde(default)]
+    pub readonly: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -25,6 +61,9 @@ pub struct Manifest {
     /// Rules are evaluated in declaration order; first match wins.
     #[serde(default, rename = "approval_policy")]
     pub approval_policy_rules: Vec<ApprovalRuleSpec>,
+    /// Optional container config for `pitboss container-dispatch`.
+    #[serde(default)]
+    pub container: Option<ContainerConfig>,
 }
 
 /// TOML schema for a single `[[approval_policy]]` rule.
@@ -208,6 +247,9 @@ pub struct SingleLeadManifest {
     /// Approval policy rules (v0.6+).
     #[serde(default, rename = "approval_policy")]
     pub approval_policy_rules: Vec<ApprovalRuleSpec>,
+    /// Optional container config for `pitboss container-dispatch`.
+    #[serde(default)]
+    pub container: Option<ContainerConfig>,
 }
 
 /// v0.6 single-table `[lead]` schema. Used when the manifest author writes
