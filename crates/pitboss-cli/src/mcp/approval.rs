@@ -92,6 +92,7 @@ impl ApprovalBridge {
     /// `kind` distinguishes `request_approval` (in-flight, `Action`) from
     /// `propose_plan` (pre-flight, `Plan`) — passed through to the TUI
     /// modal so the operator can tell them apart.
+    #[allow(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         task_id: String,

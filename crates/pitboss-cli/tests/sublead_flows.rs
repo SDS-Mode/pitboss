@@ -487,6 +487,7 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = pitboss_cli::dispatch::sublead::spawn_sublead(&state, req)
         .await
@@ -1103,6 +1104,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1163,6 +1165,7 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1629,6 +1632,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         read_down: false,
         env: Default::default(),
         tools: Default::default(),
+        resume_session_id: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await

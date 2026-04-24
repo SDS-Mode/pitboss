@@ -35,7 +35,7 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .map(|v| serde_json::from_value::<pitboss_core::store::TaskRecord>(v))
+            .map(serde_json::from_value::<pitboss_core::store::TaskRecord>)
             .collect::<Result<Vec<_>, _>>()?
     } else {
         let content = std::fs::read_to_string(&summary_jsonl)
@@ -43,7 +43,7 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         content
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str::<pitboss_core::store::TaskRecord>(l))
+            .map(serde_json::from_str::<pitboss_core::store::TaskRecord>)
             .collect::<Result<Vec<_>, _>>()
             .with_context(|| format!("parse {}", summary_jsonl.display()))?
     };

@@ -64,6 +64,12 @@ struct SpawnSubleadRequest {
     /// always included on top so the sub-lead can still spawn workers etc.
     #[serde(default)]
     tools: Vec<String>,
+    /// When set, pass `--resume <id>` to the sub-lead's claude subprocess.
+    /// The root lead discovers prior session IDs from `/resume/subleads` in
+    /// the shared store after `pitboss resume` seeds it at startup. Callers
+    /// that omit this field get a fresh sub-lead session (default behavior).
+    #[serde(default)]
+    resume_session_id: Option<String>,
     /// Caller identity injected by mcp-bridge (actor_id + actor_role).
     #[serde(rename = "_meta", default)]
     #[schemars(skip)]
@@ -343,6 +349,7 @@ impl PitbossHandler {
             read_down: req.read_down,
             env: req.env,
             tools: req.tools,
+            resume_session_id: req.resume_session_id,
         };
 
         match do_spawn(&self.state, spawn_req).await {

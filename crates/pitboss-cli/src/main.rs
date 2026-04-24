@@ -189,6 +189,7 @@ fn run_dispatch(
                 claude_version,
                 run_dir_override,
                 dry_run,
+                std::collections::HashMap::new(),
             )
             .await
             {
@@ -385,9 +386,9 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         Err(_) => false,
     };
 
-    let resolved = if is_hierarchical {
+    let (resolved, sublead_sessions) = if is_hierarchical {
         match dispatch::build_resume_hierarchical(&run_subdir) {
-            Ok(r) => r,
+            Ok(pair) => pair,
             Err(e) => {
                 eprintln!("pitboss resume: {e:#}");
                 std::process::exit(2);
@@ -395,7 +396,7 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         }
     } else {
         match dispatch::build_resume_manifest(&run_subdir) {
-            Ok(r) => r,
+            Ok(r) => (r, std::collections::HashMap::new()),
             Err(e) => {
                 eprintln!("pitboss resume: {e:#}");
                 std::process::exit(2);
@@ -438,6 +439,7 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
                 claude_version,
                 Some(effective_run_dir),
                 false,
+                sublead_sessions,
             )
             .await
             {

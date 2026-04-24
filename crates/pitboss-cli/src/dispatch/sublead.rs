@@ -98,6 +98,11 @@ pub struct SubleadSpawnRequest {
     /// (`mcp__pitboss__*`) are always included regardless so the sub-lead
     /// can still orchestrate workers.
     pub tools: Vec<String>,
+    /// When set, pass `--resume <id>` to the sub-lead's claude subprocess so
+    /// it continues a prior session. Populated by the root lead after
+    /// `pitboss resume` seeds `/resume/subleads` in the shared store with
+    /// prior session IDs. `None` for fresh spawns.
+    pub resume_session_id: Option<String>,
 }
 
 /// Validated, defaults-applied resource envelope for a sub-lead spawn.
@@ -374,6 +379,7 @@ pub async fn spawn_sublead(
             envelope,
             req.env,
             req.tools,
+            req.resume_session_id,
         )
         .await
         .context("sub-lead claude session spawn failed")?;
@@ -460,6 +466,7 @@ async fn spawn_sublead_session(
     envelope: ResolvedEnvelope,
     operator_env: std::collections::HashMap<String, String>,
     tools_override: Vec<String>,
+    resume_session_id: Option<String>,
 ) -> Result<()> {
     use crate::dispatch::hierarchical::build_sublead_mcp_config;
     use crate::dispatch::runner::sublead_spawn_args;
@@ -480,7 +487,7 @@ async fn spawn_sublead_session(
         .context("build sublead mcp-config")?;
 
     // 3. Build the CLI args: sublead toolset (or operator override),
-    //    model, prompt, no --resume on first spawn.
+    //    model, prompt, and optional --resume when continuing a prior session.
     let tools_for_args: Option<&[String]> = if tools_override.is_empty() {
         None
     } else {
@@ -491,7 +498,7 @@ async fn spawn_sublead_session(
         &prompt,
         &model,
         &mcp_config_path,
-        None,
+        resume_session_id.as_deref(),
         tools_for_args,
     );
 
@@ -825,6 +832,33 @@ async fn spawn_sublead_session(
                 "failed to persist sub-lead TaskRecord"
             );
         }
+
+        // Persist the session_id mapping so `pitboss resume` can seed the
+        // shared store with prior sub-lead session IDs on the next run.
+        if let Some(ref sid) = last_session_id {
+            let entry = serde_json::json!({
+                "sublead_id": sublead_id_bg,
+                "session_id": sid,
+            });
+            let subleads_jsonl = sub_layer_bg.run_subdir.join("subleads.jsonl");
+            if let Ok(mut line) = serde_json::to_string(&entry) {
+                line.push('\n');
+                // Best-effort: failure to persist is not fatal.
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&subleads_jsonl)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()))
+                {
+                    tracing::warn!(
+                        sublead_id = %sublead_id_bg,
+                        error = %e,
+                        "failed to append sublead session to subleads.jsonl"
+                    );
+                }
+            }
+        }
+
         // Broadcast classified failure from the sub-lead so the root TUI
         // sees why this branch of the tree died, and update api_health
         // so further spawns across the tree see the gate.
