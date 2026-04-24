@@ -1274,12 +1274,11 @@ mod tests {
         let _hello = lines.next_line().await.unwrap().unwrap();
 
         // Second line: replayed ApprovalRequest for the ghost bridge entry.
-        let replay_line =
-            tokio::time::timeout(Duration::from_millis(500), lines.next_line())
-                .await
-                .expect("replay arrives before timeout")
-                .unwrap()
-                .unwrap();
+        let replay_line = tokio::time::timeout(Duration::from_millis(500), lines.next_line())
+            .await
+            .expect("replay arrives before timeout")
+            .unwrap()
+            .unwrap();
         let replay: ControlEvent = serde_json::from_str(&replay_line).unwrap();
         match replay {
             ControlEvent::ApprovalRequest {
@@ -1300,11 +1299,9 @@ mod tests {
 
         // And the responder is still live: a subsequent approve op on the
         // replayed request_id must deliver to the original oneshot.
-        w.write_all(
-            b"{\"op\":\"approve\",\"request_id\":\"req-ghost\",\"approved\":true}\n",
-        )
-        .await
-        .unwrap();
+        w.write_all(b"{\"op\":\"approve\",\"request_id\":\"req-ghost\",\"approved\":true}\n")
+            .await
+            .unwrap();
         let resp = tokio::time::timeout(Duration::from_millis(500), rx)
             .await
             .expect("approve reaches original responder")
