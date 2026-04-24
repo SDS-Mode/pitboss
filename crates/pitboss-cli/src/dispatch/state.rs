@@ -247,11 +247,25 @@ pub struct QueuedApproval {
 /// `approval_queue` entries. Without this, an approval that moves from queue
 /// to bridge (when a TUI connects) loses TTL coverage: the queue is empty so
 /// the watcher does nothing, while the bridge has no metadata to check against.
+///
+/// Also retains the display fields (`summary`, `plan`, `kind`) so a TUI that
+/// connects after a previous TUI died without responding can have the pending
+/// approval replayed from the bridge. Before #102, transfer from queue→bridge
+/// dropped these fields, and a reconnecting TUI saw nothing for the still-live
+/// responder until a TTL fallback resolved it.
 pub struct BridgeEntry {
     /// Oneshot sender; deliver the operator's decision here.
     pub responder: oneshot::Sender<ApprovalResponse>,
     /// Actor that submitted the approval request (for counter attribution).
     pub task_id: String,
+    /// Short summary line rendered in the TUI modal + approval-list pane.
+    pub summary: String,
+    /// Typed structured plan body (rationale, resources, risks, rollback).
+    /// `None` for bare summary-only approvals.
+    pub plan: Option<crate::mcp::tools::ApprovalPlan>,
+    /// Discriminator between `Action` (in-flight) and `Plan` (pre-flight)
+    /// approvals — controls which modal header the TUI renders.
+    pub kind: crate::control::protocol::ApprovalKind,
     /// Seconds after `created_at` before the fallback fires. `None` = no TTL.
     pub ttl_secs: Option<u64>,
     /// What to do when `ttl_secs` elapses. `None` = Block (never auto-resolve).

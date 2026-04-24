@@ -232,13 +232,17 @@ async fn serve_connection(
         let mut queue = state.root.approval_queue.lock().await;
         while let Some(q) = queue.pop_front() {
             // Transfer responder into the bridge map, preserving TTL metadata
-            // so expire_layer_approvals can still expire the entry if the
-            // operator doesn't act before the TTL fires.
+            // and display fields so expire_layer_approvals can still expire
+            // the entry and — per #102 — a subsequent TUI reconnect can
+            // replay pending approvals held by the bridge.
             state.root.approval_bridge.lock().await.insert(
                 q.request_id.clone(),
                 crate::dispatch::state::BridgeEntry {
                     responder: q.responder,
                     task_id: q.task_id.clone(),
+                    summary: q.summary.clone(),
+                    plan: q.plan.clone(),
+                    kind: q.kind,
                     ttl_secs: q.ttl_secs,
                     fallback: q.fallback,
                     created_at: q.created_at,
@@ -252,6 +256,41 @@ async fn serve_connection(
                     summary: q.summary,
                     plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
                     kind: q.kind,
+                })
+                .await;
+        }
+    }
+
+    // Replay any approvals already in the bridge (#102). A bridge entry with
+    // a still-live responder means a prior TUI received the ApprovalRequest
+    // event but died without approving/rejecting (or was displaced by this
+    // new connection). Without this replay, the new TUI sees nothing for the
+    // pending responder — the queue is empty, the bridge holds the responder
+    // but emits no event, and the lead blocks until TTL fallback fires.
+    // The responder oneshot stays in the bridge; a subsequent approve/reject
+    // op still delivers correctly.
+    {
+        let bridge = state.root.approval_bridge.lock().await;
+        for (request_id, entry) in bridge.iter() {
+            // Drop entries whose responder oneshot has already been filled
+            // (e.g. TTL fallback fired between drain and this replay) — the
+            // canonical cleanup path for those is expire_layer_approvals;
+            // we just skip replaying to the TUI so it doesn't render a
+            // dangling approval card. is_closed is the best proxy we have
+            // without racing the responder's receiver.
+            if entry.responder.is_closed() {
+                continue;
+            }
+            let _ = ev_tx
+                .send(ControlEvent::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    task_id: entry.task_id.clone(),
+                    summary: entry.summary.clone(),
+                    plan: entry
+                        .plan
+                        .clone()
+                        .map(crate::mcp::approval::approval_plan_to_wire),
+                    kind: entry.kind,
                 })
                 .await;
         }
@@ -1110,6 +1149,9 @@ mod tests {
             crate::dispatch::state::BridgeEntry {
                 responder: tx,
                 task_id: "test-task".into(),
+                summary: "test".into(),
+                plan: None,
+                kind: crate::control::protocol::ApprovalKind::Action,
                 ttl_secs: None,
                 fallback: None,
                 created_at: chrono::Utc::now(),
@@ -1142,6 +1184,15 @@ mod tests {
         let (r, _w) = stream.split();
         let mut lines = BufReader::new(r).lines();
         let _hello = lines.next_line().await.unwrap();
+        // #102: server now replays live bridge entries on Hello. The pre-seed
+        // at the top of this test pushes one ApprovalRequest before the
+        // approve ack arrives.
+        let replay_line = lines.next_line().await.unwrap().unwrap();
+        let replay: ControlEvent = serde_json::from_str(&replay_line).unwrap();
+        assert!(matches!(
+            replay,
+            ControlEvent::ApprovalRequest { ref request_id, .. } if request_id == "req-1"
+        ));
         let reply_line = lines.next_line().await.unwrap().unwrap();
         let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
         assert!(matches!(
@@ -1158,6 +1209,105 @@ mod tests {
 
         // Silence unused warnings on ApprovalBridge import.
         let _ = ApprovalBridge::new(state);
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn reconnecting_tui_receives_replay_of_bridge_pending_approvals() {
+        // Regression for #102 — "ghost approval". A prior TUI received an
+        // ApprovalRequest (so the entry moved from queue→bridge) but died
+        // without responding. The responder oneshot is still live in the
+        // bridge. A fresh TUI connecting later must see an ApprovalRequest
+        // event replayed from the bridge — otherwise the operator has no
+        // way to resolve the pending approval short of TTL / run cancel.
+        use std::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        // Simulate the "first TUI got the event then died" state: entry
+        // lives in the bridge with a still-live responder oneshot.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.root.approval_bridge.lock().await.insert(
+            "req-ghost".into(),
+            crate::dispatch::state::BridgeEntry {
+                responder: tx,
+                task_id: "worker-a".into(),
+                summary: "drop staging index".into(),
+                plan: Some(crate::mcp::tools::ApprovalPlan {
+                    summary: "drop staging index".into(),
+                    rationale: Some("obsolete".into()),
+                    resources: vec!["db/idx_foo".into()],
+                    risks: vec![],
+                    rollback: Some("restore from snapshot".into()),
+                }),
+                kind: crate::control::protocol::ApprovalKind::Plan,
+                ttl_secs: None,
+                fallback: None,
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let sock = dir.path().join("replay.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.8.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Fresh TUI: connect, send Hello, read back.
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.8.0\"}\n")
+            .await
+            .unwrap();
+
+        let (r, mut w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+
+        // First line: server Hello.
+        let _hello = lines.next_line().await.unwrap().unwrap();
+
+        // Second line: replayed ApprovalRequest for the ghost bridge entry.
+        let replay_line = tokio::time::timeout(Duration::from_millis(500), lines.next_line())
+            .await
+            .expect("replay arrives before timeout")
+            .unwrap()
+            .unwrap();
+        let replay: ControlEvent = serde_json::from_str(&replay_line).unwrap();
+        match replay {
+            ControlEvent::ApprovalRequest {
+                request_id,
+                task_id,
+                summary,
+                plan,
+                kind,
+            } => {
+                assert_eq!(request_id, "req-ghost");
+                assert_eq!(task_id, "worker-a");
+                assert_eq!(summary, "drop staging index");
+                assert!(plan.is_some(), "plan must round-trip through replay");
+                assert!(matches!(kind, crate::control::protocol::ApprovalKind::Plan));
+            }
+            other => panic!("expected ApprovalRequest replay, got {other:?}"),
+        }
+
+        // And the responder is still live: a subsequent approve op on the
+        // replayed request_id must deliver to the original oneshot.
+        w.write_all(b"{\"op\":\"approve\",\"request_id\":\"req-ghost\",\"approved\":true}\n")
+            .await
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_millis(500), rx)
+            .await
+            .expect("approve reaches original responder")
+            .unwrap();
+        assert!(resp.approved);
+
         drop(handle);
     }
 
