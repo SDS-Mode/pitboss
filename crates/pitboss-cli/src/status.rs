@@ -60,25 +60,35 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| run_dir.display().to_string());
     writeln!(stdout, "Run: {run_name}")?;
+
+    // Size the TASK_ID column to fit the widest id (with a floor of 30 and
+    // ceiling of 60) instead of a hard-coded 30-pad that silently overflows
+    // into the STATUS column when sub-lead ids are long (#96).
+    const TASK_ID_MIN: usize = 30;
+    const TASK_ID_MAX: usize = 60;
+    let observed_max = records.iter().map(|r| r.task_id.chars().count()).max().unwrap_or(0);
+    let task_id_width = observed_max.clamp(TASK_ID_MIN, TASK_ID_MAX);
+    let sep_width = task_id_width + 1 + 16 + 1 + 10 + 1 + 24 + 1 + 6;
+
     writeln!(
         stdout,
-        "{:<30} {:<16} {:>10} {:<24} {:>6}",
-        "TASK_ID", "STATUS", "DURATION", "STARTED", "EXIT"
+        "{:<task_id_width$} {:<16} {:>10} {:<24} {:>6}",
+        "TASK_ID", "STATUS", "DURATION", "STARTED", "EXIT",
     )?;
-    writeln!(stdout, "{}", "-".repeat(90))?;
+    writeln!(stdout, "{}", "-".repeat(sep_width))?;
 
     for rec in &records {
         let status = status_label(&rec.status);
-        let duration = format_duration(rec.duration_ms);
+        let duration = pitboss_core::fmt::format_duration_ms(rec.duration_ms);
         let started = rec.started_at.format("%Y-%m-%d %H:%M:%S").to_string();
         let exit = rec
             .exit_code
             .map(|c| c.to_string())
             .unwrap_or_else(|| "—".to_string());
+        let task_id = pitboss_core::fmt::truncate_ellipsis(&rec.task_id, task_id_width);
         writeln!(
             stdout,
-            "{:<30} {:<16} {:>10} {:<24} {:>6}",
-            &rec.task_id, status, duration, started, exit
+            "{task_id:<task_id_width$} {status:<16} {duration:>10} {started:<24} {exit:>6}",
         )?;
     }
 
@@ -90,7 +100,7 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
             .iter()
             .filter(|r| !matches!(r.status, TaskStatus::Success))
             .count();
-        writeln!(stdout, "{}", "-".repeat(90))?;
+        writeln!(stdout, "{}", "-".repeat(sep_width))?;
         writeln!(stdout, "Total: {total}  Failed: {failed}")?;
     }
 
@@ -107,14 +117,6 @@ fn status_label(s: &TaskStatus) -> &'static str {
         TaskStatus::ApprovalRejected => "⊘ ApprovalRej",
         TaskStatus::ApprovalTimedOut => "⏱ ApprovalTO",
     }
-}
-
-fn format_duration(ms: i64) -> String {
-    if ms <= 0 {
-        return "—".to_string();
-    }
-    let secs = ms / 1000;
-    format!("{}m{:02}s", secs / 60, secs % 60)
 }
 
 fn default_runs_dir() -> PathBuf {
