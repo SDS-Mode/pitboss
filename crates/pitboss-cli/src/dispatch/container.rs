@@ -136,10 +136,14 @@ fn build_run_args(
     }
 
     // ── Manifest ─────────────────────────────────────────────────────────────
+    // Strip the [container] section before mounting: the inner `pitboss dispatch`
+    // doesn't use it, and images built before this feature was added reject it
+    // as an unknown field under deny_unknown_fields.
+    let manifest_host = strip_container_section(manifest_abs)?;
     args.push("-v".into());
     args.push(format!(
         "{}:/run/pitboss.toml:ro,z",
-        manifest_abs.display()
+        manifest_host.display()
     ));
 
     // ── Working directory ─────────────────────────────────────────────────────
@@ -271,10 +275,48 @@ fn default_run_dir() -> PathBuf {
         .join(".local/share/pitboss/runs")
 }
 
+/// Read `manifest_abs`, remove the `[container]` key, and write the result to
+/// a temp file. Returns the temp file path, which is mounted read-only into the
+/// container in place of the original manifest.
+///
+/// Stripping is necessary because older container images (built before
+/// `container-dispatch` was introduced) reject `[container]` as an unknown
+/// field when parsing with `deny_unknown_fields`. The inner `pitboss dispatch`
+/// has no use for the section anyway — it is host-side metadata only.
+///
+/// The temp file is written to /tmp with the host PID in the name. Because
+/// this process is replaced by exec() there is no Drop-based cleanup; the
+/// file persists until /tmp is next cleared (acceptable for a small TOML file).
+fn strip_container_section(manifest_abs: &Path) -> Result<PathBuf> {
+    let text = std::fs::read_to_string(manifest_abs)
+        .with_context(|| format!("reading manifest {}", manifest_abs.display()))?;
+
+    let mut val: toml::Value = toml::from_str(&text)
+        .with_context(|| "parsing manifest to strip [container] section")?;
+
+    if let toml::Value::Table(ref mut table) = val {
+        table.remove("container");
+    }
+
+    let stripped = toml::to_string_pretty(&val)
+        .with_context(|| "re-serialising stripped manifest")?;
+
+    let tmp = std::env::temp_dir()
+        .join(format!("pitboss-manifest-{}.toml", std::process::id()));
+
+    std::fs::write(&tmp, stripped)
+        .with_context(|| format!("writing stripped manifest to {}", tmp.display()))?;
+
+    Ok(tmp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::schema::{ContainerConfig, MountSpec};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     fn make_config(mounts: Vec<MountSpec>) -> ContainerConfig {
         ContainerConfig {
@@ -286,10 +328,30 @@ mod tests {
         }
     }
 
+    /// Write a minimal valid TOML manifest to a temp file and return the path.
+    /// `build_run_args` now reads the manifest (to strip [container]), so tests
+    /// that previously passed a nonexistent path need a real file.
+    fn temp_manifest() -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("pitboss-test-manifest-{}-{n}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[[task]]
+id = "t"
+directory = "/tmp"
+prompt = "hi"
+"#,
+        )
+        .expect("write test manifest");
+        path
+    }
+
     #[test]
     fn dry_run_includes_pitboss_dispatch() {
         let cfg = make_config(vec![]);
-        let manifest = PathBuf::from("/tmp/test.toml");
+        let manifest = temp_manifest();
         // Build args without calling exec.
         let args = build_run_args("podman", &cfg, &manifest, None).unwrap();
         let joined = args.join(" ");
@@ -304,7 +366,7 @@ mod tests {
     #[test]
     fn default_image_used_when_none_specified() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains(DEFAULT_IMAGE),
@@ -318,7 +380,7 @@ mod tests {
             image: Some("my-org/pitboss:latest".into()),
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("my-org/pitboss:latest"),
@@ -340,7 +402,7 @@ mod tests {
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/home/alice/project:/project:rw,z"),
@@ -358,7 +420,7 @@ mod tests {
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("/ref:/ref:ro,z"), "readonly flag: {joined}");
     }
@@ -366,7 +428,7 @@ mod tests {
     #[test]
     fn auto_inject_claude_when_not_in_mounts() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/home/pitboss/.claude"),
@@ -384,7 +446,7 @@ mod tests {
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         // Count -v args that mount to /home/pitboss/.claude — should be exactly 1
         // (the declared mount). The -w workdir may also reference the path but is
         // not a duplicate mount injection.
@@ -405,7 +467,7 @@ mod tests {
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         // -w should be followed by /project
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(args[w_pos + 1], "/project", "workdir: {args:?}");
@@ -414,7 +476,7 @@ mod tests {
     #[test]
     fn workdir_falls_back_to_home_pitboss_when_no_mounts() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(args[w_pos + 1], "/home/pitboss", "fallback workdir: {args:?}");
     }
@@ -430,7 +492,7 @@ mod tests {
             workdir: Some(PathBuf::from("/project/sub")),
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(args[w_pos + 1], "/project/sub", "explicit workdir: {args:?}");
     }
@@ -441,7 +503,7 @@ mod tests {
             extra_args: vec!["--network=host".into(), "--cap-drop=ALL".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
         let net_pos = args
             .iter()
             .position(|a| a == "--network=host")
@@ -476,7 +538,7 @@ mod tests {
         let custom = PathBuf::from("/tmp/my-runs");
         let cfg = make_config(vec![]);
         let args =
-            build_run_args("docker", &cfg, Path::new("/tmp/m.toml"), Some(custom.clone()))
+            build_run_args("docker", &cfg, &temp_manifest(), Some(custom.clone()))
                 .unwrap();
         let joined = args.join(" ");
         assert!(
