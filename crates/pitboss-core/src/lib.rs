@@ -5,6 +5,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 pub mod error;
+pub mod fmt;
 pub mod parser;
 pub mod prices;
 pub mod process;

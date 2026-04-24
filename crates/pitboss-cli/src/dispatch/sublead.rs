@@ -881,13 +881,22 @@ async fn spawn_sublead_session(
             let subleads_jsonl = sub_layer_bg.run_subdir.join("subleads.jsonl");
             if let Ok(mut line) = serde_json::to_string(&entry) {
                 line.push('\n');
-                // Best-effort: failure to persist is not fatal.
-                if let Err(e) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&subleads_jsonl)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()))
-                {
+                // Best-effort: failure to persist is not fatal. Use tokio::fs
+                // instead of std::fs here because this closure runs on the
+                // tokio runtime; a sync open+write would block a runtime
+                // worker thread (#98).
+                let res: std::io::Result<()> = async {
+                    use tokio::io::AsyncWriteExt;
+                    let mut f = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&subleads_jsonl)
+                        .await?;
+                    f.write_all(line.as_bytes()).await?;
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = res {
                     tracing::warn!(
                         sublead_id = %sublead_id_bg,
                         error = %e,

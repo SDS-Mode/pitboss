@@ -332,15 +332,14 @@ pub fn build_report(
 // ---------------------------------------------------------------------------
 
 fn fmt_ms(ms: i64) -> String {
-    #[allow(clippy::cast_sign_loss)]
-    let secs = (ms.max(0) / 1_000) as u64;
-    let m = secs / 60;
-    let s = secs % 60;
-    if m > 0 {
-        format!("{m}m{s:02}s")
-    } else {
-        format!("{s}s")
+    // Diff display treats a zero duration as "0s", not "—", because a run
+    // pair that both completed in <1ms is still meaningful data. Clamp
+    // negatives to 0 and bump through the shared formatter; its "—" case
+    // won't fire because we hand it a non-negative number.
+    if ms <= 0 {
+        return "0s".to_string();
     }
+    pitboss_core::fmt::format_duration_ms(ms)
 }
 
 fn fmt_delta_ms(delta: i64) -> String {

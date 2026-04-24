@@ -75,17 +75,15 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// Format milliseconds as `"8m24s"` (or `"0s"` for zero).
+/// Format milliseconds as `"8m24s"` / `"2h07m03s"` (or `"0s"` for zero).
+/// Thin wrapper around `pitboss_core::fmt::format_duration_ms` that swaps the
+/// "not started" em-dash for `"0s"` — the TUI title bar and tile detail pane
+/// want a concrete zero, not an unknown-marker.
 fn fmt_ms(ms: i64) -> String {
-    #[allow(clippy::cast_sign_loss)]
-    let secs = (ms.max(0) / 1_000) as u64;
-    let m = secs / 60;
-    let s = secs % 60;
-    if m > 0 {
-        format!("{m}m{s:02}s")
-    } else {
-        format!("{s}s")
+    if ms <= 0 {
+        return "0s".to_string();
     }
+    pitboss_core::fmt::format_duration_ms(ms)
 }
 
 // Number of tile columns in the grid.
@@ -317,11 +315,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &AppState) {
         // Show wall-clock elapsed time if we know when the run started.
         if let Some(started) = state.run_started_at {
             let elapsed = chrono::Utc::now() - started;
-            #[allow(clippy::cast_sign_loss)]
-            let secs = elapsed.num_seconds().max(0) as u64;
-            let m = secs / 60;
-            let s = secs % 60;
-            format!(" — live {m}m{s:02}s")
+            format!(" — live {}", fmt_ms(elapsed.num_milliseconds()))
         } else {
             " — in progress".to_string()
         }

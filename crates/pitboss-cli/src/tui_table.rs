@@ -124,12 +124,7 @@ impl ProgressTable {
             Status::Done(TaskStatus::ApprovalRejected) => "⊘ ApprovalRej".to_string(),
             Status::Done(TaskStatus::ApprovalTimedOut) => "⏱ ApprovalTO".to_string(),
         };
-        let time = if r.duration_ms == 0 {
-            "—".to_string()
-        } else {
-            let secs = r.duration_ms / 1000;
-            format!("{}m{:02}s", secs / 60, secs % 60)
-        };
+        let time = pitboss_core::fmt::format_duration_ms(r.duration_ms);
         let tokens = if r.tokens_in == 0 && r.tokens_out == 0 {
             "—".to_string()
         } else {
