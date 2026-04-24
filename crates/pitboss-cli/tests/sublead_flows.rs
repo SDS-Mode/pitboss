@@ -156,7 +156,7 @@ async fn sublead_kv_writes_isolated_from_root() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -227,7 +227,7 @@ async fn sublead_workers_cannot_read_sibling_peer_slots() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -271,7 +271,7 @@ async fn sublead_workers_cannot_wait_on_sibling_peer_slots() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -304,7 +304,7 @@ async fn sublead_workers_cannot_wait_on_sibling_peer_slots() {
 #[tokio::test]
 async fn spawn_sublead_tool_is_exposed_to_root() {
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -322,7 +322,7 @@ async fn spawn_sublead_creates_isolated_layer() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -378,7 +378,7 @@ async fn root_cancel_cascades_to_sublead_workers() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -440,7 +440,7 @@ async fn sublead_cannot_call_spawn_sublead() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -529,7 +529,7 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -725,7 +725,7 @@ async fn policy_auto_approves_sublead_actor() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -918,7 +918,7 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1053,7 +1053,7 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
     // Build state with max_sublead_budget_usd = 3.0 baked into the manifest.
     let (_dir, state) = mk_state_with_sublead_budget_cap(3.0);
 
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1211,7 +1211,7 @@ async fn wait_actor_still_handles_worker_back_compat() {
     // Register a worker in Pending state.
     let worker_id = "worker-bc-test".to_string();
     {
-        let mut w = state.workers.write().await;
+        let mut w = state.root.workers.write().await;
         w.insert(worker_id.clone(), WorkerState::Pending);
     }
 
@@ -1241,9 +1241,9 @@ async fn wait_actor_still_handles_worker_back_compat() {
             model: None,
             failure_reason: None,
         };
-        let mut w = state_clone.workers.write().await;
+        let mut w = state_clone.root.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
-        let _ = state_clone.done_tx.send(worker_id_clone);
+        let _ = state_clone.root.done_tx.send(worker_id_clone);
     });
 
     // wait_actor should return the Worker variant for a regular worker.
@@ -1270,7 +1270,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1342,7 +1342,7 @@ async fn worker_cannot_spawn_worker() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1421,7 +1421,7 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1509,7 +1509,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -1695,7 +1695,7 @@ async fn kill_with_reason_delivers_to_root_lead() {
     use serde_json::json;
 
     let (_dir, state) = mk_state_with_subleads();
-    let socket = socket_path_for_run(state.run_id, &state.root.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();

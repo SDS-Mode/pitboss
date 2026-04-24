@@ -360,7 +360,7 @@ pub async fn handle_spawn_worker(
     let target_layer = resolve_target_layer(state, &caller_id, caller_role).await?;
 
     // Guard 1: draining (root cancel gate — always check root even for sublead workers)
-    if state.cancel.is_draining() || state.cancel.is_terminated() {
+    if state.root.cancel.is_draining() || state.root.cancel.is_terminated() {
         bail!("run is draining: no new workers accepted");
     }
 
@@ -391,8 +391,9 @@ pub async fn handle_spawn_worker(
     // `propose_plan` and get operator approval before any worker
     // dispatches. The check happens here rather than earlier so draining
     // runs still short-circuit with their clearer error.
-    if state.manifest.require_plan_approval
+    if state.root.manifest.require_plan_approval
         && !state
+            .root
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire)
     {
@@ -448,10 +449,10 @@ pub async fn handle_spawn_worker(
             drop(reserved_guard);
             if let Some(router) = target_layer.notification_router.clone() {
                 let envelope = crate::notify::NotificationEnvelope::new(
-                    &state.run_id.to_string(),
+                    &state.root.run_id.to_string(),
                     crate::notify::Severity::Error,
                     crate::notify::PitbossEvent::BudgetExceeded {
-                        run_id: state.run_id.to_string(),
+                        run_id: state.root.run_id.to_string(),
                         spent_usd: spent,
                         budget_usd: budget,
                     },
@@ -1045,6 +1046,7 @@ pub async fn spawn_resume_worker(
 ) -> anyhow::Result<()> {
     use chrono::Utc;
     let model = state
+        .root
         .worker_models
         .read()
         .await
@@ -1052,18 +1054,21 @@ pub async fn spawn_resume_worker(
         .cloned()
         .unwrap_or_else(|| "claude-haiku-4-5".to_string());
     let tools: Vec<String> = state
+        .root
         .manifest
         .lead
         .as_ref()
         .map(|l| l.tools.clone())
         .unwrap_or_default();
     let timeout_secs = state
+        .root
         .manifest
         .lead
         .as_ref()
         .map(|l| l.timeout_secs)
         .unwrap_or(3600);
     let cwd = state
+        .root
         .manifest
         .lead
         .as_ref()
@@ -1071,11 +1076,12 @@ pub async fn spawn_resume_worker(
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     let worker_cancel = pitboss_core::session::CancelToken::new();
     state
+        .root
         .worker_cancels
         .write()
         .await
         .insert(task_id.clone(), worker_cancel.clone());
-    state.workers.write().await.insert(
+    state.root.workers.write().await.insert(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
@@ -1084,16 +1090,16 @@ pub async fn spawn_resume_worker(
     );
     let state_bg = Arc::clone(state);
     let task_id_bg = task_id.clone();
-    let lead_id_bg = state.lead_id.clone();
+    let lead_id_bg = state.root.lead_id.clone();
 
     // Generate (or reuse) worker-scoped mcp-config.json for the resumed
     // subprocess. write_worker_mcp_config is idempotent so calling it again
     // on an existing file is safe.
-    let worker_task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let worker_task_dir = state.root.run_subdir.join("tasks").join(&task_id);
     tokio::fs::create_dir_all(&worker_task_dir).await.ok();
     let worker_mcp_config_path = worker_task_dir.join("mcp-config.json");
     let socket_path =
-        crate::mcp::server::socket_path_for_run(state.run_id, &state.manifest.run_dir);
+        crate::mcp::server::socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
         &worker_mcp_config_path,
         &socket_path,
@@ -1119,6 +1125,7 @@ pub async fn spawn_resume_worker(
     // resolved env so `[defaults.env]` and `[lead.env]` survive a
     // pause/continue or reprompt cycle.
     let lead_env_for_resume = state
+        .root
         .manifest
         .lead
         .as_ref()
@@ -1129,12 +1136,12 @@ pub async fn spawn_resume_worker(
         &std::collections::HashMap::new(),
     );
     let cmd = pitboss_core::process::SpawnCmd {
-        program: state.claude_binary.clone(),
+        program: state.root.claude_binary.clone(),
         args: spawn_args_v,
         cwd,
         env: resume_env,
     };
-    let task_dir = state.run_subdir.join("tasks").join(&task_id);
+    let task_dir = state.root.run_subdir.join("tasks").join(&task_id);
     let _ = tokio::fs::create_dir_all(&task_dir).await;
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
@@ -1143,6 +1150,7 @@ pub async fn spawn_resume_worker(
     // freeze-pause works across continue_worker boundaries.
     let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     state
+        .root
         .worker_pids
         .write()
         .await
@@ -1152,7 +1160,7 @@ pub async fn spawn_resume_worker(
         use pitboss_core::store::{TaskRecord, TaskStatus};
         let outcome = pitboss_core::session::SessionHandle::new(
             task_id_bg.clone(),
-            Arc::clone(&state_bg.spawner),
+            Arc::clone(&state_bg.root.spawner),
             cmd,
         )
         .with_log_path(log_path.clone())
@@ -1161,7 +1169,7 @@ pub async fn spawn_resume_worker(
         .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
         .await;
         // Clean up the pid slot when the resumed subprocess exits.
-        state_bg.worker_pids.write().await.remove(&task_id_bg);
+        state_bg.root.worker_pids.write().await.remove(&task_id_bg);
         let mut status = match outcome.final_state {
             pitboss_core::session::SessionState::Completed => TaskStatus::Success,
             pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
@@ -1180,6 +1188,7 @@ pub async fn spawn_resume_worker(
             }
         }
         let counters = state_bg
+            .root
             .worker_counters
             .read()
             .await
@@ -1211,7 +1220,11 @@ pub async fn spawn_resume_worker(
                 Some(&stderr_path),
             ),
         };
-        let _ = state_bg.store.append_record(state_bg.run_id, &rec).await;
+        let _ = state_bg
+            .root
+            .store
+            .append_record(state_bg.root.run_id, &rec)
+            .await;
         if let Some(reason) = rec.failure_reason.clone() {
             state_bg.api_health.record(&reason).await;
             crate::dispatch::failure_detection::broadcast_worker_failed(
@@ -1224,11 +1237,12 @@ pub async fn spawn_resume_worker(
             .await;
         }
         state_bg
+            .root
             .workers
             .write()
             .await
             .insert(task_id_bg.clone(), WorkerState::Done(rec));
-        let _ = state_bg.done_tx.send(task_id_bg);
+        let _ = state_bg.root.done_tx.send(task_id_bg);
     });
 
     Ok(())
@@ -1252,7 +1266,7 @@ pub(crate) fn initial_estimate_for(model: &str) -> f64 {
 
 pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummary> {
     // Collect from every layer (root + each active sub-lead). Previously
-    // this read only `state.workers` (= root via Deref), so sub-leads
+    // this read only `state.root.workers` (= root via Deref), so sub-leads
     // calling `list_workers` got an empty list even when they had their
     // own workers active — the workers were registered in the sub-lead
     // layer's own `workers` map by `handle_spawn_worker`'s
@@ -1261,7 +1275,7 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
     // Lead id filtering: excludes the root lead id. Sub-lead ids aren't
     // registered as workers so they don't need filtering here.
     let mut summaries: Vec<WorkerSummary> = Vec::new();
-    let prompts = state.worker_prompts.read().await;
+    let prompts = state.root.worker_prompts.read().await;
     let render = |id: &String, w: &WorkerState| -> WorkerSummary {
         let (state_str, started_at) = match w {
             WorkerState::Pending => ("Pending".to_string(), None),
@@ -1295,8 +1309,8 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
             started_at,
         }
     };
-    for (id, w) in state.workers.read().await.iter() {
-        if id != &state.lead_id {
+    for (id, w) in state.root.workers.read().await.iter() {
+        if id != &state.root.lead_id {
             summaries.push(render(id, w));
         }
     }
@@ -1373,6 +1387,7 @@ pub async fn handle_worker_status(
         ),
     };
     let prompt_preview = state
+        .root
         .worker_prompts
         .read()
         .await
@@ -1392,7 +1407,7 @@ pub async fn handle_cancel_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Result<CancelResult> {
-    let cancels = state.worker_cancels.read().await;
+    let cancels = state.root.worker_cancels.read().await;
     let Some(token) = cancels.get(task_id) else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
@@ -1405,7 +1420,7 @@ pub async fn handle_pause_worker(
     task_id: &str,
     mode: PauseMode,
 ) -> Result<CancelResult> {
-    let mut workers = state.workers.write().await;
+    let mut workers = state.root.workers.write().await;
     let Some(entry) = workers.get(task_id).cloned() else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
@@ -1415,7 +1430,7 @@ pub async fn handle_pause_worker(
             session_id: Some(sid),
         } => match mode {
             PauseMode::Cancel => {
-                let cancels = state.worker_cancels.read().await;
+                let cancels = state.root.worker_cancels.read().await;
                 if let Some(tok) = cancels.get(task_id) {
                     tok.terminate();
                 }
@@ -1433,6 +1448,7 @@ pub async fn handle_pause_worker(
                 // Read the pid slot. If 0 (subprocess hasn't spawned
                 // yet), fail — freeze is meaningless without a pid.
                 let pid = state
+                    .root
                     .worker_pids
                     .read()
                     .await
@@ -1467,7 +1483,7 @@ pub async fn handle_continue_worker(
     state: &Arc<DispatchState>,
     args: ContinueWorkerArgs,
 ) -> Result<CancelResult> {
-    let current = state.workers.read().await.get(&args.task_id).cloned();
+    let current = state.root.workers.read().await.get(&args.task_id).cloned();
     match current {
         Some(WorkerState::Paused { session_id, .. }) => {
             let prompt = args.prompt.unwrap_or_else(|| "continue".into());
@@ -1485,6 +1501,7 @@ pub async fn handle_continue_worker(
             // a resume-only concept); clients that want to inject a
             // new prompt should thaw + reprompt as two steps.
             let pid = state
+                .root
                 .worker_pids
                 .read()
                 .await
@@ -1500,7 +1517,7 @@ pub async fn handle_continue_worker(
             crate::dispatch::signals::resume_stopped(pid)?;
             // Transition back to Running, preserving the ORIGINAL
             // started_at so wall-clock duration stays accurate.
-            state.workers.write().await.insert(
+            state.root.workers.write().await.insert(
                 args.task_id.clone(),
                 WorkerState::Running {
                     started_at,
@@ -1518,13 +1535,13 @@ pub async fn handle_reprompt_worker(
     state: &Arc<DispatchState>,
     args: RepromptWorkerArgs,
 ) -> Result<CancelResult> {
-    let current = state.workers.read().await.get(&args.task_id).cloned();
+    let current = state.root.workers.read().await.get(&args.task_id).cloned();
     let session_id = match current {
         Some(WorkerState::Running {
             session_id: Some(sid),
             ..
         }) => {
-            let cancels = state.worker_cancels.read().await;
+            let cancels = state.root.worker_cancels.read().await;
             if let Some(tok) = cancels.get(&args.task_id) {
                 tok.terminate();
             }
@@ -1548,7 +1565,7 @@ pub async fn handle_reprompt_worker(
     // Unconditionally record the reprompt attempt — audit trail even if
     // the subsequent spawn fails.
     let _ = crate::dispatch::events::append_event(
-        &state.run_subdir,
+        &state.root.run_subdir,
         &args.task_id,
         &crate::dispatch::events::TaskEvent::Reprompt {
             at: chrono::Utc::now(),
@@ -1563,6 +1580,7 @@ pub async fn handle_reprompt_worker(
     // Counter bump is conditional on spawn success so a failed spawn
     // doesn't falsely inflate the reprompt count.
     state
+        .root
         .worker_counters
         .write()
         .await
@@ -1662,7 +1680,7 @@ pub async fn handle_request_approval(
         created_at: chrono::Utc::now(),
         ttl_secs: args
             .timeout_secs
-            .or(state.manifest.lead_timeout_secs)
+            .or(state.root.manifest.lead_timeout_secs)
             .unwrap_or(3600),
         fallback: ApprovalFallback::AutoReject,
     };
@@ -1711,7 +1729,7 @@ pub async fn handle_request_approval(
 
     let timeout = Duration::from_secs(
         args.timeout_secs
-            .or(state.manifest.lead_timeout_secs)
+            .or(state.root.manifest.lead_timeout_secs)
             .unwrap_or(3600),
     );
     let caller_id_for_record = caller_id.clone();
@@ -1743,7 +1761,7 @@ pub async fn handle_request_approval(
 
 /// Handle `propose_plan`: the lead submits a full execution plan for
 /// pre-flight operator approval, distinct from `request_approval`'s
-/// in-flight per-action gating. Flips `state.plan_approved` to true on
+/// in-flight per-action gating. Flips `state.root.plan_approved` to true on
 /// approval; leaves it false on rejection (lead can revise and retry).
 ///
 /// Returns the same `ApprovalToolResponse` shape as `request_approval`
@@ -1775,7 +1793,7 @@ pub async fn handle_propose_plan(
         created_at: chrono::Utc::now(),
         ttl_secs: args
             .timeout_secs
-            .or(state.manifest.lead_timeout_secs)
+            .or(state.root.manifest.lead_timeout_secs)
             .unwrap_or(3600),
         fallback: ApprovalFallback::AutoReject,
     };
@@ -1791,6 +1809,7 @@ pub async fn handle_propose_plan(
                         "plan auto-approved by policy"
                     );
                     state
+                        .root
                         .plan_approved
                         .store(true, std::sync::atomic::Ordering::Release);
                     state
@@ -1827,7 +1846,7 @@ pub async fn handle_propose_plan(
 
     let timeout = Duration::from_secs(
         args.timeout_secs
-            .or(state.manifest.lead_timeout_secs)
+            .or(state.root.manifest.lead_timeout_secs)
             .unwrap_or(3600),
     );
     // Reuse the summary from the plan as the modal headline — a plan
@@ -1849,6 +1868,7 @@ pub async fn handle_propose_plan(
         Ok(resp) => {
             if resp.approved {
                 state
+                    .root
                     .plan_approved
                     .store(true, std::sync::atomic::Ordering::Release);
             }
@@ -1871,7 +1891,7 @@ pub async fn handle_propose_plan(
 ///
 /// Workers spawned by a sub-lead are registered in that sub-lead's
 /// `LayerState.workers`, not in root's. Before this helper existed the
-/// v0.6 MCP handlers all read `state.workers` (= root via Deref), so a
+/// v0.6 MCP handlers all read `state.root.workers` (= root via Deref), so a
 /// sub-lead's own worker looked "unknown" to every downstream tool
 /// (`wait_for_worker`, `wait_actor`, `worker_status`, `list_workers`).
 /// Surfaced via the depth-2 smoke test: sub-lead calls `spawn_worker`,
@@ -1881,7 +1901,7 @@ async fn find_worker_across_layers(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Option<WorkerState> {
-    if let Some(w) = state.workers.read().await.get(task_id).cloned() {
+    if let Some(w) = state.root.workers.read().await.get(task_id).cloned() {
         return Some(w);
     }
     let subleads = state.subleads.read().await;
@@ -1912,7 +1932,7 @@ async fn wait_for_actor_internal(
     //    broadcast is missed and the wait blocks until either the
     //    timeout fires or the sublead itself is killed by lead_timeout.
     //    Subscribing first guarantees no completion is lost.
-    let mut rx = state.done_tx.subscribe();
+    let mut rx = state.root.done_tx.subscribe();
 
     // ── Fast path: already Done ────────────────────────────────────────────────
     // 1. Worker already Done? (scan all layers — the worker may be in a
@@ -2021,12 +2041,12 @@ pub async fn handle_wait_for_any(
     // wait_for_actor_internal (commit 70e2bd8). Without this, a worker
     // that terminated between our existence check and our subscribe is
     // lost and we block until timeout.
-    let mut rx = state.done_tx.subscribe();
+    let mut rx = state.root.done_tx.subscribe();
     let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
 
     // Fast path: any already Done? Scan ALL layers — sub-lead-spawned
     // workers are registered in the sub-lead layer's workers map, not
-    // root's. Pre-fix, this only checked `state.workers.read()` (= root
+    // root's. Pre-fix, this only checked `state.root.workers.read()` (= root
     // via Deref) and so stayed blocked indefinitely on sub-lead-owned
     // workers. Same bug class as commit d134289 (which fixed wait_actor
     // + list_workers + worker_status) but this handler had its own
@@ -2214,7 +2234,7 @@ mod tests {
     async fn list_workers_shows_pending_and_running() {
         let state = test_state().await;
         {
-            let mut w = state.workers.write().await;
+            let mut w = state.root.workers.write().await;
             w.insert("w-1".into(), WorkerState::Pending);
             w.insert(
                 "w-2".into(),
@@ -2251,7 +2271,7 @@ mod tests {
         // The background task may have already transitioned the worker to
         // Running or Done by the time we read, so we just assert the key
         // exists and is in a valid state (Pending / Running / Done).
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         assert_eq!(workers.len(), 1);
         let entry = workers.get(&result.task_id).unwrap();
         assert!(matches!(
@@ -2260,7 +2280,7 @@ mod tests {
         ));
 
         // Verify prompt_preview was recorded.
-        let prompts = state.worker_prompts.read().await;
+        let prompts = state.root.worker_prompts.read().await;
         assert_eq!(
             prompts.get(&result.task_id).unwrap(),
             "investigate issue #1"
@@ -2300,7 +2320,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_worker_refuses_when_budget_exceeded() {
         let state = test_state().await; // budget_usd = 5.0
-        *state.spent_usd.lock().await = 5.0; // at cap
+        *state.root.spent_usd.lock().await = 5.0; // at cap
         let args = SpawnWorkerArgs {
             prompt: "p".into(),
             directory: None,
@@ -2367,7 +2387,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_worker_refuses_when_draining() {
         let state = test_state().await;
-        state.cancel.drain();
+        state.root.cancel.drain();
         let args = SpawnWorkerArgs {
             prompt: "p".into(),
             directory: None,
@@ -2432,7 +2452,7 @@ mod tests {
         assert!(result.ok);
 
         // Note: in real wiring, CancelToken signals the SessionHandle to terminate
-        // and the subsequent Done(...) entry in state.workers carries status=Cancelled.
+        // and the subsequent Done(...) entry in state.root.workers carries status=Cancelled.
         // For v0.3 Task 14 (unit-level), we just verify the cancel call succeeded
         // and didn't panic. Full flow is tested in integration tests (Phase 6).
     }
@@ -2445,7 +2465,7 @@ mod tests {
         let state = test_state().await;
         let task_id = "worker-test-1".to_string();
         {
-            let mut w = state.workers.write().await;
+            let mut w = state.root.workers.write().await;
             w.insert(task_id.clone(), WorkerState::Pending);
         }
 
@@ -2475,9 +2495,9 @@ mod tests {
                 model: None,
                 failure_reason: None,
             };
-            let mut w = state_clone.workers.write().await;
+            let mut w = state_clone.root.workers.write().await;
             w.insert(task_id_clone.clone(), WorkerState::Done(rec));
-            let _ = state_clone.done_tx.send(task_id_clone);
+            let _ = state_clone.root.done_tx.send(task_id_clone);
         });
 
         let outcome = handle_wait_for_worker(&state, &task_id, Some(5))
@@ -2491,7 +2511,7 @@ mod tests {
         let state = test_state().await;
         let task_id = "worker-stuck".to_string();
         {
-            let mut w = state.workers.write().await;
+            let mut w = state.root.workers.write().await;
             w.insert(task_id.clone(), WorkerState::Pending);
         }
         let err = handle_wait_for_worker(&state, &task_id, Some(0))
@@ -2517,7 +2537,7 @@ mod tests {
         let state = test_state().await;
         let ids = vec!["w-a".to_string(), "w-b".to_string(), "w-c".to_string()];
         {
-            let mut w = state.workers.write().await;
+            let mut w = state.root.workers.write().await;
             for id in &ids {
                 w.insert(id.clone(), WorkerState::Pending);
             }
@@ -2548,9 +2568,9 @@ mod tests {
                 model: None,
                 failure_reason: None,
             };
-            let mut w = state_clone.workers.write().await;
+            let mut w = state_clone.root.workers.write().await;
             w.insert("w-b".into(), WorkerState::Done(rec));
-            let _ = state_clone.done_tx.send("w-b".into());
+            let _ = state_clone.root.done_tx.send("w-b".into());
         });
 
         let (winner_id, _rec) = handle_wait_for_any(&state, &ids, Some(5)).await.unwrap();
@@ -2659,7 +2679,7 @@ mod tests {
         };
 
         // Subscribe to done events BEFORE spawning.
-        let mut rx = state.done_tx.subscribe();
+        let mut rx = state.root.done_tx.subscribe();
         let spawn = handle_spawn_worker(&state, args).await.unwrap();
 
         // Wait for the broadcast.
@@ -2670,7 +2690,7 @@ mod tests {
         assert_eq!(id, spawn.task_id, "broadcast id matches spawn id");
 
         // Verify Done state + Success + parent_task_id.
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         let entry = workers.get(&spawn.task_id).expect("worker recorded");
         match entry {
             WorkerState::Done(rec) => {
@@ -2689,7 +2709,7 @@ mod tests {
 
         // Verify cost accumulation. claude-haiku-4-5: input $0.80/1M, output $4.00/1M.
         // 1000 input = $0.0008; 2000 output = $0.008; total = $0.0088.
-        let spent = *state.spent_usd.lock().await;
+        let spent = *state.root.spent_usd.lock().await;
         assert!(
             (spent - 0.0088).abs() < 1e-6,
             "expected spent_usd ≈ 0.0088, got {spent}"
@@ -2697,6 +2717,7 @@ mod tests {
 
         // Verify prompt_preview is present.
         let preview = state
+            .root
             .worker_prompts
             .read()
             .await
@@ -2742,7 +2763,7 @@ mod tests {
         );
 
         // Sanity: the reservation should now reflect the two passing spawns.
-        let reserved_now = *state.reserved_usd.lock().await;
+        let reserved_now = *state.root.reserved_usd.lock().await;
         assert!(
             (reserved_now - 0.20).abs() < 1e-9,
             "expected reserved ≈ 0.20, got {reserved_now}"
@@ -2758,7 +2779,7 @@ mod tests {
 
         // Subscribe to done events BEFORE spawning — the completion path is
         // fast (FakeScript exits immediately after emitting the result line).
-        let mut rx = state.done_tx.subscribe();
+        let mut rx = state.root.done_tx.subscribe();
 
         let spawn = handle_spawn_worker(
             &state,
@@ -2788,12 +2809,12 @@ mod tests {
             .expect("broadcast channel open");
         assert_eq!(completed_id, spawn.task_id);
 
-        let reserved_after = *state.reserved_usd.lock().await;
+        let reserved_after = *state.root.reserved_usd.lock().await;
         assert!(
             reserved_after.abs() < 1e-9,
             "reservation should be released after completion, got {reserved_after}"
         );
-        let reservations = state.worker_reservations.read().await;
+        let reservations = state.root.worker_reservations.read().await;
         assert!(
             !reservations.contains_key(&spawn.task_id),
             "reservation entry should be removed on completion"
@@ -2818,7 +2839,7 @@ mod tests {
         use std::time::Duration;
 
         let state = completing_test_state().await;
-        let mut rx = state.done_tx.subscribe();
+        let mut rx = state.root.done_tx.subscribe();
         let args = SpawnWorkerArgs {
             prompt: "analyze".into(),
             directory: None,
@@ -2836,7 +2857,7 @@ mod tests {
 
         // Post-completion, the worker is in Done state. The session_id is
         // preserved on TaskRecord via SessionOutcome. Assert it.
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         match workers.get(&spawn.task_id).unwrap() {
             WorkerState::Done(rec) => {
                 assert_eq!(rec.claude_session_id.as_deref(), Some("sess_ok"));
@@ -2909,11 +2930,12 @@ mod tests {
         let state = test_state().await;
         let worker_token = pitboss_core::session::CancelToken::new();
         state
+            .root
             .worker_cancels
             .write()
             .await
             .insert("w-1".into(), worker_token.clone());
-        state.workers.write().await.insert(
+        state.root.workers.write().await.insert(
             "w-1".into(),
             WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2925,7 +2947,7 @@ mod tests {
             .unwrap();
         assert!(res.ok);
         assert!(worker_token.is_terminated());
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         assert!(matches!(
             workers.get("w-1").unwrap(),
             WorkerState::Paused { .. }
@@ -2950,16 +2972,18 @@ mod tests {
         // Register the pid + Running state.
         let slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(pid));
         state
+            .root
             .worker_pids
             .write()
             .await
             .insert("w-freeze".into(), slot);
         state
+            .root
             .worker_cancels
             .write()
             .await
             .insert("w-freeze".into(), pitboss_core::session::CancelToken::new());
-        state.workers.write().await.insert(
+        state.root.workers.write().await.insert(
             "w-freeze".into(),
             WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2973,7 +2997,7 @@ mod tests {
             .unwrap();
         assert!(res.ok);
         assert!(matches!(
-            state.workers.read().await.get("w-freeze").unwrap(),
+            state.root.workers.read().await.get("w-freeze").unwrap(),
             WorkerState::Frozen { .. }
         ));
 
@@ -3001,7 +3025,7 @@ mod tests {
         .unwrap();
         assert!(cres.ok);
         assert!(matches!(
-            state.workers.read().await.get("w-freeze").unwrap(),
+            state.root.workers.read().await.get("w-freeze").unwrap(),
             WorkerState::Running { .. }
         ));
 
@@ -3014,7 +3038,7 @@ mod tests {
     #[tokio::test]
     async fn handle_continue_worker_resumes_paused() {
         let state = test_state().await;
-        state.workers.write().await.insert(
+        state.root.workers.write().await.insert(
             "w-1".into(),
             WorkerState::Paused {
                 session_id: "sess".into(),
@@ -3023,11 +3047,13 @@ mod tests {
             },
         );
         state
+            .root
             .worker_prompts
             .write()
             .await
             .insert("w-1".into(), "hi".into());
         state
+            .root
             .worker_models
             .write()
             .await
@@ -3042,7 +3068,7 @@ mod tests {
         .await
         .unwrap();
         assert!(res.ok);
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         assert!(matches!(
             workers.get("w-1").unwrap(),
             WorkerState::Running { .. }
@@ -3054,11 +3080,12 @@ mod tests {
         let state = test_state().await;
         let worker_token = pitboss_core::session::CancelToken::new();
         state
+            .root
             .worker_cancels
             .write()
             .await
             .insert("w-1".into(), worker_token.clone());
-        state.workers.write().await.insert(
+        state.root.workers.write().await.insert(
             "w-1".into(),
             WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -3066,11 +3093,13 @@ mod tests {
             },
         );
         state
+            .root
             .worker_prompts
             .write()
             .await
             .insert("w-1".into(), "original".into());
         state
+            .root
             .worker_models
             .write()
             .await
@@ -3089,6 +3118,7 @@ mod tests {
         assert!(res.ok);
         // Counter bumps on success.
         let counters = state
+            .root
             .worker_counters
             .read()
             .await
@@ -3098,6 +3128,7 @@ mod tests {
         assert_eq!(counters.reprompt_count, 1);
         // events.jsonl records the reprompt.
         let events_path = state
+            .root
             .run_subdir
             .join("tasks")
             .join("w-1")
@@ -3108,7 +3139,7 @@ mod tests {
             "events.jsonl missing reprompt: {events}"
         );
         // Worker transitioned back to Running via spawn_resume_worker.
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         assert!(matches!(
             workers.get("w-1").unwrap(),
             WorkerState::Running { .. }
@@ -3141,6 +3172,7 @@ mod tests {
             failure_reason: None,
         };
         state
+            .root
             .workers
             .write()
             .await
@@ -3389,6 +3421,7 @@ mod tests {
     async fn propose_plan_auto_approve_flips_flag() {
         let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, true).await;
         assert!(!state
+            .root
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire));
 
@@ -3410,6 +3443,7 @@ mod tests {
         .unwrap();
         assert!(resp.approved);
         assert!(state
+            .root
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire));
     }
@@ -3433,6 +3467,7 @@ mod tests {
         assert!(!resp.approved);
         assert!(
             !state
+                .root
                 .plan_approved
                 .load(std::sync::atomic::Ordering::Acquire),
             "rejected plan must not flip plan_approved — lead should be able to retry"

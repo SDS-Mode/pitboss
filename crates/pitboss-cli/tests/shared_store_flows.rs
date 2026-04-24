@@ -479,7 +479,7 @@ async fn lease_released_when_mcp_connection_drops() {
         Arc::new(SharedStore::new()),
     ));
 
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
@@ -615,7 +615,7 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
         Arc::new(SharedStore::new()),
     ));
 
-    let socket = socket_path_for_run(state.run_id, &state.manifest.run_dir);
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();

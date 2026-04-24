@@ -210,7 +210,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
     let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
 
     // Start the MCP server so fake-claude's mcp_call can land somewhere.
-    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Write the script. spawn_worker returns {task_id: "worker-..."},
@@ -227,7 +227,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
     tokio::fs::write(&script, script_body).await.unwrap();
 
     // Run fake-claude as the lead. A real TokioSpawner subprocess, not the
-    // FakeSpawner in state.spawner (which backs the workers it spawns).
+    // FakeSpawner in state.root.spawner (which backs the workers it spawns).
     let outcome = run_fake_claude_lead(
         dir.path(),
         &script,
@@ -249,7 +249,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
     ));
 
     // Worker state should be Done with a captured session_id.
-    let workers = state.workers.read().await;
+    let workers = state.root.workers.read().await;
     assert_eq!(
         workers.len(),
         1,
@@ -266,7 +266,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
     }
 
     // Explicit cleanup: cancel the run token so any stray tasks exit.
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 #[tokio::test]
@@ -276,7 +276,7 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
     let dir = TempDir::new().unwrap();
     let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
 
-    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Three spawn_workers then one wait_for_any. Workers complete quickly
@@ -308,7 +308,7 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
 
     // All 3 workers should be registered (at least 1 Done; the rest can be
     // Done or Running depending on timing).
-    let workers = state.workers.read().await;
+    let workers = state.root.workers.read().await;
     assert_eq!(
         workers.len(),
         3,
@@ -325,7 +325,7 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
         "expected at least one Done worker after wait_for_any, got {done_count}"
     );
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 #[tokio::test]
@@ -393,7 +393,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
-    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // spawn_worker (worker hangs), sleep for slot fill, cancel_worker, list.
@@ -424,7 +424,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Worker should now be Cancelled.
-    let workers = state.workers.read().await;
+    let workers = state.root.workers.read().await;
     let (_, w) = workers.iter().next().expect("at least one worker");
     match w {
         pitboss_cli::dispatch::state::WorkerState::Done(rec) => {
@@ -438,7 +438,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         other => panic!("expected Done(Cancelled), got {other:?}"),
     }
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 #[tokio::test]
@@ -449,16 +449,18 @@ async fn e2e_lead_request_approval_round_trip() {
     let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
 
     // Ensure the run subdir exists so events.jsonl writes don't fail.
-    tokio::fs::create_dir_all(&state.run_subdir).await.unwrap();
+    tokio::fs::create_dir_all(&state.root.run_subdir)
+        .await
+        .unwrap();
 
     // Start BOTH the MCP server (for the lead) and the Control server
     // (for FakeControlClient).
-    let mcp_sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let mcp_sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
         .await
         .unwrap();
 
-    let ctrl_sock = pitboss_cli::control::control_socket_path(run_id, &state.manifest.run_dir);
+    let ctrl_sock = pitboss_cli::control::control_socket_path(run_id, &state.root.manifest.run_dir);
     let _ctrl_server = pitboss_cli::control::server::start_control_server(
         ctrl_sock.clone(),
         "0.4.1".into(),
@@ -479,7 +481,7 @@ async fn e2e_lead_request_approval_round_trip() {
         // Poll up to 2s for the approval_queue to fill.
         let poll_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if !state_for_fcc.approval_queue.lock().await.is_empty() {
+            if !state_for_fcc.root.approval_queue.lock().await.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= poll_deadline {
@@ -542,6 +544,7 @@ async fn e2e_lead_request_approval_round_trip() {
 
     // Check events.jsonl for both approval_request and approval_response.
     let events_path = state
+        .root
         .run_subdir
         .join("tasks")
         .join("lead")
@@ -562,6 +565,7 @@ async fn e2e_lead_request_approval_round_trip() {
 
     // Counters should record one request + one approval.
     let counters = state
+        .root
         .worker_counters
         .read()
         .await
@@ -572,7 +576,7 @@ async fn e2e_lead_request_approval_round_trip() {
     assert_eq!(counters.approvals_approved, 1);
     assert_eq!(counters.approvals_rejected, 0);
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 #[tokio::test]
@@ -648,7 +652,7 @@ async fn e2e_lead_reprompts_running_worker() {
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
-    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Spawn a worker, sleep for init+result to land (session_id captured),
@@ -676,7 +680,7 @@ async fn e2e_lead_reprompts_running_worker() {
 
     // Extract the worker's task_id for subsequent assertions.
     let task_id = {
-        let workers = state.workers.read().await;
+        let workers = state.root.workers.read().await;
         workers.keys().next().cloned().expect("at least one worker")
     };
 
@@ -690,6 +694,7 @@ async fn e2e_lead_reprompts_running_worker() {
 
     // Counter bumped.
     let counters = state
+        .root
         .worker_counters
         .read()
         .await
@@ -698,7 +703,7 @@ async fn e2e_lead_reprompts_running_worker() {
         .unwrap_or_default();
     assert_eq!(counters.reprompt_count, 1);
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 #[tokio::test]
@@ -831,11 +836,11 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
-    let mcp_sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let mcp_sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
         .await
         .unwrap();
-    let ctrl_sock = pitboss_cli::control::control_socket_path(run_id, &state.manifest.run_dir);
+    let ctrl_sock = pitboss_cli::control::control_socket_path(run_id, &state.root.manifest.run_dir);
     let _ctrl_server = pitboss_cli::control::server::start_control_server(
         ctrl_sock.clone(),
         "0.4.5".into(),
@@ -852,7 +857,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
     let fcc_task = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
-            if !state_for_fcc.approval_queue.lock().await.is_empty() {
+            if !state_for_fcc.root.approval_queue.lock().await.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -920,9 +925,10 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
 
     // plan_approved latched true, one worker spawned successfully.
     assert!(state
+        .root
         .plan_approved
         .load(std::sync::atomic::Ordering::Acquire));
-    let workers = state.workers.read().await;
+    let workers = state.root.workers.read().await;
     assert_eq!(
         workers.len(),
         1,
@@ -930,7 +936,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         workers.len()
     );
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 /// Full-stack bridge test: fake-claude lead spawns `pitboss mcp-bridge`
@@ -948,7 +954,7 @@ async fn e2e_lead_through_mcp_bridge_injects_meta() {
     let dir = TempDir::new().unwrap();
     let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
 
-    let sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Lead script: init, kv_set on /shared/bridge_probe, result.
@@ -991,6 +997,7 @@ async fn e2e_lead_through_mcp_bridge_injects_meta() {
     // the call (missing required _meta) or write with a different
     // actor_id — both caught here.
     let entry = state
+        .root
         .shared_store
         .get("/shared/bridge_probe")
         .await
@@ -1002,7 +1009,7 @@ async fn e2e_lead_through_mcp_bridge_injects_meta() {
         entry.written_by
     );
 
-    state.cancel.terminate();
+    state.root.cancel.terminate();
 }
 
 /// Test-only ProcessSpawner that rewrites each spawn to run fake-claude
@@ -1125,7 +1132,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
 
-    let mcp_sock = socket_path_for_run(run_id, &state.manifest.run_dir);
+    let mcp_sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(mcp_sock.clone(), state.clone())
         .await
         .unwrap();
@@ -1171,6 +1178,6 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
     // We do wait a tick for the worker background task to settle so
     // the test's Drop teardown doesn't race a live subprocess.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    state.cancel.terminate();
+    state.root.cancel.terminate();
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
