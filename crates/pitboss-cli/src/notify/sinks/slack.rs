@@ -69,7 +69,11 @@ impl SlackSink {
                 duration_ms,
                 spent_usd,
             } => {
-                let icon = if *tasks_failed > 0 { ":warning:" } else { ":white_check_mark:" };
+                let icon = if *tasks_failed > 0 {
+                    ":warning:"
+                } else {
+                    ":white_check_mark:"
+                };
                 let header = format!("{} Pitboss run finished", icon);
                 let duration_sec = duration_ms / 1000;
                 let detail = format!(

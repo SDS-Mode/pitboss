@@ -325,8 +325,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
         };
-        let store: Arc<dyn SessionStore> =
-            Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
         let wt_mgr = Arc::new(WorktreeManager::new());
         let shared = Arc::new(crate::shared_store::SharedStore::new());
@@ -410,8 +409,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
         };
-        let store: Arc<dyn SessionStore> =
-            Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
         let wt_mgr = Arc::new(WorktreeManager::new());
         let shared = Arc::new(crate::shared_store::SharedStore::new());

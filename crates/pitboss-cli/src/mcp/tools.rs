@@ -786,7 +786,13 @@ async fn run_worker(
     );
     let cmd = SpawnCmd {
         program: layer.claude_binary.clone(),
-        args: worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref(), worker_routing),
+        args: worker_spawn_args(
+            &prompt,
+            &model,
+            &tools,
+            mcp_config_arg.as_deref(),
+            worker_routing,
+        ),
         cwd: cwd.clone(),
         env: worker_env,
     };
@@ -1152,8 +1158,13 @@ pub async fn spawn_resume_worker(
         .map(|l| l.permission_routing)
         .unwrap_or_default();
     // Build spawn args with --resume.
-    let mut spawn_args_v =
-        worker_spawn_args(&prompt, &model, &tools, mcp_config_arg.as_deref(), resume_routing);
+    let mut spawn_args_v = worker_spawn_args(
+        &prompt,
+        &model,
+        &tools,
+        mcp_config_arg.as_deref(),
+        resume_routing,
+    );
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
 
@@ -1789,11 +1800,7 @@ pub async fn handle_request_approval(
     {
         Ok(resp) => {
             state
-                .record_last_approval_response(
-                    &caller_id_for_record,
-                    resp.approved,
-                    resp.from_ttl,
-                )
+                .record_last_approval_response(&caller_id_for_record, resp.approved, resp.from_ttl)
                 .await;
             Ok(ApprovalToolResponse {
                 approved: resp.approved,
@@ -2212,11 +2219,7 @@ pub async fn handle_permission_prompt(
         plan: None,
         blocks: vec![caller_id.clone()],
         created_at: chrono::Utc::now(),
-        ttl_secs: state
-            .root
-            .manifest
-            .lead_timeout_secs
-            .unwrap_or(3600),
+        ttl_secs: state.root.manifest.lead_timeout_secs.unwrap_or(3600),
         fallback: crate::mcp::approval::ApprovalFallback::AutoReject,
     };
 

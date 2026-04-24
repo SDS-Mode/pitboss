@@ -820,7 +820,13 @@ mod tests {
             Some("root-sess-001")
         );
         assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions.get("sublead-aaa").map(String::as_str), Some("sub-sess-aaa"));
-        assert_eq!(sessions.get("sublead-bbb").map(String::as_str), Some("sub-sess-bbb"));
+        assert_eq!(
+            sessions.get("sublead-aaa").map(String::as_str),
+            Some("sub-sess-aaa")
+        );
+        assert_eq!(
+            sessions.get("sublead-bbb").map(String::as_str),
+            Some("sub-sess-bbb")
+        );
     }
 }

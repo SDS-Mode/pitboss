@@ -40,7 +40,11 @@ fn main() -> Result<()> {
         } => {
             std::process::exit(attach::run(&run_id, &task_id, raw, lines)?);
         }
-        Command::Status { run_id, run_dir, json } => {
+        Command::Status {
+            run_id,
+            run_dir,
+            json,
+        } => {
             std::process::exit(status::run(&run_id, json, run_dir)?);
         }
         Command::McpBridge {

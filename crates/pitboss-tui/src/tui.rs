@@ -1757,8 +1757,7 @@ fn render_policy_editor(
     frame.render_widget(block, popup);
 
     if rules.is_empty() {
-        let hint = Paragraph::new(" (no rules — press n to add one) ")
-            .style(theme::muted_style());
+        let hint = Paragraph::new(" (no rules — press n to add one) ").style(theme::muted_style());
         frame.render_widget(hint, inner);
         return;
     }

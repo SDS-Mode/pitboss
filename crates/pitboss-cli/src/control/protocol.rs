@@ -396,7 +396,10 @@ mod tests {
             policy_rules: vec![],
         };
         let s = serde_json::to_string(&ev).unwrap();
-        assert!(!s.contains("policy_rules"), "empty rules must be elided: {s}");
+        assert!(
+            !s.contains("policy_rules"),
+            "empty rules must be elided: {s}"
+        );
     }
 
     #[test]
