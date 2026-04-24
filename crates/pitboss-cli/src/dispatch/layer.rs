@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::dispatch::state::{
-    ApprovalPolicy, ApprovalResponse, BridgeEntry, QueuedApproval, WorkerCounters, WorkerState,
+    ApprovalPolicy, BridgeEntry, QueuedApproval, WorkerCounters, WorkerState,
 };
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::policy::PolicyMatcher;
