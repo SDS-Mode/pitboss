@@ -240,6 +240,26 @@ pub struct QueuedApproval {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// An approval request that has been handed to a live TUI via the bridge map.
+///
+/// Carries TTL metadata so `expire_layer_approvals` can expire bridge entries
+/// that the operator never acted on — the same guarantee it provides for
+/// `approval_queue` entries. Without this, an approval that moves from queue
+/// to bridge (when a TUI connects) loses TTL coverage: the queue is empty so
+/// the watcher does nothing, while the bridge has no metadata to check against.
+pub struct BridgeEntry {
+    /// Oneshot sender; deliver the operator's decision here.
+    pub responder: oneshot::Sender<ApprovalResponse>,
+    /// Actor that submitted the approval request (for counter attribution).
+    pub task_id: String,
+    /// Seconds after `created_at` before the fallback fires. `None` = no TTL.
+    pub ttl_secs: Option<u64>,
+    /// What to do when `ttl_secs` elapses. `None` = Block (never auto-resolve).
+    pub fallback: Option<crate::mcp::approval::ApprovalFallback>,
+    /// Wall-clock time the request was created (for age computation).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 // ── DispatchState ────────────────────────────────────────────────────────────
 
 /// Run-level wrapper. Holds the root `LayerState` plus (in Phase 2+) a map

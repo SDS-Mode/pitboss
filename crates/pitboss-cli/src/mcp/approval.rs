@@ -104,6 +104,8 @@ impl ApprovalBridge {
         fallback: Option<ApprovalFallback>,
     ) -> Result<ApprovalResponse, ApprovalError> {
         let request_id = format!("req-{}", Uuid::now_v7());
+        // Clone before task_id is moved into bridge/queue/event structures below.
+        let task_id_for_counter = task_id.clone();
         let _ = crate::dispatch::events::append_event(
             &self.state.root.run_subdir,
             &self.state.root.lead_id,
@@ -139,12 +141,16 @@ impl ApprovalBridge {
         let writer_guard = self.state.root.control_writer.lock().await;
 
         if let Some(w) = writer_guard.as_ref() {
-            self.state
-                .root
-                .approval_bridge
-                .lock()
-                .await
-                .insert(request_id.clone(), tx);
+            self.state.root.approval_bridge.lock().await.insert(
+                request_id.clone(),
+                crate::dispatch::state::BridgeEntry {
+                    responder: tx,
+                    task_id: task_id.clone(),
+                    ttl_secs,
+                    fallback,
+                    created_at: chrono::Utc::now(),
+                },
+            );
             let ev = crate::control::protocol::ControlEvent::ApprovalRequest {
                 request_id: request_id.clone(),
                 task_id,
@@ -219,12 +225,17 @@ impl ApprovalBridge {
             }
         }
 
+        // task_id may have been moved into the ControlEvent or QueuedApproval
+        // above; use the request_id as the lookup key is not right — we need
+        // the caller id. Both branches clone task_id before consuming it, so
+        // we capture a clone here at the top of the function instead.
+        // (The clone is taken at function entry via task_id_for_counter below.)
         self.state
             .root
             .worker_counters
             .write()
             .await
-            .entry(self.state.root.lead_id.clone())
+            .entry(task_id_for_counter.clone())
             .or_default()
             .approvals_requested += 1;
 
@@ -247,10 +258,10 @@ impl ApprovalBridge {
                     .approval_bridge
                     .lock()
                     .await
-                    .remove(&request_id);
-                // Also evict from the TUI-drain queue (Block policy, no TUI connected).
-                // Without this, a TUI that connects after the timeout fires sees a stale
-                // approval modal for a request that has already resolved.
+                    .remove(&request_id); // removes BridgeEntry; responder dropped
+                                          // Also evict from the TUI-drain queue (Block policy, no TUI connected).
+                                          // Without this, a TUI that connects after the timeout fires sees a stale
+                                          // approval modal for a request that has already resolved.
                 self.state
                     .root
                     .approval_queue
@@ -268,7 +279,7 @@ impl ApprovalBridge {
         request_id: &str,
         resp: ApprovalResponse,
     ) -> Result<(), ApprovalError> {
-        let tx = self
+        let bridge_entry = self
             .state
             .root
             .approval_bridge
@@ -288,10 +299,14 @@ impl ApprovalBridge {
         )
         .await;
         let approved = resp.approved;
-        tx.send(resp).map_err(|_| ApprovalError::Cancelled)?;
+        let caller_id = bridge_entry.task_id.clone();
+        bridge_entry
+            .responder
+            .send(resp)
+            .map_err(|_| ApprovalError::Cancelled)?;
         {
             let mut guard = self.state.root.worker_counters.write().await;
-            let entry = guard.entry(self.state.root.lead_id.clone()).or_default();
+            let entry = guard.entry(caller_id).or_default();
             if approved {
                 entry.approvals_approved += 1;
             } else {

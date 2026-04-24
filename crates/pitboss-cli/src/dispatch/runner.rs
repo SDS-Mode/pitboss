@@ -906,10 +906,12 @@ async fn expire_layer_approvals(
     use crate::mcp::approval::ApprovalFallback;
 
     let now = chrono::Utc::now();
-    let mut queue = layer.approval_queue.lock().await;
 
+    // ── Scan approval_queue ───────────────────────────────────────────────────
+    // Entries here have not yet been seen by any TUI.
+    let mut queue = layer.approval_queue.lock().await;
     let mut i = 0;
-    let mut expired = Vec::new();
+    let mut expired_queue = Vec::new();
     while i < queue.len() {
         let expired_now = match queue[i].ttl_secs {
             Some(ttl_secs) => {
@@ -920,14 +922,14 @@ async fn expire_layer_approvals(
             None => false,
         };
         if expired_now {
-            expired.push(queue.remove(i).expect("index in range"));
+            expired_queue.push(queue.remove(i).expect("index in range"));
         } else {
             i += 1;
         }
     }
     drop(queue);
 
-    for entry in expired {
+    for entry in expired_queue {
         let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
         let approved = matches!(fallback, ApprovalFallback::AutoApprove);
         tracing::info!(
@@ -935,7 +937,7 @@ async fn expire_layer_approvals(
             task_id = %entry.task_id,
             fallback = ?fallback,
             approved,
-            "approval TTL expired, applying fallback"
+            "approval queue TTL expired, applying fallback"
         );
         let response = ApprovalResponse {
             approved,
@@ -947,8 +949,56 @@ async fn expire_layer_approvals(
         state
             .record_last_approval_response(&entry.task_id, approved, true)
             .await;
-        // Best-effort: responder may have been dropped if the caller gave up.
         let _ = entry.responder.send(response);
+    }
+
+    // ── Scan approval_bridge ──────────────────────────────────────────────────
+    // Entries here were drained to a TUI that may have disconnected before
+    // responding. Without this scan they would silently miss their TTL.
+    let expired_bridge_ids: Vec<String> = {
+        let bridge = layer.approval_bridge.lock().await;
+        bridge
+            .iter()
+            .filter_map(|(id, entry)| {
+                let ttl = entry.ttl_secs?;
+                let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+                if matches!(fallback, ApprovalFallback::Block) {
+                    return None;
+                }
+                let age = (now - entry.created_at).num_seconds() as u64;
+                if age > ttl {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    for request_id in expired_bridge_ids {
+        let entry = layer.approval_bridge.lock().await.remove(&request_id);
+        if let Some(entry) = entry {
+            let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+            let approved = matches!(fallback, ApprovalFallback::AutoApprove);
+            tracing::info!(
+                request_id = %request_id,
+                task_id = %entry.task_id,
+                fallback = ?fallback,
+                approved,
+                "approval bridge TTL expired, applying fallback"
+            );
+            let response = ApprovalResponse {
+                approved,
+                comment: Some("TTL expired".to_string()),
+                edited_summary: None,
+                reason: Some(format!("TTL expired: fallback={fallback:?}")),
+                from_ttl: true,
+            };
+            state
+                .record_last_approval_response(&entry.task_id, approved, true)
+                .await;
+            let _ = entry.responder.send(response);
+        }
     }
 }
 

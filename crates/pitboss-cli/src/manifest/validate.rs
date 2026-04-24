@@ -63,6 +63,23 @@ fn validate_mode(r: &ResolvedManifest) -> Result<()> {
 
 fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     let lead = r.lead.as_ref().unwrap();
+
+    // Path B permission routing is not yet stable. The required
+    // --permission-prompt-tool CLI flag, correct wire protocol, and env-bypass
+    // guard are being implemented in a follow-on branch. Reject it at validate
+    // time so operators get a clear error rather than a silent stall.
+    if matches!(
+        lead.permission_routing,
+        crate::manifest::schema::PermissionRouting::PathB
+    ) {
+        bail!(
+            "`permission_routing = \"path_b\"` is not yet stable and will silently \
+             stall on any permission-gated tool use. Use the default \
+             `\"path_a\"` until the follow-on implementation lands. \
+             Track progress at: https://github.com/SDS-Mode/pitboss/issues"
+        );
+    }
+
     if lead.id.is_empty() {
         bail!("lead id is required");
     }

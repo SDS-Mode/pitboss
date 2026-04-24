@@ -231,13 +231,19 @@ async fn serve_connection(
     {
         let mut queue = state.root.approval_queue.lock().await;
         while let Some(q) = queue.pop_front() {
-            // Transfer responder into the bridge map.
-            state
-                .root
-                .approval_bridge
-                .lock()
-                .await
-                .insert(q.request_id.clone(), q.responder);
+            // Transfer responder into the bridge map, preserving TTL metadata
+            // so expire_layer_approvals can still expire the entry if the
+            // operator doesn't act before the TTL fires.
+            state.root.approval_bridge.lock().await.insert(
+                q.request_id.clone(),
+                crate::dispatch::state::BridgeEntry {
+                    responder: q.responder,
+                    task_id: q.task_id.clone(),
+                    ttl_secs: q.ttl_secs,
+                    fallback: q.fallback,
+                    created_at: q.created_at,
+                },
+            );
             // And push the event.
             let _ = ev_tx
                 .send(ControlEvent::ApprovalRequest {
@@ -895,16 +901,19 @@ async fn dispatch_op(
             edited_summary,
             reason,
         } => {
-            let tx = state.root.approval_bridge.lock().await.remove(&request_id);
-            if let Some(tx) = tx {
+            let bridge_entry = state.root.approval_bridge.lock().await.remove(&request_id);
+            if let Some(bridge_entry) = bridge_entry {
+                let caller_id = bridge_entry.task_id.clone();
                 let edited = edited_summary.is_some();
-                let _ = tx.send(crate::dispatch::state::ApprovalResponse {
-                    approved,
-                    comment,
-                    edited_summary,
-                    reason,
-                    from_ttl: false,
-                });
+                let _ = bridge_entry
+                    .responder
+                    .send(crate::dispatch::state::ApprovalResponse {
+                        approved,
+                        comment,
+                        edited_summary,
+                        reason,
+                        from_ttl: false,
+                    });
                 // Write an approval_response event + bump counters so the
                 // control-socket path produces the same audit trail as
                 // ApprovalBridge::respond would. Matters when the approval
@@ -922,7 +931,7 @@ async fn dispatch_op(
                 .await;
                 {
                     let mut guard = state.root.worker_counters.write().await;
-                    let entry = guard.entry(state.root.lead_id.clone()).or_default();
+                    let entry = guard.entry(caller_id).or_default();
                     if approved {
                         entry.approvals_approved += 1;
                     } else {
@@ -1094,14 +1103,18 @@ mod tests {
         let run_id = Uuid::now_v7();
         let state = mk_state(dir.path(), run_id);
 
-        // Pre-seed the bridge map with a request_id + oneshot sender.
+        // Pre-seed the bridge map with a request_id + BridgeEntry.
         let (tx, rx) = tokio::sync::oneshot::channel();
-        state
-            .root
-            .approval_bridge
-            .lock()
-            .await
-            .insert("req-1".into(), tx);
+        state.root.approval_bridge.lock().await.insert(
+            "req-1".into(),
+            crate::dispatch::state::BridgeEntry {
+                responder: tx,
+                task_id: "test-task".into(),
+                ttl_secs: None,
+                fallback: None,
+                created_at: chrono::Utc::now(),
+            },
+        );
 
         let sock = dir.path().join("approve.sock");
         let handle = start_control_server(
