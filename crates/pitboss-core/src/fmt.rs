@@ -1,8 +1,8 @@
 //! Small display-format helpers shared across pitboss binaries.
 //!
 //! Centralized so we have one canonical answer to "how does pitboss render
-//! a duration?" — four duplicated copies across status.rs, tui_table.rs,
-//! diff.rs, and tui.rs drifted apart over the v0.7/v0.8 cycle (#97).
+//! a duration?" — four duplicated copies across `status.rs`, `tui_table.rs`,
+//! `diff.rs`, and `tui.rs` drifted apart over the v0.7/v0.8 cycle (#97).
 
 /// Format a millisecond duration as a human-readable string.
 ///

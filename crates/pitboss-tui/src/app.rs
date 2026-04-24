@@ -227,8 +227,8 @@ enum Action {
 }
 
 /// Reset all per-run state when the operator switches runs from the picker.
-/// Leaves non-run state (runtime handle, control_client slot which the caller
-/// rebuilds) untouched. Kept as a free function so the SwitchRun path can be
+/// Leaves non-run state (runtime handle, `control_client` slot which the caller
+/// rebuilds) untouched. Kept as a free function so the `SwitchRun` path can be
 /// unit-tested without running the full event loop.
 fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String) {
     state.run_dir = run_dir;
