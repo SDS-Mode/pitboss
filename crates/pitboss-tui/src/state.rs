@@ -56,6 +56,17 @@ pub enum Mode {
         kind: pitboss_cli::control::protocol::ApprovalKind,
         sub_mode: ApprovalSubMode,
     },
+    /// v0.8: inline policy editor overlay. Shows the live
+    /// `[[approval_policy]]` rule set and lets the operator toggle each
+    /// rule's action or delete rules. Pressing `s` / F2 sends an
+    /// `UpdatePolicy` control op and closes the editor.
+    PolicyEditor {
+        /// Working copy of rules (may differ from what the server has
+        /// until the operator saves with `s` / F2).
+        rules: Vec<pitboss_cli::mcp::policy::ApprovalRule>,
+        /// Currently highlighted rule index (0-based).
+        selected: usize,
+    },
 }
 
 /// What `ConfirmKill` targets.
@@ -237,6 +248,11 @@ pub struct AppState {
     pub pane_focus: PaneFocus,
     /// Non-modal approval queue rendered in the right-rail pane (30% width).
     pub approval_list: crate::approval_list::ApprovalListState,
+    /// Live copy of the dispatcher's `[[approval_policy]]` rule set.
+    /// Populated from `Hello.policy_rules` on connect (and updated when the
+    /// operator saves a `PolicyEditor` session). Seeded as empty until the
+    /// first Hello arrives.
+    pub policy_rules: Vec<pitboss_cli::mcp::policy::ApprovalRule>,
 }
 
 /// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
@@ -282,6 +298,7 @@ impl AppState {
             focused_subtree_idx: 0,
             pane_focus: PaneFocus::Grid,
             approval_list: crate::approval_list::ApprovalListState::default(),
+            policy_rules: Vec::new(),
         }
     }
 
@@ -583,6 +600,18 @@ impl AppState {
         let base = crate::runs::runs_base_dir();
         self.run_list = crate::runs::collect_run_entries(&base);
         self.mode = Mode::PickingRun { selected: 0 };
+    }
+
+    /// Open the policy editor overlay, seeded with the current rule set.
+    /// No-op if already in `PolicyEditor`.
+    pub fn enter_policy_editor(&mut self) {
+        if matches!(self.mode, Mode::PolicyEditor { .. }) {
+            return;
+        }
+        self.mode = Mode::PolicyEditor {
+            rules: self.policy_rules.clone(),
+            selected: 0,
+        };
     }
 
     /// Exit the picker and return to Normal mode without changing the active run.

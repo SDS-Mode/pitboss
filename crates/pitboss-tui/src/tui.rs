@@ -256,6 +256,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             *kind,
             sub_mode,
         ),
+        Mode::PolicyEditor { rules, selected } => {
+            render_policy_editor(frame, area, rules, *selected);
+        }
         Mode::Normal | Mode::Detail { .. } => {}
     }
 }
@@ -971,7 +974,7 @@ fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
     let keys = if matches!(state.mode, Mode::PickingRun { .. }) {
         " [j/k] navigate  [Enter] open  [Esc] cancel"
     } else {
-        " [hjkl] nav  [Enter] snap  [L] log  [x/X] kill wrk/run  [p/c] pause/cont  [r] reprompt  [o] open  [?] help  [q] quit"
+        " [hjkl] nav  [Enter] snap  [L] log  [x/X] kill wrk/run  [p/c] pause/cont  [r] reprompt  [P] policy  [o] open  [?] help  [q] quit"
     };
     let para = Paragraph::new(keys).style(theme::muted_style());
     frame.render_widget(para, area);
@@ -1734,6 +1737,80 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Policy editor overlay — a centred list of `[[approval_policy]]` rules with
+/// an action-cycling UI. The selected rule is highlighted; all others are muted.
+fn render_policy_editor(
+    frame: &mut Frame,
+    area: Rect,
+    rules: &[pitboss_cli::mcp::policy::ApprovalRule],
+    selected: usize,
+) {
+    let popup = centered_rect(70, 80, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Policy Editor  [j/k] nav  [Space] cycle action  [n] add  [d] del  [s/F2] save  [Esc] cancel ")
+        .border_style(Style::default().fg(theme::OVERLAY_ACCENT_INFO));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if rules.is_empty() {
+        let hint = Paragraph::new(" (no rules — press n to add one) ")
+            .style(theme::muted_style());
+        frame.render_widget(hint, inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = rules
+        .iter()
+        .enumerate()
+        .map(|(i, rule)| {
+            let action_label = match rule.action {
+                pitboss_cli::mcp::policy::ApprovalAction::AutoApprove => "auto_approve",
+                pitboss_cli::mcp::policy::ApprovalAction::AutoReject => "auto_reject ",
+                pitboss_cli::mcp::policy::ApprovalAction::Block => "block       ",
+            };
+            let actor = rule
+                .r#match
+                .actor
+                .as_deref()
+                .unwrap_or("*");
+            let category = rule
+                .r#match
+                .category
+                .map_or_else(|| "*".into(), |c| format!("{c:?}"));
+            let tool = rule
+                .r#match
+                .tool_name
+                .as_deref()
+                .unwrap_or("*");
+            let cost = rule
+                .r#match
+                .cost_over
+                .map_or_else(|| "*".into(), |v| format!(">${v:.2}"));
+
+            let text = format!(
+                " [{action_label}]  actor:{actor:<20} cat:{category:<12} tool:{tool:<16} cost:{cost}"
+            );
+            let style = if i == selected {
+                Style::default()
+                    .fg(theme::OVERLAY_ACCENT_INFO)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    frame.render_stateful_widget(list, inner, &mut list_state);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1789,6 +1866,7 @@ mod tests {
             focused_subtree_idx: 0,
             pane_focus: crate::state::PaneFocus::Grid,
             approval_list: crate::approval_list::ApprovalListState::default(),
+            policy_rules: Vec::new(),
         }
     }
 

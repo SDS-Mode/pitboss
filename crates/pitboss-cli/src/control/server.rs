@@ -186,6 +186,15 @@ async fn serve_connection(
         guard.keys().cloned().collect()
     };
 
+    // Snapshot current policy rules (if any) to send in Hello.
+    let policy_rules = {
+        let guard = state.root.policy_matcher.lock().await;
+        guard
+            .as_ref()
+            .map(|m| m.rules().to_vec())
+            .unwrap_or_default()
+    };
+
     // Send server hello.
     let _ = send_event(
         &writer,
@@ -194,6 +203,7 @@ async fn serve_connection(
             run_id,
             run_kind,
             workers: workers_names,
+            policy_rules,
         },
     )
     .await;
@@ -373,6 +383,7 @@ fn op_tag(op: &ControlOp) -> &'static str {
         ControlOp::RepromptWorker { .. } => "reprompt_worker",
         ControlOp::Approve { .. } => "approve",
         ControlOp::ListWorkers => "list_workers",
+        ControlOp::UpdatePolicy { .. } => "update_policy",
     }
 }
 
@@ -928,6 +939,14 @@ async fn dispatch_op(
                     task_id: None,
                     error: format!("unknown request_id: {request_id}"),
                 }
+            }
+        }
+        ControlOp::UpdatePolicy { rules } => {
+            let matcher = crate::mcp::policy::PolicyMatcher::new(rules);
+            state.root.set_policy_matcher(matcher).await;
+            ControlEvent::OpAcked {
+                op: "update_policy".into(),
+                task_id: None,
             }
         }
         other => ControlEvent::OpUnknown {
