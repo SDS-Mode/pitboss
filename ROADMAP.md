@@ -3,8 +3,8 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: v0.7.0 (2026-04-20).** Everything shipped through
-v0.7.0 has been removed from this file — check `CHANGELOG.md` for
+**Last refresh: v0.8.0 (2026-04-24).** Everything shipped through
+v0.8.0 has been removed from this file — check `CHANGELOG.md` for
 per-version history. If you're about to add an item, slot it into one
 of the tiered sections below (biggest effort first).
 
@@ -54,74 +54,47 @@ form explicitly retired.
 
 ---
 
-## Deferred from v0.7.0 (targeting v0.8+)
+## Deferred from v0.8.0 (targeting v0.9+)
 
-Items that were scoped or considered during v0.7 development but
+Items that were scoped or considered during v0.8 development but
 explicitly deferred. These are reasonably well-understood problems,
 not blue-sky ideas.
 
-### Queue-TTL fallback → response wiring
+### Path B stabilization (#92, #93, #94)
 
-`ApprovalTimedOut` terminal state was added in v0.7 but never fires —
-`expire_approvals` (in `runner.rs`) removes expired queue entries
-without sending a `{approved: false, from_ttl: true}` response back to
-the waiting actor. The actor instead sees a bridge-timeout error and
-lands in `Failed` rather than `ApprovalTimedOut`. **Status:** variant
-defined and classification path is ready; the wiring is a ~2-3 hour
-follow-up.
+v0.8 added the `permission_routing = "path_b"` manifest field but
+gates it with a validation error. Three tracked bugs block stabilization:
 
-### `pitboss status` subcommand
+- **#92:** `--permission-prompt-tool` flag isn't threaded to all
+  spawn-args call sites (root lead vs. sub-lead vs. worker).
+- **#93:** The `PermissionPromptResponse` wire format doesn't match
+  what claude's SDK expects.
+- **#94:** `CLAUDE_CODE_ENTRYPOINT=sdk-ts` must be evicted from the
+  environment when Path B is active (otherwise Path A takes over).
 
-Headless-mode inspection currently relies on `pitboss attach` +
-manual reads of `summary.jsonl` and `tasks/`. A dedicated `pitboss
-status <run-id>` would be a natural cap on the headless-agent flow.
-**Status:** deferred; needs a small spec on columns, flags, snapshot-
-vs-tail, JSON output.
+**Status:** work-in-progress on `feat/path-b-permission-routing`.
+Landing all three unblocks removal of the validate-time gate.
 
-### Path B — route claude's permission gate through pitboss
-
-Alternative to the v0.7 Path A default (`CLAUDE_CODE_ENTRYPOINT=sdk-ts`
-bypasses claude's own gate). Path B would route claude's per-tool
-permission requests through a new `permission_prompt` MCP tool,
-surfacing them in pitboss's approval queue + TUI. **Status:** spec
-pinned at `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`;
-revisit when a concrete trigger appears.
-
-### Per-sub-tree runners (Phase 4 ownership cleanup)
+### Phase 4 per-sub-tree runners (#100)
 
 The watcher cascades cancel tokens directly across sub-tree boundaries
 rather than going through a per-sub-tree runner that owns its workers'
-cancellation. Current implementation works correctly but the ownership
-inversion is a known footgun. Also: `terminate()` does not cascade to
-sub-tree workers (only `drain()` does); gates Phase 4 work.
-**Status:** deferred; tracked in codebase via `TODO(Phase 4)` in
-`signals.rs:222` and CAUTION doc block on `DispatchState`'s `Deref` impl.
+cancellation. Watchers are fire-once, so workers registered after the
+cascade fires can be orphaned. Also: `terminate()` does not cascade to
+sub-tree workers (only `drain()` does).
 
-### TUI runtime policy mutation
+**Status:** tracked in #100 with a detailed architecture memo. Tactical
+mitigation (post-register cascade check at worker-registration time)
+lands separately as #99.
 
-`[[approval_policy]]` rules are manifest-only — the TUI can display
-and act on policy but cannot edit rules while a run is live. Useful
-for operators who want to tighten or relax auto-approve rules mid-run
-without restarting. **Status:** deferred; manifest-only is safe and
-sufficient for current use cases.
+### TUI approval replay on run-switch (#95)
 
-### Sub-lead resume support
+When the TUI is launched without a run-id and the operator picks a run
+from the selector, pending approval_requested events already in the
+queue are not re-displayed. Launching with a run-id prefix works.
 
-`pitboss resume <run-id>` only resumes the root lead. Sub-leads that
-were live when the run was interrupted are not individually resumed;
-the root lead must re-spawn them. Full sub-lead resume would require
-persisting sub-lead `sublead_id` → `session_id` mappings and threading
-`--resume` through `spawn_sublead_session`. **Status:** deferred; the
-current fallback (root lead re-spawns) is workable for the typical
-interruption+retry case.
-
-### Hierarchical mode requires a git repo even with `use_worktree = false`
-
-Lead setup runs a git-repo check regardless of the `use_worktree`
-setting. Flat mode has no equivalent check — the hierarchical side is
-inconsistent. **Status:** deferred; documented in AGENTS.md "Headless
-mode" section as a known quirk. Fix is a 1-line code change or a more
-prominent book note.
+**Status:** diagnosed as stale `approval_list` state not being cleared
+in the `SwitchRun` handler.
 
 ### Slack notification sink escaping
 
@@ -130,6 +103,16 @@ but the Slack sink wasn't audited for the same class of injection.
 If Slack sink formats untrusted fields into `mrkdwn` blocks, same
 treatment applies. **Status:** deferred; audit + fix in one small PR
 when prioritized.
+
+### Low-severity nits from v0.8 ultrareview
+
+- **#96:** `pitboss status` table overflows the task-ID column for
+  sub-lead IDs (hard-coded `{:<30}` pad, no truncation).
+- **#97:** Duration formatter has no hour rollover — 2h run shows as
+  `"120m00s"`. Four duplicated copies (`status.rs`, `tui_table.rs`,
+  `diff.rs`, `tui.rs`) — centralize into one helper.
+- **#98:** Sync `std::fs` write inside a `tokio::spawn` async task in
+  `sublead.rs` — switch to `tokio::fs` or `spawn_blocking`.
 
 ---
 
