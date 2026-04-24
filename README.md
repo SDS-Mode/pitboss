@@ -123,13 +123,16 @@ cargo install --path crates/pitboss-tui
 ## Subcommands
 
 ```
-pitboss validate <manifest>          parse + resolve + validate, exit non-zero on error
-pitboss dispatch <manifest>          deal a run
-pitboss resume <run-id>              re-deal a prior run, reusing claude_session_id
-pitboss attach <run-id> <task-id>    follow-mode log viewer for a single worker
-pitboss diff <run-a> <run-b>         compare two runs side-by-side
-pitboss completions <shell>          print shell completion script
-pitboss version                      print version
+pitboss validate <manifest>               parse + resolve + validate, exit non-zero on error
+pitboss dispatch <manifest>               deal a run
+pitboss resume <run-id>                   re-deal a prior run, reusing claude_session_id
+pitboss attach <run-id> <task-id>         follow-mode log viewer for a single worker
+pitboss diff <run-a> <run-b>              compare two runs side-by-side
+pitboss container-dispatch <manifest>     run dispatch inside a Docker/Podman container
+pitboss status <run-id>                   snapshot task table for any run; supports --json
+pitboss agents-md                         print the bundled AGENTS.md reference
+pitboss completions <shell>               print shell completion script
+pitboss version                           print version
 ```
 
 `pitboss attach` accepts a run-id prefix (first 8 chars are plenty when
@@ -315,19 +318,9 @@ guarantee any single hand — it guarantees you can inspect it.
 
 ## Status
 
-`v0.6.0` — depth-2 sub-leads shipped: `spawn_sublead` MCP tool, real
-end-to-end subprocess lifecycle for sub-leads, `wait_actor` (generalized
-lifecycle wait), `run_lease_acquire` / `run_lease_release` (run-global
-leases), `cancel_worker` reason delivery, `[[approval_policy]]`
-deterministic manifest rules, reject-with-reason, approval TTL +
-fallback, TUI grouped grid + non-modal approval list pane, and a
-dogfood test suite of six fake-claude spotlights. Builds on v0.5.0's
-flagship operator-control bucket (`pitboss attach`, SIGSTOP
-freeze-pause, `ApprovalPlan`, `propose_plan` gate, fake-claude e2e
-harness) and the v0.4.x control plane (shared store, cancel/pause/
-continue/reprompt, notifications). 536 tests pass under `cargo test
---workspace --features pitboss-core/test-support`, 0 failures. See
-[`CHANGELOG.md`](CHANGELOG.md) for the full per-version history.
+`v0.8.0` — correctness hardening and new capabilities: `pitboss container-dispatch` (declarative bind-mount container dispatch), `pitboss status` (snapshot task table, supports `--json`), a live TUI policy editor (press `P` to edit `[[approval_policy]]` rules without restart), full `ApprovalTimedOut` TTL wiring via `BridgeEntry` (fires correctly even after a TUI has drained the approval queue), removal of `DispatchState` `Deref` (layer misrouting is now a compile error), per-sub-tree cancel cascade closing the second-Ctrl-C gap, and sub-lead resume. v0.8 also resolved all 34 medium- and high-severity bugs catalogued in the post-v0.7 audit cycle.
+
+v0.7 added the Path A permission default, the bundled `pitboss-with-claude` container variant, `ApprovalRejected` terminal status, and `pitboss agents-md`; v0.6 added depth-2 sub-leads (`spawn_sublead`, `wait_actor`), run-global leases, `[[approval_policy]]` rules with TTL and fallback. See [`CHANGELOG.md`](CHANGELOG.md) for the full per-version history.
 
 ## Manual smoke testing
 

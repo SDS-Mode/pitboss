@@ -1,8 +1,8 @@
 ---
 document: pitboss-agent-instructions
 schema_version: 1
-pitboss_version: 0.7.0
-last_updated: 2026-04-20
+pitboss_version: 0.8.0
+last_updated: 2026-04-24
 audience: ai-agent
 canonical_url: https://github.com/SDS-Mode/pitboss/blob/main/AGENTS.md
 ---
@@ -185,6 +185,7 @@ Additional `[lead]` fields for depth-2 sub-leads (v0.6+):
 | `max_subleads` | int | unset | Cap on total sub-leads the root lead may spawn. |
 | `max_sublead_budget_usd` | float | unset | Per-sub-lead envelope cap; `spawn_sublead` rejects envelopes exceeding this. |
 | `max_workers_across_tree` | int | unset | Cap on total live workers including all sub-tree workers. |
+| `permission_routing` | string | `"path_a"` | v0.8+. `"path_a"` (default) sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` so pitboss is the sole permission authority. `"path_b"` would route claude's built-in permission gate through pitboss's approval queue — explicitly rejected at validate time until stabilization lands (issues #92–#94). |
 
 `[lead.sublead_defaults]` — optional defaults inherited by `spawn_sublead` calls that omit those parameters:
 
@@ -195,6 +196,27 @@ max_workers = 4
 lead_timeout_secs = 1800
 read_down = false
 ```
+
+### `[container]` (v0.8+)
+
+The `[container]` section enables `pitboss container-dispatch`, which assembles and execs a Docker/Podman run command from the manifest. Task and lead `directory` fields are interpreted as container-side paths when `[container]` is present.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `image` | string | `ghcr.io/sds-mode/pitboss-with-claude:latest` | Container image to run. |
+| `runtime` | `"docker"` \| `"podman"` \| `"auto"` | `"auto"` | Runtime selector. `"auto"` prefers podman when available. |
+| `extra_args` | array of string | `[]` | Inserted verbatim before the image name in the assembled `run` invocation. |
+| `workdir` | string | first mount's container path, else `/home/pitboss` | Working directory inside the container. |
+
+#### `[[container.mount]]`
+
+| Key | Required? | Notes |
+|---|---|---|
+| `host` | yes | Absolute host path. Tilde (`~`) is expanded. |
+| `container` | yes | Absolute path inside the container. |
+| `readonly` | no | Default `false`. |
+
+Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
 
 ---
 
@@ -380,7 +402,7 @@ distinctly from a task that succeeded:
 | `Cancelled` | Task was explicitly cancelled by operator or cascade |
 | `SpawnFailed` | Task never started (worktree prep, claude not found, etc.) |
 | `ApprovalRejected` | Task's last approval returned `{approved: false}` from operator action or `[[approval_policy]]` auto_reject rule, then exited shortly after |
-| `ApprovalTimedOut` | Reserved for queue-TTL fallback (today fires only via the `from_ttl: true` codepath which is not yet wired end-to-end; treat as an intent variant) |
+| `ApprovalTimedOut` | Task's last approval aged past its declared `ttl_secs` and the configured `fallback` fired (v0.8: TTL is wired end-to-end via `BridgeEntry` — covers both queued approvals and ones already drained into a connected TUI). The task's `ApprovalResponse` carries `from_ttl: true` so downstream consumers can distinguish TTL-driven from operator-driven responses. |
 
 Before v0.7, both new statuses were reported as `Success` because the
 claude subprocess exited 0. If you see `ApprovalRejected` in
@@ -505,7 +527,7 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__reprompt_worker` | `{task_id, prompt}` | `{ok: bool}` — mid-flight course-correct via `claude --resume` |
 | `mcp__pitboss__request_approval` | `{summary, timeout_secs?, plan?: ApprovalPlan}` | `{approved, comment?, edited_summary?, reason?}` |
 | `mcp__pitboss__propose_plan` | `{plan: ApprovalPlan, timeout_secs?}` | `{approved, comment?, edited_summary?, reason?}` |
-| `mcp__pitboss__spawn_sublead` | `{prompt, model, budget_usd?, max_workers?, lead_timeout_secs?, initial_ref?, read_down?}` | `{sublead_id}` — root lead only; requires `[lead] allow_subleads = true`. See Depth-2 section. |
+| `mcp__pitboss__spawn_sublead` | `{prompt, model, budget_usd?, max_workers?, lead_timeout_secs?, initial_ref?, read_down?, env?, tools?, resume_session_id?}` | `{sublead_id}` — root lead only; requires `[lead] allow_subleads = true`. `resume_session_id` is used by `pitboss resume` to re-attach a prior sub-lead session; omit for fresh spawns. See Depth-2 section. |
 | `mcp__pitboss__run_lease_acquire` | `{key, ttl_secs, wait_secs?}` | `{lease_id, version, ...}` — run-global; auto-released on actor termination |
 | `mcp__pitboss__run_lease_release` | `{lease_id}` | `{ok: true}` |
 

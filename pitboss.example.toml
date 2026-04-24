@@ -7,6 +7,8 @@
 #     pitboss validate pitboss.toml    # catches schema / resolution errors
 #     pitboss dispatch pitboss.toml    # actually runs it
 #     pitboss-tui                      # watch the live floor-view
+#     pitboss container-dispatch pitboss.toml  # run dispatch inside a Docker/Podman container (requires a [container] section — see below)
+#     pitboss status <run-id>                  # snapshot task table for any run, in-flight or finalized
 #
 # See README.md for a project overview and AGENTS.md for the full schema
 # reference. Ready-to-run examples under examples/:
@@ -102,6 +104,37 @@ use_worktree = true
 # SOME_VAR = "value"
 
 # ────────────────────────────────────────────────────────────────────────────
+# [container] — optional; enables `pitboss container-dispatch` (v0.8+).
+# ────────────────────────────────────────────────────────────────────────────
+#
+# When present, `pitboss container-dispatch <manifest>` assembles and execs a
+# Docker/Podman `run` command from this section. Task and lead `directory`
+# fields become container-side paths; host-filesystem existence is not checked
+# at validate time when [container] is set. Omit this section for host-mode
+# dispatch — the behavior is then identical to v0.7.
+#
+# [container]
+# image      = "ghcr.io/sds-mode/pitboss-with-claude:latest"  # bundled claude CLI
+# runtime    = "auto"              # "docker" | "podman" | "auto" (auto prefers podman)
+# workdir    = "/project"          # cwd inside the container; defaults to first mount's container path
+# extra_args = []                  # inserted verbatim before the image name (e.g. ["--security-opt=...", "--cap-drop=ALL"])
+#
+# # Declare one [[container.mount]] per bind mount the run needs. Two mounts are
+# # auto-injected regardless: ~/.claude → /home/pitboss/.claude (OAuth) and the
+# # run artifact directory. The manifest itself is mounted read-only at
+# # /run/pitboss.toml. Declare only the project + reference mounts here.
+#
+# [[container.mount]]
+# host      = "~/projects/myproject"   # absolute host path; ~ is expanded
+# container = "/project"               # absolute container path
+# readonly  = false                    # default false; true for read-only reference material
+#
+# [[container.mount]]
+# host      = "~/reference-docs"
+# container = "/ref"
+# readonly  = true
+
+# ────────────────────────────────────────────────────────────────────────────
 # Task definitions: pick ONE of
 #   a) one-or-more [[task]] entries  (flat mode), OR
 #   b) exactly one [[lead]] entry    (hierarchical mode).
@@ -176,6 +209,7 @@ Then exit.
 # budget_usd = 20.00
 # max_workers = 20
 # allow_subleads = true
+# permission_routing = "path_a"       # v0.8+. "path_a" (default) = pitboss is sole permission authority via CLAUDE_CODE_ENTRYPOINT=sdk-ts. "path_b" = route claude's built-in gate through pitboss's approval queue; not yet stable (rejected at validate time; see issues #92–#94).
 # max_subleads = 4
 # max_sublead_budget_usd = 5.00
 # max_workers_across_tree = 16
