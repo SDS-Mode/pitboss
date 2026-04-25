@@ -1,8 +1,30 @@
+# Combined CI + Container workflow.
+#
+# Design: the container build jobs declare `needs: [test]` so they never
+# spin up on PRs where lint/tests are failing — the most common cause of
+# wasted runner minutes on feature branches. Merging both workflows into
+# one file is the only GHA-native way to express a cross-job dependency
+# (cross-workflow `needs` is not supported).
+#
+# Job graph:
+#
+#   test ──────────────────────────────────────────────── always
+#   check-paths ────────────────────────────────────────── always
+#   build (matrix x4) ── needs [test, check-paths] ─────── code changed + test passed
+#   merge (matrix x2) ── needs [build] ─────────────────── push/tag only
+#   smoke-test ───────── needs [merge] ──────────────────── push/tag only
+#
+# Triggers:
+#   push to main   -> test + (if code changed) build -> merge -> smoke-test
+#   push tag v*    -> test + build -> merge -> smoke-test
+#   pull_request   -> test + (if code changed AND test passed) build
+
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
     paths-ignore:
       - 'CHANGELOG.md'
       - 'README.md'
@@ -15,6 +37,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  REGISTRY: ghcr.io
+  CLAUDE_CODE_VERSION: "2.1.114"
+
+# ---------------------------------------------------------------------------
+# Lint + test
+# ---------------------------------------------------------------------------
 
 jobs:
   test:
@@ -45,3 +73,268 @@ jobs:
           cargo build --release -p pitboss-cli
           export PITBOSS="$(pwd)/target/release/pitboss"
           bash scripts/smoke-part1.sh
+
+# ---------------------------------------------------------------------------
+# Path filter — determines whether container builds are needed on this event.
+# Runs in parallel with `test` so it does not add latency to the happy path.
+# On push/tag events dorny returns 'true' for all filters (no base to diff
+# against), which is correct: always build on direct pushes to main or tags.
+# ---------------------------------------------------------------------------
+
+  check-paths:
+    name: Detect changed path categories
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Paths filter
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - '.github/workflows/ci.yml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'tests-support/**'
+
+# ---------------------------------------------------------------------------
+# Container build — gated on test passing + code paths changed.
+# ---------------------------------------------------------------------------
+
+  build:
+    name: Build ${{ matrix.target }} (${{ matrix.platform_pair }})
+    runs-on: ${{ matrix.runner }}
+    needs: [test, check-paths]
+    # On pull_request: only run when code paths changed AND test passed.
+    # On push/tag: check-paths outputs 'true' for all filters so always builds.
+    if: |
+      needs.test.result == 'success' &&
+      (github.event_name != 'pull_request' || needs.check-paths.outputs.code == 'true')
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: container-build-${{ github.ref }}-${{ matrix.platform_pair }}-${{ matrix.target }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: runtime
+            platform: linux/amd64
+            runner: ubuntu-latest
+            platform_pair: linux-amd64
+            image: pitboss
+          - target: runtime
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            platform_pair: linux-arm64
+            image: pitboss
+          - target: with-claude
+            platform: linux/amd64
+            runner: ubuntu-latest
+            platform_pair: linux-amd64
+            image: pitboss-with-claude
+          - target: with-claude
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            platform_pair: linux-arm64
+            image: pitboss-with-claude
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve image name (lowercase for GHCR)
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          REPO_LC=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          if [[ "$TARGET" == "with-claude" ]]; then
+            echo "name=${REGISTRY}/${REPO_LC}-with-claude" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${REGISTRY}/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (for labels only at this stage)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CLAUDE_CODE_VERSION=${{ env.CLAUDE_CODE_VERSION }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha,scope=build-${{ matrix.platform_pair }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.platform_pair }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.target }}-${{ matrix.platform_pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+# ---------------------------------------------------------------------------
+# Manifest merge + smoke test — push/tag only
+# ---------------------------------------------------------------------------
+
+  merge:
+    name: Merge ${{ matrix.image }} manifest
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: runtime
+            image: pitboss
+          - target: with-claude
+            image: pitboss-with-claude
+    steps:
+      - name: Resolve image name (lowercase for GHCR)
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          REPO_LC=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          if [[ "$TARGET" == "with-claude" ]]; then
+            echo "name=${REGISTRY}/${REPO_LC}-with-claude" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${REGISTRY}/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download digest artifacts (this target only)
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.target }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (final tags)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
+
+      - name: Inspect final manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ steps.image.outputs.name }}:${{ steps.meta.outputs.version }}
+
+  smoke-test:
+    name: Smoke test ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    needs: [merge]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine tag
+        id: tag
+        env:
+          GH_REF: ${{ github.ref }}
+          GH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$GH_REF" == refs/tags/v* ]]; then
+            echo "value=${GH_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GH_REF" == refs/heads/main ]]; then
+            echo "value=main" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$GH_REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke-test with-claude image
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          REPO_LC=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          IMAGE="${REGISTRY}/${REPO_LC}-with-claude:${TAG}"
+          echo "Testing $IMAGE"
+          docker pull "$IMAGE"
+          docker run --rm "$IMAGE" claude --version
+          docker run --rm "$IMAGE" pitboss --version
+          docker run --rm --entrypoint cat "$IMAGE" /usr/share/doc/claude-code/ATTRIBUTION
