@@ -12,8 +12,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
-              TableState, Tabs, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Tabs, Wrap,
+    },
     Frame, Terminal,
 };
 
@@ -309,7 +311,11 @@ fn render_tab_bar(
     let tabs = Tabs::new(vec![active_label, completed_label])
         .select(selected_idx)
         .style(theme::secondary_style())
-        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .divider("│");
     frame.render_widget(tabs, area);
 }
@@ -370,16 +376,14 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
     }
     // Apply filter.
     if let Some(filter) = filter_status {
-        idxs.retain(|&i| {
-            matches!(&state.tasks[i].status, TileStatus::Done(s) if s == filter)
-        });
+        idxs.retain(|&i| matches!(&state.tasks[i].status, TileStatus::Done(s) if s == filter));
     }
 
     let table_area = chunks[2];
 
     if idxs.is_empty() {
-        let placeholder = Paragraph::new("\n  No completed workers yet.")
-            .style(theme::secondary_style());
+        let placeholder =
+            Paragraph::new("\n  No completed workers yet.").style(theme::secondary_style());
         frame.render_widget(placeholder, table_area);
     } else {
         // Resolve selected row position.
@@ -399,13 +403,20 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
         ];
 
         let header = Row::new(vec![
-            Cell::from("TASK ID").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-            Cell::from("STATUS").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-            Cell::from("TIME").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-            Cell::from("TOKENS (in/out)").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-            Cell::from("EXIT").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-            Cell::from("ENDED").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        ]).height(1);
+            Cell::from("TASK ID")
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("STATUS")
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("TIME")
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("TOKENS (in/out)")
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("EXIT")
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("ENDED")
+                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        ])
+        .height(1);
 
         // Build rows and hit rects simultaneously.
         let mut hit_rects: Vec<(usize, Rect)> = Vec::with_capacity(idxs.len());
@@ -425,8 +436,12 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
                         pitboss_core::store::TaskStatus::TimedOut => ("⏱ TimedOut", Color::Yellow),
                         pitboss_core::store::TaskStatus::Cancelled => ("⊘ Cancelled", Color::Gray),
                         pitboss_core::store::TaskStatus::SpawnFailed => ("! SpawnFail", Color::Red),
-                        pitboss_core::store::TaskStatus::ApprovalRejected => ("⊘ ApprovalRej", Color::Yellow),
-                        pitboss_core::store::TaskStatus::ApprovalTimedOut => ("⏱ ApprovalTO", Color::Yellow),
+                        pitboss_core::store::TaskStatus::ApprovalRejected => {
+                            ("⊘ ApprovalRej", Color::Yellow)
+                        }
+                        pitboss_core::store::TaskStatus::ApprovalTimedOut => {
+                            ("⏱ ApprovalTO", Color::Yellow)
+                        }
                     },
                 };
 
@@ -460,7 +475,9 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
                 let row_y = table_area
                     .y
                     .saturating_add(1) // header row
-                    .saturating_add(u16::try_from(row_pos.saturating_sub(*scroll_offset)).unwrap_or(u16::MAX));
+                    .saturating_add(
+                        u16::try_from(row_pos.saturating_sub(*scroll_offset)).unwrap_or(u16::MAX),
+                    );
                 if row_pos >= *scroll_offset
                     && row_y < table_area.y.saturating_add(table_area.height)
                 {
@@ -507,23 +524,38 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Aggregate footer.
     let completed_all = state.completed_tile_indices();
-    let total_cost: f64 = completed_all.iter().filter_map(|&i| {
-        let tile = &state.tasks[i];
-        tile.model.as_deref().and_then(|m| {
-            let usage = pitboss_core::parser::TokenUsage {
-                input: tile.token_usage_input,
-                output: tile.token_usage_output,
-                cache_read: tile.cache_read,
-                cache_creation: tile.cache_creation,
-            };
-            pitboss_core::prices::cost_usd(m, &usage)
+    let total_cost: f64 = completed_all
+        .iter()
+        .filter_map(|&i| {
+            let tile = &state.tasks[i];
+            tile.model.as_deref().and_then(|m| {
+                let usage = pitboss_core::parser::TokenUsage {
+                    input: tile.token_usage_input,
+                    output: tile.token_usage_output,
+                    cache_read: tile.cache_read,
+                    cache_creation: tile.cache_creation,
+                };
+                pitboss_core::prices::cost_usd(m, &usage)
+            })
         })
-    }).sum();
-    let total_in: u64 = completed_all.iter().map(|&i| state.tasks[i].token_usage_input).sum();
-    let total_out: u64 = completed_all.iter().map(|&i| state.tasks[i].token_usage_output).sum();
-    let failed_c = completed_all.iter().filter(|&&i| {
-        !matches!(state.tasks[i].status, TileStatus::Done(pitboss_core::store::TaskStatus::Success))
-    }).count();
+        .sum();
+    let total_in: u64 = completed_all
+        .iter()
+        .map(|&i| state.tasks[i].token_usage_input)
+        .sum();
+    let total_out: u64 = completed_all
+        .iter()
+        .map(|&i| state.tasks[i].token_usage_output)
+        .sum();
+    let failed_c = completed_all
+        .iter()
+        .filter(|&&i| {
+            !matches!(
+                state.tasks[i].status,
+                TileStatus::Done(pitboss_core::store::TaskStatus::Success)
+            )
+        })
+        .count();
     let footer_text = format!(
         " {}/{} completed — {} failed — {} in / {} out — ${:.2} total  [j/k] nav  [Enter] detail  [s] sort  [A/Esc] active view",
         completed_all.len(), state.tasks.len(), failed_c,

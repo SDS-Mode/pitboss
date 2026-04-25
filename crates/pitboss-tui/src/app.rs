@@ -300,23 +300,19 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
         }
         // Left-click on a completed table row: open Detail for that task.
         (Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Left)) => {
-            let task_id = state
-                .completed_hit_rects
-                .lock()
-                .ok()
-                .and_then(|rects| {
-                    rects.iter().find_map(|&(task_idx, r)| {
-                        if mouse.column >= r.x
-                            && mouse.column < r.x + r.width
-                            && mouse.row >= r.y
-                            && mouse.row < r.y + r.height
-                        {
-                            Some(state.tasks[task_idx].id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                });
+            let task_id = state.completed_hit_rects.lock().ok().and_then(|rects| {
+                rects.iter().find_map(|&(task_idx, r)| {
+                    if mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                    {
+                        Some(state.tasks[task_idx].id.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
             if let Some(task_id) = task_id {
                 state.enter_detail_for(task_id);
             }
@@ -702,7 +698,10 @@ fn handle_completed(state: &mut AppState, code: KeyCode) -> Action {
 
         // Cycle sort key: EndedAtDesc → DurationDesc → StatusAsc → EndedAtDesc
         KeyCode::Char('s') => {
-            if let Mode::Completed { ref mut sort_key, .. } = state.mode {
+            if let Mode::Completed {
+                ref mut sort_key, ..
+            } = state.mode
+            {
                 *sort_key = match sort_key {
                     SortKey::EndedAtDesc => SortKey::DurationDesc,
                     SortKey::DurationDesc => SortKey::StatusAsc,

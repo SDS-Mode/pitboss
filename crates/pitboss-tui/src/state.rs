@@ -1620,7 +1620,8 @@ mod tests {
         let mut state = make_state();
         state.tasks = vec![
             make_done_tile("old", 30), // promoted
-            TileState {                // running, not promoted
+            TileState {
+                // running, not promoted
                 id: "live".into(),
                 status: TileStatus::Running,
                 duration_ms: None,
