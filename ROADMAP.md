@@ -3,7 +3,7 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: v0.8.0 (2026-04-24).** Everything shipped through
+**Last refresh: 2026-04-25 (post-v0.8.0 session).** Everything shipped through
 v0.8.0 has been removed from this file — check `CHANGELOG.md` for
 per-version history. If you're about to add an item, slot it into one
 of the tiered sections below (biggest effort first).
@@ -413,8 +413,8 @@ cascade fires can be orphaned. Also: `terminate()` does not cascade to
 sub-tree workers (only `drain()` does).
 
 **Status:** tracked in #100 with a detailed architecture memo. Tactical
-mitigation (post-register cascade check at worker-registration time)
-lands separately as #99.
+mitigation (post-register cascade check at worker-registration time) was
+already applied (#99, closed).
 
 ### TUI approval replay on run-switch (#95)
 
@@ -422,8 +422,9 @@ When the TUI is launched without a run-id and the operator picks a run
 from the selector, pending approval_requested events already in the
 queue are not re-displayed. Launching with a run-id prefix works.
 
-**Status:** diagnosed as stale `approval_list` state not being cleared
-in the `SwitchRun` handler.
+**Status:** partially mitigated — `ctrl_events_rx` is now drained on
+`SwitchRun` so stale events from the prior run no longer leak (#104,
+closed). Full replay of pending approvals on re-connect remains open.
 
 ### Slack notification sink escaping
 

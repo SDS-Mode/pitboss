@@ -9,11 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **TUI Completed page** — tiles that have been in a terminal state for 5
-  seconds (configurable via `AppState.completed_after_secs`) are automatically
+- **TUI Completed page** — tiles that have been in a terminal state for 120
+  seconds (configurable via `AppState::completed_after_secs`) are automatically
   promoted off the Active grid to a dedicated Completed page. At 100+ workers
   this keeps the Active view focused on live work rather than a wall of done
-  tiles. Press `C` to open the Completed page; `A` or Esc to return.
+  tiles. Press `C` or click the "Completed" tab to open; `A`, Esc, or
+  right-click to return to the Active view.
 
   The Completed page is a scrollable table (`ratatui::Table`) with columns
   TASK ID / STATUS / DURATION / TOKENS / ENDED. Navigate with `j`/`k`/`g`/`G`,
@@ -27,7 +28,7 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 - **Tab bar** — a one-line `Active (N running · M pending) | Completed (K)`
   bar appears between the title and body whenever any tiles have been
-  promoted. Highlights the current page.
+  promoted. Clicking a tab navigates to that page.
 
 - **`return_to` on Detail view** — `Mode::Detail` now carries a boxed
   `return_to: Box<Mode>` field. Esc from Detail returns to whichever page
@@ -36,26 +37,93 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Approval list pane keybinding** changed from `a` to `A` to free `a` for
-  future use and avoid collision with common vi navigation patterns.
+- **Approval list pane keybinding** changed from `a` to `A` to avoid
+  collision with common vi navigation patterns.
+- **Container builds gate on CI** — the `CI` and `Container` workflows have
+  been merged into a single file. Container builds on PRs now only start after
+  `test + lint + fmt` passes, eliminating wasted arm64 runner minutes on
+  lint-failing branches.
+- **Rust toolchain pinned to 1.95.0** — `rust-toolchain.toml` and
+  `rustfmt.toml` added to keep CI and local formatting in sync and prevent
+  recurring fmt-check drift between environments.
 
 ### Fixed
 
+**TUI:**
+- Completed page Detail view always showed the same log regardless of which
+  row was selected — `enter_detail_for` now updates `state.focus` so the
+  watcher tails the correct task log.
+- Log pane text leakage into the approval column — long lines with no
+  whitespace (JSON blobs, markdown tables) now truncated to 4× pane width
+  before passing to `Paragraph`; explicit `Clear` added before the approval
+  pane renders.
+- Promotion threshold corrected from 5 s to 120 s — tiles were vanishing
+  from the Active grid before operators could read their outcome.
 - `format_duration_ms`: sub-second durations (1–999 ms) now render as `"Nms"`
   instead of `"0s"` (#108).
 - `tui_table`: task ID column now truncates with ellipsis to prevent column
   misalignment on long sub-lead IDs (#96).
 - `reset_state_for_switch`: now clears `control_connected` before
-  `connect_control` overwrites it, preventing a stale status-bar indicator
-  during the transition tick (#113).
-- `ApprovalBridge::request`: `try_send` failure now emits a `warn!` log
-  instead of silently dropping the event (#110).
-- Bridge replay TOCTOU: documented accepted race between `is_closed()` check
-  and `ev_tx.send`; no spurious cards on reconnect (#109).
-- `subleads.jsonl`: comment now accurately describes crash-after-write data
-  loss as accepted rather than caught by the warn branch (#111).
-- `diff.rs` `fmt_ms`: comment corrected to match actual short-circuit path
-  (#112).
+  `connect_control` overwrites it (#113).
+- TUI stale `read_loop` events from a prior run no longer leak into the new
+  run after `SwitchRun` — `ctrl_events_rx` is drained between reset and
+  reconnect (#104).
+- `ApprovalBridge::request`: `try_send` failure now emits a `warn!` log (#110).
+- `approval_bridge` Mutex no longer held across `ev_tx.send().await` during
+  bridge replay — entries collected first, lock dropped before sending (#105).
+
+**Dispatch / runner:**
+- `match_auth` now gates `authentication_error` on co-occurrence with a 401
+  or `invalid_api_key` signal to prevent false-positive auth backoff from prose
+  log lines that mention "authentication_error" incidentally.
+- `parse_reset_timestamp` advances the year by 1 when the parsed reset date is
+  already in the past (handles "resets Jan 1" seen on Dec 31).
+- `tasks_failed` no longer counts `Cancelled` workers when the lead succeeded,
+  fixing spurious non-zero exit codes on clean hierarchical runs.
+- `build_sublead_mcp_config` now writes to `run_subdir` instead of
+  `std::env::temp_dir()`, and creates the directory defensively so test
+  harnesses don't need to pre-create it.
+- `active_worker_count` in `LayerState` now excludes the lead subprocess —
+  previously capped effective worker parallelism at `max_workers - 1`.
+- `halt_on_failure` drain no longer sets `was_interrupted = true`; the two
+  drain paths are now distinguished via `Arc<AtomicBool>`.
+- TTL expiry threshold changed from `age > ttl` to `age >= ttl` — zero-TTL
+  entries never fired on the first tick.
+- `spawn_sublead` budget guard TOCTOU fixed: `reserved_usd` lock now held
+  across check-and-add so concurrent callers can't both pass the cap (#106).
+- `sublead.rs` `subleads.jsonl` append switched to `tokio::fs` to avoid
+  blocking a tokio runtime thread (#98, already fixed in v0.8 session).
+- `parent_task_id` on sub-lead `TaskRecord` now set to the lead's actual id
+  instead of the literal string `"root"`.
+- `probe_claude`: explicit `PermissionDenied` error arm added.
+- `pitboss diff`: unparseable `summary.jsonl` lines now emit `tracing::warn!`
+  instead of silently undercounting tasks (#107).
+
+**Notify / shared store:**
+- `substitute_env_vars` rewrote byte-cast iteration to str-based find/slice —
+  byte-cast corrupted multi-byte UTF-8 outside `${...}` tokens.
+- `emit_with_retry` guard fixed from `attempt < 2` to
+  `attempt < backoffs.len() - 1` so the 900 ms backoff actually fires.
+- Discord and Slack sinks use `saturating_sub` for `tasks_total - tasks_failed`
+  to avoid panic when failed count exceeds total.
+- Shared-store lease acquire wait loop: `RecvError::Closed` now returns
+  `Err(StoreError::Shutdown)` instead of looping forever.
+- `validate_path` now checks exact path segments (`split('/').any(|s| s == "..")`)
+  instead of substring match (`.contains("..")`) to prevent false positives.
+
+**Manifest:**
+- `expand_paths` now expands `leads[*].directory` (previously only
+  `tasks[*].directory` and `run_dir` were expanded).
+
+**Core:**
+- `error::truncate()` rewrote byte-index slicing to char-based iteration to
+  prevent panic on multi-byte UTF-8 input.
+- TUI `short_id` rewrote byte-offset slicing with `chars().take()` /
+  `chars().skip()` to prevent panic on non-ASCII run IDs.
+
+**CI:**
+- `actions/upload-artifact` and `actions/download-artifact` corrected from
+  nonexistent versions (`v7`/`v8`) to `v4`.
 
 ## [0.8.0] — 2026-04-24
 
