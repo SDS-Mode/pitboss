@@ -17,10 +17,12 @@ impl ParseError {
 // wired into error rendering in a later task.
 #[allow(dead_code)]
 pub(crate) fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(n).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
     } else {
-        format!("{}…", &s[..n])
+        truncated
     }
 }
 

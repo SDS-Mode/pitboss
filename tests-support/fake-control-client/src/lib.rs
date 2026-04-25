@@ -36,7 +36,10 @@ impl FakeControlClient {
         })
         .await?;
         // Wait for the server hello so the connection is fully established.
-        let _hello = c.recv().await?;
+        let hello = c.recv().await?;
+        if !matches!(hello, ControlEvent::Hello { .. }) {
+            anyhow::bail!("expected Hello from control server, got {:?}", hello);
+        }
         Ok(c)
     }
 

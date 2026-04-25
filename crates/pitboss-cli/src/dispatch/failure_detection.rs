@@ -243,11 +243,15 @@ fn match_rate_limit(blob: &str) -> Option<FailureReason> {
 }
 
 fn match_auth(blob: &str) -> Option<FailureReason> {
-    if blob.contains("invalid_api_key")
-        || blob.contains("authentication_error")
-        || blob.contains("401")
-            && (blob.contains("Unauthorized") || blob.contains("Authentication"))
-    {
+    let has_401 = blob.contains("401")
+        && (blob.contains("Unauthorized") || blob.contains("Authentication"));
+    let has_invalid_key = blob.contains("invalid_api_key");
+    // Require "authentication_error" to co-occur with another auth signal so
+    // prose mentions (e.g. "no authentication_error occurred") don't trigger
+    // the 600-second backoff gate.
+    let has_auth_error = blob.contains("authentication_error")
+        && (has_401 || has_invalid_key);
+    if has_invalid_key || has_auth_error || has_401 {
         Some(FailureReason::AuthFailure)
     } else {
         None
@@ -349,7 +353,18 @@ fn parse_reset_timestamp(blob: &str) -> Option<DateTime<Utc>> {
     };
     let date = NaiveDate::from_ymd_opt(year, month, day)?;
     let naive = NaiveDateTime::new(date, time);
-    Utc.from_utc_datetime(&naive).into()
+    let dt = Utc.from_utc_datetime(&naive);
+    // If the parsed date is in the past the reset wraps into next year
+    // (e.g., "resets Jan 1" seen on Dec 31).
+    if dt < now {
+        Some(
+            NaiveDate::from_ymd_opt(year + 1, month, day)
+                .map(|d| Utc.from_utc_datetime(&NaiveDateTime::new(d, time)))
+                .unwrap_or(dt),
+        )
+    } else {
+        Some(dt)
+    }
 }
 
 fn month_from_abbrev(s: &str) -> Option<u32> {

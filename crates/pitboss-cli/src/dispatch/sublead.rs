@@ -494,9 +494,10 @@ async fn spawn_sublead_session(
     let socket_path = socket_path_for_run(sub_layer.run_id, &sub_layer.manifest.run_dir);
 
     // 2. Build per-sub-lead mcp-config.json.
-    let mcp_config_path = build_sublead_mcp_config(&sublead_id, &socket_path)
-        .await
-        .context("build sublead mcp-config")?;
+    let mcp_config_path =
+        build_sublead_mcp_config(&sublead_id, &socket_path, &state.root.run_subdir)
+            .await
+            .context("build sublead mcp-config")?;
 
     // 3. Build the CLI args: sublead toolset (or operator override),
     //    model, prompt, and optional --resume when continuing a prior session.
@@ -851,7 +852,7 @@ async fn spawn_sublead_session(
             token_usage: total_token_usage,
             claude_session_id: final_outcome.claude_session_id,
             final_message_preview: final_outcome.final_message_preview,
-            parent_task_id: Some("root".into()),
+            parent_task_id: Some(state_bg.root.lead_id.clone()),
             pause_count: 0,
             reprompt_count,
             approvals_requested: 0,

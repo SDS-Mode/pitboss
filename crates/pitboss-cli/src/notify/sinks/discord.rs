@@ -75,7 +75,7 @@ impl DiscordSink {
                 let desc = format!(
                     "**Run:** {}\n**Tasks:** {} / {}\n**Duration:** {}s\n**Cost:** ${:.2}",
                     escape_discord_md(run_id),
-                    tasks_total - tasks_failed,
+                    tasks_total.saturating_sub(*tasks_failed),
                     tasks_total,
                     duration_sec,
                     spent_usd

@@ -49,18 +49,16 @@ fn default_severity_min() -> Severity {
 /// or if the name does not start with `PITBOSS_` (see ENV_VAR_ALLOWED_PREFIX).
 pub fn substitute_env_vars(s: &str) -> Result<String> {
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
-            // Find closing brace.
-            let end = bytes[i + 2..]
-                .iter()
-                .position(|&b| b == b'}')
-                .map(|p| i + 2 + p)
+    let mut rest = s;
+    while !rest.is_empty() {
+        if let Some(dollar) = rest.find("${") {
+            // Emit everything before the token as-is (preserves all UTF-8).
+            out.push_str(&rest[..dollar]);
+            let after_open = &rest[dollar + 2..];
+            let end = after_open
+                .find('}')
                 .ok_or_else(|| anyhow::anyhow!("unterminated ${{…}} in {s:?}"))?;
-            let name = std::str::from_utf8(&bytes[i + 2..end])
-                .map_err(|_| anyhow::anyhow!("non-utf8 env var name in {s:?}"))?;
+            let name = &after_open[..end];
             if !name.starts_with(ENV_VAR_ALLOWED_PREFIX) {
                 bail!(
                     "notification uses ${{{name}}} but only env vars prefixed \
@@ -72,10 +70,10 @@ pub fn substitute_env_vars(s: &str) -> Result<String> {
                 anyhow::anyhow!("notification uses ${{{name}}} but env var is not set")
             })?;
             out.push_str(&val);
-            i = end + 1;
+            rest = &after_open[end + 1..];
         } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            out.push_str(rest);
+            break;
         }
     }
     Ok(out)

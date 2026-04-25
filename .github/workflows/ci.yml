@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
 
@@ -192,8 +192,8 @@ jobs:
           build-args: |
             CLAUDE_CODE_VERSION=${{ env.CLAUDE_CODE_VERSION }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
-          cache-from: type=gha,scope=build-${{ matrix.platform_pair }}
-          cache-to: type=gha,mode=max,scope=build-${{ matrix.platform_pair }}
+          cache-from: type=gha,scope=build-${{ matrix.target }}-${{ matrix.platform_pair }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.target }}-${{ matrix.platform_pair }}
 
       - name: Export digest
         if: github.event_name != 'pull_request'
@@ -204,7 +204,7 @@ jobs:
 
       - name: Upload digest artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v8
         with:
           name: digests-${{ matrix.target }}-${{ matrix.platform_pair }}
           path: /tmp/digests/*

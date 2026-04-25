@@ -523,9 +523,17 @@ pub async fn run_hierarchical(
     let mut all_records = vec![lead_record.clone()];
     all_records.extend(worker_records);
 
+    // Workers cancelled because the lead finished cleanly are not failures.
+    let lead_succeeded = matches!(lead_record.status, pitboss_core::store::TaskStatus::Success);
     let tasks_failed = all_records
         .iter()
-        .filter(|r| !matches!(r.status, pitboss_core::store::TaskStatus::Success))
+        .filter(|r| {
+            if lead_succeeded && matches!(r.status, pitboss_core::store::TaskStatus::Cancelled) {
+                false
+            } else {
+                !matches!(r.status, pitboss_core::store::TaskStatus::Success)
+            }
+        })
         .count();
 
     let ended_at = Utc::now();
@@ -647,6 +655,7 @@ pub async fn write_worker_mcp_config(
 pub async fn build_sublead_mcp_config(
     sublead_id: &str,
     socket: &std::path::Path,
+    run_subdir: &std::path::Path,
 ) -> Result<PathBuf> {
     use crate::dispatch::runner::SUBLEAD_MCP_TOOLS;
 
@@ -669,10 +678,8 @@ pub async fn build_sublead_mcp_config(
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
 
-    // Create a temp file for the sublead's mcp-config
-    // Path: {run_subdir}/sublead-{sublead_id}-mcp-config.json
     let mcp_config_path =
-        std::env::temp_dir().join(format!("sublead-{}-mcp-config.json", sublead_id));
+        run_subdir.join(format!("sublead-{sublead_id}-mcp-config.json"));
     tokio::fs::write(&mcp_config_path, bytes).await?;
     Ok(mcp_config_path)
 }

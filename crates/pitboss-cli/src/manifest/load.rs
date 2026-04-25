@@ -118,6 +118,9 @@ fn expand_paths(m: &mut Manifest) -> Result<()> {
     for t in &mut m.tasks {
         t.directory = expand(&t.directory)?;
     }
+    for l in &mut m.leads {
+        l.directory = expand(&l.directory)?;
+    }
     if let Some(dir) = &m.run.run_dir {
         m.run.run_dir = Some(expand(dir)?);
     }

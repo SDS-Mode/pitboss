@@ -224,7 +224,7 @@ async fn emit_with_retry(
                 );
                 return Err(e);
             }
-            Err(e) if attempt < 2 => {
+            Err(e) if attempt < backoffs.len() - 1 => {
                 tracing::warn!(
                     attempt = attempt + 1,
                     delay_ms,

@@ -12,6 +12,7 @@ use pitboss_core::store::{
     JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus,
 };
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
@@ -245,6 +246,9 @@ pub async fn execute(
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
     let records: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    // Tracks whether the cancel drain was triggered by halt_on_failure logic
+    // (not by a user signal), so was_interrupted is not set in that case.
+    let halt_drained: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Build notification router if manifest has any [[notification]] sections.
     let notification_router = if !resolved.notifications.is_empty() {
@@ -324,6 +328,7 @@ pub async fn execute(
             crate::manifest::schema::WorktreeCleanup::Never => CleanupPolicy::Never,
         };
         let table = table.clone();
+        let halt_drained = halt_drained.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
@@ -348,6 +353,7 @@ pub async fn execute(
             }
             records.lock().await.push(record);
             if failed && halt_on_failure {
+                halt_drained.store(true, Ordering::Relaxed);
                 cancel.drain();
             }
         }));
@@ -377,7 +383,8 @@ pub async fn execute(
         total_duration_ms: (ended_at - started_at).num_milliseconds(),
         tasks_total: records.len(),
         tasks_failed,
-        was_interrupted: cancel.is_draining() || cancel.is_terminated(),
+        was_interrupted: (cancel.is_draining() || cancel.is_terminated())
+            && !halt_drained.load(Ordering::Relaxed),
         tasks: records,
     };
     store.finalize_run(&summary).await?;
@@ -917,7 +924,7 @@ async fn expire_layer_approvals(
             Some(ttl_secs) => {
                 let age = (now - queue[i].created_at).num_seconds() as u64;
                 let fallback = queue[i].fallback.unwrap_or(ApprovalFallback::Block);
-                age > ttl_secs && !matches!(fallback, ApprovalFallback::Block)
+                age >= ttl_secs && !matches!(fallback, ApprovalFallback::Block)
             }
             None => false,
         };
@@ -966,7 +973,7 @@ async fn expire_layer_approvals(
                     return None;
                 }
                 let age = (now - entry.created_at).num_seconds() as u64;
-                if age > ttl {
+                if age >= ttl {
                     Some(id.clone())
                 } else {
                     None
