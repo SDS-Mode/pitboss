@@ -270,12 +270,18 @@ const DETAIL_VISIBLE_ROWS: usize = 40;
 fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Action {
     match (state.mode.clone(), mouse.kind) {
         // Wheel scroll inside Detail view — 5 rows/tick, matches J/K
-        // shift-scroll cadence.
+        // shift-scroll cadence. ScrollUp while already at the top of the
+        // log acts as "zoom out" — exits Detail back to the grid —
+        // symmetric with scroll-to-zoom-in from the grid (below).
+        (Mode::Detail { scroll, .. }, MouseEventKind::ScrollUp) => {
+            if scroll == 0 {
+                state.exit_detail();
+            } else {
+                state.detail_scroll_up(5);
+            }
+        }
         (Mode::Detail { .. }, MouseEventKind::ScrollDown) => {
             state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
-        }
-        (Mode::Detail { .. }, MouseEventKind::ScrollUp) => {
-            state.detail_scroll_up(5);
         }
         // Right-click inside Detail view exits back to the grid —
         // symmetric with Esc, easier than reaching for the keyboard.
@@ -295,6 +301,16 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
                     // path at the top of the event loop.
                     let _ = tile;
                 }
+                state.enter_detail();
+            }
+        }
+        // Wheel scroll over a tile in the grid: "zoom in" — focus the
+        // tile under the cursor and enter Detail. Either scroll direction
+        // performs the gesture. Scroll outside any tile is a no-op. The
+        // symmetric "zoom out" is the scroll-up-at-top branch above.
+        (Mode::Normal, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) => {
+            if let Some(idx) = state.tile_at(mouse.column, mouse.row) {
+                state.focus = idx;
                 state.enter_detail();
             }
         }
