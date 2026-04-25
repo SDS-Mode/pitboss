@@ -464,9 +464,10 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
                     .exit_code
                     .map_or_else(|| "—".to_string(), |c| c.to_string());
 
-                let ended_str = tile
-                    .completed_at
-                    .map_or_else(|| "—".to_string(), |t| t.format("%m-%d %H:%M:%S").to_string());
+                let ended_str = tile.completed_at.map_or_else(
+                    || "—".to_string(),
+                    |t| t.format("%m-%d %H:%M:%S").to_string(),
+                );
 
                 // Row y-position for hit rect: table_area.y + header(1) + row_pos,
                 // adjusted for scroll. We store it and populate hit_rects below.
