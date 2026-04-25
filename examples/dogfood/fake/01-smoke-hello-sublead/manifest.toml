@@ -11,9 +11,11 @@
 # by crates/pitboss-cli/tests/e2e_sublead_flows.rs.
 
 [run]
-max_parallel = 2
+max_parallel_tasks = 2
 
 [lead]
+id = "01-smoke-hello-sublead"
+directory = "."
 prompt = "Spawn one sub-lead for phase-A work, wait for it to finish, then exit."
 model = "claude-haiku-4-5"
 budget_usd = 10.0
@@ -24,7 +26,7 @@ max_subleads = 2
 max_sublead_budget_usd = 2.00
 use_worktree = false
 
-[lead.sublead_defaults]
+[sublead_defaults]
 budget_usd = 1.00
 max_workers = 2
 lead_timeout_secs = 600

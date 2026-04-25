@@ -29,9 +29,6 @@ readonly  = true
 
 # ── Run caps ─────────────────────────────────────────────────────────────────
 [run]
-max_workers       = 3
-budget_usd        = 0.50
-lead_timeout_secs = 180
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 [defaults]
@@ -39,7 +36,10 @@ model        = "claude-haiku-4-5"
 use_worktree = false
 
 # ── Lead ──────────────────────────────────────────────────────────────────────
-[[lead]]
+[lead]
+max_workers       = 3
+budget_usd        = 0.50
+lead_timeout_secs = 180
 id        = "container-smoke-lead"
 directory = "/project"
 prompt    = """

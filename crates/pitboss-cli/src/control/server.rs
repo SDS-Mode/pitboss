@@ -1023,7 +1023,7 @@ mod tests {
 
     fn mk_state(dir: &Path, run_id: Uuid) -> Arc<DispatchState> {
         let manifest = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -1033,7 +1033,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(1.0),
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -1398,7 +1398,7 @@ mod tests {
         let sub_w1 = pitboss_core::session::CancelToken::new();
         let sub_w2 = pitboss_core::session::CancelToken::new();
         let sub_manifest = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::Never,
@@ -1408,7 +1408,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(50.0),
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,

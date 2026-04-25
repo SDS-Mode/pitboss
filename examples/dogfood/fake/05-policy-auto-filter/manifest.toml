@@ -14,9 +14,11 @@
 #   4. Operator approval queue only contains non-auto-approved requests (S2 tool-use, S1 plan).
 
 [run]
-max_parallel = 8
+max_parallel_tasks = 8
 
 [lead]
+id = "05-policy-auto-filter"
+directory = "."
 prompt = "Spawn two sub-leads (S1 and S2). S1 will make routine tool-use approvals; S2 will make the same requests. The operator has configured a policy that auto-approves S1's tool-use but requires operator review for all plan approvals."
 model = "claude-haiku-4-5"
 budget_usd = 10.00

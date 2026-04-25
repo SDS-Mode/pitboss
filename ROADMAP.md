@@ -106,6 +106,15 @@ item.
 
 ## Ops / infra polish
 
+- **`pitboss schema --format=n8n-form` export.** Emit the manifest
+  field set as an n8n-style form-field JSON descriptor (`fieldLabel`,
+  `fieldType`, `requiredField`, `defaultValue`, `fieldOptions.values`
+  for enums) so a form-builder UI (n8n Form Trigger node, custom
+  React frontend, etc.) can drive operator manifest entry without
+  re-implementing field knowledge. Depends on the field-metadata
+  derive layer landing as part of the manifest TOML redesign initiative.
+  **Status:** scoped, deferred from the redesign initiative; reserved
+  for its own PR once the metadata layer ships.
 - **MCP protocol extensions.** We only implement `tools`. Adding
   `resources` + `prompts` would be cheap and makes pitboss a more
   complete MCP citizen — useful if we ever expose it to non-claude

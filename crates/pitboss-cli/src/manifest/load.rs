@@ -4,64 +4,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::resolve::{resolve, resolve_single_lead, ResolvedManifest};
-use super::schema::{Manifest, SingleLeadManifest};
-use super::validate::{validate, validate_skip_dir_check};
+use super::resolve::{resolve, ResolvedManifest};
+use super::schema::Manifest;
+use super::validate::{translate_legacy_parse_error, validate, validate_skip_dir_check};
 
 /// Load, parse, resolve, and validate a manifest from disk.
 ///
-/// Supports two TOML shapes:
-/// - `[[lead]]` / `[[task]]` array form (`Manifest`) — the v0.3–v0.5 format.
-/// - `[lead]` single-table form (`SingleLeadManifest`) — the v0.6 depth-2
-///   convenience format.  Tried as a fallback when the primary parse fails.
-pub fn load_manifest(path: &Path, env_max_parallel: Option<u32>) -> Result<ResolvedManifest> {
+/// v0.9: a single canonical TOML shape (`[lead]` single-table for hierarchical
+/// mode; `[[task]]` array for flat mode). The v0.8 `[[lead]]` array form is
+/// gone; manifests using it are rejected with a migration message.
+pub fn load_manifest(path: &Path, env_max_parallel_tasks: Option<u32>) -> Result<ResolvedManifest> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading manifest at {}", path.display()))?;
-
-    // Try the primary `[[lead]]`/`[[task]]` array format first.
-    match toml::from_str::<Manifest>(&text) {
-        Ok(mut manifest) => {
-            expand_paths(&mut manifest)?;
-            let resolved = resolve(manifest, env_max_parallel)?;
-            validate(&resolved)?;
-            Ok(resolved)
-        }
-        Err(primary_err) => {
-            // Fall back to the v0.6 single-table `[lead]` format ONLY when the
-            // error is the characteristic "map, expected a sequence" mismatch
-            // that occurs when the author writes `[lead]` instead of `[[lead]]`.
-            // All other errors (unknown keys, missing required fields, etc.) are
-            // reported as-is so they don't silently produce surprising results.
-            let err_str = primary_err.to_string();
-            let is_lead_type_mismatch =
-                err_str.contains("expected a sequence") || err_str.contains("invalid type: map");
-            if !is_lead_type_mismatch {
-                return Err(primary_err)
-                    .with_context(|| format!("parsing manifest at {}", path.display()));
-            }
-            let single: SingleLeadManifest = toml::from_str(&text).with_context(|| {
-                format!(
-                    "parsing manifest at {} as single-lead format (primary error: {primary_err})",
-                    path.display()
-                )
-            })?;
-            let resolved = resolve_single_lead(single, env_max_parallel)?;
-            // The full validate() pipeline assumes a real git work-tree and a
-            // populated lead id, neither of which the single-lead form
-            // guarantees (it uses CWD + an empty id sentinel). Skip the
-            // structure-shape checks but run the manifest-shape checks that
-            // are universally applicable — currently just the sublead-defaults
-            // adequacy check, which catches the
-            // "allow_subleads = true with no fallback" footgun that would
-            // otherwise blow up at the first spawn_sublead call.
-            //
-            // Add similar shape-only checks here as they get factored out of
-            // validate() — the goal is parity between the two manifest forms
-            // for everything that doesn't require real on-disk state.
-            super::validate::validate_sublead_defaults_adequate(&resolved)?;
-            Ok(resolved)
-        }
-    }
+    let mut manifest: Manifest = toml::from_str(&text).map_err(|e| {
+        translate_legacy_parse_error(&e, &text)
+            .unwrap_or_else(|| anyhow::anyhow!("parsing manifest at {}: {e}", path.display()))
+    })?;
+    expand_paths(&mut manifest)?;
+    let resolved = resolve(manifest, env_max_parallel_tasks)?;
+    validate(&resolved)?;
+    Ok(resolved)
 }
 
 /// Like `load_manifest` but skips the directory-existence check.
@@ -69,56 +31,39 @@ pub fn load_manifest(path: &Path, env_max_parallel: Option<u32>) -> Result<Resol
 /// are container-side paths that don't exist on the host.
 pub fn load_manifest_skip_dir_check(
     path: &Path,
-    env_max_parallel: Option<u32>,
+    env_max_parallel_tasks: Option<u32>,
 ) -> Result<ResolvedManifest> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading manifest at {}", path.display()))?;
-
-    match toml::from_str::<Manifest>(&text) {
-        Ok(mut manifest) => {
-            expand_paths(&mut manifest)?;
-            let resolved = resolve(manifest, env_max_parallel)?;
-            validate_skip_dir_check(&resolved)?;
-            Ok(resolved)
-        }
-        Err(primary_err) => {
-            let err_str = primary_err.to_string();
-            let is_lead_type_mismatch =
-                err_str.contains("expected a sequence") || err_str.contains("invalid type: map");
-            if !is_lead_type_mismatch {
-                return Err(primary_err)
-                    .with_context(|| format!("parsing manifest at {}", path.display()));
-            }
-            let single: SingleLeadManifest = toml::from_str(&text).with_context(|| {
-                format!(
-                    "parsing manifest at {} as single-lead format (primary error: {primary_err})",
-                    path.display()
-                )
-            })?;
-            let resolved = resolve_single_lead(single, env_max_parallel)?;
-            super::validate::validate_sublead_defaults_adequate(&resolved)?;
-            Ok(resolved)
-        }
-    }
+    let mut manifest: Manifest = toml::from_str(&text).map_err(|e| {
+        translate_legacy_parse_error(&e, &text)
+            .unwrap_or_else(|| anyhow::anyhow!("parsing manifest at {}: {e}", path.display()))
+    })?;
+    expand_paths(&mut manifest)?;
+    let resolved = resolve(manifest, env_max_parallel_tasks)?;
+    validate_skip_dir_check(&resolved)?;
+    Ok(resolved)
 }
 
-/// Load, parse, and resolve a v0.6 single-table `[lead]` manifest from a TOML
-/// string. Skips `validate` so callers (integration tests) can work without
-/// real git work-trees and real filesystem directories.
+/// Load, parse, and resolve a manifest from a TOML string. Skips `validate`
+/// so callers (integration tests) can work without real git work-trees and
+/// real filesystem directories.
 ///
 /// Use this when testing manifest parsing/resolution in isolation. For
 /// production use, prefer `load_manifest` which also validates the result.
 pub fn load_manifest_from_str(toml_src: &str) -> Result<ResolvedManifest> {
-    let manifest: SingleLeadManifest =
-        toml::from_str(toml_src).with_context(|| "parsing single-lead manifest from string")?;
-    resolve_single_lead(manifest, None)
+    let manifest: Manifest = toml::from_str(toml_src).map_err(|e| {
+        translate_legacy_parse_error(&e, toml_src)
+            .unwrap_or_else(|| anyhow::anyhow!("parsing manifest from string: {e}"))
+    })?;
+    resolve(manifest, None)
 }
 
 fn expand_paths(m: &mut Manifest) -> Result<()> {
     for t in &mut m.tasks {
         t.directory = expand(&t.directory)?;
     }
-    for l in &mut m.leads {
+    if let Some(l) = &mut m.lead {
         l.directory = expand(&l.directory)?;
     }
     if let Some(dir) = &m.run.run_dir {

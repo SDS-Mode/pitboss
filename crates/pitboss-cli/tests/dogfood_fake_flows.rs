@@ -71,11 +71,11 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         allow_subleads: true,
         max_subleads: None,
         max_sublead_budget_usd: None,
-        max_workers_across_tree: None,
+        max_total_workers: None,
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
-        max_parallel: 8,
+        max_parallel_tasks: 8,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -85,7 +85,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         max_workers: Some(20),
         budget_usd: Some(20.0),
         lead_timeout_secs: None,
-        approval_policy: None,
+        default_approval_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -1019,11 +1019,11 @@ async fn dogfood_envelope_cap_rejection() {
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: Some(3.0), // ← Cap: max $3 per sub-lead
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
-            max_parallel: 8,
+            max_parallel_tasks: 8,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: pitboss_cli::manifest::schema::WorktreeCleanup::OnSuccess,
@@ -1033,7 +1033,7 @@ async fn dogfood_envelope_cap_rejection() {
             max_workers: Some(20),
             budget_usd: Some(20.0),
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,

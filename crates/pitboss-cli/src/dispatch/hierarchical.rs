@@ -127,7 +127,7 @@ pub async fn run_hierarchical(
         wt_mgr.clone(),
         cleanup_policy,
         run_subdir.clone(),
-        resolved.approval_policy.unwrap_or_default(),
+        resolved.default_approval_policy.unwrap_or_default(),
         notification_router,
         {
             let s = std::sync::Arc::new(crate::shared_store::SharedStore::new());

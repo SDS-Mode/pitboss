@@ -29,17 +29,14 @@
 
 # Hierarchical-mode worker cap (1-16). REQUIRED when [[lead]] is set.
 # Caps lead's dynamic fanout, independent of max_parallel.
-max_workers = 3
 
 # Hierarchical-mode budget (floating USD). REQUIRED when [[lead]] is set.
 # Reservation accounting: each spawn reserves a model-aware estimate
 # up front; `spawn_worker` returns "budget exceeded" once
 # spent + reserved + next_estimate > budget_usd.
-budget_usd = 1.50
 
 # Hierarchical-mode wall-clock cap on the lead (seconds). No hard upper
 # bound — set generously for multi-hour runs. Default 3600.
-lead_timeout_secs = 900
 
 # Stop flat-mode runs on first failure. Default false. Ignored in
 # hierarchical mode (leads decide their own retry semantics).
@@ -170,7 +167,10 @@ use_worktree = true
 #
 # Workers get a narrower set: just the 7 kv_* / lease_* tools.
 
-[[lead]]
+[lead]
+max_workers = 3
+budget_usd = 1.50
+lead_timeout_secs = 900
 id = "example-lead"
 directory = "/tmp/pitboss-example"  # must exist; set `use_worktree = false` or be a git repo
 branch = "example/lead"

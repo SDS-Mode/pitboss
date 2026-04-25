@@ -96,7 +96,7 @@ pub fn headless_approval_gate_warnings(manifest: &ResolvedManifest) -> Vec<Strin
     // `approval_policy` defaults to `Block` when unset, so both None and
     // Some(Block) trigger the warning.
     let policy_blocks = matches!(
-        manifest.approval_policy,
+        manifest.default_approval_policy,
         None | Some(crate::dispatch::state::ApprovalPolicy::Block)
     );
     if policy_blocks {
@@ -241,7 +241,7 @@ pub async fn execute(
         table.lock().await.register(&t.id);
     }
 
-    let semaphore = Arc::new(Semaphore::new(resolved.max_parallel as usize));
+    let semaphore = Arc::new(Semaphore::new(resolved.max_parallel_tasks as usize));
     let cancel = CancelToken::new();
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
@@ -288,7 +288,7 @@ pub async fn execute(
         wt_mgr.clone(),
         cleanup_policy_from(resolved.worktree_cleanup),
         run_subdir.clone(),
-        resolved.approval_policy.unwrap_or_default(),
+        resolved.default_approval_policy.unwrap_or_default(),
         notification_router,
         shared_store.clone(),
     ));
@@ -1057,7 +1057,7 @@ mod tests {
 
     fn minimal_manifest() -> ResolvedManifest {
         ResolvedManifest {
-            max_parallel: 1,
+            max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: PathBuf::from("/tmp/pitboss-test"),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::OnSuccess,
@@ -1067,7 +1067,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: Some(crate::dispatch::state::ApprovalPolicy::AutoApprove),
+            default_approval_policy: Some(crate::dispatch::state::ApprovalPolicy::AutoApprove),
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -1100,7 +1100,7 @@ mod tests {
     #[test]
     fn headless_warnings_flag_block_default_when_unset() {
         let mut manifest = minimal_manifest();
-        manifest.approval_policy = None;
+        manifest.default_approval_policy = None;
         let warnings = headless_approval_gate_warnings(&manifest);
         assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
         assert!(warnings[0].contains("approval_policy"));
@@ -1109,7 +1109,7 @@ mod tests {
     #[test]
     fn headless_warnings_flag_block_policy_explicit() {
         let mut manifest = minimal_manifest();
-        manifest.approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
+        manifest.default_approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
         let warnings = headless_approval_gate_warnings(&manifest);
         assert_eq!(warnings.len(), 1, "expected one warning: {:?}", warnings);
         assert!(warnings[0].contains("approval_policy"));
@@ -1131,7 +1131,7 @@ mod tests {
     fn headless_warnings_stack_when_multiple_gates_present() {
         let mut manifest = minimal_manifest();
         manifest.require_plan_approval = true;
-        manifest.approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
+        manifest.default_approval_policy = Some(crate::dispatch::state::ApprovalPolicy::Block);
         let warnings = headless_approval_gate_warnings(&manifest);
         assert_eq!(warnings.len(), 2, "expected two warnings: {:?}", warnings);
     }
@@ -1172,7 +1172,7 @@ mod tests {
         let run_dir = TempDir::new().unwrap();
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
-            max_parallel: 2,
+            max_parallel_tasks: 2,
             halt_on_failure: false,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
@@ -1209,7 +1209,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -1289,7 +1289,7 @@ mod tests {
         };
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
-            max_parallel: 1, // serialize so ordering is deterministic
+            max_parallel_tasks: 1, // serialize so ordering is deterministic
             halt_on_failure: true,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
@@ -1299,7 +1299,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -1365,7 +1365,7 @@ mod tests {
         let run_dir = TempDir::new().unwrap();
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
-            max_parallel: 1,
+            max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
@@ -1402,7 +1402,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -1533,7 +1533,7 @@ mod tests {
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: None,
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         };
         let cfg = PathBuf::from("/tmp/cfg.json");
@@ -1597,7 +1597,7 @@ mod tests {
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
@@ -1628,7 +1628,7 @@ mod tests {
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
@@ -1670,7 +1670,7 @@ mod tests {
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: None,
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         };
         let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
@@ -1863,7 +1863,7 @@ mod tests {
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         };
         let cfg = PathBuf::from("/tmp/cfg.json");

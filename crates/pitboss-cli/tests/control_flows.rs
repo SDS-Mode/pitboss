@@ -35,7 +35,7 @@ async fn pause_op_writes_events_jsonl() {
     let run_subdir = dir.path().join(run_id.to_string());
     tokio::fs::create_dir_all(&run_subdir).await.unwrap();
     let manifest = ResolvedManifest {
-        max_parallel: 4,
+        max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -45,7 +45,7 @@ async fn pause_op_writes_events_jsonl() {
         max_workers: Some(4),
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
-        approval_policy: Some(ApprovalPolicy::Block),
+        default_approval_policy: Some(ApprovalPolicy::Block),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -239,7 +239,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
     let dir = TempDir::new().unwrap();
     let run_id = uuid::Uuid::now_v7();
     let manifest = ResolvedManifest {
-        max_parallel: 4,
+        max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -249,7 +249,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         max_workers: Some(4),
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
-        approval_policy: Some(ApprovalPolicy::Block),
+        default_approval_policy: Some(ApprovalPolicy::Block),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -352,7 +352,7 @@ async fn auto_approve_policy_responds_without_tui() {
     let dir = TempDir::new().unwrap();
     let run_id = uuid::Uuid::now_v7();
     let manifest = ResolvedManifest {
-        max_parallel: 4,
+        max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -362,7 +362,7 @@ async fn auto_approve_policy_responds_without_tui() {
         max_workers: Some(4),
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
-        approval_policy: Some(ApprovalPolicy::AutoApprove),
+        default_approval_policy: Some(ApprovalPolicy::AutoApprove),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -412,7 +412,7 @@ async fn auto_reject_policy_responds_without_tui() {
     let dir = TempDir::new().unwrap();
     let run_id = uuid::Uuid::now_v7();
     let manifest = ResolvedManifest {
-        max_parallel: 4,
+        max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -422,7 +422,7 @@ async fn auto_reject_policy_responds_without_tui() {
         max_workers: Some(4),
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
-        approval_policy: Some(ApprovalPolicy::AutoReject),
+        default_approval_policy: Some(ApprovalPolicy::AutoReject),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -480,7 +480,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
     let run_subdir = dir.path().join(run_id.to_string());
     tokio::fs::create_dir_all(&run_subdir).await.unwrap();
     let manifest = ResolvedManifest {
-        max_parallel: 4,
+        max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -490,7 +490,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         max_workers: Some(4),
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
-        approval_policy: Some(ApprovalPolicy::Block),
+        default_approval_policy: Some(ApprovalPolicy::Block),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: true,

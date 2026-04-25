@@ -1,5 +1,42 @@
 #![allow(dead_code)]
 
+//! Manifest TOML schema (v0.9 redesign).
+//!
+//! ## Overview
+//!
+//! A pitboss manifest is a single TOML file describing one dispatch run. The
+//! v0.9 schema collapses the previous dual-form layout (`[[lead]]` array vs
+//! `[lead]` single-table) into a single canonical shape and relocates fields
+//! to where they belong semantically. Pre-v1; older manifests must be migrated.
+//!
+//! ## Section reference (one source of truth)
+//!
+//! | TOML path                 | Type                  | Required | Notes                                                 |
+//! |---------------------------|-----------------------|----------|-------------------------------------------------------|
+//! | `[run]`                   | `RunConfig`           | no       | Run-wide infrastructure config                        |
+//! | `[defaults]`              | `Defaults`            | no       | Per-actor inheritable knobs (model, tools, env, ...)  |
+//! | `[[task]]`                | `Task`                | flat-mode | One-or-more tasks; mutually exclusive with `[lead]`  |
+//! | `[lead]`                  | `Lead`                | hier-mode | Exactly one root lead; mutually exclusive with task  |
+//! | `[sublead_defaults]`      | `SubleadDefaults`     | no       | Defaults applied to `spawn_sublead` calls            |
+//! | `[container]`             | `ContainerConfig`     | no       | Enables `pitboss container-dispatch`                  |
+//! | `[[container.mount]]`     | `MountSpec`           | no       | Bind mounts (when `[container]` set)                  |
+//! | `[[mcp_server]]`          | `McpServerSpec`       | no       | External MCP servers injected into all actors        |
+//! | `[[notification]]`        | `NotificationConfig`  | no       | Notification sinks                                   |
+//! | `[[approval_policy]]`     | `ApprovalRuleSpec`    | no       | Declarative approval rules (matched in order)        |
+//! | `[[template]]`            | `Template`            | no       | Prompt templates referenced by `[[task]]`            |
+//!
+//! ## Migration from v0.8 → v0.9
+//!
+//! - `[[lead]]` (array form) → `[lead]` (single-table; no array)
+//! - `[run].max_workers` → `[lead].max_workers`
+//! - `[run].budget_usd` → `[lead].budget_usd`
+//! - `[run].lead_timeout_secs` → `[lead].lead_timeout_secs`
+//! - `[run].max_parallel` → `[run].max_parallel_tasks`
+//! - `[run].approval_policy` → `[run].default_approval_policy`
+//! - `[lead].max_workers_across_tree` → `[lead].max_total_workers`
+//! - `[lead.sublead_defaults]` → top-level `[sublead_defaults]`
+//! - `[lead].id` and `[lead].directory` are now REQUIRED (no cwd default)
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -88,6 +125,8 @@ pub struct McpServerSpec {
     pub env: HashMap<String, String>,
 }
 
+/// Top-level manifest. One canonical shape: either flat-mode (`[[task]]`) or
+/// hierarchical-mode (`[lead]`), mutually exclusive.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -99,19 +138,26 @@ pub struct Manifest {
     pub templates: Vec<Template>,
     #[serde(default, rename = "task")]
     pub tasks: Vec<Task>,
-    #[serde(default, rename = "lead")]
-    pub leads: Vec<Lead>,
-    /// Notification sinks (v0.4.1+). Parsed as [[notification]] sections.
+    /// Single-table `[lead]` for hierarchical mode. Exactly one is required
+    /// when no `[[task]]` is declared. The v0.8 `[[lead]]` array form is gone.
+    #[serde(default)]
+    pub lead: Option<Lead>,
+    /// Top-level `[sublead_defaults]` (promoted from the v0.8
+    /// `[lead.sublead_defaults]` subtable). Applied to `spawn_sublead`
+    /// calls that omit the corresponding fields.
+    #[serde(default)]
+    pub sublead_defaults: Option<SubleadDefaults>,
+    /// Notification sinks. Parsed as `[[notification]]` sections.
     #[serde(default, rename = "notification")]
     pub notification: Vec<crate::notify::config::NotificationConfig>,
-    /// Approval policy rules (v0.6+). Parsed as [[approval_policy]] sections.
+    /// Approval policy rules. Parsed as `[[approval_policy]]` sections.
     /// Rules are evaluated in declaration order; first match wins.
     #[serde(default, rename = "approval_policy")]
     pub approval_policy_rules: Vec<ApprovalRuleSpec>,
     /// Optional container config for `pitboss container-dispatch`.
     #[serde(default)]
     pub container: Option<ContainerConfig>,
-    /// External MCP servers injected into all actor configs (v0.9+).
+    /// External MCP servers injected into all actor configs.
     #[serde(default, rename = "mcp_server")]
     pub mcp_servers: Vec<McpServerSpec>,
 }
@@ -135,37 +181,39 @@ pub struct ApprovalMatchSpec {
     pub cost_over: Option<f64>,
 }
 
+/// Run-wide infrastructure config (NOT lead-specific).
+///
+/// Lead-specific caps moved to `[lead]` in v0.9 (`max_workers`, `budget_usd`,
+/// `lead_timeout_secs`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
-    pub max_parallel: Option<u32>,
+    /// Concurrency cap for `[[task]]` flat mode. Renamed from `max_parallel`
+    /// in v0.9. Overridden by `ANTHROPIC_MAX_CONCURRENT` env var. Default: 4.
+    pub max_parallel_tasks: Option<u32>,
+    /// Stop flat-mode runs on first failure. Ignored in hierarchical mode.
     #[serde(default)]
     pub halt_on_failure: bool,
+    /// Where run artifacts land. Default `~/.local/share/pitboss/runs`.
     pub run_dir: Option<PathBuf>,
+    /// Worktree-cleanup policy. Default: `on_success`.
     #[serde(default = "default_cleanup")]
     pub worktree_cleanup: WorktreeCleanup,
+    /// Write an event-stream JSONL alongside `summary.jsonl`. Default off.
     #[serde(default)]
     pub emit_event_stream: bool,
-
-    // NEW in v0.3 — only meaningful when [[lead]] is present.
+    /// Default approval-policy action when no TUI is attached and no
+    /// `[[approval_policy]]` rule matches. Renamed from `approval_policy`
+    /// in v0.9 to disambiguate from the rules array. One of:
+    /// `"block"` (default), `"auto_approve"`, `"auto_reject"`.
     #[serde(default)]
-    pub max_workers: Option<u32>,
-    #[serde(default)]
-    pub budget_usd: Option<f64>,
-    #[serde(default)]
-    pub lead_timeout_secs: Option<u64>,
-
-    // NEW in v0.4 — approval policy for when no TUI is attached.
-    #[serde(default)]
-    pub approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
-
-    // NEW in v0.4.2 — write shared-store.json on finalize for post-mortem.
+    pub default_approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
+    /// Dump the shared store (`/ref/*`, `/peer/*`, `/shared/*`, `/leases/*`)
+    /// to `<run-dir>/shared-store.json` on finalize.
     #[serde(default)]
     pub dump_shared_store: bool,
-
-    // NEW in v0.4.5 — when true, the lead must call `propose_plan` and have
-    // the resulting plan approved before any `spawn_worker` call succeeds.
-    // Default off so existing runs behave unchanged.
+    /// When true, the lead must call `propose_plan` and have the resulting
+    /// plan approved before any `spawn_worker` succeeds.
     #[serde(default)]
     pub require_plan_approval: bool,
 }
@@ -173,15 +221,12 @@ pub struct RunConfig {
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
-            max_parallel: None,
+            max_parallel_tasks: None,
             halt_on_failure: false,
             run_dir: None,
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
-            max_workers: None,
-            budget_usd: None,
-            lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             dump_shared_store: false,
             require_plan_approval: false,
         }
@@ -248,12 +293,29 @@ pub struct Task {
     pub env: HashMap<String, String>,
 }
 
+/// Single canonical lead shape (v0.9). Replaces the v0.8 `[[lead]]`/`[lead]` split.
+///
+/// Lead-level caps that previously lived under `[run]` (`max_workers`,
+/// `budget_usd`, `lead_timeout_secs`) live here in v0.9 — they're properties
+/// of the lead, not the run.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lead {
+    /// Unique slug for the lead (used as the TUI tile label and in run
+    /// artifact paths). Required in v0.9 — no cwd-derived default.
     pub id: String,
+    /// Working directory for the lead's claude subprocess. Required in v0.9
+    /// — no cwd-derived default. Tilde expansion is performed at load time.
     pub directory: PathBuf,
+    /// Operator prompt for the lead. Required.
+    ///
+    /// **Important:** in TOML, `prompt =` MUST appear before any subtable
+    /// declaration. A `prompt =` placed after a subtable header is silently
+    /// reassigned to that subtable's scope; `pitboss validate` catches the
+    /// resulting empty prompt and reports it.
     pub prompt: String,
+
+    /// Branch name for the lead's worktree. Auto-generated if omitted.
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -268,119 +330,51 @@ pub struct Lead {
     pub use_worktree: Option<bool>,
     #[serde(default)]
     pub env: HashMap<String, String>,
-}
 
-/// v0.6 single-table manifest variant. Used by `load_manifest_from_str` when
-/// the TOML author writes `[lead]` (one table) instead of `[[lead]]` (array).
-/// Carries all per-run settings under `[run]` and per-lead settings (including
-/// depth-2 caps) under `[lead]`.
-///
-/// `deny_unknown_fields` is intentional: without it, a typo'd top-level
-/// section (e.g. `[default]` instead of `[defaults]`) silently disappears
-/// at parse time and the operator only finds out at dispatch — too late.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SingleLeadManifest {
+    // ── Lead-level caps (moved from [run] in v0.9) ───────────────────────
+    /// Hard cap on the lead's concurrent + queued worker pool (1–16).
     #[serde(default)]
-    pub run: RunConfig,
-    /// Per-actor defaults (model, env, tools, etc.). Merged into `[lead]`
-    /// during resolution; `[lead]` values override on collision. The
-    /// array-form `Manifest` already carries this; the single-table form
-    /// gained it in the same release that added the `[lead]` form.
+    pub max_workers: Option<u32>,
+    /// Soft cap on lead's spend (USD) with reservation accounting.
+    /// `spawn_worker` fails with `budget exceeded` once
+    /// `spent + reserved + next_estimate > budget`.
     #[serde(default)]
-    pub defaults: Defaults,
-    /// Single-table `[lead]` block.
-    pub lead: Option<LeadSpec>,
-    /// Notification sinks (v0.4.1+). Parsed as [[notification]] sections.
-    #[serde(default, rename = "notification")]
-    pub notification: Vec<crate::notify::config::NotificationConfig>,
-    /// Approval policy rules (v0.6+).
-    #[serde(default, rename = "approval_policy")]
-    pub approval_policy_rules: Vec<ApprovalRuleSpec>,
-    /// Optional container config for `pitboss container-dispatch`.
+    pub budget_usd: Option<f64>,
+    /// Wall-clock cap on the lead session (seconds). Distinct from
+    /// `timeout_secs` (which becomes the claude `--timeout` flag for
+    /// per-actor subprocess wall-clock). Default 3600 if unset.
     #[serde(default)]
-    pub container: Option<ContainerConfig>,
-    /// External MCP servers injected into all actor configs (v0.9+).
-    #[serde(default, rename = "mcp_server")]
-    pub mcp_servers: Vec<McpServerSpec>,
-}
+    pub lead_timeout_secs: Option<u64>,
 
-/// v0.6 single-table `[lead]` schema. Used when the manifest author writes
-/// `[lead]` (one table) rather than `[[lead]]` (array). Carries the new
-/// depth-2 cap fields in addition to the v0.5 per-lead fields.
-///
-/// Defaults to a "no-op" state so existing manifests without this block
-/// continue to work identically.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LeadSpec {
-    pub prompt: Option<String>,
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<Effort>,
-    #[serde(default)]
-    pub tools: Option<Vec<String>>,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-    #[serde(default)]
-    pub use_worktree: Option<bool>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-
-    /// v0.8: how claude's built-in tool-permission gate is handled.
-    /// `"path_a"` (default): `CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypasses the gate entirely.
-    /// `"path_b"`: pitboss registers a `permission_prompt` MCP tool; claude routes
-    /// each permission check through it and into pitboss's approval queue / TUI.
+    // ── v0.8 permission routing ──────────────────────────────────────────
+    /// `"path_a"` (default): `CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypasses claude's
+    /// built-in gate; pitboss is sole authority via its approval queue.
+    /// `"path_b"`: pitboss registers a `permission_prompt` MCP tool;
+    /// claude routes each permission check through it.
     #[serde(default)]
     pub permission_routing: PermissionRouting,
 
-    /// v0.6: when true, root lead's MCP toolset includes `spawn_sublead`.
-    /// Defaults to false for v0.5 backward compatibility.
+    // ── v0.6 depth-2 controls ────────────────────────────────────────────
+    /// When true, `spawn_sublead` is included in the lead's MCP toolset.
     #[serde(default)]
     pub allow_subleads: bool,
-
-    /// v0.6: hard cap on total live sub-leads under this root.
+    /// Hard cap on total live sub-leads under this root.
     #[serde(default)]
     pub max_subleads: Option<u32>,
-
-    /// v0.6: hard cap on per-sub-lead budget envelope (USD).
+    /// Hard cap on per-sub-lead budget envelope (USD).
     #[serde(default)]
     pub max_sublead_budget_usd: Option<f64>,
-
-    /// v0.6: hard cap on total live workers across the entire tree
-    /// (sum of root-level workers + all sub-tree workers).
+    /// Hard cap on total live workers across the entire tree (root + sub-trees).
+    /// Renamed from `max_workers_across_tree` in v0.9.
     #[serde(default)]
-    pub max_workers_across_tree: Option<u32>,
-
-    /// v0.6: optional defaults applied when `spawn_sublead` omits a param.
-    #[serde(default)]
-    pub sublead_defaults: Option<SubleadDefaultsSpec>,
-
-    // ── Tolerated-but-unused fields ────────────────────────────────────
-    //
-    // These belong on `[run]`, not `[lead]`, and have been silently
-    // dropped when placed on `[lead]` in manifests since the field was
-    // introduced. `deny_unknown_fields` (#67) would reject them as
-    // typos; listing them explicitly here preserves the historical
-    // accept-and-ignore behavior for existing manifests (e.g. the
-    // dogfood smoke-test set and sublead_flows tests) without
-    // compromising the typo guard for unrelated fields.
-    //
-    // Behavior: these values are parsed then discarded. The authoritative
-    // copies live on `[run]` and are what the dispatcher actually reads.
-    #[serde(default, rename = "budget_usd")]
-    pub _legacy_budget_usd: Option<f64>,
-    #[serde(default, rename = "max_workers")]
-    pub _legacy_max_workers: Option<u32>,
-    #[serde(default, rename = "lead_timeout_secs")]
-    pub _legacy_lead_timeout_secs: Option<u64>,
+    pub max_total_workers: Option<u32>,
 }
 
-/// v0.6: optional `[lead.sublead_defaults]` block that supplies fallback values
-/// for `spawn_sublead` when the caller omits them.
+/// Top-level `[sublead_defaults]` block (promoted from `[lead.sublead_defaults]`
+/// in v0.9). Supplies fallback values for `spawn_sublead` calls that omit them.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct SubleadDefaultsSpec {
+pub struct SubleadDefaults {
     pub budget_usd: Option<f64>,
     pub max_workers: Option<u32>,
     pub lead_timeout_secs: Option<u64>,
@@ -422,7 +416,7 @@ mod tests {
     fn parses_full_manifest_with_template() {
         let toml_src = r#"
             [run]
-            max_parallel = 8
+            max_parallel_tasks = 8
             halt_on_failure = true
             worktree_cleanup = "never"
 
@@ -443,39 +437,37 @@ mod tests {
             branch = "feat/x"
         "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
-        assert_eq!(m.run.max_parallel, Some(8));
+        assert_eq!(m.run.max_parallel_tasks, Some(8));
         assert!(m.run.halt_on_failure);
         assert_eq!(m.templates.len(), 1);
         assert_eq!(m.tasks[0].template.as_deref(), Some("sweep"));
     }
 
     #[test]
-    fn parses_lead_section() {
+    fn parses_lead_section_with_caps_on_lead() {
         let toml_src = r#"
-            [run]
-            max_workers = 4
-            budget_usd = 5.00
-            lead_timeout_secs = 1200
-
-            [[lead]]
+            [lead]
             id = "triage"
             directory = "/tmp"
             prompt = "coordinate the triage"
             branch = "feat/triage"
+            max_workers = 4
+            budget_usd = 5.00
+            lead_timeout_secs = 1200
         "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
-        assert_eq!(m.run.max_workers, Some(4));
-        assert_eq!(m.run.budget_usd, Some(5.00));
-        assert_eq!(m.run.lead_timeout_secs, Some(1200));
-        assert_eq!(m.leads.len(), 1);
-        assert_eq!(m.leads[0].id, "triage");
-        assert_eq!(m.leads[0].branch.as_deref(), Some("feat/triage"));
+        let lead = m.lead.unwrap();
+        assert_eq!(lead.id, "triage");
+        assert_eq!(lead.max_workers, Some(4));
+        assert_eq!(lead.budget_usd, Some(5.00));
+        assert_eq!(lead.lead_timeout_secs, Some(1200));
+        assert_eq!(lead.branch.as_deref(), Some("feat/triage"));
     }
 
     #[test]
     fn rejects_unknown_lead_field() {
         let toml_src = r#"
-            [[lead]]
+            [lead]
             id = "x"
             directory = "/tmp"
             prompt = "p"
@@ -486,37 +478,65 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_fields_without_lead_section() {
-        // These fields parse fine on their own; validation rejects them later
-        // when no [[lead]] is present.
+    fn rejects_legacy_array_lead_form() {
+        // The v0.8 [[lead]] array form is gone. Should fail with a TOML
+        // type error that validate.rs translates into a migration message.
         let toml_src = r#"
-            [run]
-            max_workers = 2
-            budget_usd = 1.00
-
-            [[task]]
+            [[lead]]
             id = "x"
             directory = "/tmp"
             prompt = "p"
         "#;
-        let m: Manifest = toml::from_str(toml_src).unwrap();
-        assert_eq!(m.run.max_workers, Some(2));
+        let err: Result<Manifest, _> = toml::from_str(toml_src);
+        assert!(err.is_err(), "[[lead]] array form should not parse");
     }
 
     #[test]
-    fn parses_approval_policy() {
+    fn rejects_legacy_run_max_workers() {
+        // `[run].max_workers` moved to `[lead].max_workers` in v0.9.
         let toml_src = r#"
             [run]
-            approval_policy = "auto_approve"
+            max_workers = 4
+        "#;
+        let err: Result<Manifest, _> = toml::from_str(toml_src);
+        assert!(err.is_err(), "legacy [run].max_workers should be rejected");
+    }
 
-            [[lead]]
+    #[test]
+    fn parses_top_level_sublead_defaults() {
+        let toml_src = r#"
+            [lead]
+            id = "root"
+            directory = "/tmp"
+            prompt = "x"
+            allow_subleads = true
+
+            [sublead_defaults]
+            budget_usd = 2.00
+            max_workers = 4
+            lead_timeout_secs = 1800
+            read_down = false
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        let sd = m.sublead_defaults.unwrap();
+        assert_eq!(sd.budget_usd, Some(2.00));
+        assert_eq!(sd.max_workers, Some(4));
+    }
+
+    #[test]
+    fn parses_default_approval_policy() {
+        let toml_src = r#"
+            [run]
+            default_approval_policy = "auto_approve"
+
+            [lead]
             id = "triage"
             directory = "/tmp"
             prompt = "p"
         "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert_eq!(
-            m.run.approval_policy,
+            m.run.default_approval_policy,
             Some(crate::dispatch::state::ApprovalPolicy::AutoApprove)
         );
     }
@@ -527,7 +547,7 @@ mod tests {
             [run]
             require_plan_approval = true
 
-            [[lead]]
+            [lead]
             id = "triage"
             directory = "/tmp"
             prompt = "p"
@@ -551,12 +571,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_approval_policy() {
+    fn rejects_unknown_default_approval_policy() {
         let toml_src = r#"
             [run]
-            approval_policy = "wibble"
+            default_approval_policy = "wibble"
 
-            [[lead]]
+            [lead]
             id = "triage"
             directory = "/tmp"
             prompt = "p"

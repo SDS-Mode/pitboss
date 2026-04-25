@@ -16,11 +16,13 @@
 # Prerequisites: ANTHROPIC_API_KEY set, `claude` in PATH
 
 [run]
-max_parallel = 2
-max_workers = 3
-budget_usd = 1.00
+max_parallel_tasks = 2
 
 [lead]
+id = "R2-real-kill-with-reason"
+directory = "."
+max_workers = 3
+budget_usd = 1.00
 prompt = """
 You are running a small data-extraction pipeline. You will spawn ONE worker to extract values from a small dataset. The worker should produce its output in JSON format.
 

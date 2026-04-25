@@ -479,7 +479,7 @@ mod tests {
     fn mk_state(budget: Option<f64>, max_workers: Option<u32>) -> Arc<DispatchState> {
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -489,7 +489,7 @@ mod tests {
             max_workers,
             budget_usd: budget,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
