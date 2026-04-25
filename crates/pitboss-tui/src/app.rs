@@ -270,15 +270,12 @@ const DETAIL_VISIBLE_ROWS: usize = 40;
 fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Action {
     match (state.mode.clone(), mouse.kind) {
         // Wheel scroll inside Detail view — 5 rows/tick, matches J/K
-        // shift-scroll cadence. ScrollUp while already at the top of the
-        // log acts as "zoom out" — exits Detail back to the grid —
-        // symmetric with scroll-to-zoom-in from the grid (below).
-        (Mode::Detail { scroll, .. }, MouseEventKind::ScrollUp) => {
-            if scroll == 0 {
-                state.exit_detail();
-            } else {
-                state.detail_scroll_up(5);
-            }
+        // shift-scroll cadence. Exit-by-overscroll was tried briefly
+        // in #114 but removed — too easy to accidentally exit while
+        // reading the top of a log. Right-click and Esc remain the
+        // explicit exit gestures.
+        (Mode::Detail { .. }, MouseEventKind::ScrollUp) => {
+            state.detail_scroll_up(5);
         }
         (Mode::Detail { .. }, MouseEventKind::ScrollDown) => {
             state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
