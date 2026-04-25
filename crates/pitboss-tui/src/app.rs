@@ -341,20 +341,18 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
         // the Active tab from Completed returns to Normal via the Completed
         // right-click / Esc path; clicking Completed from Completed is a no-op
         // because we're already there).
-        (
-            Mode::Normal | Mode::Completed { .. },
-            MouseEventKind::Down(MouseButton::Left),
-        ) if state
-            .completed_tab_rect
-            .lock()
-            .ok()
-            .and_then(|g| *g)
-            .is_some_and(|r| {
-                mouse.column >= r.x
-                    && mouse.column < r.x + r.width
-                    && mouse.row >= r.y
-                    && mouse.row < r.y + r.height
-            }) =>
+        (Mode::Normal | Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Left))
+            if state
+                .completed_tab_rect
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .is_some_and(|r| {
+                    mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                }) =>
         {
             if !matches!(state.mode, Mode::Completed { .. }) {
                 let completed = state.completed_tile_indices();
