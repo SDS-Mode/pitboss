@@ -91,8 +91,17 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(rec) = serde_json::from_str::<pitboss_core::store::TaskRecord>(trimmed) {
-            tasks.push(rec);
+        match serde_json::from_str::<pitboss_core::store::TaskRecord>(trimmed) {
+            Ok(rec) => tasks.push(rec),
+            Err(e) => {
+                // Warn rather than silently skip — corrupt/truncated lines
+                // cause silent undercounting of tasks_total, tasks_failed,
+                // token sums, and cost (#107). In-progress runs can have a
+                // genuinely partial trailing line (mid-write truncation), but
+                // that is indistinguishable here from format skew or disk
+                // corruption, so we always surface it.
+                tracing::warn!(error = %e, line = trimmed, "summary.jsonl: skipping unparseable line — diff output may be incomplete");
+            }
         }
     }
 
