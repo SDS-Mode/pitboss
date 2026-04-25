@@ -7,6 +7,56 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **TUI Completed page** — tiles that have been in a terminal state for 5
+  seconds (configurable via `AppState.completed_after_secs`) are automatically
+  promoted off the Active grid to a dedicated Completed page. At 100+ workers
+  this keeps the Active view focused on live work rather than a wall of done
+  tiles. Press `C` to open the Completed page; `A` or Esc to return.
+
+  The Completed page is a scrollable table (`ratatui::Table`) with columns
+  TASK ID / STATUS / DURATION / TOKENS / ENDED. Navigate with `j`/`k`/`g`/`G`,
+  press Enter or click a row to open the full Detail log view (Esc returns to
+  the Completed page, not the Active grid). Press `s` to cycle sort order
+  (most-recently-finished / longest duration / status).
+
+- **Compact tile mode** — press `v` in the Active grid to toggle a 2-line
+  compact tile layout (status + token summary) instead of the default 5-line
+  tiles. Useful when monitoring many concurrent workers.
+
+- **Tab bar** — a one-line `Active (N running · M pending) | Completed (K)`
+  bar appears between the title and body whenever any tiles have been
+  promoted. Highlights the current page.
+
+- **`return_to` on Detail view** — `Mode::Detail` now carries a boxed
+  `return_to: Box<Mode>` field. Esc from Detail returns to whichever page
+  opened it (Active grid or Completed page) rather than always resetting
+  to Normal mode.
+
+### Changed
+
+- **Approval list pane keybinding** changed from `a` to `A` to free `a` for
+  future use and avoid collision with common vi navigation patterns.
+
+### Fixed
+
+- `format_duration_ms`: sub-second durations (1–999 ms) now render as `"Nms"`
+  instead of `"0s"` (#108).
+- `tui_table`: task ID column now truncates with ellipsis to prevent column
+  misalignment on long sub-lead IDs (#96).
+- `reset_state_for_switch`: now clears `control_connected` before
+  `connect_control` overwrites it, preventing a stale status-bar indicator
+  during the transition tick (#113).
+- `ApprovalBridge::request`: `try_send` failure now emits a `warn!` log
+  instead of silently dropping the event (#110).
+- Bridge replay TOCTOU: documented accepted race between `is_closed()` check
+  and `ev_tx.send`; no spurious cards on reconnect (#109).
+- `subleads.jsonl`: comment now accurately describes crash-after-write data
+  loss as accepted rather than caught by the warn branch (#111).
+- `diff.rs` `fmt_ms`: comment corrected to match actual short-circuit path
+  (#112).
+
 ## [0.8.0] — 2026-04-24
 
 The correctness hardening and new-capabilities release. Closes all 34 medium-
