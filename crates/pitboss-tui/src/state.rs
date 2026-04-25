@@ -8,7 +8,10 @@ use pitboss_core::store::TaskStatus;
 
 /// Seconds after a terminal state before a tile is promoted to the Completed
 /// page. Configurable per-run via `AppState.completed_after_secs`.
-pub const COMPLETED_COOLDOWN_DEFAULT_SECS: i64 = 5;
+/// 120s (2 min): long enough for the operator to read the tile's outcome
+/// before it moves, without leaving a finished dispatch's tiles cluttering
+/// the Active grid indefinitely.
+pub const COMPLETED_COOLDOWN_DEFAULT_SECS: i64 = 120;
 
 /// Sort order for the Completed page table.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -277,6 +280,10 @@ pub struct AppState {
     /// original `tasks[]` index. Populated by `render_completed_page` each
     /// frame; used by the mouse click handler in `app.rs`.
     pub completed_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
+    /// Bounding rect of the "Completed" tab in the tab bar. Populated by
+    /// `render_tab_bar` each frame; used by the mouse click handler so
+    /// clicking the Completed tab navigates to the Completed page.
+    pub completed_tab_rect: std::sync::Mutex<Option<ratatui::layout::Rect>>,
     /// Sub-tree views keyed by `sublead_id`. Empty in depth-1 runs.
     pub subtrees: HashMap<String, SubtreeView>,
     /// Collapse state for each sub-tree container. `true` = expanded (default
@@ -344,6 +351,7 @@ impl AppState {
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
             picker_hit_rects: std::sync::Mutex::new(Vec::new()),
             completed_hit_rects: std::sync::Mutex::new(Vec::new()),
+            completed_tab_rect: std::sync::Mutex::new(None),
             subtrees: HashMap::new(),
             expanded: HashMap::new(),
             focused_subtree_idx: 0,
@@ -512,6 +520,15 @@ impl AppState {
     pub fn enter_detail_for(&mut self, task_id: String) {
         if matches!(self.mode, Mode::Detail { .. }) {
             return;
+        }
+        // Update `self.focus` to the viewed tile so that the watcher's
+        // focus-notification path (which calls `focused_tile()` after each
+        // key event) sends the correct task id and tails the right log.
+        // Without this, Detail opened from the Completed page always tailed
+        // the Active-grid focused tile's log, making every Completed row open
+        // the same log content.
+        if let Some(pos) = self.tasks.iter().position(|t| t.id == task_id) {
+            self.focus = pos;
         }
         // worktree_path is populated for in-flight tiles via the
         // `worktree.path` sidecar (written by the dispatcher at spawn
@@ -1589,7 +1606,7 @@ mod tests {
     #[test]
     fn is_promoted_true_after_threshold() {
         let state = make_state();
-        let tile = make_done_tile("t", 6); // ended 6s ago > 5s threshold
+        let tile = make_done_tile("t", 130); // ended 130s ago > 120s threshold
         assert!(state.is_promoted(&tile));
     }
 
@@ -1618,7 +1635,7 @@ mod tests {
     fn active_and_completed_indices_partition_tasks() {
         let mut state = make_state();
         state.tasks = vec![
-            make_done_tile("old", 30), // promoted
+            make_done_tile("old", 130), // promoted (130s > 120s threshold)
             TileState {
                 // running, not promoted
                 id: "live".into(),
