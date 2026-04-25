@@ -243,14 +243,13 @@ fn match_rate_limit(blob: &str) -> Option<FailureReason> {
 }
 
 fn match_auth(blob: &str) -> Option<FailureReason> {
-    let has_401 = blob.contains("401")
-        && (blob.contains("Unauthorized") || blob.contains("Authentication"));
+    let has_401 =
+        blob.contains("401") && (blob.contains("Unauthorized") || blob.contains("Authentication"));
     let has_invalid_key = blob.contains("invalid_api_key");
     // Require "authentication_error" to co-occur with another auth signal so
     // prose mentions (e.g. "no authentication_error occurred") don't trigger
     // the 600-second backoff gate.
-    let has_auth_error = blob.contains("authentication_error")
-        && (has_401 || has_invalid_key);
+    let has_auth_error = blob.contains("authentication_error") && (has_401 || has_invalid_key);
     if has_invalid_key || has_auth_error || has_401 {
         Some(FailureReason::AuthFailure)
     } else {

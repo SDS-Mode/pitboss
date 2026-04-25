@@ -678,8 +678,7 @@ pub async fn build_sublead_mcp_config(
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
 
-    let mcp_config_path =
-        run_subdir.join(format!("sublead-{sublead_id}-mcp-config.json"));
+    let mcp_config_path = run_subdir.join(format!("sublead-{sublead_id}-mcp-config.json"));
     tokio::fs::write(&mcp_config_path, bytes).await?;
     Ok(mcp_config_path)
 }
