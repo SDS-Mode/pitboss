@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
-use crate::state::{AppSnapshot, AppState, Mode, PaneFocus};
+use crate::state::{AppSnapshot, AppState, Mode, PaneFocus, SortKey};
 use crate::watcher;
 
 // ---------------------------------------------------------------------------
@@ -204,6 +204,11 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
             if matches!(state.mode, Mode::Detail { .. }) {
                 state.detail_auto_scroll(DETAIL_VISIBLE_ROWS);
             }
+            // Notify watcher of current focus after snapshot (may have changed
+            // via ensure_active_focus or Completed→Normal fallback).
+            if let Some(tile) = state.focused_tile() {
+                let _ = focus_tx.send(tile.id.clone());
+            }
         }
 
         // --- Drain any queued control events (non-blocking). ---
@@ -257,6 +262,11 @@ fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String
     // from showing on the status bar during the one render tick between this
     // reset and the new connection being established (#113).
     state.control_connected = false;
+    // Clear completed-page hit cache so stale rects from the old run don't
+    // produce phantom clicks on the new run's layout.
+    if let Ok(mut rects) = state.completed_hit_rects.lock() {
+        rects.clear();
+    }
 }
 
 /// The visible height used for snap-in scroll calculations.
@@ -284,10 +294,32 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
         (Mode::Detail { .. }, MouseEventKind::ScrollDown) => {
             state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
         }
-        // Right-click inside Detail view exits back to the grid —
-        // symmetric with Esc, easier than reaching for the keyboard.
+        // Right-click inside Detail view exits to the return_to mode.
         (Mode::Detail { .. }, MouseEventKind::Down(MouseButton::Right)) => {
             state.exit_detail();
+        }
+        // Left-click on a completed table row: open Detail for that task.
+        (Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Left)) => {
+            let task_id = state
+                .completed_hit_rects
+                .lock()
+                .ok()
+                .and_then(|rects| {
+                    rects.iter().find_map(|&(task_idx, r)| {
+                        if mouse.column >= r.x
+                            && mouse.column < r.x + r.width
+                            && mouse.row >= r.y
+                            && mouse.row < r.y + r.height
+                        {
+                            Some(state.tasks[task_idx].id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                });
+            if let Some(task_id) = task_id {
+                state.enter_detail_for(task_id);
+            }
         }
         // Left-click on a tile in the grid: focus + enter Detail
         // (equivalent to hjkl + Enter). Clicks on the already-focused
@@ -349,6 +381,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
         Mode::PromptReprompt { .. } => handle_prompt_reprompt(state, code, modifiers),
         Mode::ApprovalModal { .. } => handle_approval_modal(state, code, modifiers),
         Mode::PolicyEditor { .. } => handle_policy_editor(state, code),
+        Mode::Completed { .. } => handle_completed(state, code),
     }
 }
 
@@ -404,8 +437,27 @@ fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
         }
 
         // Focus the approval list pane.
-        KeyCode::Char('a') => {
+        KeyCode::Char('A') => {
             state.pane_focus = PaneFocus::ApprovalList;
+        }
+
+        // Enter the Completed page (only if any promoted tiles exist).
+        KeyCode::Char('C') => {
+            let completed = state.completed_tile_indices();
+            if !completed.is_empty() {
+                let first_id = state.tasks[completed[0]].id.clone();
+                state.mode = Mode::Completed {
+                    selected_task_id: first_id,
+                    scroll_offset: 0,
+                    sort_key: SortKey::EndedAtDesc,
+                    filter_status: None,
+                };
+            }
+        }
+
+        // Toggle compact 2-line tile rendering on the Active grid.
+        KeyCode::Char('v') => {
+            state.compact_tiles = !state.compact_tiles;
         }
 
         // Navigation
@@ -533,6 +585,141 @@ fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -
 
         _ => {}
     }
+    Action::Continue
+}
+
+fn handle_completed(state: &mut AppState, code: KeyCode) -> Action {
+    // Compute completed indices before borrowing state.mode mutably.
+    let completed = state.completed_tile_indices();
+    let count = completed.len();
+
+    let Mode::Completed {
+        ref selected_task_id,
+        ref mut scroll_offset,
+        ref mut sort_key,
+        ref mut filter_status,
+    } = state.mode
+    else {
+        return Action::Continue;
+    };
+    // Resolve the current selection to a position within the completed list.
+    let cur_pos = completed
+        .iter()
+        .position(|&i| state.tasks[i].id == *selected_task_id)
+        .unwrap_or(0);
+
+    match code {
+        // Exit back to Active grid.
+        KeyCode::Char('A') | KeyCode::Esc | KeyCode::Char('q') => {
+            state.mode = Mode::Normal;
+            return Action::Continue;
+        }
+
+        // Enter Detail for the selected tile.
+        KeyCode::Enter => {
+            if let Some(&task_idx) = completed.get(cur_pos) {
+                let task_id = state.tasks[task_idx].id.clone();
+                state.enter_detail_for(task_id);
+                return Action::Continue;
+            }
+        }
+
+        // Navigation — move selection down.
+        KeyCode::Char('j') | KeyCode::Down => {
+            if count > 0 {
+                let new_pos = (cur_pos + 1).min(count - 1);
+                let task_id = state.tasks[completed[new_pos]].id.clone();
+                if let Mode::Completed {
+                    ref mut selected_task_id,
+                    ref mut scroll_offset,
+                    ..
+                } = state.mode
+                {
+                    *selected_task_id = task_id;
+                    // Scroll viewport to follow selection.
+                    if new_pos >= *scroll_offset + 40 {
+                        *scroll_offset = new_pos.saturating_sub(39);
+                    }
+                }
+            }
+            return Action::Continue;
+        }
+
+        // Navigation — move selection up.
+        KeyCode::Char('k') | KeyCode::Up => {
+            if count > 0 {
+                let new_pos = cur_pos.saturating_sub(1);
+                let task_id = state.tasks[completed[new_pos]].id.clone();
+                if let Mode::Completed {
+                    ref mut selected_task_id,
+                    ref mut scroll_offset,
+                    ..
+                } = state.mode
+                {
+                    *selected_task_id = task_id;
+                    if new_pos < *scroll_offset {
+                        *scroll_offset = new_pos;
+                    }
+                }
+            }
+            return Action::Continue;
+        }
+
+        // Jump to top.
+        KeyCode::Char('g') => {
+            if count > 0 {
+                let task_id = state.tasks[completed[0]].id.clone();
+                if let Mode::Completed {
+                    ref mut selected_task_id,
+                    ref mut scroll_offset,
+                    ..
+                } = state.mode
+                {
+                    *selected_task_id = task_id;
+                    *scroll_offset = 0;
+                }
+            }
+            return Action::Continue;
+        }
+
+        // Jump to bottom.
+        KeyCode::Char('G') => {
+            if count > 0 {
+                let last = count - 1;
+                let task_id = state.tasks[completed[last]].id.clone();
+                if let Mode::Completed {
+                    ref mut selected_task_id,
+                    ref mut scroll_offset,
+                    ..
+                } = state.mode
+                {
+                    *selected_task_id = task_id;
+                    *scroll_offset = last.saturating_sub(39);
+                }
+            }
+            return Action::Continue;
+        }
+
+        // Cycle sort key: EndedAtDesc → DurationDesc → StatusAsc → EndedAtDesc
+        KeyCode::Char('s') => {
+            if let Mode::Completed { ref mut sort_key, .. } = state.mode {
+                *sort_key = match sort_key {
+                    SortKey::EndedAtDesc => SortKey::DurationDesc,
+                    SortKey::DurationDesc => SortKey::StatusAsc,
+                    SortKey::StatusAsc => SortKey::EndedAtDesc,
+                };
+            }
+            return Action::Continue;
+        }
+
+        // Quit the whole app.
+        KeyCode::Char('Q') => return Action::Quit,
+
+        _ => {}
+    }
+
+    // Suppress unused warnings from the borrow of sort_key / filter_status.
+    let _ = (sort_key, filter_status, scroll_offset);
     Action::Continue
 }
 

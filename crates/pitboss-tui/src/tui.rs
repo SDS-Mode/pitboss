@@ -12,7 +12,8 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
+              TableState, Tabs, Wrap},
     Frame, Terminal,
 };
 
@@ -204,7 +205,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // from the prior frame persist (visible leakage — fix for #129).
     frame.render_widget(Clear, area);
 
-    // SnapIn is a full-screen replacement — skip the normal grid entirely.
+    // Detail is a full-screen replacement — skip the normal grid entirely.
     if let Mode::Detail {
         ref task_id,
         scroll,
@@ -215,17 +216,36 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         return;
     }
 
-    // Outer layout: title (1) | body (fill) | statusbar (1)
+    // Completed page is also full-screen.
+    if matches!(state.mode, Mode::Completed { .. }) {
+        render_completed_page(frame, area, state);
+        return;
+    }
+
+    // Show tab bar (title + tab line) when completed tiles exist.
+    let completed_count = state.completed_tile_indices().len();
+    let title_lines: u16 = if completed_count > 0 { 2 } else { 1 };
+
+    // Outer layout: title (1 or 2) | body (fill) | statusbar (1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(title_lines),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(area);
 
-    render_title(frame, chunks[0], state);
+    if title_lines == 2 {
+        let title_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(chunks[0]);
+        render_title(frame, title_chunks[0], state);
+        render_tab_bar(frame, title_chunks[1], state, completed_count, false);
+    } else {
+        render_title(frame, chunks[0], state);
+    }
     render_body(frame, chunks[1], state);
     render_statusbar(frame, chunks[2], state);
 
@@ -257,8 +277,265 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Mode::PolicyEditor { rules, selected } => {
             render_policy_editor(frame, area, rules, *selected);
         }
-        Mode::Normal | Mode::Detail { .. } => {}
+        Mode::Normal | Mode::Detail { .. } | Mode::Completed { .. } => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tab bar — shown between title and body when completed tiles exist.
+// ---------------------------------------------------------------------------
+
+fn render_tab_bar(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    completed_count: usize,
+    on_completed_page: bool,
+) {
+    let active = state.active_tile_indices();
+    let running = active
+        .iter()
+        .filter(|&&i| matches!(state.tasks[i].status, TileStatus::Running))
+        .count();
+    let pending = active
+        .iter()
+        .filter(|&&i| matches!(state.tasks[i].status, TileStatus::Pending))
+        .count();
+
+    let active_label = format!("Active ({running} running · {pending} pending)");
+    let completed_label = format!("Completed ({completed_count})");
+
+    let selected_idx = usize::from(on_completed_page);
+    let tabs = Tabs::new(vec![active_label, completed_label])
+        .select(selected_idx)
+        .style(theme::secondary_style())
+        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .divider("│");
+    frame.render_widget(tabs, area);
+}
+
+// ---------------------------------------------------------------------------
+// Completed page — scrollable table of promoted tiles.
+// ---------------------------------------------------------------------------
+
+fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
+    let Mode::Completed {
+        ref selected_task_id,
+        ref scroll_offset,
+        ref sort_key,
+        ref filter_status,
+    } = state.mode
+    else {
+        return;
+    };
+
+    // Layout: title (1) | tab bar (1) | table (fill) | footer (1) | statusbar (1)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    // Title
+    let title = Paragraph::new(" Pitboss TUI — Completed Workers ")
+        .style(theme::primary_style().add_modifier(Modifier::BOLD));
+    frame.render_widget(title, chunks[0]);
+
+    // Tab bar (on completed page = index 1 selected)
+    let completed_count = state.completed_tile_indices().len();
+    render_tab_bar(frame, chunks[1], state, completed_count, true);
+
+    // Build sorted + filtered completed indices.
+    let mut idxs = state.completed_tile_indices();
+    // Apply sort_key.
+    match sort_key {
+        crate::state::SortKey::EndedAtDesc => {
+            // already sorted by completed_tile_indices (desc ended_at)
+        }
+        crate::state::SortKey::DurationDesc => {
+            idxs.sort_by(|&a, &b| {
+                let da = state.tasks[a].duration_ms.unwrap_or(0);
+                let db = state.tasks[b].duration_ms.unwrap_or(0);
+                db.cmp(&da)
+            });
+        }
+        crate::state::SortKey::StatusAsc => {
+            idxs.sort_by_key(|&i| format!("{:?}", state.tasks[i].status));
+        }
+    }
+    // Apply filter.
+    if let Some(filter) = filter_status {
+        idxs.retain(|&i| {
+            matches!(&state.tasks[i].status, TileStatus::Done(s) if s == filter)
+        });
+    }
+
+    let table_area = chunks[2];
+
+    if idxs.is_empty() {
+        let placeholder = Paragraph::new("\n  No completed workers yet.")
+            .style(theme::secondary_style());
+        frame.render_widget(placeholder, table_area);
+    } else {
+        // Resolve selected row position.
+        let sel_pos = idxs
+            .iter()
+            .position(|&i| state.tasks[i].id == *selected_task_id)
+            .unwrap_or(0);
+
+        // Column widths: TASK_ID(28) STATUS(14) TIME(10) TOKENS(18) EXIT(4) ENDED(17)
+        let widths = [
+            Constraint::Length(28),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Length(18),
+            Constraint::Length(4),
+            Constraint::Length(17),
+        ];
+
+        let header = Row::new(vec![
+            Cell::from("TASK ID").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("STATUS").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("TIME").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("TOKENS (in/out)").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("EXIT").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Cell::from("ENDED").style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        ]).height(1);
+
+        // Build rows and hit rects simultaneously.
+        let mut hit_rects: Vec<(usize, Rect)> = Vec::with_capacity(idxs.len());
+        let rows: Vec<Row> = idxs
+            .iter()
+            .enumerate()
+            .map(|(row_pos, &task_idx)| {
+                let tile = &state.tasks[task_idx];
+                let task_id = pitboss_core::fmt::truncate_ellipsis(&tile.id, 27);
+
+                let (status_str, status_color) = match &tile.status {
+                    TileStatus::Pending => ("… Pending", Color::Gray),
+                    TileStatus::Running => ("● Running", Color::Green),
+                    TileStatus::Done(s) => match s {
+                        pitboss_core::store::TaskStatus::Success => ("✓ Success", Color::Green),
+                        pitboss_core::store::TaskStatus::Failed => ("✗ Failed", Color::Red),
+                        pitboss_core::store::TaskStatus::TimedOut => ("⏱ TimedOut", Color::Yellow),
+                        pitboss_core::store::TaskStatus::Cancelled => ("⊘ Cancelled", Color::Gray),
+                        pitboss_core::store::TaskStatus::SpawnFailed => ("! SpawnFail", Color::Red),
+                        pitboss_core::store::TaskStatus::ApprovalRejected => ("⊘ ApprovalRej", Color::Yellow),
+                        pitboss_core::store::TaskStatus::ApprovalTimedOut => ("⏱ ApprovalTO", Color::Yellow),
+                    },
+                };
+
+                let time_str = tile
+                    .duration_ms
+                    .map(pitboss_core::fmt::format_duration_ms)
+                    .unwrap_or_else(|| "—".to_string());
+
+                let tokens_str = if tile.token_usage_input == 0 && tile.token_usage_output == 0 {
+                    "—".to_string()
+                } else {
+                    format!(
+                        "{} / {}",
+                        fmt_tokens(tile.token_usage_input),
+                        fmt_tokens(tile.token_usage_output)
+                    )
+                };
+
+                let exit_str = tile
+                    .exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+
+                let ended_str = tile
+                    .completed_at
+                    .map(|t| t.format("%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "—".to_string());
+
+                // Row y-position for hit rect: table_area.y + header(1) + row_pos,
+                // adjusted for scroll. We store it and populate hit_rects below.
+                let row_y = table_area
+                    .y
+                    .saturating_add(1) // header row
+                    .saturating_add(u16::try_from(row_pos.saturating_sub(*scroll_offset)).unwrap_or(u16::MAX));
+                if row_pos >= *scroll_offset
+                    && row_y < table_area.y.saturating_add(table_area.height)
+                {
+                    hit_rects.push((
+                        task_idx,
+                        Rect::new(table_area.x, row_y, table_area.width, 1),
+                    ));
+                }
+
+                let style = if row_pos == sel_pos {
+                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                } else {
+                    Style::default().fg(status_color)
+                };
+
+                Row::new(vec![
+                    Cell::from(task_id).style(style),
+                    Cell::from(status_str).style(style.fg(status_color)),
+                    Cell::from(time_str).style(style),
+                    Cell::from(tokens_str).style(style),
+                    Cell::from(exit_str).style(style),
+                    Cell::from(ended_str).style(style),
+                ])
+                .height(1)
+            })
+            .collect();
+
+        // Update hit rects.
+        if let Ok(mut cache) = state.completed_hit_rects.lock() {
+            *cache = hit_rects;
+        }
+
+        let mut table_state = TableState::default()
+            .with_selected(Some(sel_pos))
+            .with_offset(*scroll_offset);
+
+        let table = Table::new(rows, widths)
+            .header(header)
+            .block(Block::default())
+            .row_highlight_style(Style::default().bg(Color::DarkGray));
+
+        frame.render_stateful_widget(table, table_area, &mut table_state);
+    }
+
+    // Aggregate footer.
+    let completed_all = state.completed_tile_indices();
+    let total_cost: f64 = completed_all.iter().filter_map(|&i| {
+        let tile = &state.tasks[i];
+        tile.model.as_deref().and_then(|m| {
+            let usage = pitboss_core::parser::TokenUsage {
+                input: tile.token_usage_input,
+                output: tile.token_usage_output,
+                cache_read: tile.cache_read,
+                cache_creation: tile.cache_creation,
+            };
+            pitboss_core::prices::cost_usd(m, &usage)
+        })
+    }).sum();
+    let total_in: u64 = completed_all.iter().map(|&i| state.tasks[i].token_usage_input).sum();
+    let total_out: u64 = completed_all.iter().map(|&i| state.tasks[i].token_usage_output).sum();
+    let failed_c = completed_all.iter().filter(|&&i| {
+        !matches!(state.tasks[i].status, TileStatus::Done(pitboss_core::store::TaskStatus::Success))
+    }).count();
+    let footer_text = format!(
+        " {}/{} completed — {} failed — {} in / {} out — ${:.2} total  [j/k] nav  [Enter] detail  [s] sort  [A/Esc] active view",
+        completed_all.len(), state.tasks.len(), failed_c,
+        fmt_tokens(total_in), fmt_tokens(total_out), total_cost
+    );
+    let footer = Paragraph::new(footer_text).style(theme::secondary_style());
+    frame.render_widget(footer, chunks[3]);
+
+    // Status bar hint.
+    let hint = Paragraph::new(" [j/k] navigate  [Enter] detail  [s] cycle sort  [g/G] top/bottom  [A/Esc] back to Active ")
+        .style(theme::secondary_style());
+    frame.render_widget(hint, chunks[4]);
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +674,18 @@ fn render_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
     render_grouped_tile_grid(frame, area, state);
 }
 
-/// Original flat grid used for depth-1 runs (no sub-trees). Behavior
-/// is identical to v0.5 so existing tests and visual output are preserved.
+/// Original flat grid used for depth-1 runs (no sub-trees). Only renders
+/// active (non-promoted) tiles; promoted tiles are on the Completed page.
 fn render_flat_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
-    let n = state.tasks.len();
+    let active = state.active_tile_indices();
+    let n = active.len();
     if n == 0 {
+        let msg = Paragraph::new("\n  All workers have moved to the Completed page (C).")
+            .style(theme::secondary_style());
+        frame.render_widget(msg, area);
+        if let Ok(mut cache) = state.tile_hit_rects.lock() {
+            cache.clear();
+        }
         return;
     }
     let cols = TILE_COLS.min(n);
@@ -429,14 +713,21 @@ fn render_flat_tile_grid(frame: &mut Frame, area: Rect, state: &AppState) {
             .split(rows_layout[row]);
 
         for col in 0..cols {
-            let tile_idx = row * cols + col;
-            if tile_idx >= n {
+            let pos = row * cols + col;
+            if pos >= n {
                 break;
             }
-            let focused = tile_idx == state.focus;
+            let task_idx = active[pos];
+            let focused = task_idx == state.focus;
             let tile_rect = cols_layout[col];
-            render_tile(frame, tile_rect, state, tile_idx, focused);
-            hit_rects.push((tile_idx, tile_rect));
+            if state.compact_tiles {
+                render_tile_compact(frame, tile_rect, state, task_idx, focused);
+            } else {
+                render_tile(frame, tile_rect, state, task_idx, focused);
+            }
+            // Store original tasks[] index (not pos within active) so mouse
+            // hit-testing resolves to the correct element in state.tasks.
+            hit_rects.push((task_idx, tile_rect));
         }
     }
 
@@ -864,6 +1155,63 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// Compact 2-line tile for the Active grid (`v` toggle). Shows only the
+/// status line and token summary — much denser than the 5-line default,
+/// useful when monitoring many workers simultaneously.
+fn render_tile_compact(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    tile_idx: usize,
+    focused: bool,
+) {
+    let tile = &state.tasks[tile_idx];
+    let (icon, icon_color) = status_icon(&tile.status);
+    let status_label = status_label(&tile.status);
+    let tile_title = pitboss_core::fmt::truncate_ellipsis(&format_tile_title(state, tile_idx), 20);
+    let is_lead = tile_is_lead(state, tile_idx);
+    let role_glyph = tile_role_glyph(state, tile_idx);
+
+    let border_style = if focused || is_lead {
+        theme::focused_border()
+    } else {
+        theme::idle_border()
+    };
+    let swatch_color = theme::model_family_color(tile.model.as_deref());
+    let title_spans = vec![
+        Span::raw(" "),
+        Span::styled("\u{258E}", Style::default().fg(swatch_color)),
+        Span::raw(" "),
+        Span::styled(role_glyph, Style::default().fg(theme::TEXT_SECONDARY)),
+        Span::raw(" "),
+        Span::raw(tile_title),
+        Span::raw(" "),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(title_spans))
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Two content lines: status + tokens.
+    let tokens = format!(
+        "{}↑ {}↓",
+        fmt_tokens(tile.token_usage_input),
+        fmt_tokens(tile.token_usage_output)
+    );
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(icon, Style::default().fg(icon_color)),
+            Span::raw(" "),
+            Span::styled(status_label, Style::default().fg(icon_color)),
+        ]),
+        Line::from(Span::styled(tokens, theme::muted_style())),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -1856,6 +2204,7 @@ mod tests {
             model: None,
             parent_task_id: None,
             worktree_path: None,
+            completed_at: None,
         }
     }
 
@@ -1879,12 +2228,15 @@ mod tests {
             store_activity: std::collections::HashMap::new(),
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
             picker_hit_rects: std::sync::Mutex::new(Vec::new()),
+            completed_hit_rects: std::sync::Mutex::new(Vec::new()),
             subtrees: std::collections::HashMap::new(),
             expanded: std::collections::HashMap::new(),
             focused_subtree_idx: 0,
             pane_focus: crate::state::PaneFocus::Grid,
             approval_list: crate::approval_list::ApprovalListState::default(),
             policy_rules: Vec::new(),
+            completed_after_secs: crate::state::COMPLETED_COOLDOWN_DEFAULT_SECS,
+            compact_tiles: false,
         }
     }
 
@@ -2009,6 +2361,7 @@ mod tests {
             task_id: task_id.to_string(),
             scroll: 0,
             at_bottom: true,
+            return_to: Box::new(Mode::Normal),
         };
 
         let backend = TestBackend::new(80, 10);
@@ -2048,6 +2401,7 @@ mod tests {
             task_id: task_id.to_string(),
             scroll: 0,
             at_bottom: true,
+            return_to: Box::new(Mode::Normal),
         };
 
         let backend = TestBackend::new(80, 10);

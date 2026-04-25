@@ -312,6 +312,7 @@ fn build_tile(
                 .worktree_path
                 .clone()
                 .or_else(|| log_path.parent().and_then(read_worktree_sidecar)),
+            completed_at: Some(rec.ended_at),
         }
     } else {
         // Decide between Pending and Running by checking log freshness.
@@ -353,6 +354,7 @@ fn build_tile(
             } else {
                 None
             },
+            completed_at: None,
         }
     }
 }

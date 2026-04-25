@@ -305,6 +305,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 model,
                 parent_task_id: rec.parent_task_id.clone(),
                 worktree_path: rec.worktree_path.clone(),
+                completed_at: Some(rec.ended_at),
             });
         } else {
             tiles.push(TileState {
@@ -320,6 +321,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 model,
                 parent_task_id: None,
                 worktree_path: None,
+                completed_at: None,
             });
         }
     }
