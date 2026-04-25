@@ -307,6 +307,27 @@ fn render_tab_bar(
     let active_label = format!("Active ({running} running · {pending} pending)");
     let completed_label = format!("Completed ({completed_count})");
 
+    // Compute the Completed tab's bounding rect so the mouse handler can
+    // detect clicks on it. Ratatui's Tabs renders each tab as:
+    //   " " (left pad) + label + " " (right pad) + "│" (divider)
+    // The Active tab therefore occupies `active_label.chars().count() + 3`
+    // terminal columns (pad + label + pad + divider). The Completed tab
+    // starts immediately after.
+    let active_tab_cols = active_label.chars().count() as u16 + 3;
+    let completed_tab_cols = completed_label.chars().count() as u16 + 2; // no trailing divider
+    let completed_tab_x = area.x.saturating_add(active_tab_cols);
+    if completed_tab_x < area.x + area.width {
+        let rect = ratatui::layout::Rect::new(
+            completed_tab_x,
+            area.y,
+            completed_tab_cols.min(area.width.saturating_sub(active_tab_cols)),
+            1,
+        );
+        if let Ok(mut guard) = state.completed_tab_rect.lock() {
+            *guard = Some(rect);
+        }
+    }
+
     let selected_idx = usize::from(on_completed_page);
     let tabs = Tabs::new(vec![active_label, completed_label])
         .select(selected_idx)
@@ -1277,9 +1298,31 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
     let start = state.focus_log.len().saturating_sub(source_cap);
     let log_slice = &state.focus_log[start..];
 
+    // Truncate each source line to 4× the pane width before building spans.
+    // Very long lines (JSON blobs, base64, table rows) with no whitespace
+    // break points defeat ratatui's word-wrap and overflow the pane boundary
+    // into adjacent columns. The focus pane is a live monitor — displaying
+    // at most 4 screenfuls of horizontal content per source line is enough
+    // for any triage purpose. Truncation happens at char boundaries to avoid
+    // splitting multi-byte sequences.
+    let max_line_chars = (inner.width as usize).saturating_mul(4).max(160);
     let lines: Vec<Line> = log_slice
         .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), crate::theme::log_line_style(l))))
+        .map(|l| {
+            let display: &str = if l.chars().count() > max_line_chars {
+                // Safety: char_indices gives byte offsets; we advance by
+                // char count, so the slice is always on a char boundary.
+                let byte_end = l
+                    .char_indices()
+                    .nth(max_line_chars)
+                    .map(|(b, _)| b)
+                    .unwrap_or(l.len());
+                &l[..byte_end]
+            } else {
+                l.as_str()
+            };
+            Line::from(Span::styled(display, crate::theme::log_line_style(l)))
+        })
         .collect();
 
     // Estimate wrapped row count per source line so we can scroll to the
@@ -1313,6 +1356,10 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_approval_list_pane(frame: &mut Frame, area: Rect, state: &AppState) {
     use crate::state::PaneFocus;
+
+    // Explicit clear before rendering so no stale cells from a previous frame
+    // (e.g., leftover log content if the pane was shorter last tick) remain.
+    frame.render_widget(Clear, area);
 
     let focused = state.pane_focus == PaneFocus::ApprovalList;
     let border_style = if focused {
@@ -2263,6 +2310,7 @@ mod tests {
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
             picker_hit_rects: std::sync::Mutex::new(Vec::new()),
             completed_hit_rects: std::sync::Mutex::new(Vec::new()),
+            completed_tab_rect: std::sync::Mutex::new(None),
             subtrees: std::collections::HashMap::new(),
             expanded: std::collections::HashMap::new(),
             focused_subtree_idx: 0,

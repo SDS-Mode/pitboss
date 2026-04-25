@@ -274,10 +274,13 @@ fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String
     // from showing on the status bar during the one render tick between this
     // reset and the new connection being established (#113).
     state.control_connected = false;
-    // Clear completed-page hit cache so stale rects from the old run don't
-    // produce phantom clicks on the new run's layout.
+    // Clear hit caches so stale rects from the old run don't produce
+    // phantom clicks on the new run's layout.
     if let Ok(mut rects) = state.completed_hit_rects.lock() {
         rects.clear();
+    }
+    if let Ok(mut rect) = state.completed_tab_rect.lock() {
+        *rect = None;
     }
 }
 
@@ -310,6 +313,10 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
         (Mode::Detail { .. }, MouseEventKind::Down(MouseButton::Right)) => {
             state.exit_detail();
         }
+        // Right-click on the Completed page exits back to Active (same as Esc).
+        (Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Right)) => {
+            state.mode = Mode::Normal;
+        }
         // Left-click on a completed table row: open Detail for that task.
         (Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Left)) => {
             let task_id = state.completed_hit_rects.lock().ok().and_then(|rects| {
@@ -327,6 +334,39 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
             });
             if let Some(task_id) = task_id {
                 state.enter_detail_for(task_id);
+            }
+        }
+        // Left-click on the "Completed" tab in the tab bar: navigate to the
+        // Completed page. Works from both Normal and Completed modes (clicking
+        // the Active tab from Completed returns to Normal via the Completed
+        // right-click / Esc path; clicking Completed from Completed is a no-op
+        // because we're already there).
+        (
+            Mode::Normal | Mode::Completed { .. },
+            MouseEventKind::Down(MouseButton::Left),
+        ) if state
+            .completed_tab_rect
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|r| {
+                mouse.column >= r.x
+                    && mouse.column < r.x + r.width
+                    && mouse.row >= r.y
+                    && mouse.row < r.y + r.height
+            }) =>
+        {
+            if !matches!(state.mode, Mode::Completed { .. }) {
+                let completed = state.completed_tile_indices();
+                if !completed.is_empty() {
+                    let first_id = state.tasks[completed[0]].id.clone();
+                    state.mode = crate::state::Mode::Completed {
+                        selected_task_id: first_id,
+                        scroll_offset: 0,
+                        sort_key: crate::state::SortKey::EndedAtDesc,
+                        filter_status: None,
+                    };
+                }
             }
         }
         // Left-click on a tile in the grid: focus + enter Detail
