@@ -324,6 +324,7 @@ fn render_tab_bar(
 // Completed page — scrollable table of promoted tiles.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
     let Mode::Completed {
         ref selected_task_id,
@@ -348,9 +349,9 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     // Title
-    let title = Paragraph::new(" Pitboss TUI — Completed Workers ")
+    let title_para = Paragraph::new(" Pitboss TUI — Completed Workers ")
         .style(theme::primary_style().add_modifier(Modifier::BOLD));
-    frame.render_widget(title, chunks[0]);
+    frame.render_widget(title_para, chunks[0]);
 
     // Tab bar (on completed page = index 1 selected)
     let completed_count = state.completed_tile_indices().len();
@@ -447,8 +448,7 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
 
                 let time_str = tile
                     .duration_ms
-                    .map(pitboss_core::fmt::format_duration_ms)
-                    .unwrap_or_else(|| "—".to_string());
+                    .map_or_else(|| "—".to_string(), pitboss_core::fmt::format_duration_ms);
 
                 let tokens_str = if tile.token_usage_input == 0 && tile.token_usage_output == 0 {
                     "—".to_string()
@@ -462,13 +462,11 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
 
                 let exit_str = tile
                     .exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "—".to_string());
+                    .map_or_else(|| "—".to_string(), |c| c.to_string());
 
                 let ended_str = tile
                     .completed_at
-                    .map(|t| t.format("%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_else(|| "—".to_string());
+                    .map_or_else(|| "—".to_string(), |t| t.format("%m-%d %H:%M:%S").to_string());
 
                 // Row y-position for hit rect: table_area.y + header(1) + row_pos,
                 // adjusted for scroll. We store it and populate hit_rects below.

@@ -381,6 +381,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_normal(state: &mut AppState, code: KeyCode) -> Action {
     // When the approval list pane is focused, Up/Down/Enter navigate it;
     // Esc returns focus to the grid. All other keys fall through to the
@@ -584,6 +585,7 @@ fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -
     Action::Continue
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_completed(state: &mut AppState, code: KeyCode) -> Action {
     // Compute completed indices before borrowing state.mode mutably.
     let completed = state.completed_tile_indices();
@@ -606,7 +608,7 @@ fn handle_completed(state: &mut AppState, code: KeyCode) -> Action {
 
     match code {
         // Exit back to Active grid.
-        KeyCode::Char('A') | KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Char('A' | 'q') | KeyCode::Esc => {
             state.mode = Mode::Normal;
             return Action::Continue;
         }

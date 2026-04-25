@@ -51,13 +51,13 @@ pub enum Mode {
         return_to: Box<Mode>,
     },
     /// Completed workers page — shows Done tiles that have been in a terminal
-    /// state for longer than `AppState.completed_after_secs`. Toggled with
+    /// state for longer than `AppState::completed_after_secs`. Toggled with
     /// `C`; exit with `A` or Esc.
     Completed {
         /// Task id of the currently selected row. Stored as id (not index)
         /// so the selection stays stable when new completions arrive.
         selected_task_id: String,
-        /// First visible row (drives TableState offset).
+        /// First visible row (drives `TableState` offset).
         scroll_offset: usize,
         /// Column to sort by.
         sort_key: SortKey,
@@ -395,8 +395,7 @@ impl AppState {
     /// the tile first reaches a terminal state.
     pub fn is_promoted(&self, tile: &TileState) -> bool {
         tile.completed_at
-            .map(|t| (Utc::now() - t).num_seconds() >= self.completed_after_secs)
-            .unwrap_or(false)
+            .is_some_and(|t| (Utc::now() - t).num_seconds() >= self.completed_after_secs)
     }
 
     /// Indices into `self.tasks` for tiles that should appear on the Active
