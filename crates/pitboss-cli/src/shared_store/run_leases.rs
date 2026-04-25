@@ -59,7 +59,7 @@ impl LeaseRegistry {
 
     pub async fn release(&self, key: &str, holder: &str) -> bool {
         let mut map = self.inner.lock().await;
-        if map.get(key).map(|h| h.holder == holder).unwrap_or(false) {
+        if map.get(key).is_some_and(|h| h.holder == holder) {
             map.remove(key);
             true
         } else {

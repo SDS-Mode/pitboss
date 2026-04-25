@@ -13,19 +13,6 @@ impl ParseError {
     }
 }
 
-// Convenience display of first 80 chars of raw line for diagnostics. Will be
-// wired into error rendering in a later task.
-#[allow(dead_code)]
-pub(crate) fn truncate(s: &str, n: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(n).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
     #[error("binary not found: {path}")]
