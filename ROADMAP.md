@@ -435,13 +435,9 @@ when prioritized.
 
 ### Low-severity nits from v0.8 ultrareview
 
-- **#96:** `pitboss status` table overflows the task-ID column for
-  sub-lead IDs (hard-coded `{:<30}` pad, no truncation).
-- **#97:** Duration formatter has no hour rollover — 2h run shows as
-  `"120m00s"`. Four duplicated copies (`status.rs`, `tui_table.rs`,
-  `diff.rs`, `tui.rs`) — centralize into one helper.
-- **#98:** Sync `std::fs` write inside a `tokio::spawn` async task in
-  `sublead.rs` — switch to `tokio::fs` or `spawn_blocking`.
+- ~~**#96:** `pitboss status` table overflows the task-ID column.~~ **Closed** — `truncate_ellipsis` added to `pitboss-core::fmt`, applied in `status.rs` and `tui_table.rs`.
+- ~~**#97:** Duration formatter has no hour rollover; four duplicate copies.~~ **Closed** — centralized into `pitboss_core::fmt::format_duration_ms` with hour rollover; duplicates removed.
+- ~~**#98:** Sync `std::fs` write inside `tokio::spawn` in `sublead.rs`.~~ **Closed** — switched to `tokio::fs::OpenOptions` + `AsyncWriteExt`.
 
 ---
 
