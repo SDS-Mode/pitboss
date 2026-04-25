@@ -9,6 +9,28 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`[[mcp_server]]` — external MCP server injection** — declare external MCP
+  servers in the manifest and they are injected into every actor's
+  `--mcp-config` (lead, sub-leads, and workers) at dispatch time. Eliminates
+  the KV-bridge workaround required to give workers access to tools like
+  context7.
+
+  ```toml
+  [[mcp_server]]
+  id      = "context7"
+  command = "npx"
+  args    = ["-y", "@upstash/context7-mcp"]
+  ```
+
+  All actors receive the server (scope = all). Per-actor scoping deferred.
+
+- **`pitboss validate` detects promptless lead** — a `[lead]` block whose
+  `prompt =` key appears after a subtable declaration (e.g.
+  `[lead.sublead_defaults]`) is silently reassigned by TOML, resolving to `""`
+  at dispatch. The lead then spawns with no `-p` argument and exits in ~700ms.
+  `validate` now rejects empty or whitespace-only prompts with an explanatory
+  error that names the TOML ordering root cause.
+
 - **TUI Completed page** — tiles that have been in a terminal state for 120
   seconds (configurable via `AppState::completed_after_secs`) are automatically
   promoted off the Active grid to a dedicated Completed page. At 100+ workers
