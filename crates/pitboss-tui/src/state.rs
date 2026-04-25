@@ -6,6 +6,22 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use pitboss_core::store::TaskStatus;
 
+/// Seconds after a terminal state before a tile is promoted to the Completed
+/// page. Configurable per-run via `AppState.completed_after_secs`.
+pub const COMPLETED_COOLDOWN_DEFAULT_SECS: i64 = 5;
+
+/// Sort order for the Completed page table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SortKey {
+    /// Most recently finished first (default).
+    #[default]
+    EndedAtDesc,
+    /// Longest duration first.
+    DurationDesc,
+    /// Status alphabetically.
+    StatusAsc,
+}
+
 /// Overall display mode of the TUI.
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -25,10 +41,28 @@ pub enum Mode {
     /// grid focus if the user switched focus while in detail).
     /// `scroll` is the row offset from the top (0 = start of log).
     /// `at_bottom` tracks whether we should auto-scroll as new lines arrive.
+    /// `return_to` is the mode to restore when the user presses Esc — Normal
+    /// for Detail entered from the Active grid, Completed for Detail entered
+    /// from the Completed page.
     Detail {
         task_id: String,
         scroll: usize,
         at_bottom: bool,
+        return_to: Box<Mode>,
+    },
+    /// Completed workers page — shows Done tiles that have been in a terminal
+    /// state for longer than `AppState::completed_after_secs`. Toggled with
+    /// `C`; exit with `A` or Esc.
+    Completed {
+        /// Task id of the currently selected row. Stored as id (not index)
+        /// so the selection stays stable when new completions arrive.
+        selected_task_id: String,
+        /// First visible row (drives `TableState` offset).
+        scroll_offset: usize,
+        /// Column to sort by.
+        sort_key: SortKey,
+        /// When `Some`, only rows whose status equals this value are shown.
+        filter_status: Option<TaskStatus>,
     },
     /// v0.4: confirm modal before sending a destructive control op.
     ConfirmKill {
@@ -171,6 +205,11 @@ pub struct TileState {
     /// settled. `None` for in-flight tasks (the record hasn't been written
     /// yet) and for `use_worktree = false` tasks.
     pub worktree_path: Option<PathBuf>,
+    /// Wall-clock time when the task reached a terminal state. Set from
+    /// `TaskRecord.ended_at` for completed tiles; `None` for in-flight tiles.
+    /// Used by `is_promoted` to decide when to move the tile to the Completed
+    /// page.
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Full application state updated each poll cycle.
@@ -234,6 +273,10 @@ pub struct AppState {
     /// the picker is visible; used by the mouse click handler to open
     /// a run with one click.
     pub picker_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
+    /// Bounding rectangles of each Completed page table row, storing the
+    /// original `tasks[]` index. Populated by `render_completed_page` each
+    /// frame; used by the mouse click handler in `app.rs`.
+    pub completed_hit_rects: std::sync::Mutex<Vec<(usize, ratatui::layout::Rect)>>,
     /// Sub-tree views keyed by `sublead_id`. Empty in depth-1 runs.
     pub subtrees: HashMap<String, SubtreeView>,
     /// Collapse state for each sub-tree container. `true` = expanded (default
@@ -244,10 +287,17 @@ pub struct AppState {
     /// Used by Tab cycling and Enter toggle-collapse.
     pub focused_subtree_idx: usize,
     /// Which top-level pane has keyboard focus. Default: `Grid`.
-    /// `'a'` switches to `ApprovalList`; `Esc` returns to `Grid`.
+    /// `'A'` switches to `ApprovalList`; `Esc` returns to `Grid`.
     pub pane_focus: PaneFocus,
     /// Non-modal approval queue rendered in the right-rail pane (30% width).
     pub approval_list: crate::approval_list::ApprovalListState,
+    /// Seconds a tile must be in a terminal state before it moves from the
+    /// Active grid to the Completed page. Default: `COMPLETED_COOLDOWN_DEFAULT_SECS`.
+    /// Configurable via `[ui] completed_after_secs` in the manifest.
+    pub completed_after_secs: i64,
+    /// Compact 2-line tile rendering for the Active grid. Toggled with `v`.
+    /// Default: false (full 5-line tiles).
+    pub compact_tiles: bool,
     /// Live copy of the dispatcher's `[[approval_policy]]` rule set.
     /// Populated from `Hello.policy_rules` on connect (and updated when the
     /// operator saves a `PolicyEditor` session). Seeded as empty until the
@@ -293,12 +343,15 @@ impl AppState {
             store_activity: std::collections::HashMap::new(),
             tile_hit_rects: std::sync::Mutex::new(Vec::new()),
             picker_hit_rects: std::sync::Mutex::new(Vec::new()),
+            completed_hit_rects: std::sync::Mutex::new(Vec::new()),
             subtrees: HashMap::new(),
             expanded: HashMap::new(),
             focused_subtree_idx: 0,
             pane_focus: PaneFocus::Grid,
             approval_list: crate::approval_list::ApprovalListState::default(),
             policy_rules: Vec::new(),
+            completed_after_secs: COMPLETED_COOLDOWN_DEFAULT_SECS,
+            compact_tiles: false,
         }
     }
 
@@ -337,54 +390,109 @@ impl AppState {
         self.tasks.get(self.focus)
     }
 
-    /// Move focus left (wraps).
+    /// Returns `true` when `tile` should appear on the Completed page rather
+    /// than the Active grid. Promotion happens `completed_after_secs` after
+    /// the tile first reaches a terminal state.
+    pub fn is_promoted(&self, tile: &TileState) -> bool {
+        tile.completed_at
+            .is_some_and(|t| (Utc::now() - t).num_seconds() >= self.completed_after_secs)
+    }
+
+    /// Indices into `self.tasks` for tiles that should appear on the Active
+    /// grid (not yet promoted). Computed fresh each call; cache the result
+    /// in the caller if used more than once per frame.
+    pub fn active_tile_indices(&self) -> Vec<usize> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !self.is_promoted(t))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Indices into `self.tasks` for tiles on the Completed page, sorted
+    /// most-recently-finished first by default.
+    pub fn completed_tile_indices(&self) -> Vec<usize> {
+        let mut idxs: Vec<usize> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| self.is_promoted(t))
+            .map(|(i, _)| i)
+            .collect();
+        // Default sort: most recently finished first.
+        idxs.sort_by(|&a, &b| {
+            let ta = self.tasks[a].completed_at;
+            let tb = self.tasks[b].completed_at;
+            tb.cmp(&ta)
+        });
+        idxs
+    }
+
+    /// If the currently focused tile has been promoted, move focus to the
+    /// first active tile. Called after every snapshot update.
+    pub fn ensure_active_focus(&mut self) {
+        if matches!(self.mode, Mode::Detail { .. } | Mode::Completed { .. }) {
+            return;
+        }
+        let active = self.active_tile_indices();
+        if active.is_empty() {
+            return;
+        }
+        if !active.contains(&self.focus) {
+            self.focus = active[0];
+        }
+    }
+
+    /// Move focus left within the active tile set (wraps).
     pub fn focus_left(&mut self) {
-        if self.tasks.is_empty() {
+        let active = self.active_tile_indices();
+        if active.is_empty() {
             return;
         }
-        if self.focus == 0 {
-            self.focus = self.tasks.len() - 1;
-        } else {
-            self.focus -= 1;
-        }
+        let pos = active.iter().position(|&i| i == self.focus).unwrap_or(0);
+        let new_pos = if pos == 0 { active.len() - 1 } else { pos - 1 };
+        self.focus = active[new_pos];
     }
 
-    /// Move focus right (wraps).
+    /// Move focus right within the active tile set (wraps).
     pub fn focus_right(&mut self) {
-        if self.tasks.is_empty() {
+        let active = self.active_tile_indices();
+        if active.is_empty() {
             return;
         }
-        self.focus = (self.focus + 1) % self.tasks.len();
+        let pos = active.iter().position(|&i| i == self.focus).unwrap_or(0);
+        self.focus = active[(pos + 1) % active.len()];
     }
 
-    /// Move focus up by one row (4 columns).
+    /// Move focus up by one grid row (4 columns) within the active tile set.
     pub fn focus_up(&mut self) {
-        if self.tasks.is_empty() {
+        let active = self.active_tile_indices();
+        if active.is_empty() {
             return;
         }
-        if self.focus >= 4 {
-            self.focus -= 4;
+        let pos = active.iter().position(|&i| i == self.focus).unwrap_or(0);
+        if pos >= 4 {
+            self.focus = active[pos - 4];
         }
     }
 
-    /// Move focus down by one row (4 columns).
+    /// Move focus down by one grid row (4 columns) within the active tile set.
     pub fn focus_down(&mut self) {
-        if self.tasks.is_empty() {
+        let active = self.active_tile_indices();
+        if active.is_empty() {
             return;
         }
-        let next = self.focus + 4;
-        if next < self.tasks.len() {
-            self.focus = next;
+        let pos = active.iter().position(|&i| i == self.focus).unwrap_or(0);
+        if pos + 4 < active.len() {
+            self.focus = active[pos + 4];
         }
     }
 
-    /// Enter the detail view for the currently focused tile.
+    /// Enter the detail view for the currently focused tile on the Active grid.
     ///
     /// No-op if there is no focused tile. If already in `Detail`, stays put
-    /// (don't nest). Starts at the bottom of the log (auto-scroll enabled).
-    /// Also triggers a one-shot `git diff --stat` on the tile's worktree so
-    /// the metadata pane can show lines added/removed; the result is cached
-    /// in `self.cached_git_diff` until exit.
+    /// (don't nest). Returns to `Normal` on exit (Esc).
     pub fn enter_detail(&mut self) {
         if matches!(self.mode, Mode::Detail { .. }) {
             return;
@@ -393,27 +501,51 @@ impl AppState {
             return;
         };
         let task_id = tile.id.clone();
+        self.enter_detail_for(task_id);
+    }
+
+    /// Enter the detail view for an explicit `task_id`, preserving the
+    /// current mode as `return_to` so Esc returns to the correct page.
+    ///
+    /// Called from the Active grid (via `enter_detail`) and the Completed
+    /// page handler. No-op if already in `Detail`.
+    pub fn enter_detail_for(&mut self, task_id: String) {
+        if matches!(self.mode, Mode::Detail { .. }) {
+            return;
+        }
         // worktree_path is populated for in-flight tiles via the
         // `worktree.path` sidecar (written by the dispatcher at spawn
         // time) and for completed tiles via TaskRecord.worktree_path —
         // so this diff runs for both live and settled workers.
-        if let Some(worktree) = tile.worktree_path.as_deref() {
-            if let Some(summary) = compute_git_diff_summary(worktree) {
-                self.cached_git_diff.insert(task_id.clone(), summary);
+        if let Some(tile) = self.tasks.iter().find(|t| t.id == task_id) {
+            if let Some(worktree) = tile.worktree_path.as_deref() {
+                if let Some(summary) = compute_git_diff_summary(worktree) {
+                    self.cached_git_diff.insert(task_id.clone(), summary);
+                }
             }
         }
+        let return_to = if matches!(self.mode, Mode::Completed { .. }) {
+            Box::new(self.mode.clone())
+        } else {
+            Box::new(Mode::Normal)
+        };
         self.mode = Mode::Detail {
             task_id,
             scroll: 0,
             at_bottom: true,
+            return_to,
         };
     }
 
-    /// Exit the detail view and return to `Normal` mode. Clears the
-    /// git-diff cache since it was computed against the task's worktree at
-    /// entry time and may be stale by next entry.
+    /// Exit the detail view and return to the mode captured in `return_to`.
+    /// Clears the git-diff cache since it was computed against the task's
+    /// worktree at entry time and may be stale by next entry.
     pub fn exit_detail(&mut self) {
-        self.mode = Mode::Normal;
+        let return_to = match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Detail { return_to, .. } => *return_to,
+            _ => Mode::Normal,
+        };
+        self.mode = return_to;
         self.cached_git_diff.clear();
     }
 
@@ -666,12 +798,20 @@ impl AppState {
         if let Some(id) = focused_id {
             if let Some(pos) = self.tasks.iter().position(|t| t.id == id) {
                 self.focus = pos;
+                self.ensure_active_focus();
                 return;
             }
         }
         // Clamp focus to valid range.
         if !self.tasks.is_empty() && self.focus >= self.tasks.len() {
             self.focus = self.tasks.len() - 1;
+        }
+        self.ensure_active_focus();
+
+        // If in Completed mode but no tiles remain on that page (e.g. run
+        // switch cleared tasks), fall back to Normal.
+        if matches!(self.mode, Mode::Completed { .. }) && self.completed_tile_indices().is_empty() {
+            self.mode = Mode::Normal;
         }
     }
 }
@@ -943,6 +1083,7 @@ mod tests {
             model: None,
             parent_task_id: None,
             worktree_path: None,
+            completed_at: None,
         }];
         state
     }
@@ -987,6 +1128,7 @@ mod tests {
             task_id: "task-001".to_string(),
             scroll: 5,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.enter_detail(); // should be a no-op
@@ -1002,6 +1144,7 @@ mod tests {
             task_id: "task-001".to_string(),
             scroll: 3,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.exit_detail();
@@ -1021,6 +1164,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.detail_scroll_down(1, 10);
@@ -1045,6 +1189,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.detail_scroll_down(5, 10);
@@ -1070,6 +1215,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 0,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.detail_scroll_up(1);
@@ -1094,6 +1240,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 3,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.detail_scroll_up(1);
@@ -1113,6 +1260,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 30,
             at_bottom: true,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.detail_jump_top();
@@ -1145,6 +1293,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 5,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.detail_jump_bottom(10);
@@ -1180,6 +1329,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 20,
             at_bottom: true,
+            return_to: Box::new(Mode::Normal),
         };
 
         // Simulate new lines arriving — focus_log grows to 35 lines and the
@@ -1206,6 +1356,7 @@ mod tests {
             task_id: "t".to_string(),
             scroll: 5,
             at_bottom: false,
+            return_to: Box::new(Mode::Normal),
         };
 
         state.focus_log = (0..35).map(|i| format!("line {i}")).collect();
@@ -1404,6 +1555,120 @@ mod tests {
         } else {
             panic!("not ConfirmKill::Worker");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Completed page — promotion predicate and index helpers
+    // -----------------------------------------------------------------------
+
+    fn make_done_tile(id: &str, ended_secs_ago: i64) -> TileState {
+        TileState {
+            id: id.to_string(),
+            status: TileStatus::Done(pitboss_core::store::TaskStatus::Success),
+            duration_ms: Some(1000),
+            token_usage_input: 0,
+            token_usage_output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+            exit_code: Some(0),
+            log_path: std::path::PathBuf::from("/dev/null"),
+            model: None,
+            parent_task_id: None,
+            worktree_path: None,
+            completed_at: Some(Utc::now() - chrono::Duration::seconds(ended_secs_ago)),
+        }
+    }
+
+    #[test]
+    fn is_promoted_false_before_threshold() {
+        let state = make_state(); // completed_after_secs = 5 (default)
+        let tile = make_done_tile("t", 4); // ended 4s ago < 5s threshold
+        assert!(!state.is_promoted(&tile));
+    }
+
+    #[test]
+    fn is_promoted_true_after_threshold() {
+        let state = make_state();
+        let tile = make_done_tile("t", 6); // ended 6s ago > 5s threshold
+        assert!(state.is_promoted(&tile));
+    }
+
+    #[test]
+    fn is_promoted_false_for_running_tile() {
+        let state = make_state();
+        let tile = TileState {
+            id: "r".into(),
+            status: TileStatus::Running,
+            duration_ms: None,
+            token_usage_input: 0,
+            token_usage_output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+            exit_code: None,
+            log_path: std::path::PathBuf::from("/dev/null"),
+            model: None,
+            parent_task_id: None,
+            worktree_path: None,
+            completed_at: None, // running tiles never have completed_at
+        };
+        assert!(!state.is_promoted(&tile));
+    }
+
+    #[test]
+    fn active_and_completed_indices_partition_tasks() {
+        let mut state = make_state();
+        state.tasks = vec![
+            make_done_tile("old", 30), // promoted
+            TileState {
+                // running, not promoted
+                id: "live".into(),
+                status: TileStatus::Running,
+                duration_ms: None,
+                token_usage_input: 0,
+                token_usage_output: 0,
+                cache_read: 0,
+                cache_creation: 0,
+                exit_code: None,
+                log_path: std::path::PathBuf::from("/dev/null"),
+                model: None,
+                parent_task_id: None,
+                worktree_path: None,
+                completed_at: None,
+            },
+            make_done_tile("fresh", 2), // done but within grace period
+        ];
+        let active = state.active_tile_indices();
+        let completed = state.completed_tile_indices();
+
+        // "old" (30s ago) should be promoted; "live" and "fresh" should not.
+        assert_eq!(completed.len(), 1);
+        assert_eq!(state.tasks[completed[0]].id, "old");
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|&i| state.tasks[i].id == "live"));
+        assert!(active.iter().any(|&i| state.tasks[i].id == "fresh"));
+    }
+
+    #[test]
+    fn exit_detail_returns_to_completed_mode() {
+        let mut state = make_state_with_tile("task-001");
+        let completed_mode = Mode::Completed {
+            selected_task_id: "task-001".to_string(),
+            scroll_offset: 0,
+            sort_key: SortKey::EndedAtDesc,
+            filter_status: None,
+        };
+        state.mode = Mode::Detail {
+            task_id: "task-001".to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(completed_mode),
+        };
+        state.exit_detail();
+        assert!(
+            matches!(state.mode, Mode::Completed { .. }),
+            "exit_detail should return to Completed, got {:?}",
+            state.mode
+        );
     }
 
     #[test]

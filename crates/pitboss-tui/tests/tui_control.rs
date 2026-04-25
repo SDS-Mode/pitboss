@@ -174,6 +174,7 @@ fn empty_grid_cells_are_cleared() {
             model: None,
             parent_task_id: None,
             worktree_path: None,
+            completed_at: None,
         }
     }
 
@@ -240,6 +241,7 @@ fn focus_log_content_does_not_bleed_into_tile_grid() {
             model: None,
             parent_task_id: None,
             worktree_path: None,
+            completed_at: None,
         }
     }
 

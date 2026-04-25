@@ -332,10 +332,11 @@ pub fn build_report(
 // ---------------------------------------------------------------------------
 
 fn fmt_ms(ms: i64) -> String {
-    // Diff display treats a zero duration as "0s", not "—", because a run
-    // pair that both completed in <1ms is still meaningful data. Clamp
-    // negatives to 0 and bump through the shared formatter; its "—" case
-    // won't fire because we hand it a non-negative number.
+    // Diff display treats a zero-or-negative duration as "0s", not "—":
+    // a run pair where both sides completed in <1ms is still meaningful
+    // data. Short-circuit here rather than delegating to format_duration_ms,
+    // which would return "—" for non-positive values — the diff view has no
+    // "not started" concept (#112).
     if ms <= 0 {
         return "0s".to_string();
     }

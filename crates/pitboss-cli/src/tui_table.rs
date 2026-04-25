@@ -134,9 +134,10 @@ impl ProgressTable {
             .exit_code
             .map(|c| c.to_string())
             .unwrap_or_else(|| "—".to_string());
+        let task_id = pitboss_core::fmt::truncate_ellipsis(&r.task_id, 20);
         format!(
             "{:<20} {:<12} {:>8} {:<22} {:>4}",
-            r.task_id, status, time, tokens, exit
+            task_id, status, time, tokens, exit
         )
     }
 }

@@ -277,7 +277,11 @@ async fn serve_connection(
             // canonical cleanup path for those is expire_layer_approvals;
             // we just skip replaying to the TUI so it doesn't render a
             // dangling approval card. is_closed is the best proxy we have
-            // without racing the responder's receiver.
+            // without racing the responder's receiver. A concurrent TTL expiry
+            // between this check and the send below is accepted: the TUI will
+            // briefly render a card that vanishes when the expiry is processed
+            // (#109). Closing the window fully would require coordinating the
+            // replay and TTL paths via a version counter — not worth it.
             if entry.responder.is_closed() {
                 continue;
             }

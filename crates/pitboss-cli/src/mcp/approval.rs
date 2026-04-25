@@ -163,8 +163,14 @@ impl ApprovalBridge {
             };
             // Best-effort send. A full queue drops the event; the bridge
             // timeout will then expire and the caller sees a timeout —
-            // same end state as a permanently-disconnected TUI.
-            let _ = w.sender.try_send(ev);
+            // same end state as a permanently-disconnected TUI (#110).
+            if let Err(e) = w.sender.try_send(ev) {
+                tracing::warn!(
+                    request_id = %request_id,
+                    error = %e,
+                    "control writer queue full; TUI will not see ApprovalRequest until reconnect"
+                );
+            }
             drop(writer_guard);
         } else {
             drop(writer_guard);

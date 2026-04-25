@@ -78,6 +78,7 @@ mod tests {
             model: None,
             parent_task_id: None,
             worktree_path: None,
+            completed_at: None,
         }
     }
 

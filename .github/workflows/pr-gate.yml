@@ -61,7 +61,7 @@ jobs:
             code:
               - 'Dockerfile'
               - '.dockerignore'
-              - '.github/workflows/container.yml'
+              - '.github/workflows/ci.yml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'crates/**'
