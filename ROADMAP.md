@@ -128,6 +128,8 @@ item.
   who knows the layout, but a built-in `prune` makes the lifecycle
   legible. Defaults to dry-run; `--apply` for the destructive path;
   `--older-than 24h` for time-windowed sweeps.
+  **Status:** fully scoped; reserved for its own PR (separate from
+  manifest-quality work) due to new-subcommand test surface.
 - **TUI run-list staleness detection.** The run-list status column
   derives "running" from "summary.json missing + control socket
   liveness probe doesn't fail." A stale unix socket file can stick
@@ -330,27 +332,28 @@ args    = ["-y", "@upstash/context7-mcp"]
 # optional: scope = "lead" | "sublead" | "worker" | "all"
 ```
 
-Open scope decisions:
+v1 ships `scope = "all"` (run-wide injection, all actors receive the
+server). This covers the dominant use case — "give every actor context7
+docs access" — in one manifest line.
 
-- **Run-wide vs per-actor.** Initial cut: run-wide with optional
-  per-actor override (`scope = "lead"` to limit context7 to the
-  lead, for example). Per-actor is more secure but more verbose;
-  run-wide is the right default for the common "give all actors
-  context7 docs access" case.
+**Deferred scope decisions (v2):**
+
+- **Per-actor scoping** (`scope = "lead" | "sublead" | "worker"`).
+  More secure but more verbose; worth adding once operators encounter
+  cases where they want to restrict a server to only part of the tree.
+  Natural landing point is alongside typed worker profiles, where a
+  `worker_type` profile could declare which MCP servers its workers see.
 - **Allowlist interaction with typed profiles.** A `worker_type`
   profile should be able to declare which MCP servers its workers
-  see — keeps the safety belt even when context7 is in scope
-  run-wide.
+  see — keeps the safety belt even when a server is in scope run-wide.
 
-Today's workaround is documented in `Pitboss.md` (Larry notes,
-2026-04-24): the lead pre-fetches docs via a bash helper running
+Today's workaround: the lead pre-fetches docs via a bash helper running
 outside the worker sandbox, writes results to `/ref/context7/<lib>`
 in KV, and workers read from KV. Functional but operator-heavy.
 Native injection makes context7-style augmentation a one-line
 manifest declaration.
 
-**Status:** scoped, not started. Pairs with typed worker profiles
-above for the per-type allowlist piece.
+**Status:** v1 (scope=all) in progress. Per-actor scoping deferred.
 
 ---
 

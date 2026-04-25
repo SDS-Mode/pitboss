@@ -59,6 +59,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         require_plan_approval: false,
         approval_rules: vec![],
         container: None,
+        mcp_servers: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();

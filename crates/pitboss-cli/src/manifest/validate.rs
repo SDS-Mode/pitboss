@@ -80,6 +80,18 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
         );
     }
 
+    // A lead with an empty prompt starts, receives no `-p` argument, and exits
+    // with code 1 in ~700ms. Common cause: the `prompt =` key appears after a
+    // subtable declaration (`[lead.sublead_defaults]`) in the TOML source,
+    // which moves it out of the `[lead]` scope — TOML silently assigns it to
+    // the subtable or drops it, and serde falls back to `unwrap_or_default()`.
+    if lead.prompt.trim().is_empty() {
+        bail!(
+            "lead '{}': prompt is required but is empty. If using [lead.sublead_defaults], \
+             ensure `prompt =` appears before any subtable declaration in the TOML source.",
+            lead.id
+        );
+    }
     if lead.id.is_empty() {
         bail!("lead id is required");
     }
@@ -336,6 +348,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         }
     }
 
@@ -361,6 +374,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         f(&mut m);
         m
@@ -442,6 +456,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -470,6 +485,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("max_workers"), "got: {err}");
@@ -495,6 +511,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         assert!(validate(&r).is_err());
     }
@@ -519,6 +536,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         assert!(validate(&r).is_err());
     }
@@ -550,6 +568,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         (d, r)
     }
@@ -669,6 +688,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");
@@ -695,6 +715,64 @@ mod tests {
             max_workers_across_tree: None,
             sublead_defaults: None,
         }
+    }
+
+    #[test]
+    fn rejects_lead_with_empty_prompt() {
+        let d = with_tmp_repo(true);
+        let mut lead = rl("l", d.path().to_path_buf());
+        lead.prompt = String::new();
+        let r = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+        };
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("prompt is required but is empty"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_lead_with_whitespace_only_prompt() {
+        let d = with_tmp_repo(true);
+        let mut lead = rl("l", d.path().to_path_buf());
+        lead.prompt = "   \t\n  ".to_string();
+        let r = ResolvedManifest {
+            max_parallel: 4,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+        };
+        assert!(validate(&r).is_err());
     }
 
     #[test]

@@ -686,6 +686,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -773,6 +774,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

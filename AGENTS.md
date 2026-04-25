@@ -171,11 +171,18 @@ Inherited by every `[[task]]` and `[[lead]]` unless overridden.
 | `branch` | no | Branch name for the worktree. Defaults to a generated name. |
 | `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | no | Per-task overrides of `[defaults]`. |
 
-### `[[lead]]` (hierarchical mode, exactly one, mutually exclusive with `[[task]]`)
+### `[[lead]]` / `[lead]` (hierarchical mode, exactly one, mutually exclusive with `[[task]]`)
 
-Same fields as `[[task]]`. `id` is used as the tile label in the TUI.
-Mutually exclusive with `[[task]]` — a manifest is either flat or
-hierarchical.
+Both `[[lead]]` (array-table) and `[lead]` (single-table) are accepted.
+Use `[lead]` for depth-2 manifests that also declare `[lead.sublead_defaults]` —
+it is cleaner than the array-table form for single-lead hierarchical manifests.
+`id` is used as the tile label in the TUI. Mutually exclusive with `[[task]]`.
+
+> **Important:** `prompt =` must appear **before** any subtable declaration
+> (e.g. `[lead.sublead_defaults]`) in the TOML source. A `prompt =` key that
+> appears after a subtable header is parsed into that subtable's scope and
+> silently dropped; `pitboss validate` will catch this and report
+> `"prompt is required but is empty"`.
 
 Additional `[lead]` fields for depth-2 sub-leads (v0.6+):
 
@@ -217,6 +224,34 @@ The `[container]` section enables `pitboss container-dispatch`, which assembles 
 | `readonly` | no | Default `false`. |
 
 Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
+
+### `[[mcp_server]]` (v0.9+)
+
+Declare external MCP servers to inject into **every actor's** `--mcp-config` (lead, sub-leads, and workers). This is the native alternative to the KV-bridge workaround for giving all actors access to tools like context7.
+
+```toml
+[[mcp_server]]
+id      = "context7"
+command = "npx"
+args    = ["-y", "@upstash/context7-mcp"]
+
+[[mcp_server]]
+id      = "my-tool"
+command = "/usr/local/bin/my-mcp-server"
+args    = ["--port", "3000"]
+env     = { MY_TOKEN = "abc" }
+```
+
+| Key | Required? | Notes |
+|---|---|---|
+| `id` | yes | Key name in the generated `mcpServers` JSON. Must be unique within the manifest. |
+| `command` | yes | Executable to launch (e.g. `"npx"`, `"uvx"`, absolute path). |
+| `args` | no | Arguments passed to the command. Default `[]`. |
+| `env` | no | Environment variables injected into the server process. Default `{}`. |
+
+All declared servers are injected into all actors (scope = all). Per-actor scoping is deferred — see roadmap.
+
+**Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
 
 ---
 
