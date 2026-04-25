@@ -119,6 +119,9 @@ pub struct ResolvedManifest {
     // NEW — optional [container] section for `pitboss container-dispatch`.
     #[serde(default)]
     pub container: Option<ContainerConfig>,
+    // NEW in v0.9 — external MCP servers injected into all actor mcp-configs.
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::manifest::schema::McpServerSpec>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -188,6 +191,7 @@ pub fn resolve(manifest: Manifest, env_max_parallel: Option<u32>) -> Result<Reso
         require_plan_approval: manifest.run.require_plan_approval,
         approval_rules,
         container: manifest.container,
+        mcp_servers: manifest.mcp_servers,
     })
 }
 
@@ -336,6 +340,7 @@ pub fn resolve_single_lead(
         require_plan_approval: manifest.run.require_plan_approval,
         approval_rules,
         container: manifest.container,
+        mcp_servers: manifest.mcp_servers,
     })
 }
 

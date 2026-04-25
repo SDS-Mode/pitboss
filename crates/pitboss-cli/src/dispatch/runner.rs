@@ -1073,6 +1073,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         }
     }
 
@@ -1214,6 +1215,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -1303,6 +1305,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -1405,6 +1408,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
 
         let spawner = Arc::new(CyclingFake(

@@ -51,6 +51,7 @@ async fn pause_op_writes_events_jsonl() {
         require_plan_approval: false,
         approval_rules: vec![],
         container: None,
+        mcp_servers: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -254,6 +255,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         require_plan_approval: false,
         approval_rules: vec![],
         container: None,
+        mcp_servers: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -366,6 +368,7 @@ async fn auto_approve_policy_responds_without_tui() {
         require_plan_approval: false,
         approval_rules: vec![],
         container: None,
+        mcp_servers: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -425,6 +428,7 @@ async fn auto_reject_policy_responds_without_tui() {
         require_plan_approval: false,
         approval_rules: vec![],
         container: None,
+        mcp_servers: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -492,6 +496,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         require_plan_approval: true,
         approval_rules: vec![],
         container: None,
+        mcp_servers: vec![],
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

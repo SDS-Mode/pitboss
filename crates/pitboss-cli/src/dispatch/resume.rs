@@ -539,6 +539,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -644,6 +645,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -752,6 +754,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         std::fs::write(
             run_dir.join("resolved.json"),

@@ -128,6 +128,8 @@ item.
   who knows the layout, but a built-in `prune` makes the lifecycle
   legible. Defaults to dry-run; `--apply` for the destructive path;
   `--older-than 24h` for time-windowed sweeps.
+  **Status:** fully scoped; reserved for its own PR (separate from
+  manifest-quality work) due to new-subcommand test surface.
 - **TUI run-list staleness detection.** The run-list status column
   derives "running" from "summary.json missing + control socket
   liveness probe doesn't fail." A stale unix socket file can stick
@@ -155,16 +157,9 @@ item.
   first-attempt parse failures and lets the agent focus on prompt
   content. Defaults to `simple`; agents reach for `full` only when
   a task genuinely requires a seam worker or nested sub-leads.
-- **`pitboss validate` — detect promptless lead.** A `[lead]` /
-  `[[lead]]` block whose `prompt` key sits *after* a subtable
-  declaration (e.g. `[lead.sublead_defaults]`) parses as
-  syntactically valid TOML but assigns `prompt` outside the lead's
-  scope. The lead spawns, gets no `-p` argument, and exits with
-  code 1 in ~700ms. `pitboss validate` reports `OK` because the
-  schema is satisfied — only `prompt` is silently empty. Fix:
-  validate should fail when a resolved lead/sub-lead config has a
-  missing or empty `prompt`, since a promptless actor cannot run.
-  Cheap, single-day change.
+- ~~**`pitboss validate` — detect promptless lead.**~~ **Closed** — shipped in
+  PR #122. `validate` now rejects empty or whitespace-only lead prompts with an
+  error pointing at the TOML subtable-ordering root cause.
 - **AGENTS.md `[[lead]]` vs `[lead]` consistency.** The manifest
   schema section uses `[[lead]]` while the depth-2 example uses
   `[lead]`. The depth-2 fields (`allow_subleads`, `max_subleads`,
@@ -303,54 +298,24 @@ operators can observe the eat-rate live.
 **Status:** scoped, not started. Sibling to typed worker profiles
 above; both are operator-declared bounds the dispatcher enforces.
 
-### External MCP server injection in manifests
+### External MCP server injection — per-actor scoping (v2)
 
-Pitboss generates per-actor `--mcp-config` files containing only the
-pitboss bridge server. Claude Code's `--mcp-config` flag is not
-additive with project-level `.mcp.json` auto-discovery, so any
-project-local MCP server placed in the working directory is
-silently absent inside lead, sub-lead, and worker actors. The
-manifest schema has no field to declare additional MCP servers
-either.
+~~v1 (`scope = "all"`) shipped in v0.9~~ — `[[mcp_server]]` declarations are
+now injected into every actor's `--mcp-config` at dispatch time.
 
-Confirmed via live test on 2026-04-24 (run 019dc06a): context7
-MCP tools (`resolve-library-id`, `query-docs`) were absent at every
-actor level despite a valid `.mcp.json` in the working directory.
-Workers are additionally sandbox-locked to the run directory, so a
-helper script wrapping the MCP call is not reachable either.
+Remaining work:
 
-Add a manifest field that declares MCP servers to merge into the
-generated `--mcp-config`:
+- **Per-actor scoping** (`scope = "lead" | "sublead" | "worker"`).
+  More secure but more verbose; useful once operators need to restrict a server
+  to only part of the tree (e.g. context7 for the lead only, not workers).
+  Natural landing point is alongside typed worker profiles — a `worker_type`
+  profile could declare which MCP servers workers of that type see.
+- **Allowlist interaction with typed profiles.** When typed profiles ship,
+  `[[mcp_server]]` entries should be gateable per type so the safety belt
+  holds even when a server is declared run-wide.
 
-```toml
-[[mcp_server]]
-id      = "context7"
-command = "npx"
-args    = ["-y", "@upstash/context7-mcp"]
-# optional: scope = "lead" | "sublead" | "worker" | "all"
-```
-
-Open scope decisions:
-
-- **Run-wide vs per-actor.** Initial cut: run-wide with optional
-  per-actor override (`scope = "lead"` to limit context7 to the
-  lead, for example). Per-actor is more secure but more verbose;
-  run-wide is the right default for the common "give all actors
-  context7 docs access" case.
-- **Allowlist interaction with typed profiles.** A `worker_type`
-  profile should be able to declare which MCP servers its workers
-  see — keeps the safety belt even when context7 is in scope
-  run-wide.
-
-Today's workaround is documented in `Pitboss.md` (Larry notes,
-2026-04-24): the lead pre-fetches docs via a bash helper running
-outside the worker sandbox, writes results to `/ref/context7/<lib>`
-in KV, and workers read from KV. Functional but operator-heavy.
-Native injection makes context7-style augmentation a one-line
-manifest declaration.
-
-**Status:** scoped, not started. Pairs with typed worker profiles
-above for the per-type allowlist piece.
+**Status:** v1 shipped (PR #122). Per-actor scoping deferred pending typed
+worker profiles.
 
 ---
 

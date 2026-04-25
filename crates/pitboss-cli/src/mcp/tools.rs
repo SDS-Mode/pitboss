@@ -744,6 +744,7 @@ async fn run_worker(
         &worker_mcp_config,
         &socket_path,
         &task_id,
+        &layer.manifest.mcp_servers,
     )
     .await
     {
@@ -1164,6 +1165,7 @@ pub async fn spawn_resume_worker(
         &worker_mcp_config_path,
         &socket_path,
         &task_id,
+        &state.root.manifest.mcp_servers,
     )
     .await
     {
@@ -2384,6 +2386,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -2848,6 +2851,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -3463,6 +3467,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();
@@ -3553,6 +3558,7 @@ mod tests {
             require_plan_approval: false,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();
@@ -3651,6 +3657,7 @@ mod tests {
             require_plan_approval,
             approval_rules: vec![],
             container: None,
+            mcp_servers: vec![],
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let script = FakeScript::new().hold_until_signal();

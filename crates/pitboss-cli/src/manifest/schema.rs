@@ -60,6 +60,34 @@ pub struct MountSpec {
     pub readonly: bool,
 }
 
+/// An external MCP server to inject into every actor's `--mcp-config`.
+/// Declared as `[[mcp_server]]` in the manifest. All actors (lead, sub-lead,
+/// and workers) receive the server so they can call its tools directly.
+///
+/// Per-actor scope granularity is deferred — see roadmap.
+///
+/// Example:
+/// ```toml
+/// [[mcp_server]]
+/// id      = "context7"
+/// command = "npx"
+/// args    = ["-y", "@upstash/context7-mcp"]
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerSpec {
+    /// Key name for this server in the generated `mcpServers` JSON object.
+    pub id: String,
+    /// Executable to launch (e.g. `"npx"`, `"uvx"`, absolute path).
+    pub command: String,
+    /// Arguments passed to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables injected into the MCP server process.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -83,6 +111,9 @@ pub struct Manifest {
     /// Optional container config for `pitboss container-dispatch`.
     #[serde(default)]
     pub container: Option<ContainerConfig>,
+    /// External MCP servers injected into all actor configs (v0.9+).
+    #[serde(default, rename = "mcp_server")]
+    pub mcp_servers: Vec<McpServerSpec>,
 }
 
 /// TOML schema for a single `[[approval_policy]]` rule.
@@ -269,6 +300,9 @@ pub struct SingleLeadManifest {
     /// Optional container config for `pitboss container-dispatch`.
     #[serde(default)]
     pub container: Option<ContainerConfig>,
+    /// External MCP servers injected into all actor configs (v0.9+).
+    #[serde(default, rename = "mcp_server")]
+    pub mcp_servers: Vec<McpServerSpec>,
 }
 
 /// v0.6 single-table `[lead]` schema. Used when the manifest author writes

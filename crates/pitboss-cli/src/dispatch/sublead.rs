@@ -494,10 +494,14 @@ async fn spawn_sublead_session(
     let socket_path = socket_path_for_run(sub_layer.run_id, &sub_layer.manifest.run_dir);
 
     // 2. Build per-sub-lead mcp-config.json.
-    let mcp_config_path =
-        build_sublead_mcp_config(&sublead_id, &socket_path, &state.root.run_subdir)
-            .await
-            .context("build sublead mcp-config")?;
+    let mcp_config_path = build_sublead_mcp_config(
+        &sublead_id,
+        &socket_path,
+        &state.root.run_subdir,
+        &state.root.manifest.mcp_servers,
+    )
+    .await
+    .context("build sublead mcp-config")?;
 
     // 3. Build the CLI args: sublead toolset (or operator override),
     //    model, prompt, and optional --resume when continuing a prior session.

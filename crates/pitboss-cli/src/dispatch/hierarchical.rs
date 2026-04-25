@@ -181,7 +181,14 @@ pub async fn run_hierarchical(
 
     // 2. Build the --mcp-config file for the lead.
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
-    write_mcp_config(&mcp_config_path, &socket, &lead.id, "lead").await?;
+    write_mcp_config(
+        &mcp_config_path,
+        &socket,
+        &lead.id,
+        "lead",
+        &resolved.mcp_servers,
+    )
+    .await?;
 
     // 3. Prepare lead worktree + spawn.
     let mut lead_worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
@@ -580,30 +587,62 @@ pub async fn run_hierarchical(
 /// This avoids relying on a non-standard `transport: { type: "unix", ... }`
 /// field that claude's MCP client may not honor. The generated config uses
 /// only the documented `command` + `args` (stdio transport) shape.
+/// Build the `mcpServers` JSON object with the pitboss bridge entry plus any
+/// operator-declared `[[mcp_server]]` entries from the manifest.
+fn build_mcp_servers_json(
+    pitboss_exe: &std::path::Path,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+    extra_servers: &[crate::manifest::schema::McpServerSpec],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "pitboss".into(),
+        serde_json::json!({
+            "command": pitboss_exe.to_string_lossy(),
+            "args": [
+                "mcp-bridge",
+                "--actor-id", actor_id,
+                "--actor-role", actor_role,
+                socket.to_string_lossy(),
+            ],
+        }),
+    );
+    for s in extra_servers {
+        let mut entry = serde_json::Map::new();
+        entry.insert("command".into(), s.command.clone().into());
+        entry.insert(
+            "args".into(),
+            serde_json::Value::Array(
+                s.args
+                    .iter()
+                    .map(|a| serde_json::Value::String(a.clone()))
+                    .collect(),
+            ),
+        );
+        if !s.env.is_empty() {
+            entry.insert("env".into(), serde_json::json!(s.env));
+        }
+        servers.insert(s.id.clone(), serde_json::Value::Object(entry));
+    }
+    servers
+}
+
 async fn write_mcp_config(
     path: &std::path::Path,
     socket: &std::path::Path,
     actor_id: &str,
     actor_role: &str, // "lead" or "worker"
+    extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<()> {
     // Find the pitboss binary path (the one running us now) so the lead can
     // re-exec the same build for the bridge subcommand.
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
-
-    let cfg = serde_json::json!({
-        "mcpServers": {
-            "pitboss": {
-                "command": pitboss_exe.to_string_lossy(),
-                "args": [
-                    "mcp-bridge",
-                    "--actor-id", actor_id,
-                    "--actor-role", actor_role,
-                    socket.to_string_lossy(),
-                ],
-            }
-        }
-    });
+    let mcp_servers =
+        build_mcp_servers_json(&pitboss_exe, socket, actor_id, actor_role, extra_servers);
+    let cfg = serde_json::json!({ "mcpServers": mcp_servers });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
     tokio::fs::write(path, bytes).await?;
     Ok(())
@@ -617,22 +656,14 @@ pub async fn write_worker_mcp_config(
     path: &std::path::Path,
     socket: &std::path::Path,
     worker_id: &str,
+    extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<()> {
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
-
+    let mcp_servers =
+        build_mcp_servers_json(&pitboss_exe, socket, worker_id, "worker", extra_servers);
     let cfg = serde_json::json!({
-        "mcpServers": {
-            "pitboss": {
-                "command": pitboss_exe.to_string_lossy(),
-                "args": [
-                    "mcp-bridge",
-                    "--actor-id", worker_id,
-                    "--actor-role", "worker",
-                    socket.to_string_lossy(),
-                ],
-            }
-        },
+        "mcpServers": mcp_servers,
         "allowedTools": [
             "mcp__pitboss__kv_get",
             "mcp__pitboss__kv_set",
@@ -656,24 +687,16 @@ pub async fn build_sublead_mcp_config(
     sublead_id: &str,
     socket: &std::path::Path,
     run_subdir: &std::path::Path,
+    extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<PathBuf> {
     use crate::dispatch::runner::SUBLEAD_MCP_TOOLS;
 
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
-
+    let mcp_servers =
+        build_mcp_servers_json(&pitboss_exe, socket, sublead_id, "sublead", extra_servers);
     let cfg = serde_json::json!({
-        "mcpServers": {
-            "pitboss": {
-                "command": pitboss_exe.to_string_lossy(),
-                "args": [
-                    "mcp-bridge",
-                    "--actor-id", sublead_id,
-                    "--actor-role", "sublead",
-                    socket.to_string_lossy(),
-                ],
-            }
-        },
+        "mcpServers": mcp_servers,
         "allowedTools": SUBLEAD_MCP_TOOLS.iter().collect::<Vec<_>>()
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
