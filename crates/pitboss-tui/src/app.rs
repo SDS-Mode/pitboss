@@ -317,32 +317,10 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
         (Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Right)) => {
             state.mode = Mode::Normal;
         }
-        // Left-click on a completed table row: open Detail for that task.
+        // Left-click on the Completed page: check tab bar first (no-op if
+        // already on Completed), then fall through to row → Detail.
         (Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Left)) => {
-            let task_id = state.completed_hit_rects.lock().ok().and_then(|rects| {
-                rects.iter().find_map(|&(task_idx, r)| {
-                    if mouse.column >= r.x
-                        && mouse.column < r.x + r.width
-                        && mouse.row >= r.y
-                        && mouse.row < r.y + r.height
-                    {
-                        Some(state.tasks[task_idx].id.clone())
-                    } else {
-                        None
-                    }
-                })
-            });
-            if let Some(task_id) = task_id {
-                state.enter_detail_for(task_id);
-            }
-        }
-        // Left-click on the "Completed" tab in the tab bar: navigate to the
-        // Completed page. Works from both Normal and Completed modes (clicking
-        // the Active tab from Completed returns to Normal via the Completed
-        // right-click / Esc path; clicking Completed from Completed is a no-op
-        // because we're already there).
-        (Mode::Normal | Mode::Completed { .. }, MouseEventKind::Down(MouseButton::Left))
-            if state
+            let on_tab = state
                 .completed_tab_rect
                 .lock()
                 .ok()
@@ -352,9 +330,41 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
                         && mouse.column < r.x + r.width
                         && mouse.row >= r.y
                         && mouse.row < r.y + r.height
-                }) =>
-        {
-            if !matches!(state.mode, Mode::Completed { .. }) {
+                });
+            if !on_tab {
+                let task_id = state.completed_hit_rects.lock().ok().and_then(|rects| {
+                    rects.iter().find_map(|&(task_idx, r)| {
+                        if mouse.column >= r.x
+                            && mouse.column < r.x + r.width
+                            && mouse.row >= r.y
+                            && mouse.row < r.y + r.height
+                        {
+                            Some(state.tasks[task_idx].id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let Some(task_id) = task_id {
+                    state.enter_detail_for(task_id);
+                }
+            }
+        }
+        // Left-click on a tile in the grid (or the Completed tab when in
+        // Normal mode): check tab bar first, then fall through to tile → Detail.
+        (Mode::Normal, MouseEventKind::Down(MouseButton::Left)) => {
+            let on_tab = state
+                .completed_tab_rect
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .is_some_and(|r| {
+                    mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                });
+            if on_tab {
                 let completed = state.completed_tile_indices();
                 if !completed.is_empty() {
                     let first_id = state.tasks[completed[0]].id.clone();
@@ -365,13 +375,7 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
                         filter_status: None,
                     };
                 }
-            }
-        }
-        // Left-click on a tile in the grid: focus + enter Detail
-        // (equivalent to hjkl + Enter). Clicks on the already-focused
-        // tile also enter Detail.
-        (Mode::Normal, MouseEventKind::Down(MouseButton::Left)) => {
-            if let Some(idx) = state.tile_at(mouse.column, mouse.row) {
+            } else if let Some(idx) = state.tile_at(mouse.column, mouse.row) {
                 state.focus = idx;
                 if let Some(tile) = state.focused_tile() {
                     // The focus_tx is owned by run(); we can't touch it

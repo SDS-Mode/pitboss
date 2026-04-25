@@ -313,8 +313,12 @@ fn render_tab_bar(
     // The Active tab therefore occupies `active_label.chars().count() + 3`
     // terminal columns (pad + label + pad + divider). The Completed tab
     // starts immediately after.
-    let active_tab_cols = active_label.chars().count() as u16 + 3;
-    let completed_tab_cols = completed_label.chars().count() as u16 + 2; // no trailing divider
+    let active_tab_cols = u16::try_from(active_label.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(3);
+    let completed_tab_cols = u16::try_from(completed_label.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
     let completed_tab_x = area.x.saturating_add(active_tab_cols);
     if completed_tab_x < area.x + area.width {
         let rect = ratatui::layout::Rect::new(
@@ -1315,8 +1319,7 @@ fn render_focus_log(frame: &mut Frame, area: Rect, state: &AppState) {
                 let byte_end = l
                     .char_indices()
                     .nth(max_line_chars)
-                    .map(|(b, _)| b)
-                    .unwrap_or(l.len());
+                    .map_or(l.len(), |(b, _)| b);
                 &l[..byte_end]
             } else {
                 l.as_str()
