@@ -7,6 +7,7 @@
 /// Format a millisecond duration as a human-readable string.
 ///
 /// - `ms <= 0` renders as `"—"` (em-dash) to mean "unknown / not started".
+/// - Sub-second durations render as `"Nms"` (e.g. `"42ms"`) (#108).
 /// - Sub-minute durations render as `"Ns"` (e.g. `"42s"`).
 /// - Sub-hour durations render as `"NmSSs"` (e.g. `"12m03s"`).
 /// - Hour+ durations render as `"HhMMmSSs"` (e.g. `"2h07m03s"`) — without
@@ -18,6 +19,9 @@ pub fn format_duration_ms(ms: i64) -> String {
     }
     #[allow(clippy::cast_sign_loss)]
     let secs = (ms / 1000) as u64;
+    if secs == 0 {
+        return format!("{ms}ms");
+    }
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
@@ -63,8 +67,15 @@ mod tests {
     }
 
     #[test]
+    fn duration_sub_second_shows_milliseconds() {
+        assert_eq!(format_duration_ms(1), "1ms");
+        assert_eq!(format_duration_ms(500), "500ms");
+        assert_eq!(format_duration_ms(999), "999ms");
+    }
+
+    #[test]
     fn duration_sub_minute_drops_minute_component() {
-        assert_eq!(format_duration_ms(1), "0s");
+        assert_eq!(format_duration_ms(1_000), "1s");
         assert_eq!(format_duration_ms(42_000), "42s");
         assert_eq!(format_duration_ms(59_999), "59s");
     }

@@ -253,6 +253,10 @@ fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String
     state.failed_count = 0;
     state.run_started_at = None;
     state.focus_log.clear();
+    // Clear before connect_control overwrites it; prevents a stale indicator
+    // from showing on the status bar during the one render tick between this
+    // reset and the new connection being established (#113).
+    state.control_connected = false;
 }
 
 /// The visible height used for snap-in scroll calculations.

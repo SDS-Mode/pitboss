@@ -881,10 +881,14 @@ async fn spawn_sublead_session(
             let subleads_jsonl = sub_layer_bg.run_subdir.join("subleads.jsonl");
             if let Ok(mut line) = serde_json::to_string(&entry) {
                 line.push('\n');
-                // Best-effort: failure to persist is not fatal. Use tokio::fs
-                // instead of std::fs here because this closure runs on the
-                // tokio runtime; a sync open+write would block a runtime
-                // worker thread (#98).
+                // Best-effort: failure to persist is not fatal. No explicit
+                // flush — a process crash between write_all returning Ok and
+                // the file being dropped can lose kernel-buffered bytes, but
+                // that's accepted (resume is idempotent across re-runs). The
+                // warn branch below catches I/O errors from write_all itself,
+                // not a crash-after-write (#111). Use tokio::fs instead of
+                // std::fs here because this closure runs on the tokio runtime;
+                // a sync open+write would block a runtime worker thread (#98).
                 let res: std::io::Result<()> = async {
                     use tokio::io::AsyncWriteExt;
                     let mut f = tokio::fs::OpenOptions::new()
