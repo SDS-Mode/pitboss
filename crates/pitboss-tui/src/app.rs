@@ -120,6 +120,17 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
                             reset_state_for_switch(&mut state, run_dir, run_id);
+                            // Drain in-flight events from the old run's socket
+                            // reader before connecting to the new run. The old
+                            // read_loop keeps running until its Unix socket
+                            // closes and still forwards through the shared
+                            // ctrl_events_tx. Without this drain, stale events
+                            // (including ApprovalRequest) can arrive after
+                            // reset_state_for_switch cleared the approval list,
+                            // pass the de-dup guard as "new", and open a modal
+                            // whose request_id the new dispatcher cannot ack
+                            // (#104).
+                            while ctrl_events_rx.try_recv().is_ok() {}
                             // Rebuild the control client against the new run's
                             // socket; without this, post-switch control ops
                             // (cancel/pause/approve/reprompt) keep targeting
@@ -162,6 +173,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
                             reset_state_for_switch(&mut state, run_dir, run_id);
+                            while ctrl_events_rx.try_recv().is_ok() {} // #104
                             connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;

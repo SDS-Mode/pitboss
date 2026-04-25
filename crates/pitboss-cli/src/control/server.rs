@@ -269,35 +269,34 @@ async fn serve_connection(
     // but emits no event, and the lead blocks until TTL fallback fires.
     // The responder oneshot stays in the bridge; a subsequent approve/reject
     // op still delivers correctly.
-    {
+    // Collect live entries into a Vec while holding the lock (no async work),
+    // then drop the guard before calling ev_tx.send().await. Holding the lock
+    // across send() suspends while the channel is full, blocking every other
+    // lock waiter (expire_layer_approvals, the Approve op handler, concurrent
+    // Hello drain) for the full duration of the backpressure stall (#105).
+    let pending: Vec<ControlEvent> = {
         let bridge = state.root.approval_bridge.lock().await;
-        for (request_id, entry) in bridge.iter() {
-            // Drop entries whose responder oneshot has already been filled
-            // (e.g. TTL fallback fired between drain and this replay) — the
-            // canonical cleanup path for those is expire_layer_approvals;
-            // we just skip replaying to the TUI so it doesn't render a
-            // dangling approval card. is_closed is the best proxy we have
-            // without racing the responder's receiver. A concurrent TTL expiry
-            // between this check and the send below is accepted: the TUI will
-            // briefly render a card that vanishes when the expiry is processed
-            // (#109). Closing the window fully would require coordinating the
-            // replay and TTL paths via a version counter — not worth it.
-            if entry.responder.is_closed() {
-                continue;
-            }
-            let _ = ev_tx
-                .send(ControlEvent::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    task_id: entry.task_id.clone(),
-                    summary: entry.summary.clone(),
-                    plan: entry
-                        .plan
-                        .clone()
-                        .map(crate::mcp::approval::approval_plan_to_wire),
-                    kind: entry.kind,
-                })
-                .await;
-        }
+        bridge
+            .iter()
+            .filter(|(_, entry)| !entry.responder.is_closed())
+            // is_closed is the best proxy without racing the receiver; a
+            // concurrent TTL expiry between this filter and the send below
+            // is accepted — the TUI briefly renders a card that vanishes
+            // when the expiry is processed (#109).
+            .map(|(request_id, entry)| ControlEvent::ApprovalRequest {
+                request_id: request_id.clone(),
+                task_id: entry.task_id.clone(),
+                summary: entry.summary.clone(),
+                plan: entry
+                    .plan
+                    .clone()
+                    .map(crate::mcp::approval::approval_plan_to_wire),
+                kind: entry.kind,
+            })
+            .collect()
+    }; // lock released here
+    for ev in pending {
+        let _ = ev_tx.send(ev).await;
     }
 
     // Concurrent outbound pump: forward events from the mpsc to the socket.

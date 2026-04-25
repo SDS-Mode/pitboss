@@ -265,22 +265,27 @@ pub async fn spawn_sublead(
     {
         let amount = *budget_usd;
         if let Some(cap) = state.root.manifest.budget_usd {
-            // Snapshot both accumulators, then check before reserving.
-            // Mirroring the pattern in spawn_worker (mcp/tools.rs:329-356):
-            // read spent and reserved, check, then re-acquire reserved to add.
+            // Read spent first (snapshot acceptable — it only grows), then
+            // hold reserved_usd across the check-and-add so concurrent
+            // spawn_sublead calls can't both pass the guard simultaneously.
+            // Fixes the TOCTOU described in #106: two independent lock
+            // snapshots + an unlocked check allowed both callers to pass
+            // the guard before either wrote, enabling budget over-commit.
             let spent = *state.root.spent_usd.lock().await;
-            let reserved = *state.root.reserved_usd.lock().await;
-            if spent + reserved + amount > cap {
+            let mut reserved = state.root.reserved_usd.lock().await;
+            if spent + *reserved + amount > cap {
                 bail!(
                     "spawn_sublead: budget exceeded: ${:.2} spent + ${:.2} reserved + ${:.2} estimated > ${:.2} budget",
                     spent,
-                    reserved,
+                    *reserved,
                     amount,
                     cap
                 );
             }
+            *reserved += amount;
+        } else {
+            *state.root.reserved_usd.lock().await += amount;
         }
-        *state.root.reserved_usd.lock().await += amount;
         Some(amount)
     } else {
         None
