@@ -678,6 +678,11 @@ pub async fn build_sublead_mcp_config(
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
 
+    // Ensure run_subdir exists. In production runner.rs creates it before any
+    // sublead spawns, but test harnesses build DispatchState without creating
+    // the directory, so this create_dir_all is a defensive no-op in production
+    // and a required step in tests.
+    tokio::fs::create_dir_all(run_subdir).await?;
     let mcp_config_path = run_subdir.join(format!("sublead-{sublead_id}-mcp-config.json"));
     tokio::fs::write(&mcp_config_path, bytes).await?;
     Ok(mcp_config_path)
