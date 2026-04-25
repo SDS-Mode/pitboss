@@ -35,7 +35,8 @@ pub async fn execute_script<R: BufRead>(reader: R, mut client: Option<McpClient>
     let stdout = io::stdout();
     let stderr = io::stderr();
 
-    for (line_no, line) in reader.lines().enumerate() {
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
         let line = line.with_context(|| format!("read error at line {line_no}"))?;
         let line = line.trim();
         if line.is_empty() {
@@ -110,7 +111,7 @@ pub async fn execute_script<R: BufRead>(reader: R, mut client: Option<McpClient>
                 }
             }
         } else {
-            eprintln!("fake-claude: unknown action at line {line_no}: {line}");
+            anyhow::bail!("unknown action at line {line_no}: {line}");
         }
     }
 

@@ -24,6 +24,12 @@ pub async fn probe_claude(binary: &Path) -> Result<Option<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("claude binary not found at {}", binary.display())
         }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            bail!(
+                "claude binary at {} is not executable (permission denied)",
+                binary.display()
+            )
+        }
         Err(e) => bail!("failed to probe claude: {e}"),
     }
 }

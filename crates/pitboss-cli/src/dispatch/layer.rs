@@ -371,15 +371,16 @@ impl LayerState {
         self.workers
             .read()
             .await
-            .values()
-            .filter(|w| {
-                matches!(
-                    w,
-                    WorkerState::Pending
-                        | WorkerState::Running { .. }
-                        | WorkerState::Paused { .. }
-                        | WorkerState::Frozen { .. }
-                )
+            .iter()
+            .filter(|(id, w)| {
+                *id != &self.lead_id
+                    && matches!(
+                        w,
+                        WorkerState::Pending
+                            | WorkerState::Running { .. }
+                            | WorkerState::Paused { .. }
+                            | WorkerState::Frozen { .. }
+                    )
             })
             .count()
     }

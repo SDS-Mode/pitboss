@@ -584,8 +584,11 @@ impl SharedStore {
                                 expires_at: None,
                             });
                         }
-                        Ok(_) => {
-                            // Something was released — retry.
+                        Ok(Err(broadcast::error::RecvError::Closed)) => {
+                            return Err(StoreError::Shutdown);
+                        }
+                        Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                            // A lease was released (or we missed some notifications) — retry.
                             match self.leases.acquire(name, ttl, caller).await {
                                 Ok((lease, evicted)) => {
                                     self.notify_lease_evictions(&evicted);
@@ -691,7 +694,7 @@ fn validate_path(path: &str) -> Result<(), StoreError> {
     if !path.starts_with('/') {
         return Err(StoreError::InvalidArg("path must be absolute".into()));
     }
-    if path.contains("..") {
+    if path.split('/').any(|seg| seg == "..") {
         return Err(StoreError::InvalidArg("path must not contain `..`".into()));
     }
     if path != "/" && path.split('/').filter(|s| s.is_empty()).count() > 1 {

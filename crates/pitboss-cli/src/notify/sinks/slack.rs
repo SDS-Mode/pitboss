@@ -79,7 +79,7 @@ impl SlackSink {
                 let detail = format!(
                     "*Run:* {}\n*Tasks:* {} / {}\n*Duration:* {}s\n*Cost:* ${:.2}",
                     escape_slack_mrkdwn(run_id),
-                    tasks_total - tasks_failed,
+                    tasks_total.saturating_sub(*tasks_failed),
                     tasks_total,
                     duration_sec,
                     spent_usd,

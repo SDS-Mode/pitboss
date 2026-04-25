@@ -71,7 +71,10 @@ fn build_run_args(
     // mounted file ownership is transparent. Docker: no user namespace by
     // default; if the host UID isn't 1000 (the container pitboss user) we
     // pass -u host_uid:host_gid to align ownership.
-    let is_podman = runtime.ends_with("podman");
+    let is_podman = std::path::Path::new(runtime)
+        .file_name()
+        .and_then(|n| n.to_str())
+        == Some("podman");
     if is_podman && is_rootless_podman() {
         args.push("--userns=keep-id".into());
     } else if !is_podman {

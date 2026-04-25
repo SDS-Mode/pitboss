@@ -1323,7 +1323,7 @@ fn render_approval_list_pane(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Pending Approvals [a] ")
+        .title(" Pending Approvals [A] ")
         .border_style(border_style);
 
     let inner = block.inner(area);
@@ -1712,8 +1712,11 @@ fn kv_line(key: &str, value: &str) -> Line<'static> {
 
 /// Collapse very long ids (UUID-format) into a shorter form for display.
 fn short_id(id: &str) -> String {
-    if id.len() > 20 {
-        format!("{}…{}", &id[..8], &id[id.len() - 4..])
+    let char_count = id.chars().count();
+    if char_count > 20 {
+        let head: String = id.chars().take(8).collect();
+        let tail: String = id.chars().skip(char_count - 4).collect();
+        format!("{head}…{tail}")
     } else {
         id.to_string()
     }

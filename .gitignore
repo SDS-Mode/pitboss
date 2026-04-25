@@ -49,3 +49,9 @@ flamegraph.svg
 # purpose: one-shot grep-target, uppercase prefix so they sort above
 # tracked docs in a directory listing.
 NOTES-*.md
+
+# Leftover compiled test binaries dropped at the repo root by ad-hoc sessions.
+/test_copy
+/test_move
+/test_move3
+/test_move5
