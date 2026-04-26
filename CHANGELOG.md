@@ -43,6 +43,26 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss tree <manifest> [--check <USD>]`** — pre-flight
+  visualisation + cost gate. Prints the dispatch topology (root
+  lead, depth-2 controls, `[sublead_defaults]`, OR the flat-mode
+  task list) alongside every per-actor knob the operator is
+  implicitly committing to (model, effort, timeout, worker pool,
+  per-actor budget). Aggregates the worst-case budget envelope
+  (root lead pool + `max_subleads × max_sublead_budget_usd`,
+  assuming `read_down = false` for every sub-lead since that's the
+  conservative assumption a static manifest can make).
+
+  `--check <USD>` turns the same walk into a hard gate: exits 1
+  if the aggregate exceeds the threshold OR if a required cap is
+  unbounded (e.g. `allow_subleads = true` without
+  `max_sublead_budget_usd`). Drop into a CI workflow before
+  `pitboss dispatch` to fail loudly before any spend lands.
+
+  Loads via `load_manifest_from_str`, so it accepts manifests with
+  placeholder paths (e.g. fresh `pitboss init` output) — the gate
+  is about cost intent, not deployment readiness.
+
 - **`pitboss prune` subcommand** — sweep orphaned run directories.
   Targets `Stale` runs by default (the v0.9 classifier state added in
   the previous release), with `--include-aborted` to also clean up

@@ -143,6 +143,27 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Pre-flight visualisation + cost gate for a manifest.
+    ///
+    /// Prints the dispatch tree (root lead, depth-2 controls,
+    /// `[sublead_defaults]`, OR the flat-mode task list) alongside
+    /// every per-actor knob the operator is implicitly committing to.
+    /// Aggregates the worst-case budget envelope so a manifest can be
+    /// sanity-checked before firing a $20+ run.
+    ///
+    /// `--check <USD>` turns the same walk into a hard gate: exits
+    /// non-zero if the aggregate exceeds the threshold OR if a
+    /// required cap (`max_sublead_budget_usd` etc) is unbounded.
+    /// Drop into a CI workflow before `pitboss dispatch` to fail
+    /// loudly before any spend lands.
+    Tree {
+        manifest: PathBuf,
+        /// Maximum aggregate budget envelope (USD) the manifest is
+        /// allowed to declare. Exits non-zero if exceeded or
+        /// unbounded.
+        #[arg(long, value_name = "USD")]
+        check: Option<f64>,
+    },
     /// Sweep orphaned run directories.
     ///
     /// A run is *orphaned* when its dispatcher exited uncleanly
