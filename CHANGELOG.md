@@ -43,6 +43,28 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Run-list `Stale` state + connect-based liveness probe** — the run
+  classifier now distinguishes a fourth state, `Stale`, for runs whose
+  control socket no longer accepts connections AND whose
+  `summary.jsonl` has not been written within the last 4 hours
+  (configurable via the `STALENESS_THRESHOLD` constant). Previously
+  the v0.8 classifier treated *any* run with a socket file present as
+  `Running`, which left orphans from `kill -KILL`/OOM/crash visible
+  as live for as long as the abstract socket file persisted. The
+  probe is now a real `UnixStream::connect()` — dead sockets return
+  ECONNREFUSED almost instantly, so the classifier costs no more
+  than before.
+
+  Surfaces in `pitboss-tui list` and the run picker as the new label
+  `stale`. Pairs naturally with the upcoming `pitboss prune`
+  subcommand, which will match on this state by default.
+
+  Internal refactor: `RunStatus` / `RunEntry` / `collect_run_entries`
+  moved from `pitboss-tui::runs` to `pitboss-cli::runs` (the natural
+  home — `pitboss-tui` already depends on `pitboss-cli`). The
+  `pitboss-tui::runs` module is now a thin re-export shim so existing
+  TUI imports keep working unchanged.
+
 - **`pitboss init [output] [-t simple|full] [--force]`** — emit a starter
   manifest TOML to stdout or a named file. Two hand-curated templates:
   `simple` (one `[lead]` driving a flat worker pool — the 80% case) and
