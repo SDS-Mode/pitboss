@@ -1,0 +1,14 @@
+[package]
+name         = "pitboss-schema"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Field-level metadata types and derive macro for pitboss manifest structs."
+repository   = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pitboss-schema-derive = { path = "../pitboss-schema-derive" }

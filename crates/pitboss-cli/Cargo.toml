@@ -28,6 +28,7 @@ test-support = ["pitboss-core/test-support"]
 
 [dependencies]
 pitboss-core       = { path = "../pitboss-core" }
+pitboss-schema     = { path = "../pitboss-schema" }
 git2               = { workspace = true }
 tokio              = { workspace = true }
 serde              = { workspace = true }

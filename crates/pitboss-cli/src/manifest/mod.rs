@@ -1,4 +1,5 @@
 pub mod load;
+pub mod metadata;
 pub mod resolve;
 pub mod schema;
 pub mod validate;
