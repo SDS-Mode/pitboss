@@ -38,12 +38,18 @@ fn role_str(role: ActorRoleArg) -> &'static str {
     }
 }
 
-/// Inject `_meta: {actor_id, actor_role}` into a JSON-RPC request's
+/// Inject `_meta: {actor_id, actor_role[, token]}` into a JSON-RPC request's
 /// `params.arguments` if it is a `tools/call` request (matching MCP wire convention).
 /// The actor_role must be one of the allowed roles: "root_lead", "lead", "sublead", "worker".
 /// For non-`tools/call` requests, the request is left unchanged.
 /// Writes to `params.arguments._meta`, not `params._meta`, to match the wire-path behavior.
-pub fn inject_meta(request: &mut Value, actor_id: &str, actor_role: &str) {
+///
+/// When `token` is `Some`, it is added as `_meta.token`. The server validates
+/// the token against `DispatchState::actor_tokens` and binds the connection's
+/// canonical identity from the lookup result — so even if the wire `actor_id`
+/// / `actor_role` are forged by a direct (non-bridge) socket connection, authz
+/// uses the bound identity. Closes #145.
+pub fn inject_meta(request: &mut Value, actor_id: &str, actor_role: &str, token: Option<&str>) {
     if !ALLOWED_ROLES.contains(&actor_role) {
         return; // silently ignore disallowed roles
     }
@@ -61,21 +67,28 @@ pub fn inject_meta(request: &mut Value, actor_id: &str, actor_role: &str) {
                 .entry("arguments")
                 .or_insert(Value::Object(Map::new()));
             if let Value::Object(args_obj) = arguments {
-                let meta = serde_json::json!({
-                    "actor_id": actor_id,
-                    "actor_role": actor_role,
-                });
-                args_obj.insert("_meta".to_string(), meta);
+                let mut meta = serde_json::Map::new();
+                meta.insert("actor_id".into(), Value::String(actor_id.to_string()));
+                meta.insert("actor_role".into(), Value::String(actor_role.to_string()));
+                if let Some(t) = token {
+                    meta.insert("token".into(), Value::String(t.to_string()));
+                }
+                args_obj.insert("_meta".to_string(), Value::Object(meta));
             }
         }
     }
 }
 
 /// Parse a single JSON-RPC line and, if it's a `tools/call` request,
-/// inject `_meta: {actor_id, actor_role}` into `params.arguments`.
+/// inject `_meta: {actor_id, actor_role[, token]}` into `params.arguments`.
 /// Non-`tools/call` requests pass through unchanged. Malformed JSON
 /// passes through byte-identical (the dispatcher will reject it).
-pub(crate) fn inject_meta_line(line: &[u8], actor_id: &str, actor_role: &str) -> Result<Vec<u8>> {
+pub(crate) fn inject_meta_line(
+    line: &[u8],
+    actor_id: &str,
+    actor_role: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>> {
     let trailing_nl = line.last() == Some(&b'\n');
     let trimmed = if trailing_nl {
         &line[..line.len() - 1]
@@ -93,7 +106,7 @@ pub(crate) fn inject_meta_line(line: &[u8], actor_id: &str, actor_role: &str) ->
     };
 
     // Delegate to inject_meta to handle the actual injection logic
-    inject_meta(&mut parsed, actor_id, actor_role);
+    inject_meta(&mut parsed, actor_id, actor_role, token);
 
     let mut out = serde_json::to_vec(&parsed)?;
     if trailing_nl {
@@ -102,7 +115,12 @@ pub(crate) fn inject_meta_line(line: &[u8], actor_id: &str, actor_role: &str) ->
     Ok(out)
 }
 
-pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg) -> Result<i32> {
+pub async fn run_bridge(
+    socket: &Path,
+    actor_id: &str,
+    actor_role: ActorRoleArg,
+    token: Option<&str>,
+) -> Result<i32> {
     let mut stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("connect to pitboss mcp socket at {}", socket.display()))?;
@@ -112,11 +130,17 @@ pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg)
 
     let actor_id = actor_id.to_string();
     let role_s = role_str(actor_role).to_string();
+    let token_s: Option<String> = token.map(|t| t.to_string());
 
     // c2s: line-parse, inject _meta on tools/call, forward.
     // Chunked read with an explicit per-line cap so a child that never emits
     // `\n` can't OOM the host. We read straight from stdin — the manual line
     // accumulator means a BufReader wrapper would just add a second copy.
+    //
+    // SECURITY: Do NOT log `token_s` or include it in error/diagnostic
+    // messages. The token is the only thing standing between a same-UID
+    // attacker who can read mcp-config.json and an attacker who can also
+    // forge identity. Tracing it would land it in the run's log file.
     let c2s = async {
         let mut line: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 8192];
@@ -127,8 +151,9 @@ pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg)
                     for &b in &chunk[..n] {
                         line.push(b);
                         if b == b'\n' {
-                            let injected = inject_meta_line(&line, &actor_id, &role_s)
-                                .unwrap_or_else(|_| line.clone());
+                            let injected =
+                                inject_meta_line(&line, &actor_id, &role_s, token_s.as_deref())
+                                    .unwrap_or_else(|_| line.clone());
                             if sw.write_all(&injected).await.is_err() {
                                 break 'outer;
                             }
@@ -152,8 +177,8 @@ pub async fn run_bridge(socket: &Path, actor_id: &str, actor_role: ActorRoleArg)
         // Flush the final line if the stream ended without a trailing newline
         // and it's within the cap.
         if !line.is_empty() && line.len() <= MAX_C2S_LINE_BYTES {
-            let injected =
-                inject_meta_line(&line, &actor_id, &role_s).unwrap_or_else(|_| line.clone());
+            let injected = inject_meta_line(&line, &actor_id, &role_s, token_s.as_deref())
+                .unwrap_or_else(|_| line.clone());
             let _ = sw.write_all(&injected).await;
             let _ = sw.flush().await;
         }
@@ -271,11 +296,15 @@ mod tests {
     fn bridge_injects_meta_into_tool_calls() {
         let input = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kv_get","arguments":{"path":"/ref/k"}}}
 "#;
-        let out = inject_meta_line(input, "worker-A", "worker").unwrap();
+        let out = inject_meta_line(input, "worker-A", "worker", None).unwrap();
         let out_str = String::from_utf8(out).unwrap();
         assert!(
-            out_str.contains(r#""_meta":{"actor_id":"worker-A","actor_role":"worker"}"#),
-            "expected _meta injection, got:\n{out_str}"
+            out_str.contains(r#""actor_id":"worker-A""#),
+            "expected actor_id injection, got:\n{out_str}"
+        );
+        assert!(
+            out_str.contains(r#""actor_role":"worker""#),
+            "expected actor_role injection, got:\n{out_str}"
         );
         assert!(
             out_str.contains(r#""path":"/ref/k""#),
@@ -284,10 +313,37 @@ mod tests {
     }
 
     #[test]
+    fn bridge_injects_token_when_provided() {
+        // Issue #145: --token argv adds _meta.token, which the server uses
+        // to bind connection identity (rejecting forged actor_role on direct
+        // socket connections).
+        let input = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kv_get","arguments":{}}}
+"#;
+        let out = inject_meta_line(input, "worker-A", "worker", Some("tok-1234")).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains(r#""token":"tok-1234""#),
+            "expected token injection, got:\n{out_str}"
+        );
+    }
+
+    #[test]
+    fn bridge_omits_token_field_when_not_provided() {
+        let input = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kv_get","arguments":{}}}
+"#;
+        let out = inject_meta_line(input, "worker-A", "worker", None).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            !out_str.contains(r#""token""#),
+            "token field must be absent when no token supplied, got:\n{out_str}"
+        );
+    }
+
+    #[test]
     fn bridge_passes_non_tool_calls_through_unchanged() {
         let input = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
 "#;
-        let out = inject_meta_line(input, "worker-A", "worker").unwrap();
+        let out = inject_meta_line(input, "worker-A", "worker", None).unwrap();
         let out_str = String::from_utf8(out).unwrap();
         assert!(
             !out_str.contains(r#""_meta""#),
@@ -298,7 +354,7 @@ mod tests {
     #[test]
     fn bridge_passes_malformed_json_through_verbatim() {
         let input = b"{not valid json\n";
-        let out = inject_meta_line(input, "worker-A", "worker").unwrap();
+        let out = inject_meta_line(input, "worker-A", "worker", None).unwrap();
         assert_eq!(
             out, input,
             "malformed input must pass through byte-identical"
@@ -309,7 +365,7 @@ mod tests {
     fn bridge_handles_line_without_trailing_newline() {
         // Last line of a stream may lack a trailing newline; still parse it.
         let input = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kv_get","arguments":{}}}"#;
-        let out = inject_meta_line(input, "w", "worker").unwrap();
+        let out = inject_meta_line(input, "w", "worker", None).unwrap();
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains(r#""_meta""#));
         assert!(!out_str.ends_with('\n'), "must not invent a newline");

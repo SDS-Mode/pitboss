@@ -736,6 +736,13 @@ async fn run_worker(
 
     // Generate worker-scoped mcp-config.json so the worker can reach
     // the shared store via the bridge-injected identity.
+    //
+    // Mint the worker's auth token here so it gets embedded in the
+    // mcp-config.json args. The server validates the token on every
+    // tools/call and binds the connection's canonical identity from
+    // it — defending against same-UID processes that connect directly
+    // to the socket and forge `_meta.actor_role`. Issue #145.
+    let worker_token = state.mint_token(&task_id, "worker").await;
     let worker_task_dir = layer.run_subdir.join("tasks").join(&task_id);
     tokio::fs::create_dir_all(&worker_task_dir).await.ok();
     let worker_mcp_config = worker_task_dir.join("mcp-config.json");
@@ -745,6 +752,7 @@ async fn run_worker(
         &worker_mcp_config,
         &socket_path,
         &task_id,
+        Some(&worker_token),
         &layer.manifest.mcp_servers,
     )
     .await
@@ -1099,52 +1107,64 @@ pub async fn spawn_resume_worker(
     session_id: String,
 ) -> anyhow::Result<()> {
     use chrono::Utc;
-    let model = state
-        .root
+    // Resolve the owning layer (root OR sub-lead). Sub-tree workers'
+    // models, prompts, pid slots, and worker map all live in the
+    // sub-lead's `LayerState`; reading/writing root would split state
+    // and silently corrupt sub-tree resumes (issue #146).
+    let layer = layer_for_worker(state, &task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
+    let model = layer
         .worker_models
         .read()
         .await
         .get(&task_id)
         .cloned()
         .unwrap_or_else(|| "claude-haiku-4-5".to_string());
-    let tools: Vec<String> = state
-        .root
+    let tools: Vec<String> = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.tools.clone())
+        .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.tools.clone()))
         .unwrap_or_default();
-    let timeout_secs = state
-        .root
+    let timeout_secs = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.timeout_secs)
+        .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.timeout_secs))
         .unwrap_or(3600);
-    let cwd = state
-        .root
+    let cwd = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.directory.clone())
+        .or_else(|| {
+            state
+                .root
+                .manifest
+                .lead
+                .as_ref()
+                .map(|l| l.directory.clone())
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     let worker_cancel = pitboss_core::session::CancelToken::new();
     // Same post-register cascade plug as `handle_spawn_worker` (#99): if the
-    // root layer's cancel has already fired, the fire-once watcher won't
+    // owning layer's cancel has already fired, the fire-once watcher won't
     // re-issue to this token — propagate synchronously before we register a
     // Running worker against it.
-    if state.root.cancel.is_terminated() {
+    if layer.cancel.is_terminated() {
         worker_cancel.terminate();
-    } else if state.root.cancel.is_draining() {
+    } else if layer.cancel.is_draining() {
         worker_cancel.drain();
     }
-    state
-        .root
+    layer
         .worker_cancels
         .write()
         .await
         .insert(task_id.clone(), worker_cancel.clone());
-    state.root.workers.write().await.insert(
+    layer.workers.write().await.insert(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
@@ -1152,22 +1172,29 @@ pub async fn spawn_resume_worker(
         },
     );
     let state_bg = Arc::clone(state);
+    let layer_bg = layer.clone();
     let task_id_bg = task_id.clone();
-    let lead_id_bg = state.root.lead_id.clone();
+    let lead_id_bg = layer.lead_id.clone();
 
     // Generate (or reuse) worker-scoped mcp-config.json for the resumed
-    // subprocess. write_worker_mcp_config is idempotent so calling it again
-    // on an existing file is safe.
-    let worker_task_dir = state.root.run_subdir.join("tasks").join(&task_id);
+    // subprocess. write_worker_mcp_config is idempotent so calling it
+    // again on an existing file is safe.
+    //
+    // Mint a fresh auth token for the resumed bridge — the original
+    // token from the initial spawn is still valid (we never revoke), but
+    // re-minting keeps the per-spawn token lifetime simple. Issue #145.
+    let worker_token = state.mint_token(&task_id, "worker").await;
+    let worker_task_dir = layer.run_subdir.join("tasks").join(&task_id);
     tokio::fs::create_dir_all(&worker_task_dir).await.ok();
     let worker_mcp_config_path = worker_task_dir.join("mcp-config.json");
     let socket_path =
-        crate::mcp::server::socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
+        crate::mcp::server::socket_path_for_run(layer.run_id, &layer.manifest.run_dir);
     let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
         &worker_mcp_config_path,
         &socket_path,
         &task_id,
-        &state.root.manifest.mcp_servers,
+        Some(&worker_token),
+        &layer.manifest.mcp_servers,
     )
     .await
     {
@@ -1180,12 +1207,19 @@ pub async fn spawn_resume_worker(
         }
     };
 
-    let resume_routing = state
-        .root
+    let resume_routing = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.permission_routing)
+        .or_else(|| {
+            state
+                .root
+                .manifest
+                .lead
+                .as_ref()
+                .map(|l| l.permission_routing)
+        })
         .unwrap_or_default();
     // Build spawn args with --resume.
     let mut spawn_args_v = worker_spawn_args(
@@ -1201,12 +1235,12 @@ pub async fn spawn_resume_worker(
     // Resume path mirrors the initial spawn: inherit the parent lead's
     // resolved env so `[defaults.env]` and `[lead.env]` survive a
     // pause/continue or reprompt cycle.
-    let lead_env_for_resume = state
-        .root
+    let lead_env_for_resume = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
+        .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
         .unwrap_or_default();
     let resume_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_resume,
@@ -1214,12 +1248,12 @@ pub async fn spawn_resume_worker(
         resume_routing,
     );
     let cmd = pitboss_core::process::SpawnCmd {
-        program: state.root.claude_binary.clone(),
+        program: layer.claude_binary.clone(),
         args: spawn_args_v,
         cwd,
         env: resume_env,
     };
-    let task_dir = state.root.run_subdir.join("tasks").join(&task_id);
+    let task_dir = layer.run_subdir.join("tasks").join(&task_id);
     let _ = tokio::fs::create_dir_all(&task_dir).await;
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
@@ -1227,8 +1261,7 @@ pub async fn spawn_resume_worker(
     // Register a pid slot for the resumed subprocess too, so
     // freeze-pause works across continue_worker boundaries.
     let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    state
-        .root
+    layer
         .worker_pids
         .write()
         .await
@@ -1238,7 +1271,7 @@ pub async fn spawn_resume_worker(
         use pitboss_core::store::{TaskRecord, TaskStatus};
         let outcome = pitboss_core::session::SessionHandle::new(
             task_id_bg.clone(),
-            Arc::clone(&state_bg.root.spawner),
+            Arc::clone(&layer_bg.spawner),
             cmd,
         )
         .with_log_path(log_path.clone())
@@ -1247,7 +1280,7 @@ pub async fn spawn_resume_worker(
         .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
         .await;
         // Clean up the pid slot when the resumed subprocess exits.
-        state_bg.root.worker_pids.write().await.remove(&task_id_bg);
+        layer_bg.worker_pids.write().await.remove(&task_id_bg);
         let mut status = match outcome.final_state {
             pitboss_core::session::SessionState::Completed => TaskStatus::Success,
             pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
@@ -1269,8 +1302,7 @@ pub async fn spawn_resume_worker(
                 None => {}
             }
         }
-        let counters = state_bg
-            .root
+        let counters = layer_bg
             .worker_counters
             .read()
             .await
@@ -1303,15 +1335,11 @@ pub async fn spawn_resume_worker(
                 Some(&stderr_path),
             ),
         };
-        let _ = state_bg
-            .root
-            .store
-            .append_record(state_bg.root.run_id, &rec)
-            .await;
+        let _ = layer_bg.store.append_record(layer_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {
             state_bg.api_health.record(&reason).await;
             crate::dispatch::failure_detection::broadcast_worker_failed(
-                &state_bg.root,
+                &layer_bg,
                 task_id_bg.clone(),
                 Some(lead_id_bg.clone()),
                 reason,
@@ -1319,13 +1347,12 @@ pub async fn spawn_resume_worker(
             )
             .await;
         }
-        state_bg
-            .root
+        layer_bg
             .workers
             .write()
             .await
             .insert(task_id_bg.clone(), WorkerState::Done(rec));
-        let _ = state_bg.root.done_tx.send(task_id_bg);
+        let _ = layer_bg.done_tx.send(task_id_bg);
     });
 
     Ok(())
@@ -1490,7 +1517,13 @@ pub async fn handle_cancel_worker(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Result<CancelResult> {
-    let cancels = state.root.worker_cancels.read().await;
+    // Resolve the owning layer (root OR sub-lead) — a sub-lead-owned
+    // worker is registered in its sub-tree's `LayerState`, not root.
+    // See `layer_for_worker` (issue #146).
+    let layer = layer_for_worker(state, task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
+    let cancels = layer.worker_cancels.read().await;
     let Some(token) = cancels.get(task_id) else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
@@ -1503,7 +1536,13 @@ pub async fn handle_pause_worker(
     task_id: &str,
     mode: PauseMode,
 ) -> Result<CancelResult> {
-    let mut workers = state.root.workers.write().await;
+    // Resolve the owning layer up front — sub-tree workers live in
+    // their sub-lead's `LayerState`, not root (issue #146). Reading the
+    // wrong layer here silently no-op'd pause for sub-tree workers.
+    let layer = layer_for_worker(state, task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
+    let mut workers = layer.workers.write().await;
     let Some(entry) = workers.get(task_id).cloned() else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
@@ -1513,7 +1552,7 @@ pub async fn handle_pause_worker(
             session_id: Some(sid),
         } => match mode {
             PauseMode::Cancel => {
-                let cancels = state.root.worker_cancels.read().await;
+                let cancels = layer.worker_cancels.read().await;
                 if let Some(tok) = cancels.get(task_id) {
                     tok.terminate();
                 }
@@ -1530,8 +1569,7 @@ pub async fn handle_pause_worker(
             PauseMode::Freeze => {
                 // Read the pid slot. If 0 (subprocess hasn't spawned
                 // yet), fail — freeze is meaningless without a pid.
-                let pid = state
-                    .root
+                let pid = layer
                     .worker_pids
                     .read()
                     .await
@@ -1566,7 +1604,12 @@ pub async fn handle_continue_worker(
     state: &Arc<DispatchState>,
     args: ContinueWorkerArgs,
 ) -> Result<CancelResult> {
-    let current = state.root.workers.read().await.get(&args.task_id).cloned();
+    // Resolve the owning layer (sub-tree workers live in their sub-lead's
+    // LayerState — see `layer_for_worker`, issue #146).
+    let layer = layer_for_worker(state, &args.task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown task_id: {}", args.task_id))?;
+    let current = layer.workers.read().await.get(&args.task_id).cloned();
     match current {
         Some(WorkerState::Paused { session_id, .. }) => {
             let prompt = args.prompt.unwrap_or_else(|| "continue".into());
@@ -1583,8 +1626,7 @@ pub async fn handle_continue_worker(
             // off. `prompt` is silently ignored in freeze mode (it's
             // a resume-only concept); clients that want to inject a
             // new prompt should thaw + reprompt as two steps.
-            let pid = state
-                .root
+            let pid = layer
                 .worker_pids
                 .read()
                 .await
@@ -1600,7 +1642,7 @@ pub async fn handle_continue_worker(
             crate::dispatch::signals::resume_stopped(pid)?;
             // Transition back to Running, preserving the ORIGINAL
             // started_at so wall-clock duration stays accurate.
-            state.root.workers.write().await.insert(
+            layer.workers.write().await.insert(
                 args.task_id.clone(),
                 WorkerState::Running {
                     started_at,
@@ -1618,13 +1660,19 @@ pub async fn handle_reprompt_worker(
     state: &Arc<DispatchState>,
     args: RepromptWorkerArgs,
 ) -> Result<CancelResult> {
-    let current = state.root.workers.read().await.get(&args.task_id).cloned();
+    // Resolve the owning layer (issue #146: sub-tree workers were
+    // unreachable to reprompt because all reads/writes were hard-coded
+    // to root).
+    let layer = layer_for_worker(state, &args.task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown task_id: {}", args.task_id))?;
+    let current = layer.workers.read().await.get(&args.task_id).cloned();
     let session_id = match current {
         Some(WorkerState::Running {
             session_id: Some(sid),
             ..
         }) => {
-            let cancels = state.root.worker_cancels.read().await;
+            let cancels = layer.worker_cancels.read().await;
             if let Some(tok) = cancels.get(&args.task_id) {
                 tok.terminate();
             }
@@ -1646,9 +1694,11 @@ pub async fn handle_reprompt_worker(
     };
 
     // Unconditionally record the reprompt attempt — audit trail even if
-    // the subsequent spawn fails.
+    // the subsequent spawn fails. The events directory is owned by the
+    // layer that registered the worker (sub-tree workers' events live
+    // under the sub-lead's run_subdir).
     let _ = crate::dispatch::events::append_event(
-        &state.root.run_subdir,
+        &layer.run_subdir,
         &args.task_id,
         &crate::dispatch::events::TaskEvent::Reprompt {
             at: chrono::Utc::now(),
@@ -1661,9 +1711,9 @@ pub async fn handle_reprompt_worker(
     spawn_resume_worker(state, args.task_id.clone(), args.prompt, session_id).await?;
 
     // Counter bump is conditional on spawn success so a failed spawn
-    // doesn't falsely inflate the reprompt count.
-    state
-        .root
+    // doesn't falsely inflate the reprompt count. Bump the counter on
+    // the OWNING layer, not root.
+    layer
         .worker_counters
         .write()
         .await
@@ -2029,6 +2079,35 @@ async fn find_worker_across_layers(
         }
     }
     None
+}
+
+/// Resolve the `LayerState` that owns `task_id`. Used by mutating
+/// handlers (cancel/pause/continue/reprompt) so they target the correct
+/// layer's `workers` / `worker_cancels` / `worker_pids` /
+/// `worker_counters` maps. Sub-lead-owned workers live in their layer,
+/// NOT root — before this helper, every mutating handler hard-coded
+/// `state.root.*` and silently failed for sub-tree workers (issue #146).
+///
+/// Strategy: prefer the O(1) `worker_layer_index` lookup; fall back to a
+/// linear scan if the index hasn't been populated yet (race with
+/// `spawn_worker` registration).
+async fn layer_for_worker(state: &Arc<DispatchState>, task_id: &str) -> Option<Arc<LayerState>> {
+    let layer_id = state.worker_layer_index.read().await.get(task_id).cloned();
+    match layer_id {
+        Some(None) => Some(state.root.clone()),
+        Some(Some(sublead_id)) => state.subleads.read().await.get(&sublead_id).cloned(),
+        None => {
+            if state.root.workers.read().await.contains_key(task_id) {
+                return Some(state.root.clone());
+            }
+            for layer in state.subleads.read().await.values() {
+                if layer.workers.read().await.contains_key(task_id) {
+                    return Some(layer.clone());
+                }
+            }
+            None
+        }
+    }
 }
 
 async fn wait_for_actor_internal(
@@ -3421,6 +3500,226 @@ mod tests {
             err.to_string().contains("already completed"),
             "expected 'already completed' in error, got: {err}"
         );
+    }
+
+    /// Register a sub-lead `LayerState` on `state` keyed by `sublead_id`,
+    /// inheriting the spawner / store / etc. from the root layer. Used by
+    /// the issue-#146 regression tests below to verify that mutating
+    /// handlers route to the owning sub-lead's layer.
+    async fn register_test_sublead(
+        state: &Arc<DispatchState>,
+        sublead_id: &str,
+    ) -> Arc<crate::dispatch::layer::LayerState> {
+        use crate::dispatch::layer::LayerState;
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::worktree::CleanupPolicy;
+
+        let sub_layer = Arc::new(LayerState::new(
+            state.root.run_id,
+            state.root.manifest.clone(),
+            state.root.store.clone(),
+            CancelToken::new(),
+            sublead_id.to_string(),
+            state.root.spawner.clone(),
+            state.root.claude_binary.clone(),
+            state.root.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            state.root.run_subdir.clone(),
+            state.root.approval_policy,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+        state
+            .subleads
+            .write()
+            .await
+            .insert(sublead_id.to_string(), sub_layer.clone());
+        sub_layer
+    }
+
+    /// Register `task_id` on the `worker_layer_index` so `layer_for_worker`
+    /// resolves it via the O(1) path (matching production registration in
+    /// `spawn_worker`).
+    async fn index_worker(state: &Arc<DispatchState>, task_id: &str, sublead_id: Option<&str>) {
+        state
+            .worker_layer_index
+            .write()
+            .await
+            .insert(task_id.to_string(), sublead_id.map(|s| s.to_string()));
+    }
+
+    /// Issue #146 regression: handle_pause_worker must target the
+    /// owning sub-lead's `LayerState`, not always root.
+    #[tokio::test]
+    async fn handle_pause_worker_targets_sublead_layer() {
+        let state = test_state().await;
+        let sub_layer = register_test_sublead(&state, "sublead-A").await;
+        index_worker(&state, "w-sub", Some("sublead-A")).await;
+
+        let worker_token = pitboss_core::session::CancelToken::new();
+        sub_layer
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-sub".into(), worker_token.clone());
+        sub_layer.workers.write().await.insert(
+            "w-sub".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess".into()),
+            },
+        );
+        // Sanity: root has no entry — pre-fix code would bail here.
+        assert!(state.root.workers.read().await.get("w-sub").is_none());
+
+        let res = handle_pause_worker(&state, "w-sub", PauseMode::Cancel)
+            .await
+            .unwrap();
+        assert!(res.ok);
+        assert!(worker_token.is_terminated());
+        let workers = sub_layer.workers.read().await;
+        assert!(matches!(
+            workers.get("w-sub").unwrap(),
+            WorkerState::Paused { .. }
+        ));
+    }
+
+    /// Issue #146 regression: handle_continue_worker must target the
+    /// owning sub-lead's `LayerState`.
+    #[tokio::test]
+    async fn handle_continue_worker_targets_sublead_layer() {
+        let state = test_state().await;
+        let sub_layer = register_test_sublead(&state, "sublead-A").await;
+        index_worker(&state, "w-sub", Some("sublead-A")).await;
+
+        sub_layer.workers.write().await.insert(
+            "w-sub".into(),
+            WorkerState::Paused {
+                session_id: "sess".into(),
+                paused_at: chrono::Utc::now(),
+                prior_token_usage: Default::default(),
+            },
+        );
+        sub_layer
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-sub".into(), "hi".into());
+        sub_layer
+            .worker_models
+            .write()
+            .await
+            .insert("w-sub".into(), "claude-haiku-4-5".into());
+
+        let res = handle_continue_worker(
+            &state,
+            ContinueWorkerArgs {
+                task_id: "w-sub".into(),
+                prompt: Some("resume please".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(res.ok);
+        // The sublead's layer has the resumed worker — root must remain empty.
+        assert!(state.root.workers.read().await.get("w-sub").is_none());
+        let workers = sub_layer.workers.read().await;
+        assert!(matches!(
+            workers.get("w-sub").unwrap(),
+            WorkerState::Running { .. }
+        ));
+    }
+
+    /// Issue #146 regression: handle_reprompt_worker must target the
+    /// owning sub-lead's `LayerState` for both the cancel-and-respawn
+    /// path AND the counter bump.
+    #[tokio::test]
+    async fn handle_reprompt_worker_targets_sublead_layer() {
+        let state = test_state().await;
+        let sub_layer = register_test_sublead(&state, "sublead-A").await;
+        index_worker(&state, "w-sub", Some("sublead-A")).await;
+
+        let worker_token = pitboss_core::session::CancelToken::new();
+        sub_layer
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-sub".into(), worker_token.clone());
+        sub_layer.workers.write().await.insert(
+            "w-sub".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess-abc".into()),
+            },
+        );
+        sub_layer
+            .worker_prompts
+            .write()
+            .await
+            .insert("w-sub".into(), "original".into());
+        sub_layer
+            .worker_models
+            .write()
+            .await
+            .insert("w-sub".into(), "claude-haiku-4-5".into());
+
+        let res = handle_reprompt_worker(
+            &state,
+            RepromptWorkerArgs {
+                task_id: "w-sub".into(),
+                prompt: "new plan".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(res.ok);
+        // Counter bumps on the sub-lead's layer (NOT root).
+        let counters = sub_layer
+            .worker_counters
+            .read()
+            .await
+            .get("w-sub")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(counters.reprompt_count, 1);
+        // Root counters should be empty.
+        assert!(state
+            .root
+            .worker_counters
+            .read()
+            .await
+            .get("w-sub")
+            .is_none());
+    }
+
+    /// Issue #146 regression: handle_cancel_worker must terminate the
+    /// owning sub-lead's CancelToken.
+    #[tokio::test]
+    async fn handle_cancel_worker_targets_sublead_layer() {
+        let state = test_state().await;
+        let sub_layer = register_test_sublead(&state, "sublead-A").await;
+        index_worker(&state, "w-sub", Some("sublead-A")).await;
+
+        let worker_token = pitboss_core::session::CancelToken::new();
+        sub_layer
+            .worker_cancels
+            .write()
+            .await
+            .insert("w-sub".into(), worker_token.clone());
+        sub_layer.workers.write().await.insert(
+            "w-sub".into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sess".into()),
+            },
+        );
+
+        // Pre-fix: this would bail "unknown task_id" because the read was
+        // pinned to state.root.worker_cancels.
+        let res = handle_cancel_worker(&state, "w-sub").await.unwrap();
+        assert!(res.ok);
+        assert!(worker_token.is_terminated());
     }
 
     #[tokio::test]
