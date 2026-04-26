@@ -143,12 +143,19 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Emit machine-readable views of the manifest schema. Currently
-    /// supports `--format=map` (a markdown reference checked in at
-    /// `docs/manifest-map.md`). The `--check <path>` mode regenerates and
-    /// diffs against an existing file — used in CI to catch drift.
+    /// Emit machine-readable views of the manifest schema.
+    ///
+    /// Supported formats:
+    ///   * `--format=map` — markdown field map, checked in at
+    ///     `docs/manifest-map.md`.
+    ///   * `--format=example` — complete reference TOML with every field
+    ///     present (placeholders), checked in at
+    ///     `docs/manifest-reference.toml`.
+    ///
+    /// The `--check <path>` mode regenerates and diffs against an existing
+    /// file — used in CI to catch drift.
     Schema {
-        /// Output format. Only `map` is implemented today;
+        /// Output format. `map` (default) and `example` are implemented;
         /// `n8n-form` is roadmapped.
         #[arg(long, value_enum, default_value_t = SchemaFormat::Map)]
         format: SchemaFormat,
@@ -165,6 +172,8 @@ pub enum Command {
 pub enum SchemaFormat {
     /// Markdown manifest map (one row per field, with file:line refs).
     Map,
+    /// Complete reference TOML — every field present as `key = placeholder`.
+    Example,
 }
 
 #[cfg(test)]

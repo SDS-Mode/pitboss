@@ -43,6 +43,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss schema --format=example` + `docs/manifest-reference.toml`** —
+  auto-generates a complete reference TOML in which every field declared by
+  the v0.9 schema appears as an uncommented `key = placeholder` assignment.
+  Placeholders come from the field's inferred `FormType` (with `enum_values`
+  fields collapsing to their first variant). Companion to `--format=map`:
+  the map shows where each field lives in the source, the reference shows
+  what a fully-populated section looks like. Drift-guarded by a unit test
+  and `pitboss schema --format=example --check docs/manifest-reference.toml`
+  for CI. The output is valid TOML (parses cleanly) but is *not* a runnable
+  manifest — `[lead]` and `[[task]]` are mutually exclusive at dispatch time
+  even though both demonstrate happily side-by-side here.
+
 - **`pitboss schema --format=map` + `docs/manifest-map.md`** — auto-generates
   a per-field code-reference doc that maps every TOML key to its Rust
   source location (`schema.rs:LINE`), label, help text, type, and

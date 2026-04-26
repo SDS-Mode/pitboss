@@ -76,8 +76,9 @@ fn main() -> Result<()> {
 
 /// Drive `pitboss schema --format=...`. Returns the exit code.
 fn run_schema(format: cli::SchemaFormat, check: Option<&std::path::Path>) -> i32 {
-    let generated = match format {
-        cli::SchemaFormat::Map => crate::manifest::map_doc::render(),
+    let (generated, format_flag) = match format {
+        cli::SchemaFormat::Map => (crate::manifest::map_doc::render(), "map"),
+        cli::SchemaFormat::Example => (crate::manifest::example_doc::render(), "example"),
     };
     match check {
         None => {
@@ -102,7 +103,7 @@ fn run_schema(format: cli::SchemaFormat, check: Option<&std::path::Path>) -> i32
                 eprintln!(
                     "pitboss schema --check: {} is stale.\n\
                      Regenerate with:\n\
-                     \n    pitboss schema --format=map > {}\n",
+                     \n    pitboss schema --format={format_flag} > {}\n",
                     path.display(),
                     path.display()
                 );
