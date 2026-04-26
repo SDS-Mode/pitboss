@@ -1,0 +1,17 @@
+[package]
+name         = "pitboss-schema-derive"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Proc-macro derive for FieldMetadata. Re-exported by pitboss-schema."
+repository   = { workspace = true }
+
+[lib]
+proc-macro = true
+path = "src/lib.rs"
+
+[dependencies]
+syn   = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

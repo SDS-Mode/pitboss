@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use pitboss_schema::FieldMetadata;
 use serde::{Deserialize, Serialize};
 
 /// How the pitboss-spawned claude handles its built-in per-tool permission gate.
@@ -65,35 +66,56 @@ pub enum PermissionRouting {
 /// When present, `pitboss container-dispatch` uses this config to build
 /// the `docker`/`podman run` invocation. `directory` fields in tasks/lead
 /// must be valid container-side paths (after mounts are applied).
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerConfig {
     /// Container image. Default: `ghcr.io/sds-mode/pitboss-with-claude:latest`.
+    #[field(
+        label = "Image",
+        help = "Container image reference. Defaults to ghcr.io/sds-mode/pitboss-with-claude:latest."
+    )]
     pub image: Option<String>,
     /// Container runtime: `"docker"`, `"podman"`, or `"auto"` (default).
+    #[field(
+        label = "Runtime",
+        help = "Container runtime to invoke. \"auto\" prefers podman.",
+        enum_values = ["docker", "podman", "auto"]
+    )]
     pub runtime: Option<String>,
     /// Extra args inserted verbatim before the image name in the `run` call.
     #[serde(default)]
+    #[field(
+        label = "Extra args",
+        help = "Args inserted verbatim before the image name in the run invocation."
+    )]
     pub extra_args: Vec<String>,
     /// Host→container bind mounts (besides the auto-injected `~/.claude` and run_dir).
     #[serde(default, rename = "mount")]
+    #[field(skip)]
     pub mounts: Vec<MountSpec>,
     /// Working directory inside the container.
     /// Defaults to the container path of the first `[[container.mount]]` entry,
     /// or `/home/pitboss` if no mounts are declared.
+    #[field(
+        label = "Working directory",
+        help = "cwd inside the container; defaults to the first mount's container path."
+    )]
     pub workdir: Option<PathBuf>,
 }
 
 /// A single host→container bind mount entry.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct MountSpec {
     /// Absolute path on the host (tilde expansion is performed at dispatch time).
+    #[field(label = "Host path", help = "Absolute host path. ~ is expanded.")]
     pub host: PathBuf,
     /// Absolute path inside the container.
+    #[field(label = "Container path", help = "Absolute path inside the container.")]
     pub container: PathBuf,
     /// Mount as read-only. Default: false.
     #[serde(default)]
+    #[field(label = "Read-only", help = "Mount read-only.")]
     pub readonly: bool,
 }
 
@@ -110,18 +132,31 @@ pub struct MountSpec {
 /// command = "npx"
 /// args    = ["-y", "@upstash/context7-mcp"]
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerSpec {
     /// Key name for this server in the generated `mcpServers` JSON object.
+    #[field(
+        label = "Server ID",
+        help = "Key under mcpServers in the generated config."
+    )]
     pub id: String,
     /// Executable to launch (e.g. `"npx"`, `"uvx"`, absolute path).
+    #[field(
+        label = "Command",
+        help = "Executable to launch (e.g. npx, uvx, or an absolute path)."
+    )]
     pub command: String,
     /// Arguments passed to the command.
     #[serde(default)]
+    #[field(label = "Args", help = "Arguments passed to the command.")]
     pub args: Vec<String>,
     /// Environment variables injected into the MCP server process.
     #[serde(default)]
+    #[field(
+        label = "Env vars",
+        help = "Environment variables injected into the MCP server process."
+    )]
     pub env: HashMap<String, String>,
 }
 
@@ -163,21 +198,40 @@ pub struct Manifest {
 }
 
 /// TOML schema for a single `[[approval_policy]]` rule.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 pub struct ApprovalRuleSpec {
     #[serde(default, rename = "match")]
+    #[field(skip)]
     pub match_clause: ApprovalMatchSpec,
     /// Action to take when the rule matches.
     /// One of: "auto_approve", "auto_reject", "block".
+    #[field(
+        label = "Action",
+        help = "Action when this rule matches.",
+        enum_values = ["auto_approve", "auto_reject", "block"]
+    )]
     pub action: String,
 }
 
 /// TOML schema for the `[match]` sub-table within an `[[approval_policy]]` rule.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
 pub struct ApprovalMatchSpec {
+    #[field(
+        label = "Actor",
+        help = "Actor path, e.g. \"root→S1\" or \"root→S1→W3\"."
+    )]
     pub actor: Option<String>,
+    #[field(
+        label = "Category",
+        help = "Event category: tool_use, plan, cost, etc."
+    )]
     pub category: Option<String>,
+    #[field(label = "Tool name", help = "Specific MCP tool name to match.")]
     pub tool_name: Option<String>,
+    #[field(
+        label = "Cost over (USD)",
+        help = "Fires when the request's cost_estimate exceeds this value."
+    )]
     pub cost_over: Option<f64>,
 }
 
@@ -185,36 +239,70 @@ pub struct ApprovalMatchSpec {
 ///
 /// Lead-specific caps moved to `[lead]` in v0.9 (`max_workers`, `budget_usd`,
 /// `lead_timeout_secs`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
     /// Concurrency cap for `[[task]]` flat mode. Renamed from `max_parallel`
     /// in v0.9. Overridden by `ANTHROPIC_MAX_CONCURRENT` env var. Default: 4.
+    #[field(
+        label = "Max parallel tasks",
+        help = "Flat-mode concurrency cap for [[task]] runs. Default 4. Overridden by ANTHROPIC_MAX_CONCURRENT."
+    )]
     pub max_parallel_tasks: Option<u32>,
     /// Stop flat-mode runs on first failure. Ignored in hierarchical mode.
     #[serde(default)]
+    #[field(
+        label = "Halt on failure",
+        help = "Stop remaining flat-mode tasks on first failure."
+    )]
     pub halt_on_failure: bool,
     /// Where run artifacts land. Default `~/.local/share/pitboss/runs`.
+    #[field(
+        label = "Run directory",
+        help = "Where per-run artifacts land. Default ~/.local/share/pitboss/runs."
+    )]
     pub run_dir: Option<PathBuf>,
     /// Worktree-cleanup policy. Default: `on_success`.
     #[serde(default = "default_cleanup")]
+    #[field(
+        label = "Worktree cleanup",
+        help = "What to do with each worker's git worktree after it finishes.",
+        enum_values = ["always", "on_success", "never"]
+    )]
     pub worktree_cleanup: WorktreeCleanup,
     /// Write an event-stream JSONL alongside `summary.jsonl`. Default off.
     #[serde(default)]
+    #[field(
+        label = "Emit event stream",
+        help = "Write a JSONL event stream alongside summary.jsonl."
+    )]
     pub emit_event_stream: bool,
     /// Default approval-policy action when no TUI is attached and no
     /// `[[approval_policy]]` rule matches. Renamed from `approval_policy`
     /// in v0.9 to disambiguate from the rules array. One of:
     /// `"block"` (default), `"auto_approve"`, `"auto_reject"`.
     #[serde(default)]
+    #[field(
+        label = "Default approval policy",
+        help = "Default action for request_approval / propose_plan when no TUI is attached and no rule matches.",
+        enum_values = ["block", "auto_approve", "auto_reject"]
+    )]
     pub default_approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
     /// Dump the shared store (`/ref/*`, `/peer/*`, `/shared/*`, `/leases/*`)
     /// to `<run-dir>/shared-store.json` on finalize.
     #[serde(default)]
+    #[field(
+        label = "Dump shared store",
+        help = "Write shared-store.json into the run directory on finalize."
+    )]
     pub dump_shared_store: bool,
     /// When true, the lead must call `propose_plan` and have the resulting
     /// plan approved before any `spawn_worker` succeeds.
     #[serde(default)]
+    #[field(
+        label = "Require plan approval",
+        help = "When true, spawn_worker is blocked until propose_plan has been approved."
+    )]
     pub require_plan_approval: bool,
 }
 
@@ -245,15 +333,40 @@ pub enum WorktreeCleanup {
     Never,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
+    #[field(
+        label = "Model",
+        help = "Claude model id (e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7)."
+    )]
     pub model: Option<String>,
+    #[field(
+        label = "Effort",
+        help = "Maps to the claude --effort flag.",
+        enum_values = ["low", "medium", "high", "xhigh", "max"]
+    )]
     pub effort: Option<Effort>,
+    #[field(
+        label = "Tools",
+        help = "Allowed tool surface. Pitboss auto-appends its MCP tools for leads and workers."
+    )]
     pub tools: Option<Vec<String>>,
+    #[field(
+        label = "Timeout (seconds)",
+        help = "Per-task wall-clock cap. No default (no cap)."
+    )]
     pub timeout_secs: Option<u64>,
+    #[field(
+        label = "Use git worktree",
+        help = "Isolate each worker in a git worktree. Default true."
+    )]
     pub use_worktree: Option<bool>,
     #[serde(default)]
+    #[field(
+        label = "Env vars",
+        help = "Environment variables passed to the claude subprocess."
+    )]
     pub env: HashMap<String, String>,
 }
 
@@ -267,29 +380,79 @@ pub enum Effort {
     Max,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct Template {
+    #[field(
+        label = "Template ID",
+        help = "Slug referenced from [[task]].template."
+    )]
     pub id: String,
+    #[field(
+        label = "Prompt",
+        help = "Prompt body. Supports {var} placeholders supplied by [[task]].vars.",
+        form_type = "long_text"
+    )]
     pub prompt: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
+    #[field(
+        label = "Task ID",
+        help = "Unique slug. Alphanumeric + _ + -. Used in logs and worktree names."
+    )]
     pub id: String,
+    #[field(
+        label = "Directory",
+        help = "Working directory. Must be inside a git repo if use_worktree = true."
+    )]
     pub directory: PathBuf,
+    #[field(
+        label = "Prompt",
+        help = "Prompt body sent to claude via -p. Mutually exclusive with `template`.",
+        form_type = "long_text"
+    )]
     pub prompt: Option<String>,
+    #[field(
+        label = "Template ID",
+        help = "Reference to a [[template]] entry. Mutually exclusive with `prompt`."
+    )]
     pub template: Option<String>,
     #[serde(default)]
+    #[field(
+        label = "Template vars",
+        help = "Substitutions for {placeholders} when using `template`."
+    )]
     pub vars: HashMap<String, String>,
+    #[field(
+        label = "Branch",
+        help = "Worktree branch name. Auto-generated if omitted."
+    )]
     pub branch: Option<String>,
+    #[field(label = "Model", help = "Per-task override of [defaults].model.")]
     pub model: Option<String>,
+    #[field(
+        label = "Effort",
+        help = "Per-task override of [defaults].effort.",
+        enum_values = ["low", "medium", "high", "xhigh", "max"]
+    )]
     pub effort: Option<Effort>,
+    #[field(label = "Tools", help = "Per-task override of [defaults].tools.")]
     pub tools: Option<Vec<String>>,
+    #[field(label = "Timeout (seconds)", help = "Per-task wall-clock cap.")]
     pub timeout_secs: Option<u64>,
+    #[field(
+        label = "Use git worktree",
+        help = "Per-task override of [defaults].use_worktree."
+    )]
     pub use_worktree: Option<bool>,
     #[serde(default)]
+    #[field(
+        label = "Env vars",
+        help = "Per-task env vars merged on top of [defaults].env."
+    )]
     pub env: HashMap<String, String>,
 }
 
@@ -298,14 +461,22 @@ pub struct Task {
 /// Lead-level caps that previously lived under `[run]` (`max_workers`,
 /// `budget_usd`, `lead_timeout_secs`) live here in v0.9 — they're properties
 /// of the lead, not the run.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct Lead {
     /// Unique slug for the lead (used as the TUI tile label and in run
     /// artifact paths). Required in v0.9 — no cwd-derived default.
+    #[field(
+        label = "Lead ID",
+        help = "Unique slug used as the TUI tile label and in run artifact paths."
+    )]
     pub id: String,
     /// Working directory for the lead's claude subprocess. Required in v0.9
     /// — no cwd-derived default. Tilde expansion is performed at load time.
+    #[field(
+        label = "Directory",
+        help = "Working directory for the lead's claude subprocess. Must be a git work-tree if use_worktree = true."
+    )]
     pub directory: PathBuf,
     /// Operator prompt for the lead. Required.
     ///
@@ -313,37 +484,80 @@ pub struct Lead {
     /// declaration. A `prompt =` placed after a subtable header is silently
     /// reassigned to that subtable's scope; `pitboss validate` catches the
     /// resulting empty prompt and reports it.
+    #[field(
+        label = "Prompt",
+        help = "Operator instructions passed to claude via -p. Must appear before any [lead.X] subtable in the source.",
+        form_type = "long_text"
+    )]
     pub prompt: String,
 
     /// Branch name for the lead's worktree. Auto-generated if omitted.
     #[serde(default)]
+    #[field(
+        label = "Branch",
+        help = "Worktree branch name. Auto-generated if omitted."
+    )]
     pub branch: Option<String>,
     #[serde(default)]
+    #[field(label = "Model", help = "Per-lead override of [defaults].model.")]
     pub model: Option<String>,
     #[serde(default)]
+    #[field(
+        label = "Effort",
+        help = "Per-lead override of [defaults].effort.",
+        enum_values = ["low", "medium", "high", "xhigh", "max"]
+    )]
     pub effort: Option<Effort>,
     #[serde(default)]
+    #[field(
+        label = "Tools",
+        help = "Per-lead override of [defaults].tools. Pitboss auto-appends its MCP tools."
+    )]
     pub tools: Option<Vec<String>>,
     #[serde(default)]
+    #[field(
+        label = "Timeout (seconds)",
+        help = "Per-actor subprocess wall-clock cap (claude --timeout)."
+    )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
+    #[field(
+        label = "Use git worktree",
+        help = "Per-lead override of [defaults].use_worktree."
+    )]
     pub use_worktree: Option<bool>,
     #[serde(default)]
+    #[field(
+        label = "Env vars",
+        help = "Per-lead env vars merged on top of [defaults].env."
+    )]
     pub env: HashMap<String, String>,
 
     // ── Lead-level caps (moved from [run] in v0.9) ───────────────────────
     /// Hard cap on the lead's concurrent + queued worker pool (1–16).
     #[serde(default)]
+    #[field(
+        label = "Max workers",
+        help = "Hard cap on the lead's concurrent + queued worker pool (1–16). Required when the lead spawns workers."
+    )]
     pub max_workers: Option<u32>,
     /// Soft cap on lead's spend (USD) with reservation accounting.
     /// `spawn_worker` fails with `budget exceeded` once
     /// `spent + reserved + next_estimate > budget`.
     #[serde(default)]
+    #[field(
+        label = "Budget (USD)",
+        help = "Soft cap on lead spend with reservation accounting. spawn_worker fails once spent + reserved + next_estimate > budget."
+    )]
     pub budget_usd: Option<f64>,
     /// Wall-clock cap on the lead session (seconds). Distinct from
     /// `timeout_secs` (which becomes the claude `--timeout` flag for
     /// per-actor subprocess wall-clock). Default 3600 if unset.
     #[serde(default)]
+    #[field(
+        label = "Lead timeout (seconds)",
+        help = "Wall-clock cap on the lead session. Default 3600."
+    )]
     pub lead_timeout_secs: Option<u64>,
 
     // ── v0.8 permission routing ──────────────────────────────────────────
@@ -352,33 +566,70 @@ pub struct Lead {
     /// `"path_b"`: pitboss registers a `permission_prompt` MCP tool;
     /// claude routes each permission check through it.
     #[serde(default)]
+    #[field(
+        label = "Permission routing",
+        help = "path_a (default) makes pitboss the sole permission authority. path_b routes claude's gate through pitboss (rejected at validate time pending stabilization).",
+        enum_values = ["path_a", "path_b"]
+    )]
     pub permission_routing: PermissionRouting,
 
     // ── v0.6 depth-2 controls ────────────────────────────────────────────
     /// When true, `spawn_sublead` is included in the lead's MCP toolset.
     #[serde(default)]
+    #[field(
+        label = "Allow sub-leads",
+        help = "Expose spawn_sublead to the root lead."
+    )]
     pub allow_subleads: bool,
     /// Hard cap on total live sub-leads under this root.
     #[serde(default)]
+    #[field(
+        label = "Max sub-leads",
+        help = "Hard cap on total live sub-leads under this root."
+    )]
     pub max_subleads: Option<u32>,
     /// Hard cap on per-sub-lead budget envelope (USD).
     #[serde(default)]
+    #[field(
+        label = "Max sub-lead budget (USD)",
+        help = "Cap on the per-sub-lead budget envelope."
+    )]
     pub max_sublead_budget_usd: Option<f64>,
     /// Hard cap on total live workers across the entire tree (root + sub-trees).
     /// Renamed from `max_workers_across_tree` in v0.9.
     #[serde(default)]
+    #[field(
+        label = "Max total workers",
+        help = "Cap on total live workers across the entire tree (root + sub-trees)."
+    )]
     pub max_total_workers: Option<u32>,
 }
 
 /// Top-level `[sublead_defaults]` block (promoted from `[lead.sublead_defaults]`
 /// in v0.9). Supplies fallback values for `spawn_sublead` calls that omit them.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct SubleadDefaults {
+    #[field(
+        label = "Budget (USD)",
+        help = "Per-sub-lead envelope when read_down = false."
+    )]
     pub budget_usd: Option<f64>,
+    #[field(
+        label = "Max workers",
+        help = "Per-sub-lead worker pool when read_down = false."
+    )]
     pub max_workers: Option<u32>,
+    #[field(
+        label = "Lead timeout (seconds)",
+        help = "Wall-clock cap for the sub-lead session."
+    )]
     pub lead_timeout_secs: Option<u64>,
     #[serde(default)]
+    #[field(
+        label = "Read down",
+        help = "When true, sub-lead shares root's budget + worker pool instead of carving its own envelope."
+    )]
     pub read_down: bool,
 }
 

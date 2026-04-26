@@ -4,6 +4,8 @@ members = [
     "crates/pitboss-core",
     "crates/pitboss-cli",
     "crates/pitboss-tui",
+    "crates/pitboss-schema",
+    "crates/pitboss-schema-derive",
     "tests-support/fake-claude",
     "tests-support/fake-mcp-client",
     "tests-support/fake-control-client",

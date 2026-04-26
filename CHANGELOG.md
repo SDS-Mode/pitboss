@@ -43,6 +43,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Field-metadata derive (`pitboss-schema` + `pitboss-schema-derive`)** —
+  schema structs now carry per-field metadata (label, help, form_type,
+  enum_values, required) via `#[derive(FieldMetadata)]`. `required` is
+  inferred from `Option<T>` and serde defaults; `form_type` is inferred
+  from the Rust type (`Vec<String>` → `string_list`, `PathBuf` → `path`,
+  `bool` → `boolean`, …) with explicit override via `#[field(form_type =
+  "...")]`. A central registry in `manifest::metadata::sections()` walks
+  every section in declaration order. Foundation for the upcoming
+  auto-generated TOML map doc (PR 1.C), complete-example emitter (PR 1.D),
+  `pitboss scaffold` template generator (PR 1.E), and
+  `pitboss schema --format=n8n-form` export.
+
 - **`[[mcp_server]]` — external MCP server injection** — declare external MCP
   servers in the manifest and they are injected into every actor's
   `--mcp-config` (lead, sub-leads, and workers) at dispatch time. Eliminates
