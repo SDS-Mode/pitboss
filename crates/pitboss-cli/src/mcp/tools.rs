@@ -3268,12 +3268,18 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn freeze_and_thaw_transition_via_handler() {
+        use std::os::unix::process::CommandExt;
         use std::process::Command;
 
         let state = test_state().await;
 
         // Spawn a real long-sleep child we can safely SIGSTOP/SIGCONT.
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        // Process-group-isolated so freeze() (which signals `-pgid`) does
+        // not deliver SIGSTOP to the cargo-test runner itself — matches
+        // what TokioSpawner does in production.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").process_group(0);
+        let child = cmd.spawn().unwrap();
         let pid = child.id();
 
         // Register the pid + Running state.

@@ -25,31 +25,42 @@ const SECOND_SIGINT_WINDOW: Duration = Duration::from_secs(5);
 // transitive dep and this is a two-function use case. Pitboss is
 // Linux/macOS only so POSIX signal semantics are available
 // unconditionally.
+//
+// Workers are spawned with `process_group(0)` (see
+// `pitboss_core::process::tokio_impl`), so `pid` is also the PGID. We
+// signal `-pgid` so freeze/resume reach the entire claude subtree
+// (Bash subshells, sub-agents, MCP servers) — otherwise SIGSTOP on the
+// parent alone leaves grandchildren running and the freeze illusion
+// breaks down (the parent can't service its children's stdio while
+// stopped, but the children themselves keep burning CPU and tokens).
 
-/// Suspend the process with `pid` using SIGSTOP. Returns an error for
-/// `pid == 0` (slot not yet populated) or if the syscall fails
-/// (process already exited, permission denied, etc).
+/// Suspend the worker process group rooted at `pid` using SIGSTOP.
+/// Returns an error for `pid == 0` (slot not yet populated) or if the
+/// syscall fails (group already gone, permission denied, etc).
 pub fn freeze(pid: u32) -> Result<()> {
-    send_signal(pid, libc::SIGSTOP, "SIGSTOP")
+    send_group_signal(pid, libc::SIGSTOP, "SIGSTOP")
 }
 
-/// Resume a previously-frozen process with SIGCONT.
+/// Resume a previously-frozen worker process group with SIGCONT.
 pub fn resume_stopped(pid: u32) -> Result<()> {
-    send_signal(pid, libc::SIGCONT, "SIGCONT")
+    send_group_signal(pid, libc::SIGCONT, "SIGCONT")
 }
 
-fn send_signal(pid: u32, sig: libc::c_int, name: &'static str) -> Result<()> {
+fn send_group_signal(pid: u32, sig: libc::c_int, name: &'static str) -> Result<()> {
     if pid == 0 {
         bail!("{name}: pid is 0 (worker not yet spawned?)");
     }
-    // SAFETY: `kill(2)` accepts any pid_t + valid signo; no memory is
-    // dereferenced. The cast is libc's expected pid_t shape.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
+    #[allow(clippy::cast_possible_wrap)]
+    let pgid = pid as libc::pid_t;
+    // SAFETY: `kill(2)` with a negative pid signals the process group;
+    // pgid was published by the spawner after `process_group(0)`, so it
+    // is a PGID we own. No memory is dereferenced.
+    let rc = unsafe { libc::kill(-pgid, sig) };
     if rc == 0 {
         return Ok(());
     }
     let err = std::io::Error::last_os_error();
-    bail!("{name} to pid {pid} failed: {err}")
+    bail!("{name} to pgid {pid} failed: {err}")
 }
 
 /// Spawn a task that watches for Ctrl-C in two phases:
@@ -267,9 +278,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn freeze_then_resume_flips_proc_state() {
+        use std::os::unix::process::CommandExt;
         use std::process::Command;
 
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        // Spawn the test child in its own process group (matches what
+        // TokioSpawner does in production). freeze()/resume_stopped()
+        // signal `-pgid` so without this the test would deliver SIGSTOP
+        // to the cargo-test process group itself.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").process_group(0);
+        let mut child = cmd.spawn().unwrap();
         let pid = child.id();
 
         freeze(pid).unwrap();

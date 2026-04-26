@@ -369,6 +369,38 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**pitboss-core (child supervision):**
+- `pitboss-core::session::handle` — PID slot now cleared the moment
+  `child.wait()` resolves, before the up-to-30 s stream-drain await. The
+  previous ordering left the reaped child's PID published for the entire
+  drain window; on busy systems where the kernel recycled that PID within
+  milliseconds, any signal the dispatcher's freeze-pause path sent during
+  the window could land on an unrelated process. Closes #147.
+- `pitboss-core::process::tokio_impl` — children are now spawned with
+  `process_group(0)` (each child becomes its own group leader, PGID == PID)
+  and `terminate()`/`kill()` signal `-pgid` instead of the bare child PID.
+  This propagates SIGTERM/SIGKILL to the entire `claude` subtree (Bash
+  subshells, sub-agents, MCP servers) instead of orphaning them to PID 1
+  where they would keep holding worktree locks and burning budget. ESRCH
+  on an empty group is collapsed to `Ok` so terminate-after-exit stays a
+  no-op. `kill()` and `terminate()` are now symmetric (both use the same
+  group-targeted `libc::kill` path), addressing the legacy asymmetry where
+  one used `start_kill` and the other used raw `libc::kill`. Closes #148.
+- `pitboss-cli::dispatch::signals` — `freeze`/`resume_stopped`
+  (SIGSTOP/SIGCONT) now signal the worker's process group as well, so the
+  whole subtree halts and resumes together rather than leaving claude's
+  children running while the parent is frozen.
+
+**pitboss-core (audit follow-ups, low-severity):**
+- `session::handle::stream_loop` — assistant-text length comparison changed
+  from `>=` to `>` so equal-length later messages don't silently displace
+  the first-seen winner (claude's tail confirmations cluster at similar
+  short lengths and were occasionally clobbering the substantive answer).
+- `session::handle::stream_loop` — `parse_line_all` errors and `try_send`
+  drops on the `session_id` channel now emit `tracing::debug!` lines
+  instead of being swallowed silently, giving operators a diagnostic trail
+  when subprocess output is malformed or the session-id receiver vanishes.
+
 **TUI:**
 - Completed page Detail view always showed the same log regardless of which
   row was selected — `enter_detail_for` now updates `state.focus` so the
