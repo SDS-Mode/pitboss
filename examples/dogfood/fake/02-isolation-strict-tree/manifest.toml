@@ -29,3 +29,7 @@ max_workers = 4
 allow_subleads = true
 max_subleads = 2
 max_sublead_budget_usd = 2.00
+
+[sublead_defaults]
+budget_usd = 1.50
+max_workers = 2
