@@ -43,6 +43,40 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss dispatch --background`** — `nohup`-equivalent, non-blocking
+  dispatch (issue #133-C). The parent process pre-mints a `run_id`,
+  spawns the dispatcher as a session-leader child (`setsid()` via
+  `pre_exec`, stdio nulled), prints a single JSON line on stdout, and
+  exits 0 — without waiting for the run to complete:
+
+  ```
+  $ pitboss dispatch --background ./manifest.toml
+  {"run_id":"019d…","manifest_path":"./manifest.toml","started_at":"2026-04-26T17:00:00Z","child_pid":12345}
+  $
+  ```
+
+  Designed for orchestrators (Discord bots, web dashboards, CI scripts)
+  that need to dispatch a manifest and return to availability immediately
+  rather than tie up an event loop for the duration of the run. Concrete
+  example from issue #133: a Discord bot's `/dispatch <manifest>` slash
+  command can now hand the manifest off and respond to the user in
+  milliseconds; the run grinds in the background and reports back via
+  `[lifecycle].notify` (PR #137) or polling `pitboss list --active` /
+  `pitboss status <run_id>`.
+
+  Mode-agnostic by design: works with both flat (`[[task]]`) and
+  hierarchical (`[lead]`) manifests. The decision of whether a lead
+  claude wraps the dispatch is a manifest authoring concern (omit
+  `[lead]` to skip the lead-claude cost), kept orthogonal to this
+  flag's attached-vs-detached lifecycle concern.
+
+  Mechanism uses a hidden `--internal-run-id <UUID>` flag for the
+  parent→child handoff so the announced and on-disk run ids match
+  byte-for-byte (the standard correlation contract orchestrators
+  already rely on for `RunDispatched` / `RunFinished` webhooks).
+  `--background --dry-run` and `--background --internal-run-id` are
+  rejected at parse time as nonsensical combinations.
+
 - **`[lifecycle]` manifest section + `survive_parent` declaration** —
   follow-up A from issue #133. Lets a manifest formally declare that this
   dispatch should be allowed to outlive its parent process (use case: an

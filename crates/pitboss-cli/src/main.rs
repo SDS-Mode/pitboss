@@ -25,8 +25,50 @@ fn main() -> Result<()> {
             manifest,
             run_dir,
             dry_run,
+            background,
+            internal_run_id,
         } => {
-            run_dispatch(&manifest, run_dir, dry_run);
+            // `--background` short-circuits before the normal dispatch
+            // path: parent re-spawns itself detached and exits 0 with a
+            // JSON announcement on stdout. The child invocation receives
+            // `--internal-run-id` so the announced and on-disk run ids
+            // match. See `dispatch::background` for the full mechanism.
+            if background {
+                if dry_run {
+                    eprintln!("--background and --dry-run are mutually exclusive");
+                    std::process::exit(2);
+                }
+                if internal_run_id.is_some() {
+                    // Ambiguous: the parent already pre-mints and forwards
+                    // via --internal-run-id, so combining them means the
+                    // operator is asking us to re-detach an already-detached
+                    // dispatch. Reject rather than silently double-spawn.
+                    eprintln!(
+                        "--background and --internal-run-id are mutually exclusive\n\
+                         (--internal-run-id is set automatically by --background's \
+                         self-respawn; not for direct human use)"
+                    );
+                    std::process::exit(2);
+                }
+                match dispatch::background::run_background(&manifest, run_dir) {
+                    Ok(code) => std::process::exit(code),
+                    Err(e) => {
+                        eprintln!("background dispatch: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let pre_minted = match internal_run_id.as_deref() {
+                None => None,
+                Some(s) => match dispatch::background::parse_internal_run_id(s) {
+                    Ok(u) => Some(u),
+                    Err(e) => {
+                        eprintln!("{e:#}");
+                        std::process::exit(2);
+                    }
+                },
+            };
+            run_dispatch(&manifest, run_dir, dry_run, pre_minted);
         }
         Command::Resume { run_id, run_dir } => {
             run_resume(&run_id, run_dir);
@@ -260,6 +302,7 @@ fn run_dispatch(
     manifest: &std::path::Path,
     run_dir_override: Option<std::path::PathBuf>,
     dry_run: bool,
+    pre_minted_run_id: Option<uuid::Uuid>,
 ) -> ! {
     let env_mp = parse_env_max_parallel();
     let manifest_text = match std::fs::read_to_string(manifest) {
@@ -314,6 +357,7 @@ fn run_dispatch(
                 run_dir_override,
                 dry_run,
                 std::collections::HashMap::new(),
+                pre_minted_run_id,
             )
             .await
             {
@@ -332,6 +376,7 @@ fn run_dispatch(
             claude_version,
             run_dir_override,
             dry_run,
+            pre_minted_run_id,
         )
         .await
         {
@@ -564,6 +609,7 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
                 Some(effective_run_dir),
                 false,
                 sublead_sessions,
+                None,
             )
             .await
             {
@@ -582,6 +628,7 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
             claude_version,
             Some(effective_run_dir),
             false,
+            None,
         )
         .await
         {

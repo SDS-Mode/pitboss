@@ -51,6 +51,28 @@ pub enum Command {
         /// Print the resolved claude spawn commands and exit.
         #[arg(long)]
         dry_run: bool,
+        /// Detach the dispatcher to run in the background (`nohup`-equivalent).
+        /// Mints a `run_id`, spawns the dispatcher as a session-leader child
+        /// process with stdio nulled, prints `{run_id, manifest_path,
+        /// started_at, child_pid}` JSON to stdout, and exits 0 — without
+        /// waiting for completion.
+        ///
+        /// Designed for orchestrators (Discord bots, web dashboards, CI)
+        /// that need to dispatch a manifest and return to availability
+        /// immediately. Pair with `[lifecycle].notify` to learn about run
+        /// completion via webhook, or poll `pitboss list --active` /
+        /// `pitboss status <run_id>`.
+        ///
+        /// Mode-agnostic: works with both flat (`[[task]]`) and
+        /// hierarchical (`[lead]`) manifests.
+        #[arg(long)]
+        background: bool,
+        /// Internal: re-use this UUID as the run id instead of minting one.
+        /// Set automatically when `--background` re-spawns the dispatcher
+        /// as a detached child so the parent's announced `run_id` matches
+        /// what the child writes to disk. Not for direct human use.
+        #[arg(long, hide = true, value_name = "UUID")]
+        internal_run_id: Option<String>,
     },
     /// Re-run a prior dispatch, reusing claude_session_id for each task.
     Resume {
