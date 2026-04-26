@@ -17,9 +17,11 @@
 #      own layer.
 
 [run]
-max_parallel = 4
+max_parallel_tasks = 4
 
 [lead]
+id = "02-isolation-strict-tree"
+directory = "."
 prompt = "Decompose the job into two parallel phases. Spawn sub-lead S1 for phase-1 (gather inputs) and sub-lead S2 for phase-2 (process outputs). Each sub-lead writes its progress to /shared/progress."
 model = "claude-haiku-4-5"
 budget_usd = 5.00
@@ -27,3 +29,7 @@ max_workers = 4
 allow_subleads = true
 max_subleads = 2
 max_sublead_budget_usd = 2.00
+
+[sublead_defaults]
+budget_usd = 1.50
+max_workers = 2

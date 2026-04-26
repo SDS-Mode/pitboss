@@ -25,7 +25,7 @@ fn three_task_mixed_outcomes_produce_summary() {
         format!(
             r#"
 [run]
-max_parallel = 2
+max_parallel_tasks = 2
 run_dir = "{run_dir}"
 worktree_cleanup = "always"
 
@@ -94,7 +94,7 @@ fn halt_on_failure_stops_remaining_tasks() {
         format!(
             r#"
 [run]
-max_parallel = 1
+max_parallel_tasks = 1
 halt_on_failure = true
 run_dir = "{run_dir}"
 worktree_cleanup = "always"
@@ -184,7 +184,7 @@ fn ctrl_c_twice_terminates_running_tasks() {
         format!(
             r#"
 [run]
-max_parallel = 1
+max_parallel_tasks = 1
 run_dir = "{run_dir}"
 worktree_cleanup = "always"
 

@@ -130,7 +130,7 @@ fn run_validate(manifest: &std::path::Path) -> Result<()> {
         println!(
             "OK — {} tasks, max_parallel={}",
             r.tasks.len(),
-            r.max_parallel
+            r.max_parallel_tasks
         );
     }
     Ok(())

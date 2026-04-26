@@ -308,7 +308,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
-            max_parallel: 1,
+            max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -318,7 +318,7 @@ mod tests {
             max_workers: Some(1),
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -393,7 +393,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
-            max_parallel: 1,
+            max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -403,7 +403,7 @@ mod tests {
             max_workers: Some(1),
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,

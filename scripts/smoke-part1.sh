@@ -202,6 +202,8 @@ expect_exit 2 "$CODE" "1.9 missing claude binary"
 # --------------------------------------------------------------------
 # 1.10 Concurrency precedence — manifest > env > default
 #   Test by parsing "max_parallel=N" out of validate's OK line.
+#   (validate still prints `max_parallel=N` as the friendly key — only
+#    the TOML field name changed to `max_parallel_tasks` in v0.9.)
 cat > "$SCRATCH/conc-default.toml" <<EOF
 [[task]]
 id = "a"
@@ -213,7 +215,7 @@ ENV_OUT=$(ANTHROPIC_MAX_CONCURRENT=7 "$PITBOSS" validate "$SCRATCH/conc-default.
 
 cat > "$SCRATCH/conc-manifest.toml" <<EOF
 [run]
-max_parallel = 2
+max_parallel_tasks = 2
 [[task]]
 id = "a"
 directory = "$REPO"

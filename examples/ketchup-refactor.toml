@@ -1,14 +1,14 @@
 [run]
-max_workers = 4
-budget_usd = 1.50
-lead_timeout_secs = 1500
 worktree_cleanup = "never"
 
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false
 
-[[lead]]
+[lead]
+max_workers = 4
+budget_usd = 1.50
+lead_timeout_secs = 1500
 id = "refactor-analyst"
 directory = "/path/to/ketchup"
 prompt = """You are the lead refactor analyst for the Ketchup project — a Claude Code plugin that generates perspective-shaped technical research reports. The repo is currently on branch `feature/pitboss-refactor-analysis`.

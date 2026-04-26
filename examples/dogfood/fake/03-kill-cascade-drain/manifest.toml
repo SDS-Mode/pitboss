@@ -12,9 +12,11 @@
 # reaches every sub-tree and every sub-tree worker.
 
 [run]
-max_parallel = 8
+max_parallel_tasks = 8
 
 [lead]
+id = "03-kill-cascade-drain"
+directory = "."
 prompt = "Run two parallel sub-leads, each dispatching two workers for long-running analysis."
 model = "claude-haiku-4-5"
 budget_usd = 10.00
@@ -22,3 +24,7 @@ max_workers = 8
 allow_subleads = true
 max_subleads = 2
 max_sublead_budget_usd = 4.00
+
+[sublead_defaults]
+budget_usd = 3.00
+max_workers = 4

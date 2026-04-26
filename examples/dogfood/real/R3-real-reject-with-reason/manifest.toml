@@ -15,10 +15,12 @@
 # Prerequisites: ANTHROPIC_API_KEY set, `claude` in PATH
 
 [run]
-max_parallel = 4
-approval_policy = "auto_reject"
+max_parallel_tasks = 4
+default_approval_policy = "auto_reject"
 
 [lead]
+id = "R3-real-reject-with-reason"
+directory = "."
 prompt = """
 You are writing a data summary. Before writing any files, you MUST call
 request_approval with summary="Write results as JSON to output.json".

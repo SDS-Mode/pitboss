@@ -7,6 +7,40 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (breaking, pre-v1)
+
+- **Manifest TOML schema redesign (v0.9)** — collapses the v0.8
+  `[[lead]]`/`[lead]` split into one canonical `[lead]` (single-table) form,
+  moves lead-level caps off `[run]` onto `[lead]` (where they semantically
+  belong), promotes `[lead.sublead_defaults]` to top-level
+  `[sublead_defaults]`, and renames a few fields for consistency. The
+  redesign is informed by n8n form-input patterns: a single linear shape
+  that a form-builder can render without "this section is either an array
+  or a singleton" branching.
+
+  | v0.8 form | v0.9 form |
+  |---|---|
+  | `[[lead]]` (array) | `[lead]` (single-table) |
+  | `[run].max_workers` | `[lead].max_workers` |
+  | `[run].budget_usd` | `[lead].budget_usd` |
+  | `[run].lead_timeout_secs` | `[lead].lead_timeout_secs` |
+  | `[run].max_parallel` | `[run].max_parallel_tasks` |
+  | `[run].approval_policy` | `[run].default_approval_policy` |
+  | `[lead].max_workers_across_tree` | `[lead].max_total_workers` |
+  | `[lead.sublead_defaults]` | top-level `[sublead_defaults]` |
+  | `[lead].id`, `[lead].directory` optional | both required |
+
+  `pitboss validate` recognises pre-v0.9 manifests and reports each
+  renamed/moved field as a single migration block (rather than bailing on
+  the first generic "unknown field" error). In-flight runs (`resolved.json`
+  snapshots) remain readable — `#[serde(alias)]` on the renamed fields
+  preserves resume.
+
+  The internal `Manifest` and `SingleLeadManifest` types collapsed into one
+  canonical `Manifest`. `ResolvedManifest` field names were renamed to mirror
+  the TOML (`max_parallel_tasks`, `default_approval_policy`,
+  `max_total_workers`).
+
 ### Added
 
 - **`[[mcp_server]]` — external MCP server injection** — declare external MCP

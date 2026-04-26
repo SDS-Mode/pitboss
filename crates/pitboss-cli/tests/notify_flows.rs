@@ -237,7 +237,7 @@ async fn approval_pending_notification_fires_on_enqueue() {
     // Set up dispatch state with the notification router
     let dir = TempDir::new().unwrap();
     let manifest = ResolvedManifest {
-        max_parallel: 4,
+        max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -247,7 +247,7 @@ async fn approval_pending_notification_fires_on_enqueue() {
         max_workers: Some(4),
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
-        approval_policy: Some(ApprovalPolicy::Block),
+        default_approval_policy: Some(ApprovalPolicy::Block),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,

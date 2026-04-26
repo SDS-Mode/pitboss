@@ -11,9 +11,11 @@
 # Prerequisites: ANTHROPIC_API_KEY set, `claude` in PATH
 
 [run]
-max_parallel = 4
+max_parallel_tasks = 4
 
 [lead]
+id = "R1-real-root-spawns-sublead"
+directory = "."
 prompt = """
 You are coordinating a two-phase data pipeline. Your job is ONLY to spawn sub-leads — one per phase — and wait for them to complete. Do not do the work yourself.
 
@@ -30,7 +32,7 @@ max_subleads = 4
 max_sublead_budget_usd = 1.50
 lead_timeout_secs = 300
 
-[lead.sublead_defaults]
+[sublead_defaults]
 budget_usd = 1.00
 max_workers = 1
 lead_timeout_secs = 120

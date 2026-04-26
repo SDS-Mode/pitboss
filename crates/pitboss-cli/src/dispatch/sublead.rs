@@ -124,7 +124,7 @@ pub enum ResolvedEnvelope {
 /// Cap enforcement (Task 5.1):
 /// - `max_sublead_budget_usd`: per-call `budget_usd` must not exceed cap.
 /// - `max_subleads`: current sub-lead count + 1 must not exceed cap.
-/// - `max_workers_across_tree`: projected total workers must not exceed cap.
+/// - `max_total_workers`: projected total workers must not exceed cap.
 ///
 /// `sublead_defaults` fallback (Task 5.1): when `spawn_sublead` omits
 /// `budget_usd`, `max_workers`, or `lead_timeout_secs`, the values are
@@ -190,8 +190,8 @@ pub async fn resolve_envelope(
         }
     }
 
-    // ── Cap: max_workers_across_tree ─────────────────────────────────────────
-    if let Some(cap) = lead.and_then(|l| l.max_workers_across_tree) {
+    // ── Cap: max_total_workers ─────────────────────────────────────────
+    if let Some(cap) = lead.and_then(|l| l.max_total_workers) {
         let root_workers = state.root.workers.read().await.len() as u32;
         let subleads_guard = state.subleads.read().await;
         let sub_workers: u32 = {
@@ -204,7 +204,7 @@ pub async fn resolve_envelope(
         let projected = root_workers + sub_workers + max_workers;
         if projected > cap {
             return Err(anyhow!(
-                "spawn_sublead: max_workers_across_tree cap {} would be exceeded \
+                "spawn_sublead: max_total_workers cap {} would be exceeded \
                  (current {}, requested {})",
                 cap,
                 root_workers + sub_workers,

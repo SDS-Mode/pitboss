@@ -19,20 +19,20 @@
 #   y / n / e  — when the approval modal is up: approve, reject, or edit
 
 [run]
-max_workers       = 3
-budget_usd        = 0.50
-lead_timeout_secs = 900
 worktree_cleanup  = "never"
 # v0.4 NEW: what happens when the lead calls request_approval and no TUI
 # is attached. "block" = queue until a TUI connects. Alternatives:
 # "auto_approve" (immediate yes), "auto_reject" (immediate no).
-approval_policy   = "block"
+default_approval_policy   = "block"
 
 [defaults]
 model        = "claude-haiku-4-5"
 use_worktree = false
 
-[[lead]]
+[lead]
+max_workers       = 3
+budget_usd        = 0.50
+lead_timeout_secs = 900
 id        = "orchestrator"
 directory = "/tmp/pitboss-v04-demo"
 prompt    = """You are a small demo lead for pitboss v0.4.

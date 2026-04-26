@@ -39,13 +39,10 @@
 # Wall-clock estimate: 3-6 minutes (workers run in parallel).
 
 [run]
-max_workers = 5
 # Generous budget so the full 5-worker spread completes. Last run at $5
 # stopped at 2/5 workers because Opus lead + 5 Opus-tier workers (per
 # defaults) is expensive. This is a recurring dogfood, not user-facing
 # sample — adjust if you mirror this into your own manifest.
-budget_usd = 100.00
-lead_timeout_secs = 3600
 worktree_cleanup = "never"
 dump_shared_store = true
 
@@ -53,7 +50,10 @@ dump_shared_store = true
 model = "claude-haiku-4-5"
 use_worktree = true
 
-[[lead]]
+[lead]
+max_workers = 5
+budget_usd = 100.00
+lead_timeout_secs = 3600
 id = "ketchup-p0-coordinator"
 directory = "/run/media/system/Dos/Projects/ketchup"
 branch = "demo/ketchup-p0-lead"

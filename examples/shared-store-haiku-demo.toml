@@ -20,9 +20,6 @@
 # Cost: ~$0.10-$0.20 on Haiku for the whole run.
 
 [run]
-max_workers = 3
-budget_usd = 0.30
-lead_timeout_secs = 600
 worktree_cleanup = "never"
 dump_shared_store = true
 
@@ -30,7 +27,10 @@ dump_shared_store = true
 model = "claude-haiku-4-5"
 use_worktree = false
 
-[[lead]]
+[lead]
+max_workers = 3
+budget_usd = 0.30
+lead_timeout_secs = 600
 id = "haiku-director"
 directory = "/tmp/pitboss-shared-store-demo"
 prompt = """

@@ -3,11 +3,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Error, Result};
 
 use super::resolve::ResolvedManifest;
 
-/// Run all v0.1 validations. Call after [`crate::manifest::resolve::resolve`].
+/// Run all manifest validations. Call after [`crate::manifest::resolve::resolve`].
 pub fn validate(resolved: &ResolvedManifest) -> Result<()> {
     validate_inner(resolved, false)
 }
@@ -29,7 +29,6 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         validate_hierarchical_ranges(resolved)?;
         validate_sublead_defaults_adequate(resolved)?;
     } else {
-        // Flat-mode validations unchanged.
         validate_ids(resolved)?;
         if !skip_dir_check {
             validate_directories(resolved)?;
@@ -42,21 +41,10 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
 
 fn validate_mode(r: &ResolvedManifest) -> Result<()> {
     if !r.tasks.is_empty() && r.lead.is_some() {
-        bail!("cannot combine [[task]] and [[lead]] in the same manifest");
+        bail!("cannot combine [[task]] and [lead] in the same manifest");
     }
     if r.tasks.is_empty() && r.lead.is_none() {
-        bail!("empty manifest: define either [[task]] entries or exactly one [[lead]]");
-    }
-    if r.lead.is_none() {
-        if r.max_workers.is_some() {
-            bail!("[run].max_workers is only valid with a [[lead]] section");
-        }
-        if r.budget_usd.is_some() {
-            bail!("[run].budget_usd is only valid with a [[lead]] section");
-        }
-        if r.lead_timeout_secs.is_some() {
-            bail!("[run].lead_timeout_secs is only valid with a [[lead]] section");
-        }
+        bail!("empty manifest: define either [[task]] entries or exactly one [lead]");
     }
     Ok(())
 }
@@ -82,13 +70,13 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
 
     // A lead with an empty prompt starts, receives no `-p` argument, and exits
     // with code 1 in ~700ms. Common cause: the `prompt =` key appears after a
-    // subtable declaration (`[lead.sublead_defaults]`) in the TOML source,
-    // which moves it out of the `[lead]` scope — TOML silently assigns it to
-    // the subtable or drops it, and serde falls back to `unwrap_or_default()`.
+    // subtable declaration in the TOML source, which moves it out of the
+    // `[lead]` scope — TOML silently assigns it to the subtable or drops it.
     if lead.prompt.trim().is_empty() {
         bail!(
-            "lead '{}': prompt is required but is empty. If using [lead.sublead_defaults], \
-             ensure `prompt =` appears before any subtable declaration in the TOML source.",
+            "lead '{}': prompt is required but is empty. Ensure `prompt =` \
+             appears before any subtable declaration (e.g. `[lead.env]`) in \
+             the TOML source.",
             lead.id
         );
     }
@@ -120,24 +108,12 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     Ok(())
 }
 
-/// If `[lead] allow_subleads = true`, the manifest must also either
-/// supply both `sublead_defaults.budget_usd` + `sublead_defaults.max_workers`
-/// (for Owned-envelope default), or set `sublead_defaults.read_down = true`
-/// (for SharedPool default). Otherwise a runtime `spawn_sublead` call that
-/// omits those fields will fail with "budget_usd required when read_down=false"
-/// mid-dispatch — a failure class that should have been caught at validate
-/// time since it's a pure function of manifest shape.
-///
-/// Rationale: the lead's Claude session can always override these per-spawn
-/// by passing explicit `budget_usd` + `max_workers` arguments, but there's
-/// no way at validate time to prove it will. Forcing a well-defined manifest
-/// default means the worst case (lead calls spawn_sublead without explicit
-/// resources) still resolves cleanly rather than blowing up at dispatch.
-///
-/// Common fixes:
-/// - "share root's pool by default" — `[lead.sublead_defaults] read_down = true`
-/// - "give each sub-lead a budget" — `[lead.sublead_defaults]` with both
-///   `budget_usd` and `max_workers` set
+/// If `[lead] allow_subleads = true`, the manifest must also either supply
+/// both `sublead_defaults.budget_usd` + `sublead_defaults.max_workers` (for
+/// Owned-envelope default), or set `sublead_defaults.read_down = true` (for
+/// SharedPool default). Otherwise a runtime `spawn_sublead` call that omits
+/// those fields will fail with "budget_usd required when read_down=false"
+/// mid-dispatch.
 pub fn validate_sublead_defaults_adequate(r: &ResolvedManifest) -> Result<()> {
     let Some(lead) = r.lead.as_ref() else {
         return Ok(());
@@ -145,10 +121,6 @@ pub fn validate_sublead_defaults_adequate(r: &ResolvedManifest) -> Result<()> {
     if !lead.allow_subleads {
         return Ok(());
     }
-    // Owned default: both budget_usd AND max_workers set on sublead_defaults.
-    // SharedPool default: read_down = true (budget/workers irrelevant).
-    // Either path resolves cleanly at spawn time even if the lead omits the
-    // per-spawn args.
     let owned_default_ok = lead
         .sublead_defaults
         .as_ref()
@@ -159,17 +131,17 @@ pub fn validate_sublead_defaults_adequate(r: &ResolvedManifest) -> Result<()> {
     }
 
     bail!(
-        "`[lead] allow_subleads = true` requires `[lead.sublead_defaults]` to \
+        "`[lead] allow_subleads = true` requires `[sublead_defaults]` to \
          specify either (a) both `budget_usd` and `max_workers` for an \
          Owned-envelope default, or (b) `read_down = true` for a SharedPool \
          default. Without this, any `spawn_sublead` call from the lead that \
          omits those fields will fail at dispatch time with \
          \"budget_usd required when read_down=false\". \
          Pick the one that matches your intent:\n  \
-         [lead.sublead_defaults]\n  \
+         [sublead_defaults]\n  \
          read_down = true                  # share root's budget + worker pool\n\n\
          or\n\n  \
-         [lead.sublead_defaults]\n  \
+         [sublead_defaults]\n  \
          budget_usd = 1.00                 # per-sub-lead cap\n  \
          max_workers = 4"
     );
@@ -178,21 +150,21 @@ pub fn validate_sublead_defaults_adequate(r: &ResolvedManifest) -> Result<()> {
 fn validate_hierarchical_ranges(r: &ResolvedManifest) -> Result<()> {
     if let Some(mw) = r.max_workers {
         if mw == 0 || mw > 16 {
-            bail!("max_workers must be between 1 and 16 inclusive");
+            bail!("[lead].max_workers must be between 1 and 16 inclusive");
         }
     }
     if let Some(b) = r.budget_usd {
         if b <= 0.0 {
-            bail!("budget_usd must be > 0");
+            bail!("[lead].budget_usd must be > 0");
         }
     }
     if let Some(t) = r.lead_timeout_secs {
         if t == 0 {
-            bail!("lead_timeout_secs must be > 0");
+            bail!("[lead].lead_timeout_secs must be > 0");
         }
     }
-    if r.max_parallel == 0 {
-        bail!("max_parallel must be > 0");
+    if r.max_parallel_tasks == 0 {
+        bail!("[run].max_parallel_tasks must be > 0");
     }
     Ok(())
 }
@@ -257,8 +229,8 @@ fn validate_branch_conflicts(r: &ResolvedManifest) -> Result<()> {
 }
 
 fn validate_ranges(r: &ResolvedManifest) -> Result<()> {
-    if r.max_parallel == 0 {
-        bail!("max_parallel must be > 0");
+    if r.max_parallel_tasks == 0 {
+        bail!("[run].max_parallel_tasks must be > 0");
     }
     for t in &r.tasks {
         if t.timeout_secs == 0 {
@@ -270,6 +242,137 @@ fn validate_ranges(r: &ResolvedManifest) -> Result<()> {
 
 fn is_in_git_repo(path: &Path) -> bool {
     git2::Repository::discover(path).is_ok()
+}
+
+/// Inspect a TOML parse error against the manifest source text and, if it
+/// matches a known v0.8→v0.9 migration footprint, return a tailored error
+/// with explicit migration guidance. Returns `None` if no legacy pattern is
+/// detected (the original parse error stands).
+///
+/// This is a pure-text scan over the source — it doesn't try to fully parse
+/// the file (which already failed). It looks for the table/field markers that
+/// changed in v0.9 and emits one error per matched legacy pattern.
+pub fn translate_legacy_parse_error(parse_err: &toml::de::Error, src: &str) -> Option<Error> {
+    let mut migrations: Vec<String> = Vec::new();
+
+    // [[lead]] array form removed in v0.9.
+    if has_top_level_array_table(src, "lead") {
+        migrations.push(
+            "  • `[[lead]]` (array form) was removed in v0.9. Use `[lead]` \
+             (single-table) instead. Pitboss only ever supported one root \
+             lead, so the array form was removable without losing capability."
+                .to_string(),
+        );
+    }
+
+    // [run] no longer carries the lead caps.
+    let run_field_migrations = [
+        ("max_workers", "[lead].max_workers"),
+        ("budget_usd", "[lead].budget_usd"),
+        ("lead_timeout_secs", "[lead].lead_timeout_secs"),
+    ];
+    for (old, new) in run_field_migrations {
+        if has_field_in_section(src, "run", old) {
+            migrations.push(format!(
+                "  • `[run].{old}` moved to `{new}` in v0.9 — these are \
+                 lead-level caps, not run-wide settings."
+            ));
+        }
+    }
+
+    // [run].max_parallel renamed to [run].max_parallel_tasks.
+    if has_field_in_section(src, "run", "max_parallel")
+        && !has_field_in_section(src, "run", "max_parallel_tasks")
+    {
+        migrations.push(
+            "  • `[run].max_parallel` renamed to `[run].max_parallel_tasks` \
+             in v0.9 (clarifies it's the flat-mode task concurrency cap)."
+                .to_string(),
+        );
+    }
+
+    // [run].approval_policy renamed to [run].default_approval_policy.
+    if has_field_in_section(src, "run", "approval_policy")
+        && !has_field_in_section(src, "run", "default_approval_policy")
+    {
+        migrations.push(
+            "  • `[run].approval_policy` renamed to \
+             `[run].default_approval_policy` in v0.9 (disambiguates from the \
+             `[[approval_policy]]` rule array)."
+                .to_string(),
+        );
+    }
+
+    // [lead].max_workers_across_tree renamed to [lead].max_total_workers.
+    if has_field_in_section(src, "lead", "max_workers_across_tree") {
+        migrations.push(
+            "  • `[lead].max_workers_across_tree` renamed to \
+             `[lead].max_total_workers` in v0.9 (shorter and clearer)."
+                .to_string(),
+        );
+    }
+
+    // [lead.sublead_defaults] promoted to top-level [sublead_defaults].
+    if has_subtable(src, "lead", "sublead_defaults") {
+        migrations.push(
+            "  • `[lead.sublead_defaults]` promoted to top-level \
+             `[sublead_defaults]` in v0.9 (form-friendly; eliminates the \
+             prompt-ordering footgun where keys after the subtable header \
+             silently moved scope)."
+                .to_string(),
+        );
+    }
+
+    if migrations.is_empty() {
+        return None;
+    }
+
+    Some(anyhow!(
+        "manifest uses pre-v0.9 schema. Migrate the following:\n{}\n\nOriginal parse error: {}",
+        migrations.join("\n"),
+        parse_err
+    ))
+}
+
+/// Returns true iff the source contains a `[[<name>]]` array-of-tables marker
+/// (with optional whitespace) at the start of a line.
+fn has_top_level_array_table(src: &str, name: &str) -> bool {
+    let needle = format!("[[{name}]]");
+    src.lines()
+        .any(|line| line.trim_start().starts_with(&needle))
+}
+
+/// Returns true iff the source contains a top-level `[<section>]` table
+/// containing a `<field> =` assignment before the next `[` line.
+fn has_field_in_section(src: &str, section: &str, field: &str) -> bool {
+    let header = format!("[{section}]");
+    let mut in_section = false;
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            // Entering a new table — true if we hit the target header,
+            // false on any other table (including subtables of the section).
+            in_section =
+                trimmed.starts_with(&header) && trimmed.chars().nth(header.len()) != Some('.');
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(field) {
+            if rest.starts_with(' ') || rest.starts_with('=') || rest.starts_with('\t') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns true iff the source contains a `[<parent>.<child>]` subtable header.
+fn has_subtable(src: &str, parent: &str, child: &str) -> bool {
+    let needle = format!("[{parent}.{child}]");
+    src.lines()
+        .any(|line| line.trim_start().starts_with(&needle))
 }
 
 #[cfg(test)]
@@ -332,7 +435,7 @@ mod tests {
 
     fn rm(tasks: Vec<ResolvedTask>) -> ResolvedManifest {
         ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -342,7 +445,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -358,7 +461,7 @@ mod tests {
     {
         let d = with_tmp_repo(true);
         let mut m = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -368,7 +471,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(1.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -422,10 +525,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_max_parallel() {
+    fn rejects_zero_max_parallel_tasks() {
         let d = with_tmp_repo(true);
         let mut r = rm(vec![rt("a", d.path().to_path_buf(), false, None)]);
-        r.max_parallel = 0;
+        r.max_parallel_tasks = 0;
         assert!(validate(&r).is_err());
     }
 
@@ -440,7 +543,7 @@ mod tests {
     fn rejects_mixing_tasks_and_lead() {
         let d = with_tmp_repo(true);
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -450,7 +553,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -460,42 +563,16 @@ mod tests {
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
-            err.contains("cannot combine [[task]] and [[lead]]"),
+            err.contains("cannot combine [[task]] and [lead]"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn rejects_max_workers_on_flat_manifest() {
-        let d = with_tmp_repo(true);
-        let r = ResolvedManifest {
-            max_parallel: 4,
-            halt_on_failure: false,
-            run_dir: PathBuf::from("."),
-            worktree_cleanup: WorktreeCleanup::OnSuccess,
-            emit_event_stream: false,
-            tasks: vec![rt("t1", d.path().to_path_buf(), false, None)],
-            lead: None,
-            max_workers: Some(4), // set without a lead → error
-            budget_usd: None,
-            lead_timeout_secs: None,
-            approval_policy: None,
-            notifications: vec![],
-            dump_shared_store: false,
-            require_plan_approval: false,
-            approval_rules: vec![],
-            container: None,
-            mcp_servers: vec![],
-        };
-        let err = validate(&r).unwrap_err().to_string();
-        assert!(err.contains("max_workers"), "got: {err}");
     }
 
     #[test]
     fn rejects_max_workers_out_of_range() {
         let d = with_tmp_repo(true);
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -505,7 +582,7 @@ mod tests {
             max_workers: Some(17),
             budget_usd: Some(1.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -520,7 +597,7 @@ mod tests {
     fn rejects_non_positive_budget() {
         let d = with_tmp_repo(true);
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -530,7 +607,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(0.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -541,18 +618,16 @@ mod tests {
         assert!(validate(&r).is_err());
     }
 
-    /// Build a minimal hierarchical manifest with a lead in a real git repo,
-    /// parameterized by the two knobs under test.
     fn hierarchical_with_subleads(
         allow_subleads: bool,
-        sublead_defaults: Option<super::super::resolve::SubleadDefaults>,
+        sublead_defaults: Option<super::super::resolve::ResolvedSubleadDefaults>,
     ) -> (TempDir, ResolvedManifest) {
         let d = with_tmp_repo(true);
         let mut lead = rl("l", d.path().to_path_buf());
         lead.allow_subleads = allow_subleads;
         lead.sublead_defaults = sublead_defaults;
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -562,7 +637,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(1.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -575,21 +650,17 @@ mod tests {
 
     #[test]
     fn accepts_allow_subleads_false_without_sublead_defaults() {
-        // No sub-leads → sublead_defaults is irrelevant.
         let (_d, r) = hierarchical_with_subleads(false, None);
         assert!(validate(&r).is_ok());
     }
 
     #[test]
     fn rejects_allow_subleads_true_without_sublead_defaults() {
-        // The regression this validation was added for: allow_subleads=true
-        // with no defaults → any lead-initiated spawn_sublead that omits the
-        // resource args fails at dispatch. Must be caught at validate time.
         let (_d, r) = hierarchical_with_subleads(true, None);
         let err = validate(&r).unwrap_err();
         assert!(
             err.to_string()
-                .contains("allow_subleads = true` requires `[lead.sublead_defaults]`"),
+                .contains("allow_subleads = true` requires `[sublead_defaults]`"),
             "expected explanatory error, got: {err}"
         );
     }
@@ -598,7 +669,7 @@ mod tests {
     fn rejects_allow_subleads_true_with_empty_sublead_defaults() {
         let (_d, r) = hierarchical_with_subleads(
             true,
-            Some(super::super::resolve::SubleadDefaults {
+            Some(super::super::resolve::ResolvedSubleadDefaults {
                 budget_usd: None,
                 max_workers: None,
                 lead_timeout_secs: None,
@@ -610,10 +681,9 @@ mod tests {
 
     #[test]
     fn rejects_allow_subleads_true_with_partial_owned_defaults() {
-        // budget_usd but no max_workers — ambiguous; must reject.
         let (_d, r) = hierarchical_with_subleads(
             true,
-            Some(super::super::resolve::SubleadDefaults {
+            Some(super::super::resolve::ResolvedSubleadDefaults {
                 budget_usd: Some(1.0),
                 max_workers: None,
                 lead_timeout_secs: None,
@@ -627,7 +697,7 @@ mod tests {
     fn accepts_allow_subleads_true_with_complete_owned_defaults() {
         let (_d, r) = hierarchical_with_subleads(
             true,
-            Some(super::super::resolve::SubleadDefaults {
+            Some(super::super::resolve::ResolvedSubleadDefaults {
                 budget_usd: Some(2.0),
                 max_workers: Some(4),
                 lead_timeout_secs: Some(1800),
@@ -639,10 +709,9 @@ mod tests {
 
     #[test]
     fn accepts_allow_subleads_true_with_read_down() {
-        // SharedPool fallback — budget/workers omitted intentionally.
         let (_d, r) = hierarchical_with_subleads(
             true,
-            Some(super::super::resolve::SubleadDefaults {
+            Some(super::super::resolve::ResolvedSubleadDefaults {
                 budget_usd: None,
                 max_workers: None,
                 lead_timeout_secs: None,
@@ -654,12 +723,9 @@ mod tests {
 
     #[test]
     fn accepts_allow_subleads_true_with_read_down_and_explicit_defaults() {
-        // Redundant but benign: operator set both read_down and explicit
-        // defaults. Either alone would satisfy the check; both together is
-        // fine.
         let (_d, r) = hierarchical_with_subleads(
             true,
-            Some(super::super::resolve::SubleadDefaults {
+            Some(super::super::resolve::ResolvedSubleadDefaults {
                 budget_usd: Some(2.0),
                 max_workers: Some(4),
                 lead_timeout_secs: None,
@@ -672,7 +738,7 @@ mod tests {
     #[test]
     fn rejects_manifest_with_no_tasks_and_no_lead() {
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -682,7 +748,7 @@ mod tests {
             max_workers: None,
             budget_usd: None,
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -694,7 +760,6 @@ mod tests {
         assert!(err.contains("empty manifest"), "got: {err}");
     }
 
-    // Helper for these tests.
     fn rl(id: &str, dir: PathBuf) -> super::super::resolve::ResolvedLead {
         super::super::resolve::ResolvedLead {
             id: id.into(),
@@ -712,7 +777,7 @@ mod tests {
             allow_subleads: false,
             max_subleads: None,
             max_sublead_budget_usd: None,
-            max_workers_across_tree: None,
+            max_total_workers: None,
             sublead_defaults: None,
         }
     }
@@ -723,7 +788,7 @@ mod tests {
         let mut lead = rl("l", d.path().to_path_buf());
         lead.prompt = String::new();
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -733,7 +798,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(1.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -754,7 +819,7 @@ mod tests {
         let mut lead = rl("l", d.path().to_path_buf());
         lead.prompt = "   \t\n  ".to_string();
         let r = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -764,7 +829,7 @@ mod tests {
             max_workers: Some(4),
             budget_usd: Some(1.0),
             lead_timeout_secs: Some(600),
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -803,5 +868,52 @@ mod tests {
         });
         let err = validate(&m).unwrap_err();
         assert!(err.to_string().contains("unknown event"));
+    }
+
+    // ── Migration translator tests ───────────────────────────────────────
+
+    #[test]
+    fn translator_flags_legacy_array_lead() {
+        let src = "[[lead]]\nid = \"x\"\ndirectory = \"/tmp\"\nprompt = \"p\"\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        let err = translate_legacy_parse_error(&parse_err.unwrap_err(), src).unwrap();
+        let s = err.to_string();
+        assert!(s.contains("[[lead]]"), "got: {s}");
+        assert!(s.contains("v0.9"), "got: {s}");
+    }
+
+    #[test]
+    fn translator_flags_run_max_workers() {
+        let src = "[run]\nmax_workers = 4\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        let err = translate_legacy_parse_error(&parse_err.unwrap_err(), src).unwrap();
+        assert!(err.to_string().contains("[run].max_workers"));
+        assert!(err.to_string().contains("[lead].max_workers"));
+    }
+
+    #[test]
+    fn translator_flags_max_parallel_rename() {
+        let src = "[run]\nmax_parallel = 4\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        let err = translate_legacy_parse_error(&parse_err.unwrap_err(), src).unwrap();
+        assert!(err.to_string().contains("max_parallel_tasks"));
+    }
+
+    #[test]
+    fn translator_flags_nested_sublead_defaults() {
+        let src = "[lead.sublead_defaults]\nread_down = true\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        let err = translate_legacy_parse_error(&parse_err.unwrap_err(), src).unwrap();
+        assert!(err.to_string().contains("[sublead_defaults]"));
+    }
+
+    #[test]
+    fn translator_returns_none_for_unrelated_errors() {
+        // A v0.9-shaped manifest with an unrelated error (unknown top-level
+        // key) should not be hijacked by the migration translator.
+        let src = "wibble = \"x\"\n[lead]\nid = \"a\"\ndirectory = \"/tmp\"\nprompt = \"p\"\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        let translated = translate_legacy_parse_error(&parse_err.unwrap_err(), src);
+        assert!(translated.is_none());
     }
 }

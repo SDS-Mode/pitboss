@@ -94,7 +94,7 @@ hierarchical.**
 | **Run** | One `pitboss dispatch` invocation. Produces `~/.local/share/pitboss/runs/<run-id>/`. |
 | **Lead** | In hierarchical mode, the first claude subprocess. Receives the operator's prompt + the full MCP orchestration toolset. Decides how many workers to spawn. |
 | **Worker** | A claude subprocess executing a single task, either declared in `[[task]]` (flat) or dynamically spawned by the lead (hierarchical). |
-| **House rules** | Hierarchical guardrails: `max_workers` (≤16), `budget_usd`, `lead_timeout_secs`. For depth-2 runs: also `max_subleads`, `max_sublead_budget_usd`, `max_workers_across_tree`. |
+| **House rules** | Hierarchical guardrails: `max_workers` (≤16), `budget_usd`, `lead_timeout_secs`. For depth-2 runs: also `max_subleads`, `max_sublead_budget_usd`, `max_total_workers`. |
 | **Worktree** | A per-task git worktree under a fresh branch, isolating concurrent work. `use_worktree = true` by default. |
 
 ---
@@ -103,20 +103,28 @@ hierarchical.**
 
 TOML, typically named `pitboss.toml`. Every field annotated below.
 
-### Top-level `[run]`
+> **v0.9 schema** — collapses the v0.8 `[[lead]]`/`[lead]` split into one
+> canonical `[lead]` (single-table) form, moves lead-level caps off `[run]`
+> and onto `[lead]`, promotes `[lead.sublead_defaults]` to top-level
+> `[sublead_defaults]`, and renames a few fields for consistency. See the
+> `Migration from v0.8 → v0.9` table at the bottom of this section. Pre-v0.9
+> manifests are rejected; `pitboss validate` provides per-field migration
+> guidance.
+
+### Top-level `[run]` (run-wide infrastructure config)
+
+`[run]` carries settings that apply to the whole dispatch run. Lead-level
+caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 
 | Key | Type | Required? | Default | Notes |
 |---|---|---|---|---|
-| `max_parallel` | int | no | 4 | Concurrency cap for flat-mode tasks. Overridden by `ANTHROPIC_MAX_CONCURRENT` env. |
+| `max_parallel_tasks` | int | no | 4 | Concurrency cap for flat-mode `[[task]]` runs. Overridden by `ANTHROPIC_MAX_CONCURRENT` env. Renamed from `max_parallel` in v0.9. |
 | `halt_on_failure` | bool | no | false | Flat mode. If a task fails, skip remaining tasks. |
 | `run_dir` | string path | no | `~/.local/share/pitboss/runs` | Where per-run artifacts land. |
 | `worktree_cleanup` | `"always"` \| `"on_success"` \| `"never"` | no | `"on_success"` | What to do with each worker's worktree after completion. `"never"` for inspection-heavy runs. |
 | `emit_event_stream` | bool | no | false | Emit a JSONL event stream alongside summary.jsonl. |
-| `max_workers` | int | only if `[[lead]]` present | unset | Hierarchical: hard cap on concurrent + queued workers (1–16). |
-| `budget_usd` | float | only if `[[lead]]` present | unset | Hierarchical: soft cap with reservation accounting. Worker spawns fail with `budget exceeded` once `spent + reserved + next_estimate > budget`. |
-| `lead_timeout_secs` | int | only if `[[lead]]` present | 3600 (fallback) | Hierarchical: wall-clock cap on the lead. No upper bound — set generously for multi-hour orchestration plans (e.g. `21600` for a 6-hour plan executor). The 3600s fallback is tuned for single-task leads, not plan drivers. |
-| `approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: how `request_approval` / `propose_plan` behave when no TUI is attached. See the `approval_policy` section below. |
-| `require_plan_approval` | bool | no | false | Hierarchical (v0.5.0+): when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. Opt-in; runs without it behave identically to v0.4.x. |
+| `default_approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: default action for `request_approval` / `propose_plan` when no TUI is attached and no `[[approval_policy]]` rule matches. Renamed from `approval_policy` in v0.9 to disambiguate from the rules array. |
+| `require_plan_approval` | bool | no | false | Hierarchical: when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. |
 | `dump_shared_store` | bool | no | false | Hierarchical: at run finalize, write `shared-store.json` into the run dir for post-mortem inspection. |
 
 ### `[[notification]]` sinks (v0.4.1+)
@@ -150,7 +158,7 @@ events = ["approval_pending", "run_finished"]
 
 ### `[defaults]`
 
-Inherited by every `[[task]]` and `[[lead]]` unless overridden.
+Inherited by every `[[task]]` and `[lead]` unless overridden.
 
 | Key | Type | Notes |
 |---|---|---|
@@ -171,38 +179,66 @@ Inherited by every `[[task]]` and `[[lead]]` unless overridden.
 | `branch` | no | Branch name for the worktree. Defaults to a generated name. |
 | `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | no | Per-task overrides of `[defaults]`. |
 
-### `[[lead]]` / `[lead]` (hierarchical mode, exactly one, mutually exclusive with `[[task]]`)
+### `[lead]` (hierarchical mode, exactly one, mutually exclusive with `[[task]]`)
 
-Both `[[lead]]` (array-table) and `[lead]` (single-table) are accepted.
-Use `[lead]` for depth-2 manifests that also declare `[lead.sublead_defaults]` —
-it is cleaner than the array-table form for single-lead hierarchical manifests.
-`id` is used as the tile label in the TUI. Mutually exclusive with `[[task]]`.
+`[lead]` is a single-table block (no array form — the v0.8 `[[lead]]` array
+form was removed in v0.9). `id` is used as the tile label in the TUI.
 
 > **Important:** `prompt =` must appear **before** any subtable declaration
-> (e.g. `[lead.sublead_defaults]`) in the TOML source. A `prompt =` key that
-> appears after a subtable header is parsed into that subtable's scope and
-> silently dropped; `pitboss validate` will catch this and report
-> `"prompt is required but is empty"`.
+> (e.g. `[lead.env]`) in the TOML source. A `prompt =` key that appears
+> after a subtable header is parsed into that subtable's scope and silently
+> dropped; `pitboss validate` catches this and reports `"prompt is required
+> but is empty"`.
 
-Additional `[lead]` fields for depth-2 sub-leads (v0.6+):
+Required and per-actor fields:
+
+| Key | Type | Required? | Notes |
+|---|---|---|---|
+| `id` | string | yes | Short slug used in logs, worktree names, TUI tiles. Alphanumeric + `_` + `-`. |
+| `directory` | string path | yes | Working dir for the lead's claude subprocess. Must be a git work-tree if `use_worktree = true`. |
+| `prompt` | string | yes | Operator instructions passed via `-p`. Must come before any `[lead.X]` subtable. |
+| `branch` | string | no | Branch name for the lead's worktree. Auto-generated if omitted. |
+| `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | various | no | Per-lead overrides of `[defaults]`. |
+
+Lead-level caps (moved from `[run]` in v0.9 — they're properties of the
+lead, not the run):
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_workers` | int | unset | Hard cap on the lead's concurrent + queued worker pool (1–16). Required when the lead spawns workers. |
+| `budget_usd` | float | unset | Soft cap with reservation accounting. `spawn_worker` fails with `budget exceeded` once `spent + reserved + next_estimate > budget`. |
+| `lead_timeout_secs` | int | 3600 fallback | Wall-clock cap on the lead session. No upper bound — set generously for multi-hour orchestration plans. |
+
+Depth-2 controls (sub-leads):
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `allow_subleads` | bool | `false` | Expose `spawn_sublead` in the root lead's `--allowedTools`. Required to enable depth-2. |
 | `max_subleads` | int | unset | Cap on total sub-leads the root lead may spawn. |
 | `max_sublead_budget_usd` | float | unset | Per-sub-lead envelope cap; `spawn_sublead` rejects envelopes exceeding this. |
-| `max_workers_across_tree` | int | unset | Cap on total live workers including all sub-tree workers. |
-| `permission_routing` | string | `"path_a"` | v0.8+. `"path_a"` (default) sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` so pitboss is the sole permission authority. `"path_b"` would route claude's built-in permission gate through pitboss's approval queue — explicitly rejected at validate time until stabilization lands (issues #92–#94). |
+| `max_total_workers` | int | unset | Cap on total live workers including all sub-tree workers. Renamed from `max_workers_across_tree` in v0.9. |
+| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_a"` | `"path_a"` sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` so pitboss is the sole permission authority. `"path_b"` routes claude's built-in gate through pitboss's approval queue — rejected at validate time until stabilization (issues #92–#94). |
 
-`[lead.sublead_defaults]` — optional defaults inherited by `spawn_sublead` calls that omit those parameters:
+### Top-level `[sublead_defaults]` (v0.9+, promoted from `[lead.sublead_defaults]`)
+
+Optional defaults applied to `spawn_sublead` calls that omit the
+corresponding parameters. Top-level in v0.9 — the v0.8 nested
+`[lead.sublead_defaults]` form is gone.
 
 ```toml
-[lead.sublead_defaults]
+[sublead_defaults]
 budget_usd = 2.00
 max_workers = 4
 lead_timeout_secs = 1800
 read_down = false
 ```
+
+| Key | Type | Notes |
+|---|---|---|
+| `budget_usd` | float | Per-sub-lead envelope when `read_down = false`. |
+| `max_workers` | int | Per-sub-lead worker pool when `read_down = false`. |
+| `lead_timeout_secs` | int | Wall-clock cap for the sub-lead session. |
+| `read_down` | bool | When true, the sub-lead shares the root's budget and worker pool instead of carving its own envelope. |
 
 ### `[container]` (v0.8+)
 
@@ -253,6 +289,26 @@ All declared servers are injected into all actors (scope = all). Per-actor scopi
 
 **Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
 
+### Migration from v0.8 → v0.9
+
+Pre-v0.9 manifests are rejected. `pitboss validate` scans for the migration
+patterns below and emits guidance:
+
+| v0.8 form | v0.9 form |
+|---|---|
+| `[[lead]]` (array) | `[lead]` (single-table) |
+| `[run].max_workers` | `[lead].max_workers` |
+| `[run].budget_usd` | `[lead].budget_usd` |
+| `[run].lead_timeout_secs` | `[lead].lead_timeout_secs` |
+| `[run].max_parallel` | `[run].max_parallel_tasks` |
+| `[run].approval_policy` | `[run].default_approval_policy` |
+| `[lead].max_workers_across_tree` | `[lead].max_total_workers` |
+| `[lead.sublead_defaults]` | top-level `[sublead_defaults]` |
+| `[lead].id` and `[lead].directory` optional | both required |
+
+In-flight runs (`resolved.json` snapshots in run-dirs) remain readable —
+`#[serde(alias)]` on the renamed `ResolvedManifest` fields preserves resume.
+
 ---
 
 ## Invocation patterns
@@ -264,9 +320,9 @@ pitboss validate pitboss.toml
 ```
 
 Exit 0 = valid. Non-zero = parse error or semantic error. **Always validate
-first.** This catches all the class-of-error issues (mixed `[[task]]` + `[[lead]]`,
-`max_workers = 17`, `budget_usd = 0`, missing `id`, directory doesn't exist)
-before any claude subprocess is spawned.
+first.** This catches all the class-of-error issues (mixed `[[task]]` + `[lead]`,
+`max_workers = 17`, `budget_usd = 0`, missing `id`, directory doesn't exist,
+pre-v0.9 schema usage) before any claude subprocess is spawned.
 
 ### Dispatch
 
@@ -366,12 +422,12 @@ forever (or until timeout) if not configured. Set:
 
 ```toml
 [run]
-approval_policy = "auto_approve"  # or "auto_reject" for strict dry-run dispatch
+default_approval_policy = "auto_approve"  # or "auto_reject" for strict dry-run dispatch
 ```
 
 For finer control, use `[[approval_policy]]` rules with `ttl_secs`
 fallbacks. Pitboss now emits a startup warning to stderr when it detects
-`approval_policy = "block"` (or unset) AND no TTY on stdout — read it
+`default_approval_policy = "block"` (or unset) AND no TTY on stdout — read it
 before assuming a hang is something else.
 
 ### `require_plan_approval = true` is usually wrong headless
@@ -398,7 +454,7 @@ git init /workspace
 git -C /workspace commit --allow-empty -m "init"
 ```
 
-Flat mode (`[[task]]` only, no `[[lead]]`) follows the same rule — it only
+Flat mode (`[[task]]` only, no `[lead]`) follows the same rule — it only
 needs a git repo when `use_worktree = true`.
 
 ### Reading run status without the TUI
@@ -833,7 +889,7 @@ Flat mode, predeclared tasks.
 
 ```toml
 [run]
-max_parallel = 3
+max_parallel_tasks = 3
 
 [defaults]
 model = "claude-haiku-4-5"
@@ -857,16 +913,11 @@ prompt = "Read file-b.txt and summarize in one sentence to /tmp/summaries/b.md"
 Hierarchical mode, dynamic decomposition.
 
 ```toml
-[run]
-max_workers = 6
-budget_usd = 1.50
-lead_timeout_secs = 1200
-
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false
 
-[[lead]]
+[lead]
 id = "author-digest"
 directory = "/path/to/repo"
 prompt = """
@@ -876,6 +927,9 @@ mcp__pitboss__spawn_worker to summarize that author's work in
 /tmp/digest/<author-slug>.md. Wait for all via mcp__pitboss__wait_for_worker.
 Compose a combined /tmp/digest/SUMMARY.md. Then exit.
 """
+max_workers = 6
+budget_usd = 1.50
+lead_timeout_secs = 1200
 ```
 
 ### 3. Refactor analysis of a neighboring repo
@@ -895,16 +949,13 @@ Sketch of the manifest:
 
 ```toml
 [run]
-max_workers = 4
-budget_usd = 1.50
-lead_timeout_secs = 1500
 worktree_cleanup = "never"
 
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false        # read-only audit — no worktree isolation needed
 
-[[lead]]
+[lead]
 id = "refactor-analyst"
 directory = "/path/to/target-repo"
 prompt = """
@@ -912,6 +963,9 @@ prompt = """
 each writing to /tmp/refactor/<angle>.md; then reading them back and
 synthesizing into /tmp/refactor/REFACTOR-PLAN.md...]
 """
+max_workers = 4
+budget_usd = 1.50
+lead_timeout_secs = 1500
 ```
 
 The lead spawned workers in an explicit loop, used
@@ -937,16 +991,11 @@ Run this pattern against any repo of similar shape by:
 ### 4. Tight-budget stress / graceful degradation
 
 ```toml
-[run]
-max_workers = 8
-budget_usd = 0.20
-lead_timeout_secs = 900
-
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false
 
-[[lead]]
+[lead]
 id = "partial"
 directory = "/path/to/repo"
 prompt = """
@@ -955,6 +1004,9 @@ src/. When a spawn fails with 'budget exceeded', DO NOT retry — record the
 file and move on. Wait for successfully-spawned workers, then compose a
 partial summary noting which files were skipped and why.
 """
+max_workers = 8
+budget_usd = 0.20
+lead_timeout_secs = 900
 ```
 
 Use this pattern when you want to explore *what you can get* within a fixed
@@ -986,13 +1038,17 @@ cheaper.
 
 ```toml
 [lead]
+id = "root"
+directory = "/path/to/repo"
 prompt = "..."
+budget_usd = 20.00
+max_workers = 12
 allow_subleads = true
 max_subleads = 8                # optional cap
 max_sublead_budget_usd = 5.00   # optional cap on per-sub-lead envelope
-max_workers_across_tree = 20    # optional cap on total live workers
+max_total_workers = 20          # optional cap on total live workers (root + sub-trees)
 
-[lead.sublead_defaults]         # optional defaults inherited by spawn_sublead
+[sublead_defaults]              # top-level (v0.9+, was [lead.sublead_defaults])
 budget_usd = 2.00
 max_workers = 4
 lead_timeout_secs = 1800

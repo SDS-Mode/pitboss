@@ -505,7 +505,7 @@ mod tests {
 
         // Synthesize resolved.json with a lead.
         let mut resolved = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -527,13 +527,13 @@ mod tests {
                 allow_subleads: false,
                 max_subleads: None,
                 max_sublead_budget_usd: None,
-                max_workers_across_tree: None,
+                max_total_workers: None,
                 sublead_defaults: None,
             }),
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -611,7 +611,7 @@ mod tests {
 
         // Write a bare-bones resolved.json.
         let resolved = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -633,13 +633,13 @@ mod tests {
                 allow_subleads: false,
                 max_subleads: None,
                 max_sublead_budget_usd: None,
-                max_workers_across_tree: None,
+                max_total_workers: None,
                 sublead_defaults: None,
             }),
             max_workers: Some(4),
             budget_usd: Some(5.0),
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,
@@ -720,7 +720,7 @@ mod tests {
         let run_dir = dir.path();
 
         let resolved = ResolvedManifest {
-            max_parallel: 4,
+            max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -742,13 +742,13 @@ mod tests {
                 allow_subleads: true,
                 max_subleads: None,
                 max_sublead_budget_usd: None,
-                max_workers_across_tree: None,
+                max_total_workers: None,
                 sublead_defaults: None,
             }),
             max_workers: Some(4),
             budget_usd: Some(10.0),
             lead_timeout_secs: None,
-            approval_policy: None,
+            default_approval_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,

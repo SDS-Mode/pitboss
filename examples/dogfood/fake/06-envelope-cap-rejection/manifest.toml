@@ -7,9 +7,11 @@
 # Note: Tests use in-code configuration, so this file is documentation only.
 
 [run]
-max_parallel = 8
+max_parallel_tasks = 8
 
 [lead]
+id = "06-envelope-cap-rejection"
+directory = "."
 prompt = """
 Root lead with sublead spawning capability and a strict $3 per-sub-lead budget cap.
 
@@ -28,6 +30,6 @@ max_workers = 10
 allow_subleads = true
 max_sublead_budget_usd = 3.0
 
-[lead.sublead_defaults]
+[sublead_defaults]
 budget_usd = 2.0
 max_workers = 2

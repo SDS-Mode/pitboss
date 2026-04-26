@@ -180,7 +180,7 @@ echo
 # 2.5 Two-task parallel
 cat > "$SCRATCH/t2.toml" <<EOF
 [run]
-max_parallel = 2
+max_parallel_tasks = 2
 worktree_cleanup = "always"
 
 [defaults]
@@ -264,7 +264,7 @@ else
     cat > "$SCRATCH/t4.toml" <<EOF
 [run]
 halt_on_failure = true
-max_parallel = 1
+max_parallel_tasks = 1
 
 [defaults]
 model = "$MODEL"

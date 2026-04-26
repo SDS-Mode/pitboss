@@ -39,11 +39,11 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         allow_subleads: true,
         max_subleads: None,
         max_sublead_budget_usd: None,
-        max_workers_across_tree: None,
+        max_total_workers: None,
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
-        max_parallel: 8,
+        max_parallel_tasks: 8,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -53,7 +53,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         max_workers: Some(20),
         budget_usd: Some(20.0),
         lead_timeout_secs: None,
-        approval_policy: None,
+        default_approval_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -105,11 +105,11 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         allow_subleads: true,
         max_subleads: None,
         max_sublead_budget_usd: Some(cap),
-        max_workers_across_tree: None,
+        max_total_workers: None,
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
-        max_parallel: 8,
+        max_parallel_tasks: 8,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -119,7 +119,7 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         max_workers: Some(20),
         budget_usd: Some(20.0),
         lead_timeout_secs: None,
-        approval_policy: None,
+        default_approval_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -1023,9 +1023,11 @@ async fn manifest_allow_subleads_exposes_tool() {
 
     let toml = r#"
 [run]
-max_parallel = 4
+max_parallel_tasks = 4
 
 [lead]
+id = "root"
+directory = "/tmp"
 prompt = "root"
 model = "claude-haiku-4-5"
 budget_usd = 20.0
@@ -1033,9 +1035,9 @@ max_workers = 20
 allow_subleads = true
 max_subleads = 8
 max_sublead_budget_usd = 5.0
-max_workers_across_tree = 20
+max_total_workers = 20
 
-[lead.sublead_defaults]
+[sublead_defaults]
 budget_usd = 2.0
 max_workers = 4
 lead_timeout_secs = 1800
@@ -1046,7 +1048,7 @@ read_down = false
     assert!(lead.allow_subleads);
     assert_eq!(lead.max_subleads, Some(8));
     assert_eq!(lead.max_sublead_budget_usd, Some(5.0));
-    assert_eq!(lead.max_workers_across_tree, Some(20));
+    assert_eq!(lead.max_total_workers, Some(20));
     let defaults = lead.sublead_defaults.as_ref().unwrap();
     assert_eq!(defaults.budget_usd, Some(2.0));
     assert_eq!(defaults.max_workers, Some(4));
