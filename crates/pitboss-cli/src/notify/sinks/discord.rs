@@ -62,6 +62,24 @@ impl DiscordSink {
                     desc,
                 )
             }
+            PitbossEvent::RunDispatched {
+                run_id,
+                parent_run_id,
+                manifest_path,
+                mode,
+            } => {
+                let parent_line = parent_run_id.as_deref().map_or(String::new(), |p| {
+                    format!("\n**Parent:** {}", escape_discord_md(p))
+                });
+                let desc = format!(
+                    "**Run:** {}\n**Manifest:** {}\n**Mode:** {}{}",
+                    escape_discord_md(run_id),
+                    escape_discord_md(manifest_path),
+                    escape_discord_md(mode),
+                    parent_line,
+                );
+                ("🚀 Pitboss run dispatched".to_string(), desc)
+            }
             PitbossEvent::RunFinished {
                 run_id,
                 tasks_total,

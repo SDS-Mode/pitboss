@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod config;
+pub mod parent;
 pub mod sinks;
 
 /// Severity levels for `NotificationEnvelope`. Matches syslog heritage +
@@ -40,6 +41,21 @@ pub enum PitbossEvent {
         task_id: String,
         summary: String,
     },
+    /// Fires once at run start, immediately after the dispatcher has
+    /// minted a run id and created the run directory. Lets a parent
+    /// orchestrator register the run in its own bookkeeping (`runs` table,
+    /// budget gate, retention sweep) before any tokens land. The
+    /// `parent_run_id` is populated from `PITBOSS_RUN_ID` in the env when a
+    /// pitboss dispatch is itself launched from inside another pitboss-
+    /// spawned actor (i.e. an agent with `pitboss` on its PATH calling
+    /// `pitboss dispatch <child.toml>`); `None` for top-level dispatches.
+    RunDispatched {
+        run_id: String,
+        parent_run_id: Option<String>,
+        manifest_path: String,
+        /// "flat" or "hierarchical".
+        mode: String,
+    },
     RunFinished {
         run_id: String,
         tasks_total: usize,
@@ -61,6 +77,7 @@ impl PitbossEvent {
         match self {
             PitbossEvent::ApprovalRequest { .. } => "approval_request",
             PitbossEvent::ApprovalPending { .. } => "approval_pending",
+            PitbossEvent::RunDispatched { .. } => "run_dispatched",
             PitbossEvent::RunFinished { .. } => "run_finished",
             PitbossEvent::BudgetExceeded { .. } => "budget_exceeded",
         }
@@ -87,7 +104,7 @@ impl NotificationEnvelope {
         let discriminator = match &event {
             PitbossEvent::ApprovalRequest { request_id, .. } => Some(request_id.as_str()),
             PitbossEvent::ApprovalPending { request_id, .. } => Some(request_id.as_str()),
-            PitbossEvent::RunFinished { .. } => None,
+            PitbossEvent::RunDispatched { .. } | PitbossEvent::RunFinished { .. } => None,
             PitbossEvent::BudgetExceeded { .. } => Some("first"),
         };
         let dedup_key = match discriminator {

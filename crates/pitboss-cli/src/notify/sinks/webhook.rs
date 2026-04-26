@@ -9,6 +9,13 @@ pub struct WebhookSink {
     id: String,
     url: String,
     http: Arc<reqwest::Client>,
+    /// Skip the per-request SSRF guard. Set only for sinks built from the
+    /// `PITBOSS_PARENT_NOTIFY_URL` env var, since the canonical use case for
+    /// that var is "POST to my local orchestrator on `http://localhost:N`"
+    /// — which the manifest-author SSRF check would refuse. The env var is
+    /// operator-trusted (a hostile manifest can't set the parent process's
+    /// env), so loopback / private targets are safe by definition.
+    bypass_ssrf: bool,
 }
 
 impl WebhookSink {
@@ -18,7 +25,24 @@ impl WebhookSink {
         } else {
             format!("webhook:{}", idx)
         };
-        Self { id, url, http }
+        Self {
+            id,
+            url,
+            http,
+            bypass_ssrf: false,
+        }
+    }
+
+    /// Like [`WebhookSink::new`] but tags the sink as operator-trusted so
+    /// emit-time SSRF checks are skipped. Reserved for the
+    /// `PITBOSS_PARENT_NOTIFY_URL` ingest path.
+    pub fn new_trusted(id: String, url: String, http: Arc<reqwest::Client>) -> Self {
+        Self {
+            id,
+            url,
+            http,
+            bypass_ssrf: true,
+        }
     }
 }
 
@@ -29,10 +53,12 @@ impl NotificationSink for WebhookSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
-        // DNS rebinding / mutable-CNAME SSRF guard: re-validate the URL's
-        // currently-resolved IP against the private-range blocklist
-        // before sending.
-        crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+        if !self.bypass_ssrf {
+            // DNS rebinding / mutable-CNAME SSRF guard: re-validate the URL's
+            // currently-resolved IP against the private-range blocklist
+            // before sending.
+            crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+        }
 
         let response = self
             .http

@@ -43,6 +43,47 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Parent-orchestrator notification hook** — closes issue #133. Two new
+  env vars give a wrapping orchestrator (Discord bot, dispatcher service,
+  CI runner) visibility into runs the agent itself spawns from inside its
+  task worktree, without requiring manifest cooperation.
+
+  - `PITBOSS_PARENT_NOTIFY_URL` — when set, every `pitboss dispatch`
+    invocation builds an ephemeral webhook sink targeting that URL and
+    emits at run start (`RunDispatched`) and run end (`RunFinished`).
+    Runs alongside any manifest-declared `[[notification]]` sinks. The
+    env-var sink bypasses the manifest-path SSRF guards (which reject
+    loopback / private IPs) because the canonical orchestrator topology
+    is `http://localhost:N` on the same host, and only the operator
+    running pitboss can set the env var — a hostile manifest cannot.
+
+  - `PITBOSS_RUN_ID` — set automatically by every `pitboss dispatch` to
+    its own run uuid. Standard env-var inheritance propagates the value
+    into spawned claude subprocesses; if claude (or any descendant) runs
+    `pitboss dispatch <child.toml>`, that nested invocation reads the
+    inherited value and reports it as `parent_run_id` on the child's
+    `RunDispatched` event so the orchestrator can correlate parent ↔
+    child runs.
+
+  Concrete shape of the new event:
+
+  ```json
+  {
+    "kind": "run_dispatched",
+    "run_id":        "019d...",
+    "parent_run_id": "019c...",
+    "manifest_path": "/work/child.toml",
+    "mode":          "flat"
+  }
+  ```
+
+  Also fixes an existing bug: hierarchical mode built the notification
+  router but never fired `RunFinished`. Both flat and hierarchical now
+  emit it consistently.
+
+  `run_dispatched` is added to the `[[notification]] events = [...]`
+  allowlist so operators can subscribe via the manifest path too.
+
 - **`final_message` field on `TaskRecord`** — sibling to the existing
   `final_message_preview` (still capped at 200 chars for layout-friendly
   displays), carrying the untruncated assistant final message. Closes
