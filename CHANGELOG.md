@@ -43,6 +43,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss schema --format=map` + `docs/manifest-map.md`** — auto-generates
+  a per-field code-reference doc that maps every TOML key to its Rust
+  source location (`schema.rs:LINE`), label, help text, type, and
+  required/optional state. The checked-in file is verified by a unit-test
+  drift guard plus `pitboss schema --format=map --check docs/manifest-map.md`
+  for CI/contributor use. Driven entirely by the `field_metadata()`
+  registry from the prior change — adding a new schema field with
+  `#[field(label, help)]` flows automatically into the doc on regenerate.
+  Also fixed a derive bug exposed by this work: `#[serde(default)]` /
+  `#[serde(default = "...")]` fields now correctly render as optional
+  (previously only `Option<T>` did).
+
 - **Field-metadata derive (`pitboss-schema` + `pitboss-schema-derive`)** —
   schema structs now carry per-field metadata (label, help, form_type,
   enum_values, required) via `#[derive(FieldMetadata)]`. `required` is

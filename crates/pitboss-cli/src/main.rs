@@ -68,6 +68,47 @@ fn main() -> Result<()> {
             clap_complete::generate(shell, &mut cmd, "pitboss", &mut std::io::stdout());
             std::process::exit(0);
         }
+        Command::Schema { format, check } => {
+            std::process::exit(run_schema(format, check.as_deref()));
+        }
+    }
+}
+
+/// Drive `pitboss schema --format=...`. Returns the exit code.
+fn run_schema(format: cli::SchemaFormat, check: Option<&std::path::Path>) -> i32 {
+    let generated = match format {
+        cli::SchemaFormat::Map => crate::manifest::map_doc::render(),
+    };
+    match check {
+        None => {
+            print!("{generated}");
+            0
+        }
+        Some(path) => {
+            let existing = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "pitboss schema --check: cannot read {}: {e}",
+                        path.display()
+                    );
+                    return 2;
+                }
+            };
+            if existing == generated {
+                eprintln!("pitboss schema --check: {} is up to date", path.display());
+                0
+            } else {
+                eprintln!(
+                    "pitboss schema --check: {} is stale.\n\
+                     Regenerate with:\n\
+                     \n    pitboss schema --format=map > {}\n",
+                    path.display(),
+                    path.display()
+                );
+                1
+            }
+        }
     }
 }
 
