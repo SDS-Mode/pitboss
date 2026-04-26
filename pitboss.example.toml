@@ -1,4 +1,4 @@
-# Pitboss — annotated example manifest.
+# Pitboss — annotated example manifest (v0.9 schema).
 #
 # This file is a learning aid. Every field in pitboss's manifest schema
 # is explained inline below, with notes on when to use what. Copy this
@@ -18,25 +18,16 @@
 #     examples/ketchup-p0-execute.toml         real-world refactor run
 
 # ────────────────────────────────────────────────────────────────────────────
-# [run] — run-wide configuration.
+# [run] — run-wide infrastructure config (NOT lead-specific).
+# Lead-level caps moved to [lead] in v0.9.
 # ────────────────────────────────────────────────────────────────────────────
 
 [run]
 
 # Flat-mode concurrency cap. Only meaningful when [[task]] is used (not
-# [[lead]]). Default 4. Overridden by ANTHROPIC_MAX_CONCURRENT env var.
-# max_parallel = 4
-
-# Hierarchical-mode worker cap (1-16). REQUIRED when [[lead]] is set.
-# Caps lead's dynamic fanout, independent of max_parallel.
-
-# Hierarchical-mode budget (floating USD). REQUIRED when [[lead]] is set.
-# Reservation accounting: each spawn reserves a model-aware estimate
-# up front; `spawn_worker` returns "budget exceeded" once
-# spent + reserved + next_estimate > budget_usd.
-
-# Hierarchical-mode wall-clock cap on the lead (seconds). No hard upper
-# bound — set generously for multi-hour runs. Default 3600.
+# when [lead] is set). Default 4. Overridden by ANTHROPIC_MAX_CONCURRENT.
+# Renamed from `max_parallel` in v0.9.
+# max_parallel_tasks = 4
 
 # Stop flat-mode runs on first failure. Default false. Ignored in
 # hierarchical mode (leads decide their own retry semantics).
@@ -56,21 +47,22 @@ worktree_cleanup = "on_success"
 # summary.jsonl. Off by default.
 # emit_event_stream = false
 
-# v0.4 only: approval_policy controls what happens when a lead calls
-# mcp__pitboss__request_approval without a TUI attached.
+# Default action for `request_approval` / `propose_plan` when no TUI is
+# attached and no [[approval_policy]] rule matches.
 #   "block"        — queue until a TUI connects (DEFAULT)
 #   "auto_approve" — immediately approve (useful for CI)
 #   "auto_reject"  — immediately reject
-# approval_policy = "block"
+# Renamed from `approval_policy` in v0.9 to disambiguate from the rules array.
+# default_approval_policy = "block"
 
-# v0.5 only: when true, after finalize pitboss writes a JSON snapshot of
-# the shared store (all /ref/*, /peer/*, /shared/*, /leases/*) to
-# <run-dir>/shared-store.json. Useful for post-mortem or auditing the
-# cross-worker coordination state.
+# When true, write `shared-store.json` (all /ref/*, /peer/*, /shared/*,
+# /leases/*) to <run-dir>/shared-store.json on finalize. Useful for
+# post-mortem inspection of cross-worker coordination state.
 dump_shared_store = true
 
 # ────────────────────────────────────────────────────────────────────────────
-# [defaults] — inherited by every [[task]] and [[lead]] unless overridden.
+# [defaults] — per-actor inheritable knobs.
+# Inherited by every [[task]] and [lead] unless overridden.
 # ────────────────────────────────────────────────────────────────────────────
 
 [defaults]
@@ -84,8 +76,8 @@ model = "claude-haiku-4-5"
 # Claude --effort flag. "low" | "medium" | "high".
 # effort = "medium"
 
-# Allowed tool surface. Default covers the common set; specify to
-# restrict (e.g. a read-only analysis worker gets only [Read, Glob, Grep]).
+# Allowed tool surface. Default covers the common set; specify to restrict
+# (e.g. a read-only analysis worker gets only [Read, Glob, Grep]).
 # Pitboss auto-appends its own MCP tools for leads and workers.
 # tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
@@ -114,7 +106,7 @@ use_worktree = true
 # image      = "ghcr.io/sds-mode/pitboss-with-claude:latest"  # bundled claude CLI
 # runtime    = "auto"              # "docker" | "podman" | "auto" (auto prefers podman)
 # workdir    = "/project"          # cwd inside the container; defaults to first mount's container path
-# extra_args = []                  # inserted verbatim before the image name (e.g. ["--security-opt=...", "--cap-drop=ALL"])
+# extra_args = []                  # inserted verbatim before the image name
 #
 # # Declare one [[container.mount]] per bind mount the run needs. Two mounts are
 # # auto-injected regardless: ~/.claude → /home/pitboss/.claude (OAuth) and the
@@ -134,7 +126,7 @@ use_worktree = true
 # ────────────────────────────────────────────────────────────────────────────
 # Task definitions: pick ONE of
 #   a) one-or-more [[task]] entries  (flat mode), OR
-#   b) exactly one [[lead]] entry    (hierarchical mode).
+#   b) exactly one [lead] entry      (hierarchical mode).
 # The two are mutually exclusive — a manifest is either flat or hierarchical.
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -168,14 +160,17 @@ use_worktree = true
 # Workers get a narrower set: just the 7 kv_* / lease_* tools.
 
 [lead]
-max_workers = 3
-budget_usd = 1.50
-lead_timeout_secs = 900
-id = "example-lead"
-directory = "/tmp/pitboss-example"  # must exist; set `use_worktree = false` or be a git repo
-branch = "example/lead"
-# model = "claude-opus-4-7"  # override defaults for the coordinator
 
+# Identity (REQUIRED in v0.9 — both `id` and `directory` are no longer
+# defaulted from cwd).
+id = "example-lead"
+directory = "/tmp/pitboss-example"  # must exist; set use_worktree=false unless it's a git repo
+branch = "example/lead"
+# model = "claude-opus-4-7"          # override [defaults] for the coordinator
+
+# IMPORTANT: `prompt =` MUST appear before any [lead.X] subtable in the
+# TOML source. A `prompt =` after a subtable header is silently moved to
+# that subtable's scope; pitboss validate catches the resulting empty prompt.
 prompt = """
 This is a minimal hierarchical example that exercises the shared store.
 
@@ -197,28 +192,42 @@ via mcp__pitboss__kv_get and print a combined report of all three echoes.
 Then exit.
 """
 
-# ─── Depth-2 example (v0.6+) ───
+# Lead-level caps (moved from [run] in v0.9).
+max_workers = 3                     # 1–16; required when the lead spawns workers
+budget_usd = 1.50                   # soft cap; reservation accounting at spawn time
+lead_timeout_secs = 900             # wall-clock cap on the lead session
+
+# Permission routing (v0.8+). "path_a" (default) = pitboss is sole authority
+# via CLAUDE_CODE_ENTRYPOINT=sdk-ts. "path_b" = route claude's built-in gate
+# through pitboss's approval queue; rejected at validate time until the
+# follow-on stabilization lands (issues #92–#94).
+# permission_routing = "path_a"
+
+# ─── Depth-2 sub-leads (v0.6+) ───
 # Uncomment to enable a root lead that may spawn sub-leads.
-#
-# [lead]
-# prompt = """
-# You are coordinating a multi-phase project. For each independent
-# phase, spawn a sub-lead with its own context and budget.
-# """
-# model = "claude-sonnet-4-6"
-# budget_usd = 20.00
-# max_workers = 20
 # allow_subleads = true
-# permission_routing = "path_a"       # v0.8+. "path_a" (default) = pitboss is sole permission authority via CLAUDE_CODE_ENTRYPOINT=sdk-ts. "path_b" = route claude's built-in gate through pitboss's approval queue; not yet stable (rejected at validate time; see issues #92–#94).
-# max_subleads = 4
-# max_sublead_budget_usd = 5.00
-# max_workers_across_tree = 16
+# max_subleads = 4                    # cap on total sub-leads
+# max_sublead_budget_usd = 5.00       # cap on per-sub-lead budget envelope
+# max_total_workers = 16              # cap on total live workers (root + sub-trees)
+                                      # Renamed from max_workers_across_tree in v0.9.
+
+# ────────────────────────────────────────────────────────────────────────────
+# [sublead_defaults] — top-level (v0.9+, promoted from [lead.sublead_defaults]).
+# Optional defaults applied to spawn_sublead calls that omit the corresponding
+# parameters. Required when allow_subleads = true (use either explicit
+# budget_usd + max_workers, or read_down = true).
+# ────────────────────────────────────────────────────────────────────────────
 #
-# [lead.sublead_defaults]
-# budget_usd = 2.00
-# max_workers = 4
-# lead_timeout_secs = 1800
-# read_down = false
+# [sublead_defaults]
+# budget_usd = 2.00         # per-sub-lead envelope when read_down = false
+# max_workers = 4           # per-sub-lead worker pool when read_down = false
+# lead_timeout_secs = 1800  # wall-clock cap for the sub-lead session
+# read_down = false         # when true, sub-lead shares root's budget + pool
+
+# ────────────────────────────────────────────────────────────────────────────
+# [[approval_policy]] — declarative approval rules (v0.6+).
+# Zero or more rule blocks; evaluated in declaration order, first match wins.
+# ────────────────────────────────────────────────────────────────────────────
 #
 # # Auto-approve all file-read tool calls within sub-tree S1
 # [[approval_policy]]
@@ -229,3 +238,20 @@ Then exit.
 # [[approval_policy]]
 # match = { category = "cost", cost_over = 0.50 }
 # action = "block"
+
+# ────────────────────────────────────────────────────────────────────────────
+# [[mcp_server]] — external MCP server injection (v0.9+).
+# Servers declared here are injected into every actor's --mcp-config
+# (lead, sub-leads, and workers) at dispatch time.
+# ────────────────────────────────────────────────────────────────────────────
+#
+# [[mcp_server]]
+# id      = "context7"
+# command = "npx"
+# args    = ["-y", "@upstash/context7-mcp"]
+#
+# [[mcp_server]]
+# id      = "my-tool"
+# command = "/usr/local/bin/my-mcp-server"
+# args    = ["--port", "3000"]
+# env     = { MY_TOKEN = "abc" }
