@@ -1,12 +1,12 @@
-# Depth-2 sub-lead manifest for fake-claude e2e tests.
+# Depth-2 sub-lead manifest for fake-claude e2e tests (v0.9 schema).
 # Used by crates/pitboss-cli/tests/e2e_sublead_flows.rs.
 
 [run]
-max_parallel = 4
-max_workers = 4
-budget_usd = 10.0
+max_parallel_tasks = 4
 
 [lead]
+id = "depth2"
+directory = "."
 prompt = "execute phase 1"
 model = "claude-haiku-4-5"
 budget_usd = 10.0
@@ -14,12 +14,12 @@ max_workers = 4
 allow_subleads = true
 max_subleads = 4
 max_sublead_budget_usd = 5.0
-max_workers_across_tree = 8
+max_total_workers = 8
 # use_worktree = false so the smoke test dispatch works without a git clone.
 # The fake-claude binary exits cleanly regardless of directory.
 use_worktree = false
 
-[lead.sublead_defaults]
+[sublead_defaults]
 budget_usd = 1.0
 max_workers = 2
 lead_timeout_secs = 600
