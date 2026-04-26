@@ -336,6 +336,42 @@ Blocks until all tasks finish. Exit codes:
 - `2` — manifest error, claude binary missing, etc.
 - `130` — interrupted (Ctrl-C drained gracefully)
 
+### Background dispatch (v0.10+)
+
+```bash
+pitboss dispatch pitboss.toml --background
+# {"run_id":"019d…","manifest_path":"pitboss.toml","started_at":"…","child_pid":12345}
+```
+
+`nohup`-equivalent: detaches the dispatcher and returns immediately
+with a JSON announcement on stdout. Exit code is 0 on successful spawn;
+the run's actual outcome is observed out-of-band.
+
+Use this when you (the agent) are wrapping pitboss for an orchestrator
+context — a Discord bot's slash-command handler, a webhook receiver,
+a CI script — that needs to dispatch and stay responsive rather than
+block for the duration of the run.
+
+The flag is mode-agnostic: works with both flat (`[[task]]`) and
+hierarchical (`[lead]`) manifests. Whether a lead claude wraps the
+dispatch is a manifest authoring decision, kept orthogonal to this
+flag's attached-vs-detached lifecycle concern.
+
+To learn how a backgrounded run finishes, three out-of-band channels:
+
+| Channel | When to use |
+|---|---|
+| `[lifecycle].notify` webhook | Push delivery on `RunFinished` (no polling) |
+| `pitboss list --active` | Survey of currently-running dispatchers |
+| `pitboss status <run-id>` | On-demand snapshot of one run's task table |
+
+The announced `run_id` matches the id that lands in `summary.json`
+byte-for-byte (the parent pre-mints and forwards it to the child),
+so orchestrators can correlate the parent's stdout with later
+notifications and on-disk artifacts using a single key.
+
+`--background --dry-run` is rejected — they're nonsensical together.
+
 ### Resume
 
 ```bash
