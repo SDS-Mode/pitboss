@@ -124,12 +124,13 @@ cargo install --path crates/pitboss-tui
 
 ```
 pitboss validate <manifest>               parse + resolve + validate, exit non-zero on error
-pitboss dispatch <manifest>               deal a run
+pitboss dispatch <manifest>               deal a run; --background detaches & returns a run-id
 pitboss resume <run-id>                   re-deal a prior run, reusing claude_session_id
 pitboss attach <run-id> <task-id>         follow-mode log viewer for a single worker
 pitboss diff <run-a> <run-b>              compare two runs side-by-side
 pitboss container-dispatch <manifest>     run dispatch inside a Docker/Podman container
 pitboss status <run-id>                   snapshot task table for any run; supports --json
+pitboss list                              inventory of recent runs; --active narrows to live
 pitboss agents-md                         print the bundled AGENTS.md reference
 pitboss completions <shell>               print shell completion script
 pitboss version                           print version
