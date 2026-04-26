@@ -252,10 +252,7 @@ fn is_in_git_repo(path: &Path) -> bool {
 /// This is a pure-text scan over the source — it doesn't try to fully parse
 /// the file (which already failed). It looks for the table/field markers that
 /// changed in v0.9 and emits one error per matched legacy pattern.
-pub fn translate_legacy_parse_error(
-    parse_err: &toml::de::Error,
-    src: &str,
-) -> Option<Error> {
+pub fn translate_legacy_parse_error(parse_err: &toml::de::Error, src: &str) -> Option<Error> {
     let mut migrations: Vec<String> = Vec::new();
 
     // [[lead]] array form removed in v0.9.
@@ -341,7 +338,8 @@ pub fn translate_legacy_parse_error(
 /// (with optional whitespace) at the start of a line.
 fn has_top_level_array_table(src: &str, name: &str) -> bool {
     let needle = format!("[[{name}]]");
-    src.lines().any(|line| line.trim_start().starts_with(&needle))
+    src.lines()
+        .any(|line| line.trim_start().starts_with(&needle))
 }
 
 /// Returns true iff the source contains a top-level `[<section>]` table
@@ -354,8 +352,8 @@ fn has_field_in_section(src: &str, section: &str, field: &str) -> bool {
         if trimmed.starts_with('[') {
             // Entering a new table — true if we hit the target header,
             // false on any other table (including subtables of the section).
-            in_section = trimmed.starts_with(&header)
-                && trimmed.chars().nth(header.len()) != Some('.');
+            in_section =
+                trimmed.starts_with(&header) && trimmed.chars().nth(header.len()) != Some('.');
             continue;
         }
         if !in_section {
@@ -373,7 +371,8 @@ fn has_field_in_section(src: &str, section: &str, field: &str) -> bool {
 /// Returns true iff the source contains a `[<parent>.<child>]` subtable header.
 fn has_subtable(src: &str, parent: &str, child: &str) -> bool {
     let needle = format!("[{parent}.{child}]");
-    src.lines().any(|line| line.trim_start().starts_with(&needle))
+    src.lines()
+        .any(|line| line.trim_start().starts_with(&needle))
 }
 
 #[cfg(test)]
