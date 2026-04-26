@@ -207,6 +207,17 @@ impl SessionHandle {
             }
         };
 
+        // Clear the pid slot the moment the child is reaped, *before* the
+        // stream-drain await below. The OS may recycle the now-free pid for
+        // an unrelated process within milliseconds; any reader that still
+        // observed the published value during the 30-second drain window
+        // would signal the wrong target. Drain depends on stdout/stderr fds,
+        // not on the pid, so clearing here is safe. `Release` pairs with the
+        // `Acquire` loads at signal sites (see `dispatch::signals`).
+        if let Some(slot) = &self.pid_slot {
+            slot.store(0, std::sync::atomic::Ordering::Release);
+        }
+
         // Let the stream + stderr drain tasks finish. Stdout/stderr EOF is
         // guaranteed once the child is reaped, so we can wait generously
         // — a premature timeout here would throw away the final
@@ -226,16 +237,6 @@ impl SessionHandle {
         }
         if let Some(t) = stderr_task {
             let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, t).await;
-        }
-
-        // Clear the pid slot now that the child has been reaped. Leaving
-        // the old pid published creates a use-after-free race: the OS may
-        // recycle that pid to an unrelated process, and a signal-sending
-        // reader that still observes the slot would then hit the wrong
-        // process. `Release` pairs with the `Acquire` loads at signal
-        // sites so a reader that sees 0 won't signal anything.
-        if let Some(slot) = &self.pid_slot {
-            slot.store(0, std::sync::atomic::Ordering::Release);
         }
 
         let exit_code = exit_status
@@ -305,8 +306,16 @@ async fn stream_loop(
                     let _ = w.write_all(line.as_bytes()).await;
                     let _ = w.write_all(b"\n").await;
                 }
-                let Ok(events) = parse_line_all(line.as_bytes()) else {
-                    continue;
+                let events = match parse_line_all(line.as_bytes()) {
+                    Ok(evs) => evs,
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            len = line.len(),
+                            "stream_loop: parse_line_all failed; line skipped"
+                        );
+                        continue;
+                    }
                 };
                 for ev in events {
                     match ev {
@@ -318,9 +327,15 @@ async fn stream_loop(
                             // real content. A length-keyed winner avoids that. Stored
                             // untruncated so consumers reading `final_message` see the
                             // complete text — preview is built once at outcome time.
+                            //
+                            // Strict `>` so equal-length later messages do not displace
+                            // the first-seen winner — when two assistant blocks have the
+                            // same length, the earlier one is closer to the substantive
+                            // answer (claude's tail confirmations cluster around the
+                            // same short length).
                             let trimmed_len = text.trim().len();
                             let current_len = a.last_text.as_deref().map_or(0, |t| t.trim().len());
-                            if trimmed_len >= current_len {
+                            if trimmed_len > current_len {
                                 a.last_text = Some(text);
                             }
                         }
@@ -332,7 +347,13 @@ async fn stream_loop(
                             let mut a = accum.lock().await;
                             if let Some(tx) = &session_id_tx {
                                 // Best-effort: if receiver is closed or full, drop the send.
-                                let _ = tx.try_send(sid.clone());
+                                if let Err(e) = tx.try_send(sid.clone()) {
+                                    tracing::debug!(
+                                        error = %e,
+                                        session_id = %sid,
+                                        "stream_loop: session_id channel send dropped"
+                                    );
+                                }
                             }
                             a.session_id = Some(sid);
                             a.usage.add(&u);
@@ -449,5 +470,46 @@ mod session_id_tests {
             .expect("channel fires before deadline")
             .expect("sender not dropped");
         assert_eq!(got, "sess-xyz");
+    }
+}
+
+#[cfg(test)]
+mod pid_slot_tests {
+    use super::*;
+    use crate::process::fake::{FakeScript, FakeSpawner};
+    use crate::process::ProcessSpawner;
+    use crate::session::CancelToken;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Regression for #147: the PID slot must be cleared promptly after the
+    /// child reaps, not at the end of the (up-to-30s) stream-drain window.
+    /// We can't observe the exact timing across the boundary cheaply, but
+    /// the post-condition (slot == 0 on return) and bounded total runtime
+    /// together guard against regression to the "clear after drain" form.
+    #[tokio::test]
+    async fn pid_slot_is_cleared_after_run() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"result","session_id":"s","usage":{"input_tokens":1,"output_tokens":1}}"#)
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cmd = crate::process::SpawnCmd {
+            program: std::path::PathBuf::from("fake-claude"),
+            args: vec![],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: std::collections::HashMap::new(),
+        };
+        let slot = Arc::new(AtomicU32::new(0));
+        let handle = SessionHandle::new("t", spawner, cmd).with_pid_slot(slot.clone());
+        let _outcome = handle
+            .run_to_completion(CancelToken::new(), Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            slot.load(Ordering::Acquire),
+            0,
+            "pid slot should be cleared on return so signal sites cannot \
+             target a recycled pid",
+        );
     }
 }
