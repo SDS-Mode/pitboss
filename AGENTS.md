@@ -103,6 +103,18 @@ hierarchical.**
 
 TOML, typically named `pitboss.toml`. Every field annotated below.
 
+> **Need a starting point?** `pitboss init [output] --template simple|full`
+> emits a valid v0.9 manifest skeleton. `simple` is one `[lead]` driving a
+> flat worker pool (the 80% case); `full` includes coordinator + sub-leads +
+> commented optional sections. Both render to stdout if no output path is
+> given.
+>
+> **Need the complete machine-readable schema?** `pitboss schema --format=map`
+> emits the markdown field map (every key, every default, every file:line
+> ref); `pitboss schema --format=example` emits a complete reference TOML
+> with every field present as a placeholder. Useful when generating
+> manifests programmatically rather than reading this doc.
+
 > **v0.9 schema** — collapses the v0.8 `[[lead]]`/`[lead]` split into one
 > canonical `[lead]` (single-table) form, moves lead-level caps off `[run]`
 > and onto `[lead]`, promotes `[lead.sublead_defaults]` to top-level
@@ -324,6 +336,24 @@ first.** This catches all the class-of-error issues (mixed `[[task]]` + `[lead]`
 `max_workers = 17`, `budget_usd = 0`, missing `id`, directory doesn't exist,
 pre-v0.9 schema usage) before any claude subprocess is spawned.
 
+### Pre-flight cost gate (`pitboss tree`)
+
+```bash
+pitboss tree pitboss.toml                 # render dispatch tree + worst-case envelope
+pitboss tree pitboss.toml --check 20      # CI gate: exit non-zero if envelope > $20 or unbounded
+```
+
+Renders the dispatch tree (root lead, depth-2 controls, `[sublead_defaults]`,
+or the flat-mode task list) alongside every per-actor knob the manifest is
+implicitly committing to, and aggregates the worst-case budget envelope.
+
+`--check <USD>` turns the same walk into a hard gate that exits non-zero
+when the envelope exceeds the threshold OR when a required cap
+(`max_sublead_budget_usd` etc) is unbounded. Drop into a CI workflow
+between `validate` and `dispatch` to fail loudly before any spend lands —
+catches cases where a manifest is structurally valid but committed to
+unbounded fan-out.
+
 ### Dispatch
 
 ```bash
@@ -515,6 +545,30 @@ Workers and sub-leads live at `<run-dir>/tasks/<task-id>/` and
 `<run-dir>/tasks/<sublead-id>/` respectively. Sub-lead ids are
 `sublead-<uuid>` — they don't match the manifest's `[lead].id`. Use
 the UUID form from `summary.jsonl` when calling `pitboss attach`.
+
+### Sweeping orphaned runs (`pitboss prune`)
+
+A run is *orphaned* when its dispatcher exited uncleanly (`SIGKILL`,
+OOM, segfault, host crash) and never finalized `summary.json`. These
+show up in `pitboss list` as `Stale` (no live control socket and
+`summary.jsonl` mtime > 4h) or `Aborted` (no records at all).
+
+```bash
+pitboss prune                             # dry-run: report what would be swept
+pitboss prune --apply                     # commit: synthesize Cancelled summary.json from partial state
+pitboss prune --apply --remove            # commit: delete the run dir entirely instead
+pitboss prune --apply --older-than 24h    # only sweep runs older than 24h (avoid in-flight investigation)
+pitboss prune --include-aborted           # also sweep Aborted runs (off by default — might be a still-spinning-up dispatcher)
+```
+
+Defaults to dry-run so you can see what would happen first; `--apply`
+commits. Default action is to synthesize a Cancelled `summary.json` that
+reflects whatever partial state landed in `summary.jsonl` — preserves
+audit trail. Pass `--remove` if you want the directory gone entirely.
+
+`--older-than` accepts `60s`, `30m`, `4h`, `1d`, or a bare seconds
+integer. Set this when you don't want fresh failures swept while you're
+still mid-investigation.
 
 ### Terminal-state classification (v0.7+)
 
