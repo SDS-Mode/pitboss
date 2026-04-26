@@ -1,0 +1,110 @@
+# Pitboss manifest — complete reference
+#
+# Auto-generated. Do not edit by hand. Regenerate with:
+#   pitboss schema --format=example > docs/manifest-reference.toml
+#
+# Every field declared in the v0.9 schema is present below as an
+# uncommented `key = value` assignment using a placeholder derived
+# from the field's form type. This file demonstrates *structure*; it
+# is NOT a runnable manifest:
+#   * `[lead]` and `[[task]]` are mutually exclusive — pick one.
+#   * `[[mcp_server]]` / `[[approval_policy]]` / `[[template]]` are
+#     repeating sections; one example entry is shown.
+#   * Sub-sections that aren't surfaced through the FieldMetadata
+#     registry yet (e.g. `[approval_policy.match]`, `[[notification]]`)
+#     are omitted; see `pitboss.example.toml` for hand-curated
+#     coverage and `book/src/operator-guide/manifest-schema.md` for
+#     prose explanations.
+#
+# Each row's source-of-truth lives in
+# `crates/pitboss-cli/src/manifest/schema.rs`. The companion field
+# map at `docs/manifest-map.md` provides clickable file:line refs.
+
+[run]
+max_parallel_tasks = 0
+halt_on_failure = false
+run_dir = "/path/to/value"
+worktree_cleanup = "always"
+emit_event_stream = false
+default_approval_policy = "block"
+dump_shared_store = false
+require_plan_approval = false
+
+[defaults]
+model = "<value>"
+effort = "low"
+tools = []
+timeout_secs = 0
+use_worktree = false
+env = { EXAMPLE_KEY = "value" }
+
+[container]
+image = "<value>"
+runtime = "docker"
+extra_args = []
+workdir = "/path/to/value"
+
+[[container.mount]]
+host = "/path/to/value"
+container = "/path/to/value"
+readonly = false
+
+[[task]]
+id = "<value>"
+directory = "/path/to/value"
+prompt = """
+  Replace with the actual prompt body.
+"""
+template = "<value>"
+vars = { EXAMPLE_KEY = "value" }
+branch = "<value>"
+model = "<value>"
+effort = "low"
+tools = []
+timeout_secs = 0
+use_worktree = false
+env = { EXAMPLE_KEY = "value" }
+
+[lead]
+id = "<value>"
+directory = "/path/to/value"
+prompt = """
+  Replace with the actual prompt body.
+"""
+branch = "<value>"
+model = "<value>"
+effort = "low"
+tools = []
+timeout_secs = 0
+use_worktree = false
+env = { EXAMPLE_KEY = "value" }
+max_workers = 0
+budget_usd = 0.0
+lead_timeout_secs = 0
+permission_routing = "path_a"
+allow_subleads = false
+max_subleads = 0
+max_sublead_budget_usd = 0.0
+max_total_workers = 0
+
+[sublead_defaults]
+budget_usd = 0.0
+max_workers = 0
+lead_timeout_secs = 0
+read_down = false
+
+[[approval_policy]]
+action = "auto_approve"
+
+[[mcp_server]]
+id = "<value>"
+command = "<value>"
+args = []
+env = { EXAMPLE_KEY = "value" }
+
+[[template]]
+id = "<value>"
+prompt = """
+  Replace with the actual prompt body.
+"""
+
