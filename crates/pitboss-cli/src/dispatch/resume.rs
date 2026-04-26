@@ -541,6 +541,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -648,6 +649,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -758,6 +760,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         std::fs::write(
             run_dir.join("resolved.json"),

@@ -275,6 +275,10 @@ pub async fn execute(
                 parent_run_id: parent_run_id.clone(),
                 manifest_path: manifest_path.display().to_string(),
                 mode: "flat".to_string(),
+                survive_parent: resolved
+                    .lifecycle
+                    .as_ref()
+                    .is_some_and(|l| l.survive_parent),
             },
             Utc::now(),
         );
@@ -1086,6 +1090,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         }
     }
 
@@ -1228,6 +1233,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -1318,6 +1324,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -1421,6 +1428,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
 
         let spawner = Arc::new(CyclingFake(

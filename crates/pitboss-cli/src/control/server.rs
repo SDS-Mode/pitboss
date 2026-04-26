@@ -1040,6 +1040,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1415,6 +1416,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,

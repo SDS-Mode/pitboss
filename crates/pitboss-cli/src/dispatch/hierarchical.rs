@@ -116,6 +116,10 @@ pub async fn run_hierarchical(
                 parent_run_id: parent_run_id.clone(),
                 manifest_path: manifest_path.display().to_string(),
                 mode: "hierarchical".to_string(),
+                survive_parent: resolved
+                    .lifecycle
+                    .as_ref()
+                    .is_some_and(|l| l.survive_parent),
             },
             Utc::now(),
         );

@@ -67,17 +67,24 @@ impl SlackSink {
                 parent_run_id,
                 manifest_path,
                 mode,
+                survive_parent,
             } => {
                 let header = format!("{} Pitboss run dispatched", emoji);
                 let parent_line = parent_run_id.as_deref().map_or(String::new(), |p| {
                     format!("\n*Parent:* {}", escape_slack_mrkdwn(p))
                 });
+                let survive_line = if *survive_parent {
+                    "\n*Survives parent:* yes".to_string()
+                } else {
+                    String::new()
+                };
                 let detail = format!(
-                    "*Run:* {}\n*Manifest:* {}\n*Mode:* {}{}",
+                    "*Run:* {}\n*Manifest:* {}\n*Mode:* {}{}{}",
                     escape_slack_mrkdwn(run_id),
                     escape_slack_mrkdwn(manifest_path),
                     escape_slack_mrkdwn(mode),
                     parent_line,
+                    survive_line,
                 );
                 (header, detail)
             }

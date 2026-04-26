@@ -92,6 +92,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -1040,6 +1041,7 @@ async fn dogfood_envelope_cap_rejection() {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();

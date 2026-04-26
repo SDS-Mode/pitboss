@@ -108,3 +108,6 @@ prompt = """
   Replace with the actual prompt body.
 """
 
+[lifecycle]
+survive_parent = false
+

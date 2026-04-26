@@ -24,6 +24,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     for cfg in &resolved.notifications {
         crate::notify::config::validate(cfg)?;
     }
+    validate_lifecycle(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -35,6 +36,43 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         }
         validate_branch_conflicts(resolved)?;
         validate_ranges(resolved)?;
+    }
+    Ok(())
+}
+
+/// Enforce the `[lifecycle]` coupling rule (issue #133): a manifest that
+/// declares `survive_parent = true` must declare at least one notification
+/// target so the orchestrator can observe the run's outcome after losing
+/// process-level control of it. Either an inline `[lifecycle].notify` or a
+/// top-level `[[notification]]` section satisfies the rule.
+///
+/// Validates the inline notify spec (when present) using the same SSRF /
+/// scheme rules as `[[notification]]`. The error explicitly points at the
+/// fix so an operator using only `PITBOSS_PARENT_NOTIFY_URL` knows to add a
+/// no-cost `kind = "log"` notification block.
+fn validate_lifecycle(r: &ResolvedManifest) -> Result<()> {
+    let Some(lifecycle) = &r.lifecycle else {
+        return Ok(());
+    };
+    if let Some(notify) = &lifecycle.notify {
+        crate::notify::config::validate(notify)?;
+    }
+    if lifecycle.survive_parent {
+        let has_inline_notify = lifecycle.notify.is_some();
+        let has_top_level_notify = !r.notifications.is_empty();
+        if !has_inline_notify && !has_top_level_notify {
+            bail!(
+                "[lifecycle] survive_parent = true requires a notification target so the \
+                 orchestrator can observe run completion. Add either:\n  \
+                 - a [lifecycle.notify] inline sink (same shape as [[notification]]), or\n  \
+                 - at least one top-level [[notification]] section.\n\
+                 If you intend to deliver lifecycle events via the \
+                 PITBOSS_PARENT_NOTIFY_URL env var, also declare a no-cost \
+                 [[notification]]\n  kind = \"log\"\n\
+                 to satisfy this validate-time gate (the env-var sink is configured at \
+                 dispatch-time and validate cannot see it)."
+            );
+        }
     }
     Ok(())
 }
@@ -452,6 +490,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         }
     }
 
@@ -478,6 +517,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         f(&mut m);
         m
@@ -560,6 +600,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -589,6 +630,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         assert!(validate(&r).is_err());
     }
@@ -614,6 +656,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         assert!(validate(&r).is_err());
     }
@@ -644,6 +687,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         (d, r)
     }
@@ -755,6 +799,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");
@@ -805,6 +850,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -836,6 +882,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            lifecycle: None,
         };
         assert!(validate(&r).is_err());
     }
@@ -915,5 +962,94 @@ mod tests {
         let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
         let translated = translate_legacy_parse_error(&parse_err.unwrap_err(), src);
         assert!(translated.is_none());
+    }
+
+    fn log_notification() -> crate::notify::config::NotificationConfig {
+        crate::notify::config::NotificationConfig {
+            kind: crate::notify::config::SinkKind::Log,
+            url: None,
+            events: None,
+            severity_min: crate::notify::Severity::Info,
+        }
+    }
+
+    #[test]
+    fn lifecycle_survive_parent_with_top_level_notification_is_ok() {
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.notifications.push(log_notification());
+        m.lifecycle = Some(crate::manifest::schema::Lifecycle {
+            survive_parent: true,
+            notify: None,
+        });
+        validate(&m).expect("top-level notification satisfies the coupling");
+    }
+
+    #[test]
+    fn lifecycle_survive_parent_with_inline_notify_is_ok() {
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.lifecycle = Some(crate::manifest::schema::Lifecycle {
+            survive_parent: true,
+            notify: Some(log_notification()),
+        });
+        validate(&m).expect("inline lifecycle.notify satisfies the coupling");
+    }
+
+    #[test]
+    fn lifecycle_survive_parent_without_any_notification_is_rejected() {
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.lifecycle = Some(crate::manifest::schema::Lifecycle {
+            survive_parent: true,
+            notify: None,
+        });
+        let err = validate(&m).expect_err("naked survive_parent must fail");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("survive_parent = true"), "msg: {msg}");
+        assert!(msg.contains("notification target"), "msg: {msg}");
+        assert!(msg.contains("PITBOSS_PARENT_NOTIFY_URL"), "msg: {msg}");
+    }
+
+    #[test]
+    fn lifecycle_survive_parent_false_does_not_require_notify() {
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.lifecycle = Some(crate::manifest::schema::Lifecycle {
+            survive_parent: false,
+            notify: None,
+        });
+        validate(&m).expect("survive_parent=false has no coupling requirement");
+    }
+
+    #[test]
+    fn lifecycle_inline_notify_runs_through_ssrf_guard() {
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.lifecycle = Some(crate::manifest::schema::Lifecycle {
+            survive_parent: true,
+            notify: Some(crate::notify::config::NotificationConfig {
+                kind: crate::notify::config::SinkKind::Webhook,
+                url: Some("http://localhost/hook".to_string()),
+                events: None,
+                severity_min: crate::notify::Severity::Info,
+            }),
+        });
+        // The inline notify gets validated by the same logic as
+        // [[notification]] — http:// + loopback should be refused. Operators
+        // who need loopback should use PITBOSS_PARENT_NOTIFY_URL.
+        let err = validate(&m).expect_err("inline notify must obey SSRF rules");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("https://") || msg.contains("loopback"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_omitted_section_is_unchanged_behavior() {
+        let d = with_tmp_repo(true);
+        let m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        validate(&m).expect("manifests without [lifecycle] continue to validate");
     }
 }
