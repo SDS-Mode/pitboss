@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp, prune, status};
+use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp, prune, status, tree};
 
 use cli::{Cli, Command};
 
@@ -77,6 +77,9 @@ fn main() -> Result<()> {
             force,
         } => {
             std::process::exit(run_init(template.into(), output.as_deref(), force));
+        }
+        Command::Tree { manifest, check } => {
+            std::process::exit(tree::run(&manifest, check));
         }
         Command::Prune {
             apply,
