@@ -1353,6 +1353,7 @@ dependencies = [
  "libc",
  "lru",
  "pitboss-core",
+ "pitboss-schema",
  "reqwest",
  "rmcp",
  "schemars",
@@ -1388,6 +1389,22 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "pitboss-schema"
+version = "0.8.0"
+dependencies = [
+ "pitboss-schema-derive",
+]
+
+[[package]]
+name = "pitboss-schema-derive"
+version = "0.8.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
