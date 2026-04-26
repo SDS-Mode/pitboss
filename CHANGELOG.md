@@ -43,6 +43,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss init [output] [-t simple|full] [--force]`** — emit a starter
+  manifest TOML to stdout or a named file. Two hand-curated templates:
+  `simple` (one `[lead]` driving a flat worker pool — the 80% case) and
+  `full` (coordinator + sub-leads + workers with depth-2 controls and
+  `[sublead_defaults]` populated, plus `[[mcp_server]]` /
+  `[[approval_policy]]` / `[[template]]` / `[container]` commented at the
+  bottom for easy uncommenting). Both templates are valid v0.9 manifests
+  once placeholder paths and prompts are filled in. Refuses to overwrite
+  an existing file unless `--force` is passed. Drift-guard tests run each
+  template through `load_manifest_from_str` so a future schema change
+  that breaks a template surfaces immediately.
+
 - **`pitboss schema --format=example` + `docs/manifest-reference.toml`** —
   auto-generates a complete reference TOML in which every field declared by
   the v0.9 schema appears as an uncommented `key = placeholder` assignment.

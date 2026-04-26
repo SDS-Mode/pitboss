@@ -1,4 +1,5 @@
 pub mod example_doc;
+pub mod init_template;
 pub mod load;
 pub mod map_doc;
 pub mod metadata;
