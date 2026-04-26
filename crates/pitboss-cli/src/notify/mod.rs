@@ -55,6 +55,12 @@ pub enum PitbossEvent {
         manifest_path: String,
         /// "flat" or "hierarchical".
         mode: String,
+        /// Resolved value of `[lifecycle].survive_parent` from the manifest.
+        /// `false` for manifests without a `[lifecycle]` section. Lets the
+        /// orchestrator decide whether to include this run's process group
+        /// in any cancel-tree-walk it performs (issue #133-A).
+        #[serde(default)]
+        survive_parent: bool,
     },
     RunFinished {
         run_id: String,
@@ -317,6 +323,46 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"kind\":\"run_finished\""));
         assert!(s.contains("\"tasks_failed\":1"));
+    }
+
+    #[test]
+    fn pitboss_event_run_dispatched_roundtrip_carries_survive_parent() {
+        // Regression for issue #133-A: the `survive_parent` field must
+        // serialize so the orchestrator can decide whether to include this
+        // run's process group in any cancel-tree-walk it performs.
+        let ev = PitbossEvent::RunDispatched {
+            run_id: "019d-child".into(),
+            parent_run_id: Some("019c-parent".into()),
+            manifest_path: "/work/c.toml".into(),
+            mode: "flat".into(),
+            survive_parent: true,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"kind\":\"run_dispatched\""));
+        assert!(s.contains("\"survive_parent\":true"));
+        let back: PitbossEvent = serde_json::from_str(&s).unwrap();
+        match back {
+            PitbossEvent::RunDispatched { survive_parent, .. } => assert!(survive_parent),
+            other => panic!("expected RunDispatched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pitboss_event_run_dispatched_back_compat_default_survive_parent_false() {
+        // A pre-#133-A producer that omits `survive_parent` must still
+        // deserialize cleanly with the field defaulting to false.
+        let json = r#"{
+            "kind":"run_dispatched",
+            "run_id":"019d-x",
+            "parent_run_id":null,
+            "manifest_path":"/x",
+            "mode":"flat"
+        }"#;
+        let ev: PitbossEvent = serde_json::from_str(json).unwrap();
+        match ev {
+            PitbossEvent::RunDispatched { survive_parent, .. } => assert!(!survive_parent),
+            other => panic!("expected RunDispatched, got {other:?}"),
+        }
     }
 
     #[test]

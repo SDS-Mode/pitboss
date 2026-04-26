@@ -195,6 +195,66 @@ pub struct Manifest {
     /// External MCP servers injected into all actor configs.
     #[serde(default, rename = "mcp_server")]
     pub mcp_servers: Vec<McpServerSpec>,
+    /// Optional `[lifecycle]` section: declares run-survival semantics and
+    /// orchestrator notification expectations. See [`Lifecycle`] for the
+    /// coupling rules enforced at validate time.
+    #[serde(default)]
+    pub lifecycle: Option<Lifecycle>,
+}
+
+/// `[lifecycle]` manifest section. Two coupled controls:
+///
+/// - `survive_parent` — opt in to outliving the process that spawned this
+///   `pitboss dispatch`. Default `false` (the dispatch dies with its parent,
+///   matching pitboss's existing "controlled cancellation" posture).
+///
+/// - `notify` — optional inline `[[notification]]`-style sink declaration,
+///   convenient for "I want this run's lifecycle events sent to a specific
+///   place without needing a separate `[[notification]]` block." Reuses the
+///   existing [`crate::notify::config::NotificationConfig`] shape, so the
+///   same SSRF rules apply (https-only, no loopback). Operators wanting
+///   loopback orchestrator delivery should use `PITBOSS_PARENT_NOTIFY_URL`
+///   instead — the env-var path is operator-trusted and bypasses the
+///   manifest-author SSRF guard.
+///
+/// Coupling enforced at [`crate::manifest::validate`] time:
+/// `survive_parent = true` requires AT LEAST ONE of:
+///   - this section's `notify` field set, OR
+///   - at least one `[[notification]]` section declared at the manifest top
+///     level
+///
+/// A naked `survive_parent = true` with no notification target is rejected
+/// because the orchestrator that's losing process-level control over the
+/// run needs SOME signal that the run actually finished.
+///
+/// Why we don't ALSO accept `PITBOSS_PARENT_NOTIFY_URL` as satisfying the
+/// coupling at validate time: validate runs against the manifest in
+/// isolation (CI gate, pre-flight check) and cannot see the env vars that
+/// will be present at the eventual `pitboss dispatch` invocation. The
+/// dispatch-time check (in addition) verifies a router actually got built;
+/// if the operator relies solely on the env-var path, the manifest must
+/// still declare at least a no-cost `kind = "log"` notification to satisfy
+/// the validate gate.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
+#[serde(deny_unknown_fields)]
+pub struct Lifecycle {
+    /// Opt-in: this dispatch is allowed to outlive its parent process.
+    /// Pitboss communicates the intent via the [`crate::notify::PitbossEvent::RunDispatched`]
+    /// event payload; the orchestrator decides whether to exclude the
+    /// sub-pitboss process group from any cancel-tree-walk it performs.
+    /// Default: `false`.
+    #[serde(default)]
+    #[field(
+        label = "Survive parent",
+        help = "Allow this dispatch to outlive its parent process. Requires a notify target."
+    )]
+    pub survive_parent: bool,
+    /// Optional inline `[[notification]]`-style sink. When present, gets
+    /// merged into the run's notification router alongside any top-level
+    /// `[[notification]]` sections.
+    #[serde(default)]
+    #[field(skip)]
+    pub notify: Option<crate::notify::config::NotificationConfig>,
 }
 
 /// TOML schema for a single `[[approval_policy]]` rule.

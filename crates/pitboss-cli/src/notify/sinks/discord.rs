@@ -67,16 +67,23 @@ impl DiscordSink {
                 parent_run_id,
                 manifest_path,
                 mode,
+                survive_parent,
             } => {
                 let parent_line = parent_run_id.as_deref().map_or(String::new(), |p| {
                     format!("\n**Parent:** {}", escape_discord_md(p))
                 });
+                let survive_line = if *survive_parent {
+                    "\n**Survives parent:** yes".to_string()
+                } else {
+                    String::new()
+                };
                 let desc = format!(
-                    "**Run:** {}\n**Manifest:** {}\n**Mode:** {}{}",
+                    "**Run:** {}\n**Manifest:** {}\n**Mode:** {}{}{}",
                     escape_discord_md(run_id),
                     escape_discord_md(manifest_path),
                     escape_discord_md(mode),
                     parent_line,
+                    survive_line,
                 );
                 ("🚀 Pitboss run dispatched".to_string(), desc)
             }

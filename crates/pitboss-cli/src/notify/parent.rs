@@ -223,6 +223,7 @@ mod tests {
                 parent_run_id: Some("parent-run-7".into()),
                 manifest_path: "/work/child.toml".into(),
                 mode: "flat".into(),
+                survive_parent: false,
             },
             Utc::now(),
         );

@@ -43,6 +43,57 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`[lifecycle]` manifest section + `survive_parent` declaration** —
+  follow-up A from issue #133. Lets a manifest formally declare that this
+  dispatch should be allowed to outlive its parent process (use case: an
+  agent's `pitboss dispatch <child.toml>` from inside its task worktree
+  needs to keep running after the agent's lead claude exits or times
+  out). Two coupled controls:
+
+  ```toml
+  [lifecycle]
+  survive_parent = true
+  notify = { kind = "webhook", url = "https://orchestrator.internal/events", events = ["run_dispatched", "run_finished"] }
+  ```
+
+  The `notify` field is optional and inline (same shape as
+  `[[notification]]`); when present it's validated by the same SSRF rules
+  as the top-level form. `pitboss validate` enforces the coupling:
+  `survive_parent = true` requires AT LEAST ONE notification target
+  (inline `[lifecycle].notify` or a top-level `[[notification]]` section),
+  so the orchestrator that's losing process-level control of the run can
+  still observe its outcome. Operators delivering events solely via
+  `PITBOSS_PARENT_NOTIFY_URL` (the env-var path shipped earlier in
+  v0.10) need to declare a no-cost `kind = "log"` block to satisfy the
+  validate-time gate, since validate runs against the manifest in
+  isolation and cannot see env vars.
+
+  The inline `[lifecycle].notify` goes through the same SSRF guard as
+  `[[notification]]` (https-only, no loopback). For loopback orchestrator
+  delivery, use `PITBOSS_PARENT_NOTIFY_URL` — that env-var path is
+  operator-trusted and bypasses the manifest-author SSRF guard for
+  exactly that case.
+
+  The `RunDispatched` event payload now carries `survive_parent: bool`
+  so the orchestrator can decide whether to include this run's process
+  group in any cancel-tree-walk it performs:
+
+  ```json
+  {
+    "kind":           "run_dispatched",
+    "run_id":         "019d...",
+    "parent_run_id":  "019c...",
+    "manifest_path":  "/work/child.toml",
+    "mode":           "flat",
+    "survive_parent": true
+  }
+  ```
+
+  No actual cancel-cascade behavior change ships in this PR — the
+  manifest declares intent; how the orchestrator acts on it (tree-walk
+  exclusion, signal handling) is the orchestrator's call. The
+  RacerX-side plumbing for tree-walk exclusion is tracked separately.
+
 - **`pitboss list [--active] [--json]`** — flat-CLI inventory of recent runs
   under `~/.local/share/pitboss/runs/`. Mirrors the `pitboss-tui list`
   output but without depending on the TUI binary, so orchestrators (RacerX,

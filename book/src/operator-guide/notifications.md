@@ -134,3 +134,47 @@ Sample `run_dispatched` payload:
 ```
 
 `parent_run_id` is `null` for top-level dispatches.
+
+## `[lifecycle]` section: surviving the parent (v0.10+)
+
+A second control on the same orchestrator-visibility theme: the optional
+`[lifecycle]` section lets a manifest formally declare that this dispatch
+is allowed to outlive the process that spawned it. Use case: an agent's
+`pitboss dispatch <child.toml>` from inside its task worktree needs to
+keep running after the agent's lead claude exits or hits the orchestrator's
+task timeout.
+
+```toml
+[lifecycle]
+survive_parent = true
+notify = { kind = "webhook", url = "https://orchestrator.internal/events", events = ["run_dispatched", "run_finished"] }
+```
+
+`survive_parent`
+: Default `false` (matching pitboss's existing "dies with parent" posture). When set to `true`, the dispatcher communicates the intent via the `RunDispatched` event payload's `survive_parent` field — the orchestrator decides whether to exclude this run's process group from any cancel-tree-walk it performs.
+
+`notify` (optional)
+: Inline `[[notification]]`-style sink. Same shape and same SSRF rules (https-only, no loopback). When present, gets merged into the run's notification router alongside any top-level `[[notification]]` sections.
+
+### Validate-time coupling
+
+`pitboss validate` rejects `survive_parent = true` without a notification target. Either an inline `[lifecycle].notify` OR at least one top-level `[[notification]]` section satisfies the rule. The reasoning: an orchestrator that's losing process-level control of the run needs *some* signal that the run actually finished — a naked detachment with no out-of-band notify is the worst-orphan case the schema aims to prevent.
+
+If you intend to deliver lifecycle events solely via `PITBOSS_PARENT_NOTIFY_URL`, declare a no-cost `kind = "log"` notification block to satisfy the validate gate (the env-var sink is configured at dispatch-time and validate cannot see it):
+
+```toml
+[lifecycle]
+survive_parent = true
+
+[[notification]]
+kind = "log"
+events = ["run_dispatched", "run_finished"]
+```
+
+### When to use which
+
+| Case | Use |
+|---|---|
+| Loopback orchestrator on the same host | `PITBOSS_PARENT_NOTIFY_URL` env var (operator-trusted, bypasses SSRF guard) |
+| HTTPS endpoint on a non-loopback host | `[lifecycle].notify` or `[[notification]]` with `kind = "webhook"` |
+| Just want to cleanly outlive the parent | `[lifecycle].survive_parent = true` + any of the above |

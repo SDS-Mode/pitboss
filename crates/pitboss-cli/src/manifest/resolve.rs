@@ -125,6 +125,11 @@ pub struct ResolvedManifest {
     pub container: Option<ContainerConfig>,
     #[serde(default)]
     pub mcp_servers: Vec<crate::manifest::schema::McpServerSpec>,
+    /// Resolved `[lifecycle]` section. `None` when the manifest omits it
+    /// entirely (the common case — pitboss's default semantics apply: dies
+    /// with parent, no out-of-band lifecycle notify expected).
+    #[serde(default)]
+    pub lifecycle: Option<crate::manifest::schema::Lifecycle>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -213,6 +218,7 @@ pub fn resolve(
         approval_rules,
         container: manifest.container,
         mcp_servers: manifest.mcp_servers,
+        lifecycle: manifest.lifecycle,
     })
 }
 
