@@ -71,6 +71,52 @@ fn main() -> Result<()> {
         Command::Schema { format, check } => {
             std::process::exit(run_schema(format, check.as_deref()));
         }
+        Command::Init {
+            output,
+            template,
+            force,
+        } => {
+            std::process::exit(run_init(template.into(), output.as_deref(), force));
+        }
+    }
+}
+
+/// Drive `pitboss init`. Returns the exit code.
+///
+/// Exit codes:
+///   0 — wrote the template (or printed it to stdout)
+///   1 — output path already exists and `--force` was not supplied
+///   2 — write failed (parent missing, permissions, …)
+fn run_init(
+    template: crate::manifest::init_template::InitTemplate,
+    output: Option<&std::path::Path>,
+    force: bool,
+) -> i32 {
+    let body = template.render();
+    match output {
+        None => {
+            print!("{body}");
+            0
+        }
+        Some(path) => {
+            if path.exists() && !force {
+                eprintln!(
+                    "pitboss init: refusing to overwrite {} (pass --force to allow)",
+                    path.display()
+                );
+                return 1;
+            }
+            if let Err(e) = std::fs::write(path, body) {
+                eprintln!("pitboss init: writing {}: {e}", path.display());
+                return 2;
+            }
+            eprintln!(
+                "pitboss init: wrote {} template to {}",
+                template.slug(),
+                path.display()
+            );
+            0
+        }
     }
 }
 

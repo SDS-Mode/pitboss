@@ -143,6 +143,27 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Emit a starter manifest TOML to stdout or a named file.
+    ///
+    /// Two templates: `simple` (one [lead] driving a flat worker pool) and
+    /// `full` (coordinator + sub-leads + workers + commented optional
+    /// sections). Both are valid v0.9 manifests once you fill in the
+    /// placeholder paths and prompt. Use `pitboss validate` to verify
+    /// your edits.
+    ///
+    /// The complete reference (every field, no defaults hidden) lives at
+    /// `docs/manifest-reference.toml`; produce it with
+    /// `pitboss schema --format=example`.
+    Init {
+        /// Output path. If omitted, prints to stdout.
+        output: Option<PathBuf>,
+        /// Template to emit. `simple` is the default 80% case.
+        #[arg(short, long, value_enum, default_value_t = InitTemplateArg::Simple)]
+        template: InitTemplateArg,
+        /// Overwrite the output file if it already exists.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Emit machine-readable views of the manifest schema.
     ///
     /// Supported formats:
@@ -174,6 +195,29 @@ pub enum SchemaFormat {
     Map,
     /// Complete reference TOML — every field present as `key = placeholder`.
     Example,
+}
+
+/// Starter templates supported by `pitboss init`.
+///
+/// Mirrors [`crate::manifest::init_template::InitTemplate`] — kept separate so
+/// the clap surface doesn't depend on `clap::ValueEnum` leaking into the
+/// `manifest` module.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum InitTemplateArg {
+    /// One [lead] driving a flat worker pool. Two levels deep.
+    Simple,
+    /// Coordinator + sub-leads + workers + commented optional sections.
+    Full,
+}
+
+impl From<InitTemplateArg> for crate::manifest::init_template::InitTemplate {
+    fn from(arg: InitTemplateArg) -> Self {
+        match arg {
+            InitTemplateArg::Simple => Self::Simple,
+            InitTemplateArg::Full => Self::Full,
+        }
+    }
 }
 
 #[cfg(test)]
