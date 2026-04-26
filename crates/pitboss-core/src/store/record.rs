@@ -64,7 +64,17 @@ pub struct TaskRecord {
     pub log_path: PathBuf,
     pub token_usage: TokenUsage,
     pub claude_session_id: Option<String>,
+    /// First ~200 chars of the assistant's chosen final message, with an
+    /// ellipsis if truncated. Suitable for table cells and chat embeds where
+    /// a long blob would overflow the layout. Consumers that need the
+    /// complete text should read `final_message`.
     pub final_message_preview: Option<String>,
+    /// Untruncated assistant final message. Same source as
+    /// `final_message_preview` (longest non-trivial assistant turn) without
+    /// the 200-char cap. Added in v0.10 — `#[serde(default)]` makes pre-v0.10
+    /// `summary.json` files still parse with this field as `None`.
+    #[serde(default)]
+    pub final_message: Option<String>,
     /// Task id of the lead that spawned this worker, or `None` for flat-mode
     /// tasks and the lead itself.
     #[serde(default)]
@@ -141,6 +151,7 @@ mod tests {
             },
             claude_session_id: Some("sess".into()),
             final_message_preview: Some("ok".into()),
+            final_message: Some("ok".into()),
             parent_task_id: None,
             pause_count: 0,
             reprompt_count: 0,
@@ -170,6 +181,7 @@ mod tests {
             token_usage: TokenUsage::default(),
             claude_session_id: None,
             final_message_preview: None,
+            final_message: None,
             parent_task_id: Some("lead-abc".into()),
             pause_count: 0,
             reprompt_count: 0,
@@ -231,6 +243,7 @@ mod tests {
             token_usage: TokenUsage::default(),
             claude_session_id: None,
             final_message_preview: None,
+            final_message: None,
             parent_task_id: None,
             pause_count: 0,
             reprompt_count: 0,
@@ -290,6 +303,63 @@ mod tests {
     }
 
     #[test]
+    fn task_record_missing_final_message_deserializes_as_none() {
+        // Pre-v0.10 records didn't have a `final_message` field. The
+        // back-compat test guards against breaking existing summary.json
+        // files when the dispatcher is upgraded.
+        let old_json = r#"{
+            "task_id": "t1",
+            "status": "Success",
+            "exit_code": 0,
+            "started_at": "2026-04-17T00:00:00Z",
+            "ended_at":   "2026-04-17T00:00:30Z",
+            "duration_ms": 30000,
+            "worktree_path": null,
+            "log_path": "/dev/null",
+            "token_usage": {"input":0,"output":0,"cache_read":0,"cache_creation":0},
+            "claude_session_id": null,
+            "final_message_preview": "snippet…"
+        }"#;
+        let rec: TaskRecord = serde_json::from_str(old_json).unwrap();
+        assert_eq!(rec.final_message_preview.as_deref(), Some("snippet…"));
+        assert!(rec.final_message.is_none());
+    }
+
+    #[test]
+    fn task_record_round_trips_full_final_message() {
+        let full = "a".repeat(500);
+        let rec = TaskRecord {
+            task_id: "t".into(),
+            status: TaskStatus::Success,
+            exit_code: Some(0),
+            started_at: Utc.with_ymd_and_hms(2026, 4, 26, 0, 0, 0).unwrap(),
+            ended_at: Utc.with_ymd_and_hms(2026, 4, 26, 0, 0, 1).unwrap(),
+            duration_ms: 1_000,
+            worktree_path: None,
+            log_path: PathBuf::from("/dev/null"),
+            token_usage: TokenUsage::default(),
+            claude_session_id: None,
+            final_message_preview: Some(format!("{}…", &full[..200])),
+            final_message: Some(full.clone()),
+            parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+            failure_reason: None,
+        };
+        let s = serde_json::to_string(&rec).unwrap();
+        let back: TaskRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.final_message.as_deref(), Some(full.as_str()));
+        assert_eq!(
+            back.final_message_preview.as_ref().unwrap().chars().count(),
+            201
+        );
+    }
+
+    #[test]
     fn task_record_roundtrips_counters() {
         let rec = TaskRecord {
             task_id: "w".into(),
@@ -303,6 +373,7 @@ mod tests {
             token_usage: TokenUsage::default(),
             claude_session_id: None,
             final_message_preview: None,
+            final_message: None,
             parent_task_id: None,
             pause_count: 2,
             reprompt_count: 1,

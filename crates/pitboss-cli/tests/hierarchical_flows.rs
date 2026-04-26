@@ -274,6 +274,7 @@ async fn wait_actor_alias_resolves_worker_id() {
             token_usage: Default::default(),
             claude_session_id: None,
             final_message_preview: Some("ok".into()),
+            final_message: Some("ok".into()),
             parent_task_id: Some("lead".into()),
             pause_count: 0,
             reprompt_count: 0,

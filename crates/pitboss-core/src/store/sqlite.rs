@@ -70,6 +70,7 @@ impl SqliteStore {
         migrate_v04_event_counters(&conn)?;
         migrate_task_model(&conn)?;
         migrate_failure_reason(&conn)?;
+        migrate_final_message(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -145,6 +146,31 @@ fn migrate_failure_reason(conn: &rusqlite::Connection) -> Result<(), StoreError>
             [],
         )
         .map_err(|e| StoreError::Incomplete(format!("migrate failure_reason alter: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Idempotent migration: add the v0.10 `final_message` column (untruncated
+/// assistant final message — sibling to the existing 200-char preview). Lets
+/// consumers read the complete text from `summary.json` / the `SQLite` store
+/// without re-parsing per-task `stdout.log` for the terminal `result` event.
+fn migrate_final_message(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let has_col = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('task_records') \
+                 WHERE name = 'final_message'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate final_message prepare: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate final_message exists: {e}")))?
+    };
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE task_records ADD COLUMN final_message TEXT NULL",
+            [],
+        )
+        .map_err(|e| StoreError::Incomplete(format!("migrate final_message alter: {e}")))?;
     }
     Ok(())
 }
@@ -263,6 +289,7 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             approvals_rejected    INTEGER NOT NULL DEFAULT 0,
             model                 TEXT NULL,
             failure_reason        TEXT NULL,
+            final_message         TEXT NULL,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -367,6 +394,7 @@ struct TaskRow {
     approvals_rejected: i64,
     model: Option<String>,
     failure_reason: Option<String>,
+    final_message: Option<String>,
 }
 
 impl TaskRow {
@@ -394,6 +422,7 @@ impl TaskRow {
             approvals_rejected: row.get("approvals_rejected").unwrap_or(0),
             model: row.get("model").unwrap_or(None),
             failure_reason: row.get("failure_reason").unwrap_or(None),
+            final_message: row.get("final_message").unwrap_or(None),
         })
     }
 
@@ -419,6 +448,7 @@ impl TaskRow {
             },
             claude_session_id: self.claude_session_id,
             final_message_preview: self.final_message_preview,
+            final_message: self.final_message,
             parent_task_id: self.parent_task_id,
             pause_count: self.pause_count.try_into().unwrap_or(0),
             reprompt_count: self.reprompt_count.try_into().unwrap_or(0),
@@ -467,7 +497,8 @@ fn fetch_task_records(
                   token_input, token_output, token_cache_read, token_cache_creation, \
                   claude_session_id, final_message_preview, parent_task_id, \
                   pause_count, reprompt_count, approvals_requested, \
-                  approvals_approved, approvals_rejected, model, failure_reason \
+                  approvals_approved, approvals_rejected, model, failure_reason, \
+                  final_message \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -587,9 +618,10 @@ impl SessionStore for SqliteStore {
                       token_input, token_output, token_cache_read, token_cache_creation, \
                       claude_session_id, final_message_preview, parent_task_id, \
                       pause_count, reprompt_count, approvals_requested, \
-                      approvals_approved, approvals_rejected, model, failure_reason) \
+                      approvals_approved, approvals_rejected, model, failure_reason, \
+                      final_message) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                             ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -620,6 +652,7 @@ impl SessionStore for SqliteStore {
                             .failure_reason
                             .as_ref()
                             .and_then(|fr| serde_json::to_string(fr).ok()),
+                        record.final_message,
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -724,6 +757,7 @@ mod sqlite_tests {
             token_usage: TokenUsage::default(),
             claude_session_id: None,
             final_message_preview: None,
+            final_message: None,
             parent_task_id: None,
             pause_count: 0,
             reprompt_count: 0,
@@ -1016,6 +1050,48 @@ mod sqlite_tests {
         assert_eq!(back.tasks[0].approvals_approved, 1);
 
         // Re-open: must not ALTER again.
+        let _s2 = SqliteStore::new(db_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrates_old_db_missing_final_message_column() {
+        // Pre-v0.10 schema has `final_message_preview` but not `final_message`.
+        // Migration must add the column idempotently and round-trip a long
+        // assistant message that would have been truncated under the preview cap.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("pre_v010.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (run_id TEXT PRIMARY KEY, manifest_path TEXT NOT NULL, \
+                 pitboss_version TEXT NOT NULL, claude_version TEXT, started_at TEXT NOT NULL, \
+                 ended_at TEXT, tasks_total INTEGER, tasks_failed INTEGER, was_interrupted INTEGER DEFAULT 0); \
+                 CREATE TABLE task_records (run_id TEXT NOT NULL, task_id TEXT NOT NULL, \
+                 status TEXT NOT NULL, exit_code INTEGER, started_at TEXT, ended_at TEXT, \
+                 duration_ms INTEGER, worktree_path TEXT, log_path TEXT, token_input INTEGER, \
+                 token_output INTEGER, token_cache_read INTEGER, token_cache_creation INTEGER, \
+                 claude_session_id TEXT, final_message_preview TEXT, parent_task_id TEXT NULL, \
+                 pause_count INTEGER NOT NULL DEFAULT 0, \
+                 reprompt_count INTEGER NOT NULL DEFAULT 0, \
+                 approvals_requested INTEGER NOT NULL DEFAULT 0, \
+                 approvals_approved INTEGER NOT NULL DEFAULT 0, \
+                 approvals_rejected INTEGER NOT NULL DEFAULT 0, \
+                 model TEXT NULL, failure_reason TEXT NULL, \
+                 PRIMARY KEY (run_id, task_id));",
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+        let full = "x".repeat(1500);
+        let mut rec = rec("t", TaskStatus::Success);
+        rec.final_message_preview = Some(format!("{}…", &full[..200]));
+        rec.final_message = Some(full.clone());
+        store.append_record(run_id, &rec).await.unwrap();
+        let back = store.load_run(run_id).await.unwrap();
+        assert_eq!(back.tasks[0].final_message.as_deref(), Some(full.as_str()));
+        // Re-open is a no-op (column now exists).
         let _s2 = SqliteStore::new(db_path).unwrap();
     }
 }

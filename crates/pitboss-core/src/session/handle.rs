@@ -93,6 +93,7 @@ impl SessionHandle {
                     token_usage: TokenUsage::default(),
                     claude_session_id: None,
                     final_message_preview: None,
+                    final_message: None,
                     started_at,
                     ended_at: Utc::now(),
                 };
@@ -262,12 +263,15 @@ impl SessionHandle {
             },
         };
 
+        let final_message = accum.last_text.clone();
+        let final_message_preview = final_message.as_deref().map(truncate_preview);
         SessionOutcome {
             final_state,
             exit_code,
             token_usage: accum.usage,
             claude_session_id: accum.session_id.clone(),
-            final_message_preview: accum.last_text.clone(),
+            final_message_preview,
+            final_message,
             started_at,
             ended_at,
         }
@@ -308,17 +312,16 @@ async fn stream_loop(
                     match ev {
                         Event::AssistantText { text } => {
                             let mut a = accum.lock().await;
-                            // Prefer the longest nontrivial assistant text as the preview.
-                            // Rationale: claude often appends a short confirmation
-                            // ("Done.", "OK") after the real output; taking the last text
-                            // buries the real content. A length-keyed winner avoids that.
+                            // Prefer the longest nontrivial assistant text. Rationale:
+                            // claude often appends a short confirmation ("Done.", "OK")
+                            // after the real output; taking the last text buries the
+                            // real content. A length-keyed winner avoids that. Stored
+                            // untruncated so consumers reading `final_message` see the
+                            // complete text — preview is built once at outcome time.
                             let trimmed_len = text.trim().len();
-                            let current_len = a
-                                .last_text
-                                .as_deref()
-                                .map_or(0, |t| t.trim_end_matches('…').trim().len());
+                            let current_len = a.last_text.as_deref().map_or(0, |t| t.trim().len());
                             if trimmed_len >= current_len {
-                                a.last_text = Some(truncate_preview(&text));
+                                a.last_text = Some(text);
                             }
                         }
                         Event::Result {

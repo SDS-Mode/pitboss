@@ -55,6 +55,35 @@ mod happy_path_tests {
         assert_eq!(outcome.token_usage.output, 25);
         assert_eq!(outcome.token_usage.cache_read, 100);
         assert_eq!(outcome.final_message_preview.as_deref(), Some("all done"));
+        assert_eq!(outcome.final_message.as_deref(), Some("all done"));
+    }
+
+    #[tokio::test]
+    async fn long_assistant_message_lands_untruncated_in_final_message() {
+        // Regression for issue #124: the 200-char preview cap silently
+        // truncated the only field downstream consumers had access to. The
+        // session outcome must now expose both the truncated preview and the
+        // untruncated text so consumers can pick the right one.
+        let body = "abc ".repeat(200); // 800 chars — well past the preview cap
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{body}"}}]}}}}"#
+        );
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init"}"#)
+            .stdout_line(&line)
+            .stdout_line(r#"{"type":"result","subtype":"success","session_id":"s","result":"ok","usage":{"input_tokens":0,"output_tokens":0}}"#)
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let outcome = SessionHandle::new("t-long", spawner, cmd())
+            .run_to_completion(CancelToken::new(), Duration::from_secs(30))
+            .await;
+
+        let preview = outcome.final_message_preview.as_deref().unwrap();
+        let full = outcome.final_message.as_deref().unwrap();
+        assert!(preview.ends_with('…'), "preview should be truncated");
+        assert_eq!(preview.chars().count(), 201, "200 chars + ellipsis");
+        assert_eq!(full.chars().count(), body.chars().count());
+        assert!(!full.contains('…'), "full message must not be truncated");
     }
 
     #[tokio::test]
