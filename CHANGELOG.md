@@ -43,6 +43,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss list [--active] [--json]`** — flat-CLI inventory of recent runs
+  under `~/.local/share/pitboss/runs/`. Mirrors the `pitboss-tui list`
+  output but without depending on the TUI binary, so orchestrators (RacerX,
+  CI scripts, dashboards) can shell out to it directly. `--active` narrows
+  to runs whose dispatcher is alive right now (`status = running`); use
+  `pitboss prune --dry-run` to surface stale / orphaned entries instead.
+  `--json` emits a stable record array — `{run_id, run_dir, started_at,
+  tasks_total, tasks_failed, status}` — suitable for piping through `jq`
+  or consuming from a wrapping process. Companion to the parent-notify
+  hook (also #133): notifications give push observability, `pitboss list`
+  gives pull.
+
 - **Parent-orchestrator notification hook** — closes issue #133. Two new
   env vars give a wrapping orchestrator (Discord bot, dispatcher service,
   CI runner) visibility into runs the agent itself spawns from inside its

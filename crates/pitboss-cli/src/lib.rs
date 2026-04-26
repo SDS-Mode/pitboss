@@ -10,6 +10,7 @@ pub mod cli;
 pub mod control;
 pub mod diff;
 pub mod dispatch;
+pub mod list;
 pub mod manifest;
 pub mod mcp;
 pub mod notify;

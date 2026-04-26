@@ -164,6 +164,27 @@ pub enum Command {
         #[arg(long, value_name = "USD")]
         check: Option<f64>,
     },
+    /// Inventory of recent runs under `~/.local/share/pitboss/runs/`.
+    ///
+    /// Mirrors `pitboss-tui list` but as a flat-CLI subcommand orchestrators
+    /// can shell out to without depending on the TUI binary. `--active`
+    /// narrows to runs whose dispatcher is alive right now (`status =
+    /// running`); use `pitboss prune --dry-run` for stale / orphaned
+    /// entries. `--json` emits an array suitable for orchestrator
+    /// consumption (RacerX, CI scripts).
+    List {
+        /// Show only runs whose dispatcher is alive (status = running).
+        /// Excludes complete, stale, and aborted runs.
+        #[arg(long)]
+        active: bool,
+        /// Emit machine-readable JSON instead of a human table.
+        #[arg(long)]
+        json: bool,
+        /// Override the runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs`.
+        #[arg(long, value_name = "PATH")]
+        runs_dir: Option<PathBuf>,
+    },
     /// Sweep orphaned run directories.
     ///
     /// A run is *orphaned* when its dispatcher exited uncleanly
