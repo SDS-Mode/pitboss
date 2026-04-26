@@ -43,6 +43,19 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`final_message` field on `TaskRecord`** — sibling to the existing
+  `final_message_preview` (still capped at 200 chars for layout-friendly
+  displays), carrying the untruncated assistant final message. Closes
+  issue #124. Previously, consumers reading `summary.json` for the assistant's
+  reply silently received ~14% of the actual content (a 1478-char message
+  would land in the JSON as 200 chars + ellipsis), forcing them to fall back
+  to parsing the per-task `stdout.log` stream-json for the terminal `result`
+  event. Now the dispatcher writes both the preview (for tables and chat
+  embeds) and the full text. SQLite store gains a `final_message TEXT NULL`
+  column with an idempotent `migrate_final_message` migration; pre-v0.10
+  databases and `summary.json` files continue to deserialize cleanly with
+  the field defaulting to `None`.
+
 - **`pitboss tree <manifest> [--check <USD>]`** — pre-flight
   visualisation + cost gate. Prints the dispatch topology (root
   lead, depth-2 controls, `[sublead_defaults]`, OR the flat-mode

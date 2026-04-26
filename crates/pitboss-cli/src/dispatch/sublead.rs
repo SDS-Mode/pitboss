@@ -856,6 +856,7 @@ async fn spawn_sublead_session(
             token_usage: total_token_usage,
             claude_session_id: final_outcome.claude_session_id,
             final_message_preview: final_outcome.final_message_preview,
+            final_message: final_outcome.final_message,
             parent_task_id: Some(state_bg.root.lead_id.clone()),
             pause_count: 0,
             reprompt_count,

@@ -416,6 +416,7 @@ pub async fn run_hierarchical(
         token_usage: total_token_usage,
         claude_session_id: final_outcome.claude_session_id,
         final_message_preview: final_outcome.final_message_preview,
+        final_message: final_outcome.final_message,
         parent_task_id: None, // lead has no parent
         pause_count: lead_counters.pause_count,
         reprompt_count: total_reprompt_count,
@@ -508,6 +509,7 @@ pub async fn run_hierarchical(
                         token_usage: Default::default(),
                         claude_session_id: None,
                         final_message_preview: Some("cancelled when lead exited".into()),
+                        final_message: None,
                         parent_task_id: Some(lead.id.clone()),
                         pause_count: 0,
                         reprompt_count: 0,
