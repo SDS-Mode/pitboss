@@ -203,7 +203,14 @@ pub async fn execute(
     store: Arc<dyn SessionStore>,
     dry_run: bool,
 ) -> Result<i32> {
+    // Snapshot any `PITBOSS_RUN_ID` already in our env BEFORE we overwrite it
+    // with our own run_id. If we're running under a parent orchestrator (or as
+    // a sub-dispatch the agent triggered from inside a worktree), the prior
+    // value is the parent run id reported on `RunDispatched`. See the
+    // `notify::parent` module for the full env-var contract (issue #133).
+    let parent_run_id = crate::notify::parent::parent_run_id();
     let run_id = Uuid::now_v7();
+    crate::notify::parent::set_run_id_env(&run_id.to_string());
 
     let run_dir = resolved.run_dir.clone();
     let run_subdir = run_dir.join(run_id.to_string());
@@ -250,26 +257,29 @@ pub async fn execute(
     // (not by a user signal), so was_interrupted is not set in that case.
     let halt_drained: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    // Build notification router if manifest has any [[notification]] sections.
-    let notification_router = if !resolved.notifications.is_empty() {
-        let http = std::sync::Arc::new(reqwest::Client::new());
-        let sinks: Vec<_> = resolved
-            .notifications
-            .iter()
-            .enumerate()
-            .map(|(idx, cfg)| {
-                let sink = crate::notify::sinks::build(cfg, idx, &http)
-                    .context("build notification sink")?;
-                let filter = crate::notify::SinkFilter::from(cfg);
-                Ok::<_, anyhow::Error>((sink, filter))
-            })
-            .collect::<Result<_>>()?;
-        Some(std::sync::Arc::new(crate::notify::NotificationRouter::new(
-            sinks,
-        )))
-    } else {
-        None
-    };
+    // Build notification router from manifest [[notification]] sections AND
+    // the optional `PITBOSS_PARENT_NOTIFY_URL` env var. Returns None when
+    // both sources are empty, so the no-notify common case stays cost-free.
+    let http = std::sync::Arc::new(reqwest::Client::new());
+    let notification_router = crate::notify::parent::build_router(&resolved.notifications, &http)?;
+
+    // Fire RunDispatched immediately. The orchestrator wants to register
+    // the run before any tokens are spent — emitting at finalize-time only
+    // (the prior behavior) defeats the point of the hook.
+    if let Some(router) = &notification_router {
+        let env = crate::notify::NotificationEnvelope::new(
+            &run_id.to_string(),
+            crate::notify::Severity::Info,
+            crate::notify::PitbossEvent::RunDispatched {
+                run_id: run_id.to_string(),
+                parent_run_id: parent_run_id.clone(),
+                manifest_path: manifest_path.display().to_string(),
+                mode: "flat".to_string(),
+            },
+            Utc::now(),
+        );
+        let _ = router.dispatch(env).await;
+    }
 
     // Build a minimal DispatchState so the control server has something to bind
     // against. Flat mode has no lead and no spawn_worker path, but cancel and

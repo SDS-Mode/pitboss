@@ -41,6 +41,7 @@ The top-level field is `kind`, not `type`. TOML parses it literally — a `type 
 |-------|---------|--------------|
 | `approval_request` | Warning | An approval is enqueued for operator action (v0.6+) |
 | `approval_pending` | Warning | An approval enqueues and awaits operator action with no TUI attached (v0.6+) — distinct from `approval_request` for alerting when a run is blocked |
+| `run_dispatched` | Info | The dispatch starts, immediately after a `run_id` is minted (v0.10+) |
 | `run_finished` | Info | The dispatch completes (all tasks settled or cancelled) |
 | `budget_exceeded` | Critical | A `spawn_worker` or `spawn_sublead` fails due to budget exhaustion |
 
@@ -98,3 +99,38 @@ The Discord sink escapes markdown and mention characters (`* _ ~ \` `|` `> # [ ]
 Slack sink parallel hardening is a known roadmap item — until it lands, avoid routing untrusted content (task summaries from external sources) through Slack.
 
 For the canonical notification schema reference, see [`AGENTS.md`](https://github.com/SDS-Mode/pitboss/blob/main/AGENTS.md) in the source tree.
+
+## Parent-orchestrator notify hook (v0.10+)
+
+If you wrap pitboss in a host process (Discord bot, dispatcher service, CI runner) and you want visibility into runs the agent itself spawns from inside its task worktree (`pitboss dispatch <child.toml>`), set two env vars on the parent process — no manifest cooperation required:
+
+```bash
+export PITBOSS_PARENT_NOTIFY_URL=http://localhost:8080/pitboss-events
+pitboss dispatch root-manifest.toml
+```
+
+`PITBOSS_PARENT_NOTIFY_URL`
+: Every `pitboss dispatch` invocation (top-level AND any nested call from inside a worktree) builds an ephemeral webhook sink targeting this URL and emits at run start (`run_dispatched`) and run end (`run_finished`). Runs alongside any manifest-declared `[[notification]]` sinks. Loopback / private-address URLs are accepted here (the canonical orchestrator topology is `http://localhost:N` on the same host) — manifest URLs still go through the strict SSRF guard since a manifest is user-authored content; an env var can only be set by the operator.
+
+`PITBOSS_RUN_ID`
+: Set automatically by every `pitboss dispatch` to its own run uuid. Standard env-var inheritance propagates the value into spawned claude subprocesses; if the agent runs `pitboss dispatch <child.toml>` from inside its worktree, the nested invocation reads the inherited value and reports it as `parent_run_id` on the child's `run_dispatched` event so your orchestrator can correlate parent ↔ child runs. You don't need to set this yourself — pitboss does it for you.
+
+Sample `run_dispatched` payload:
+
+```json
+{
+  "dedup_key": "019d...:run_dispatched",
+  "severity":  "info",
+  "ts":        "2026-04-26T12:00:00Z",
+  "source":    "019d...",
+  "event": {
+    "kind":          "run_dispatched",
+    "run_id":        "019d...",
+    "parent_run_id": "019c...",
+    "manifest_path": "/work/child.toml",
+    "mode":          "flat"
+  }
+}
+```
+
+`parent_run_id` is `null` for top-level dispatches.

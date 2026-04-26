@@ -37,7 +37,13 @@ pub async fn run_hierarchical(
     // operator has the TUI to approve things).
     crate::dispatch::runner::print_headless_warnings_if_applicable(&resolved);
 
+    // Snapshot the inherited PITBOSS_RUN_ID (the parent orchestrator's run id,
+    // when one exists) BEFORE we overwrite it with our own. See `notify::parent`
+    // for the env-var contract introduced for issue #133.
+    let parent_run_id = crate::notify::parent::parent_run_id();
     let run_id = Uuid::now_v7();
+    crate::notify::parent::set_run_id_env(&run_id.to_string());
+
     let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
     tokio::fs::create_dir_all(&run_dir).await.ok();
 
@@ -93,26 +99,28 @@ pub async fn run_hierarchical(
         }
     };
 
-    // Build notification router if manifest has any [[notification]] sections.
-    let notification_router = if !resolved.notifications.is_empty() {
-        let http = std::sync::Arc::new(reqwest::Client::new());
-        let sinks: Vec<_> = resolved
-            .notifications
-            .iter()
-            .enumerate()
-            .map(|(idx, cfg)| {
-                let sink = crate::notify::sinks::build(cfg, idx, &http)
-                    .context("build notification sink")?;
-                let filter = crate::notify::SinkFilter::from(cfg);
-                Ok::<_, anyhow::Error>((sink, filter))
-            })
-            .collect::<Result<_>>()?;
-        Some(std::sync::Arc::new(crate::notify::NotificationRouter::new(
-            sinks,
-        )))
-    } else {
-        None
-    };
+    // Build notification router from manifest [[notification]] sections AND
+    // the optional `PITBOSS_PARENT_NOTIFY_URL` env var. See notify::parent
+    // for the parent-orchestrator hook contract (issue #133).
+    let http = std::sync::Arc::new(reqwest::Client::new());
+    let notification_router = crate::notify::parent::build_router(&resolved.notifications, &http)?;
+
+    // Fire RunDispatched up front so a parent orchestrator can register the
+    // run before any tokens spend.
+    if let Some(router) = &notification_router {
+        let env = crate::notify::NotificationEnvelope::new(
+            &run_id.to_string(),
+            crate::notify::Severity::Info,
+            crate::notify::PitbossEvent::RunDispatched {
+                run_id: run_id.to_string(),
+                parent_run_id: parent_run_id.clone(),
+                manifest_path: manifest_path.display().to_string(),
+                mode: "hierarchical".to_string(),
+            },
+            Utc::now(),
+        );
+        let _ = router.dispatch(env).await;
+    }
 
     // 1. Start the MCP server.
     let socket = socket_path_for_run(run_id, &run_dir);
@@ -128,7 +136,7 @@ pub async fn run_hierarchical(
         cleanup_policy,
         run_subdir.clone(),
         resolved.default_approval_policy.unwrap_or_default(),
-        notification_router,
+        notification_router.clone(),
         {
             let s = std::sync::Arc::new(crate::shared_store::SharedStore::new());
             s.start_lease_pruner();
@@ -567,6 +575,27 @@ pub async fn run_hierarchical(
         if let Err(e) = state.root.shared_store.dump_to_path(&dump_path).await {
             tracing::warn!(?e, "shared-store dump failed");
         }
+    }
+
+    // Emit RunFinished. Hierarchical mode used to build the notification
+    // router and never fire this event — consumers only saw the run via
+    // RunDispatched (now) and the per-tool approval traffic. Cost intent
+    // (spent_usd) is left at 0.0 here; the lead-spend accounting work
+    // (separate roadmap item) will populate it.
+    if let Some(router) = &notification_router {
+        let env = crate::notify::NotificationEnvelope::new(
+            &run_id.to_string(),
+            crate::notify::Severity::Info,
+            crate::notify::PitbossEvent::RunFinished {
+                run_id: run_id.to_string(),
+                tasks_total: summary.tasks_total,
+                tasks_failed,
+                duration_ms: u64::try_from(summary.total_duration_ms).unwrap_or(0),
+                spent_usd: 0.0,
+            },
+            Utc::now(),
+        );
+        let _ = router.dispatch(env).await;
     }
 
     // Exit code same as flat dispatch

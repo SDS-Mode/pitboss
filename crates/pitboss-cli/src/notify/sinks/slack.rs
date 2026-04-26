@@ -62,6 +62,25 @@ impl SlackSink {
                 );
                 (header, detail)
             }
+            PitbossEvent::RunDispatched {
+                run_id,
+                parent_run_id,
+                manifest_path,
+                mode,
+            } => {
+                let header = format!("{} Pitboss run dispatched", emoji);
+                let parent_line = parent_run_id.as_deref().map_or(String::new(), |p| {
+                    format!("\n*Parent:* {}", escape_slack_mrkdwn(p))
+                });
+                let detail = format!(
+                    "*Run:* {}\n*Manifest:* {}\n*Mode:* {}{}",
+                    escape_slack_mrkdwn(run_id),
+                    escape_slack_mrkdwn(manifest_path),
+                    escape_slack_mrkdwn(mode),
+                    parent_line,
+                );
+                (header, detail)
+            }
             PitbossEvent::RunFinished {
                 run_id,
                 tasks_total,
