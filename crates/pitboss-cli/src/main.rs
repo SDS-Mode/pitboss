@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp, status};
+use pitboss_cli::{agents_md, attach, cli, diff, dispatch, manifest, mcp, prune, status};
 
 use cli::{Cli, Command};
 
@@ -77,6 +77,26 @@ fn main() -> Result<()> {
             force,
         } => {
             std::process::exit(run_init(template.into(), output.as_deref(), force));
+        }
+        Command::Prune {
+            apply,
+            remove,
+            older_than,
+            include_aborted,
+            runs_dir,
+        } => {
+            let opts = prune::PruneOptions {
+                apply,
+                remove,
+                older_than,
+                include_aborted,
+                runs_dir,
+            };
+            let report = prune::run(&opts);
+            print!("{}", prune::render_report(&report));
+            // Exit non-zero if --apply produced any failures, so CI /
+            // shell loops can detect partial success.
+            std::process::exit(if report.failure_count() > 0 { 1 } else { 0 });
         }
     }
 }

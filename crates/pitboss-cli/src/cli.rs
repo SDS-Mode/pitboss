@@ -143,6 +143,41 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Sweep orphaned run directories.
+    ///
+    /// A run is *orphaned* when its dispatcher exited uncleanly
+    /// (`SIGKILL`, OOM, segfault, host crash) and never finalized
+    /// `summary.json`. By default, prune matches runs in the `Stale`
+    /// state and synthesizes a Cancelled `summary.json` reflecting
+    /// whatever partial state landed in `summary.jsonl`. Pass
+    /// `--remove` to delete the run directory entirely instead.
+    ///
+    /// Defaults to dry-run; `--apply` commits the action.
+    /// `--older-than 24h` filters by age so a fresh `kill -KILL` two
+    /// minutes ago doesn't get swept while you're still investigating.
+    Prune {
+        /// Without this, prune only reports what would happen.
+        #[arg(long)]
+        apply: bool,
+        /// Remove the run directory entirely (and the leftover XDG
+        /// socket file) instead of synthesizing a Cancelled
+        /// `summary.json`.
+        #[arg(long)]
+        remove: bool,
+        /// Only prune runs older than this. Accepts `60s`, `30m`,
+        /// `4h`, `1d`, or a bare number of seconds.
+        #[arg(long, value_name = "DURATION", value_parser = crate::prune::parse_duration)]
+        older_than: Option<std::time::Duration>,
+        /// Also include runs in the `Aborted` state (no `summary.json`,
+        /// no `summary.jsonl` records). Off by default — Aborted runs
+        /// might be the active output of a still-spinning-up dispatcher.
+        #[arg(long)]
+        include_aborted: bool,
+        /// Override the runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs`.
+        #[arg(long, value_name = "PATH")]
+        runs_dir: Option<PathBuf>,
+    },
     /// Emit a starter manifest TOML to stdout or a named file.
     ///
     /// Two templates: `simple` (one [lead] driving a flat worker pool) and

@@ -43,6 +43,29 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss prune` subcommand** — sweep orphaned run directories.
+  Targets `Stale` runs by default (the v0.9 classifier state added in
+  the previous release), with `--include-aborted` to also clean up
+  runs that never produced any output. Two actions: synthesize a
+  Cancelled `summary.json` (default — preserves the partial state in
+  `summary.jsonl` so the run is still inspectable / resumable) or
+  remove the run directory entirely with `--remove` (also unlinks the
+  leftover `$XDG_RUNTIME_DIR/pitboss/<id>.control.sock` file).
+
+  Defaults to dry-run; `--apply` commits the action. `--older-than
+  24h` filters by mtime so a fresh `kill -KILL` two minutes ago
+  doesn't get swept while you're still investigating; accepts `60s`,
+  `30m`, `4h`, `1d`, or a bare number of seconds. Exits non-zero if
+  any candidate's action failed (so CI / shell loops can detect
+  partial success). `--runs-dir <PATH>` overrides the default base
+  for testing or non-standard layouts.
+
+  Replaces the manual cleanup recipe of `rm -rf
+  ~/.local/share/pitboss/runs/<id>` plus
+  `rm /run/user/$(id -u)/pitboss/<id>-*.sock` — fine for an operator
+  who knows the layout, but the built-in subcommand makes the
+  lifecycle legible and scriptable.
+
 - **Run-list `Stale` state + connect-based liveness probe** — the run
   classifier now distinguishes a fourth state, `Stale`, for runs whose
   control socket no longer accepts connections AND whose
