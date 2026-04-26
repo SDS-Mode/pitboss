@@ -162,13 +162,18 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
     }
 
     let is_optional = is_option_type(&field.ty);
+    let has_serde_default = field_has_serde_default(field);
     let inferred = if !enum_values.is_empty() {
         "enum_select"
     } else {
         infer_form_type(&field.ty)
     };
     let form_type_str = form_type.unwrap_or_else(|| inferred.to_string());
-    let required = required_override.unwrap_or(!is_optional);
+    // Required iff (a) not wrapped in Option AND (b) no `#[serde(default)]`
+    // / `#[serde(default = "...")]`. The serde-default branch matters for
+    // primitives like `bool`/`u32` that have a Rust default but should still
+    // render as optional in a form.
+    let required = required_override.unwrap_or(!(is_optional || has_serde_default));
 
     let label_str = label.unwrap_or_else(|| name_str.clone());
     let help_str = help.unwrap_or_default();
@@ -185,6 +190,33 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
             enum_values: &[ #( #enum_values_lits ),* ],
         }
     }))
+}
+
+/// `true` when the field carries any flavor of `#[serde(default)]` —
+/// either the bare `default` token or `default = "func"`. The serde
+/// attribute is parsed token-by-token rather than via `attr.parse_args`
+/// so we don't choke on combined attributes like
+/// `#[serde(default, rename = "task")]`.
+fn field_has_serde_default(field: &syn::Field) -> bool {
+    use syn::Meta;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        // Walk the comma-separated nested meta items. `default` and
+        // `default = "..."` both signal a serde default.
+        for tok in list.tokens.clone() {
+            if let proc_macro2::TokenTree::Ident(ident) = &tok {
+                if ident == "default" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// `true` when the type is `Option<T>` (any path ending in `Option`).

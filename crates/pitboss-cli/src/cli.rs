@@ -143,6 +143,28 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Emit machine-readable views of the manifest schema. Currently
+    /// supports `--format=map` (a markdown reference checked in at
+    /// `docs/manifest-map.md`). The `--check <path>` mode regenerates and
+    /// diffs against an existing file — used in CI to catch drift.
+    Schema {
+        /// Output format. Only `map` is implemented today;
+        /// `n8n-form` is roadmapped.
+        #[arg(long, value_enum, default_value_t = SchemaFormat::Map)]
+        format: SchemaFormat,
+        /// If set, compare the generator output against the file at this
+        /// path and exit non-zero if they differ. Otherwise prints to stdout.
+        #[arg(long, value_name = "PATH")]
+        check: Option<PathBuf>,
+    },
+}
+
+/// Output formats supported by `pitboss schema`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum SchemaFormat {
+    /// Markdown manifest map (one row per field, with file:line refs).
+    Map,
 }
 
 #[cfg(test)]

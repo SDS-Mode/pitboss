@@ -154,6 +154,31 @@ mod tests {
         assert!(f.enum_values.contains(&"never"));
     }
 
+    /// `halt_on_failure: bool` carries `#[serde(default)]`, so even though
+    /// it's not wrapped in `Option`, it should render as optional in the
+    /// metadata. Catches a regression where the derive used to require
+    /// every non-Option field.
+    #[test]
+    fn serde_default_field_is_optional() {
+        let f = RunConfig::field_metadata()
+            .iter()
+            .find(|f| f.name == "halt_on_failure")
+            .expect("RunConfig must declare `halt_on_failure`");
+        assert!(
+            !f.required,
+            "halt_on_failure has #[serde(default)], should be optional"
+        );
+
+        let f = RunConfig::field_metadata()
+            .iter()
+            .find(|f| f.name == "worktree_cleanup")
+            .expect("RunConfig must declare `worktree_cleanup`");
+        assert!(
+            !f.required,
+            "worktree_cleanup has #[serde(default = ...)], should be optional"
+        );
+    }
+
     /// `default_approval_policy` is `Option<ApprovalPolicy>` — the derive
     /// can't introspect the foreign enum's variants, so we supply
     /// `enum_values` explicitly. Verify that worked and that `required`

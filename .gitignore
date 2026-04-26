@@ -28,8 +28,12 @@ flamegraph.svg
 .env
 .env.*
 
-# Project-internal docs (kept locally; not shipped)
-/docs/
+# Project-internal docs (kept locally; not shipped) — except the auto-generated
+# manifest map, which is checked in and verified by `pitboss schema --check`.
+# Ignore *contents* not the directory itself, otherwise the !-exception below
+# can't re-include the one file we want under git.
+/docs/*
+!/docs/manifest-map.md
 
 # Git worktrees
 .worktrees/
