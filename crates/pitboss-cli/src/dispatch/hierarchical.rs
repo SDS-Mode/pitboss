@@ -31,6 +31,7 @@ pub async fn run_hierarchical(
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
     sublead_sessions: std::collections::HashMap<String, String>,
+    pre_minted_run_id: Option<Uuid>,
 ) -> Result<i32> {
     // Surface headless approval-gate mis-configurations early, before any
     // claude subprocess launches. Runs silently if stdout is a TTY (the
@@ -41,7 +42,9 @@ pub async fn run_hierarchical(
     // when one exists) BEFORE we overwrite it with our own. See `notify::parent`
     // for the env-var contract introduced for issue #133.
     let parent_run_id = crate::notify::parent::parent_run_id();
-    let run_id = Uuid::now_v7();
+    // Honor a pre-minted id from `--background` (issue #133-C); otherwise
+    // mint fresh.
+    let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
     crate::notify::parent::set_run_id_env(&run_id.to_string());
 
     let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());

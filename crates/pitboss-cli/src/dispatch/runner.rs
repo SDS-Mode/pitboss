@@ -160,6 +160,12 @@ fn cleanup_policy_from(w: crate::manifest::schema::WorktreeCleanup) -> CleanupPo
 }
 
 /// Public entry — main.rs calls this. Constructs production spawner + store.
+///
+/// `pre_minted_run_id` is `Some` only when the dispatcher was re-spawned
+/// by `pitboss dispatch --background` (which mints the id in the parent so
+/// it can announce it on stdout before exiting). `None` for normal
+/// foreground dispatch — the run id is generated inside [`execute`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_dispatch_inner(
     resolved: ResolvedManifest,
     manifest_text: String,
@@ -168,6 +174,7 @@ pub async fn run_dispatch_inner(
     claude_version: Option<String>,
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
+    pre_minted_run_id: Option<Uuid>,
 ) -> Result<i32> {
     // Flat manifests rarely use `[[approval_policy]]` or `propose_plan`,
     // but if they do, the same headless-gate warnings apply. Silent on TTY.
@@ -187,6 +194,7 @@ pub async fn run_dispatch_inner(
         spawner,
         store,
         dry_run,
+        pre_minted_run_id,
     )
     .await
 }
@@ -202,6 +210,7 @@ pub async fn execute(
     spawner: Arc<dyn ProcessSpawner>,
     store: Arc<dyn SessionStore>,
     dry_run: bool,
+    pre_minted_run_id: Option<Uuid>,
 ) -> Result<i32> {
     // Snapshot any `PITBOSS_RUN_ID` already in our env BEFORE we overwrite it
     // with our own run_id. If we're running under a parent orchestrator (or as
@@ -209,7 +218,10 @@ pub async fn execute(
     // value is the parent run id reported on `RunDispatched`. See the
     // `notify::parent` module for the full env-var contract (issue #133).
     let parent_run_id = crate::notify::parent::parent_run_id();
-    let run_id = Uuid::now_v7();
+    // Honor a pre-minted id from `--background` (issue #133-C); otherwise
+    // mint fresh as before. Background pre-mints in the parent so it can
+    // announce the id on stdout before the detached child boots.
+    let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
     crate::notify::parent::set_run_id_env(&run_id.to_string());
 
     let run_dir = resolved.run_dir.clone();
@@ -1260,6 +1272,7 @@ mod tests {
             spawner,
             store.clone(),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1347,6 +1360,7 @@ mod tests {
             spawner,
             store.clone(),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1447,6 +1461,7 @@ mod tests {
             spawner,
             store.clone(),
             false,
+            None,
         )
         .await
         .unwrap();

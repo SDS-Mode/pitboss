@@ -178,3 +178,80 @@ events = ["run_dispatched", "run_finished"]
 | Loopback orchestrator on the same host | `PITBOSS_PARENT_NOTIFY_URL` env var (operator-trusted, bypasses SSRF guard) |
 | HTTPS endpoint on a non-loopback host | `[lifecycle].notify` or `[[notification]]` with `kind = "webhook"` |
 | Just want to cleanly outlive the parent | `[lifecycle].survive_parent = true` + any of the above |
+
+## `pitboss dispatch --background` (v0.10+)
+
+`--background` detaches the dispatcher and returns immediately, like
+`nohup pitboss dispatch & disown`. The parent prints a single JSON line
+identifying the run, then exits 0. The detached child runs the standard
+dispatch path until completion.
+
+```
+$ pitboss dispatch --background ./manifest.toml
+{"run_id":"019d…","manifest_path":"./manifest.toml","started_at":"2026-04-26T17:00:00Z","child_pid":12345}
+$
+```
+
+Designed for orchestrators that need to dispatch and stay responsive: a
+Discord bot's `/dispatch` slash command can hand the manifest to pitboss
+and reply to the user in milliseconds while the run grinds in the
+background.
+
+### What it does, and what it doesn't
+
+`--background` controls the **lifecycle** of the dispatch process — that
+is the only concern. It does not change *what* runs:
+
+- **Lead vs. flat is a manifest authoring decision.** Write a flat-mode
+  manifest (`[[task]]`-only, no `[lead]`) when you don't need claude
+  reasoning to fan tasks out; write a hierarchical manifest (`[lead]`)
+  when you do. `--background` works with either.
+- **Cost optimization is upstream of this flag.** If your bot dispatches
+  static task lists, the lead's per-run token cost is avoided by
+  authoring flat manifests, not by passing `--background`.
+
+### Composing with `[lifecycle].notify`
+
+`--background` pairs naturally with the `[lifecycle].notify` machinery
+above: detach the dispatch, declare a webhook, and the orchestrator
+gets `RunFinished` delivered when the run actually finishes — no
+polling required:
+
+```toml
+[lifecycle]
+notify = { kind = "webhook", url = "https://orchestrator.internal/events", events = ["run_finished"] }
+```
+
+Run-id correlation is automatic. The orchestrator stored the `run_id`
+the parent printed; the webhook payload carries the same id.
+
+### Observing background runs
+
+Three out-of-band channels expose detached run state:
+
+| Channel | When to use |
+|---|---|
+| `[lifecycle].notify` webhook | Push delivery; reacts to lifecycle transitions |
+| `pitboss list --active` | Survey of currently-running dispatchers |
+| `pitboss status <run_id>` | On-demand snapshot of one run's task table |
+
+### Mechanism
+
+The parent pre-mints a UUID v7 `run_id`, then re-spawns itself with the
+hidden `--internal-run-id <uuid>` flag so the child honors the same id
+that was announced on stdout. The child is detached via `setsid()` (new
+session, no controlling tty) with stdin/stdout/stderr nulled. Once the
+parent exits the child is reparented to PID 1 (init/systemd), which
+auto-reaps it on completion. No double-fork is needed because the child
+never opens a tty device.
+
+### Edge cases
+
+- `--background --dry-run` is rejected (nonsensical).
+- `--background --internal-run-id <UUID>` is rejected (the parent already
+  pre-mints; combining them would re-detach an already-detached invocation).
+- The parent does **not** wait to verify the child boots successfully.
+  If the manifest fails to validate or the child crashes during startup,
+  the parent has already exited 0 with a `run_id` that will never see
+  a `summary.json`. Operators that need confirmation should poll
+  `pitboss status` or rely on the `RunDispatched` notification firing.
