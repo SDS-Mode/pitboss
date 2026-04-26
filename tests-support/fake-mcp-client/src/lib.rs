@@ -18,6 +18,11 @@ pub struct FakeMcpClient {
     inner: RunningService<RoleClient, ()>,
     actor_id: Option<String>,
     actor_role: Option<String>,
+    /// Optional auth token injected as `_meta.token` (issue #145).
+    /// Production bridges always supply one; tests can simulate either
+    /// the legitimate path (with token) or a forged direct connection
+    /// (no token).
+    token: Option<String>,
 }
 
 impl FakeMcpClient {
@@ -43,7 +48,31 @@ impl FakeMcpClient {
             inner,
             actor_id: Some(actor_id.to_string()),
             actor_role: Some(actor_role.to_string()),
+            token: None,
         })
+    }
+
+    /// Connect with a recorded actor identity AND a per-actor auth token
+    /// (the token the dispatcher minted via `mint_token`). Subsequent
+    /// `call_tool` invocations will inject `_meta: {actor_id, actor_role,
+    /// token}` so the server can validate the token and bind the
+    /// connection's canonical identity. This mirrors what the real
+    /// `pitboss mcp-bridge --token` does in production.
+    pub async fn connect_with_token(
+        socket: &Path,
+        actor_id: &str,
+        actor_role: &str,
+        token: &str,
+    ) -> Result<Self> {
+        let mut c = Self::connect_as(socket, actor_id, actor_role).await?;
+        c.token = Some(token.to_string());
+        Ok(c)
+    }
+
+    /// Replace the recorded auth token. Use for tests that want to
+    /// simulate a connection re-handshaking with a different identity.
+    pub fn set_token(&mut self, token: Option<String>) {
+        self.token = token;
     }
 
     /// Call a tool and return the tool's structured content as JSON.
@@ -76,13 +105,19 @@ impl FakeMcpClient {
         if let (Some(ref actor_id), Some(ref actor_role)) = (&self.actor_id, &self.actor_role) {
             let args_obj = arguments.get_or_insert_with(serde_json::Map::new);
             if !args_obj.contains_key("_meta") {
-                args_obj.insert(
-                    "_meta".to_string(),
-                    serde_json::json!({
-                        "actor_id": actor_id,
-                        "actor_role": actor_role,
-                    }),
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "actor_id".to_string(),
+                    serde_json::Value::String(actor_id.clone()),
                 );
+                meta.insert(
+                    "actor_role".to_string(),
+                    serde_json::Value::String(actor_role.clone()),
+                );
+                if let Some(ref t) = self.token {
+                    meta.insert("token".to_string(), serde_json::Value::String(t.clone()));
+                }
+                args_obj.insert("_meta".to_string(), serde_json::Value::Object(meta));
             }
         }
 

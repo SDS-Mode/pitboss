@@ -131,6 +131,16 @@ pub enum Command {
         /// Role of the actor: `lead` or `worker`.
         #[arg(long, value_enum)]
         actor_role: ActorRoleArg,
+        /// Per-actor authentication token, minted by the dispatcher at
+        /// spawn time and embedded in this bridge's mcp-config.json.
+        /// Injected into every outbound `tools/call`'s `_meta.token` so
+        /// the server can bind the connection to its canonical
+        /// (actor_id, actor_role) — defending against direct socket
+        /// connections that forge `_meta.actor_role: root_lead`.
+        /// Optional only for backward compatibility with mcp-config files
+        /// written before #145 landed; production runs always pass it.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Run a dispatch inside a container, assembling the docker/podman invocation
     /// from the manifest's `[container]` section. Replaces the current process

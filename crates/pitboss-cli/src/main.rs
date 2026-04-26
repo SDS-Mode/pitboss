@@ -95,8 +95,9 @@ fn main() -> Result<()> {
             socket,
             actor_id,
             actor_role,
+            token,
         } => {
-            run_mcp_bridge(&socket, &actor_id, actor_role);
+            run_mcp_bridge(&socket, &actor_id, actor_role, token.as_deref());
         }
         Command::ContainerDispatch {
             manifest,
@@ -241,6 +242,7 @@ fn run_mcp_bridge(
     socket: &std::path::Path,
     actor_id: &str,
     actor_role: crate::cli::ActorRoleArg,
+    token: Option<&str>,
 ) -> ! {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -252,7 +254,9 @@ fn run_mcp_bridge(
             std::process::exit(2);
         }
     };
-    let result = rt.block_on(crate::mcp::bridge::run_bridge(socket, actor_id, actor_role));
+    let result = rt.block_on(crate::mcp::bridge::run_bridge(
+        socket, actor_id, actor_role, token,
+    ));
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {

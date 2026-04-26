@@ -494,10 +494,16 @@ async fn spawn_sublead_session(
     let socket_path = socket_path_for_run(sub_layer.run_id, &sub_layer.manifest.run_dir);
 
     // 2. Build per-sub-lead mcp-config.json.
+    //
+    // Mint the sublead's auth token here — the bridge will inject it
+    // into every tools/call's `_meta.token`, and the server uses the
+    // bound identity for authz. Closes #145 for the sublead path.
+    let sublead_token = state.mint_token(&sublead_id, "sublead").await;
     let mcp_config_path = build_sublead_mcp_config(
         &sublead_id,
         &socket_path,
         &state.root.run_subdir,
+        Some(&sublead_token),
         &state.root.manifest.mcp_servers,
     )
     .await

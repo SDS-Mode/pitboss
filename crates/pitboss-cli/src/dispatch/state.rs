@@ -65,6 +65,17 @@ use crate::dispatch::layer::LayerState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::shared_store::RunLeaseRegistry;
 
+/// Canonical actor identity, bound at token-mint time. The MCP server
+/// validates `_meta.token` from each tools/call against the
+/// `actor_tokens` table on `DispatchState` and uses the resolved
+/// `ActorIdentity` for ALL authz — never trusting the wire's
+/// `_meta.actor_id` / `_meta.actor_role`. Closes #145.
+#[derive(Debug, Clone)]
+pub struct ActorIdentity {
+    pub actor_id: String,
+    pub actor_role: String,
+}
+
 // ── Re-exported public types (keep in this module for back-compat) ──────────
 //
 // Downstream code that does `use pitboss_cli::dispatch::state::WorkerState`
@@ -338,6 +349,13 @@ pub struct DispatchState {
     /// burns budget faster than the operator can intervene. Updated
     /// alongside the `TaskRecord` persist in every completion path.
     pub api_health: Arc<crate::dispatch::failure_detection::ApiHealth>,
+    /// Per-actor authentication tokens. Minted at spawn time (lead at
+    /// dispatch start, workers at handle_spawn_worker, subleads at
+    /// handle_spawn_sublead) and embedded in each actor's mcp-config.json
+    /// via the bridge's `--token` arg. The MCP server validates the token
+    /// on every tools/call and uses the bound identity (NOT the wire
+    /// `_meta.actor_id`) for authz. Closes issue #145.
+    pub actor_tokens: RwLock<HashMap<String, ActorIdentity>>,
 }
 
 impl std::fmt::Debug for DispatchState {
@@ -401,7 +419,37 @@ impl DispatchState {
             run_leases: Arc::new(RunLeaseRegistry::new()),
             last_approval_response: RwLock::new(HashMap::new()),
             api_health: Arc::new(crate::dispatch::failure_detection::ApiHealth::new()),
+            actor_tokens: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Mint a fresh authentication token bound to the (actor_id, role)
+    /// pair. The token is later embedded into the actor's
+    /// mcp-config.json (consumed by `pitboss mcp-bridge --token <hex>`)
+    /// and validated on every inbound MCP tools/call. Closes #145.
+    ///
+    /// The token format is a UUIDv7 string. UUIDv7 is fine for this
+    /// threat model — local same-UID processes are the boundary; the
+    /// token raises the bar from "any local process" to "process that
+    /// has read the actor's mcp-config.json file (mode 0o600 in the
+    /// run_subdir)".
+    pub async fn mint_token(&self, actor_id: &str, role: &str) -> String {
+        let token = Uuid::now_v7().to_string();
+        self.actor_tokens.write().await.insert(
+            token.clone(),
+            ActorIdentity {
+                actor_id: actor_id.to_string(),
+                actor_role: role.to_string(),
+            },
+        );
+        token
+    }
+
+    /// Resolve an authentication token to its bound `ActorIdentity`,
+    /// or `None` if the token is unknown / has been revoked. Used by
+    /// the MCP server's per-call authz check.
+    pub async fn lookup_token(&self, token: &str) -> Option<ActorIdentity> {
+        self.actor_tokens.read().await.get(token).cloned()
     }
 
     /// Record the most recent approval response delivered to `actor_id`.

@@ -195,12 +195,19 @@ pub async fn run_hierarchical(
     .context("start control server")?;
 
     // 2. Build the --mcp-config file for the lead.
+    //
+    // Mint a per-actor token for the root lead and embed it in the
+    // bridge args. The server uses the token to bind connection identity
+    // — defending against direct (non-bridge) socket connections that
+    // try to forge `_meta.actor_role: root_lead`. Issue #145.
+    let lead_token = state.mint_token(&lead.id, "lead").await;
     let mcp_config_path = run_subdir.join("lead-mcp-config.json");
     write_mcp_config(
         &mcp_config_path,
         &socket,
         &lead.id,
         "lead",
+        Some(&lead_token),
         &resolved.mcp_servers,
     )
     .await?;
@@ -627,24 +634,37 @@ pub async fn run_hierarchical(
 /// only the documented `command` + `args` (stdio transport) shape.
 /// Build the `mcpServers` JSON object with the pitboss bridge entry plus any
 /// operator-declared `[[mcp_server]]` entries from the manifest.
+///
+/// `token` is the actor's per-connection auth token (minted by
+/// `DispatchState::mint_token`). When `Some`, it is appended as
+/// `--token <hex>` to the bridge args; the server then validates it and
+/// binds the connection identity. Closes #145.
 fn build_mcp_servers_json(
     pitboss_exe: &std::path::Path,
     socket: &std::path::Path,
     actor_id: &str,
     actor_role: &str,
+    token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut servers = serde_json::Map::new();
+    let mut args: Vec<serde_json::Value> = vec![
+        serde_json::Value::String("mcp-bridge".into()),
+        serde_json::Value::String("--actor-id".into()),
+        serde_json::Value::String(actor_id.to_string()),
+        serde_json::Value::String("--actor-role".into()),
+        serde_json::Value::String(actor_role.to_string()),
+    ];
+    if let Some(t) = token {
+        args.push(serde_json::Value::String("--token".into()));
+        args.push(serde_json::Value::String(t.to_string()));
+    }
+    args.push(serde_json::Value::String(socket.to_string_lossy().into()));
     servers.insert(
         "pitboss".into(),
         serde_json::json!({
             "command": pitboss_exe.to_string_lossy(),
-            "args": [
-                "mcp-bridge",
-                "--actor-id", actor_id,
-                "--actor-role", actor_role,
-                socket.to_string_lossy(),
-            ],
+            "args": args,
         }),
     );
     for s in extra_servers {
@@ -672,17 +692,31 @@ async fn write_mcp_config(
     socket: &std::path::Path,
     actor_id: &str,
     actor_role: &str, // "lead" or "worker"
+    token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<()> {
     // Find the pitboss binary path (the one running us now) so the lead can
     // re-exec the same build for the bridge subcommand.
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
-    let mcp_servers =
-        build_mcp_servers_json(&pitboss_exe, socket, actor_id, actor_role, extra_servers);
+    let mcp_servers = build_mcp_servers_json(
+        &pitboss_exe,
+        socket,
+        actor_id,
+        actor_role,
+        token,
+        extra_servers,
+    );
     let cfg = serde_json::json!({ "mcpServers": mcp_servers });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
     tokio::fs::write(path, bytes).await?;
+    // mcp-config.json carries the actor's auth token (#145). Restrict to the
+    // running user so a same-UID-but-different-process attacker can't read it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    }
     Ok(())
 }
 
@@ -690,16 +724,28 @@ async fn write_mcp_config(
 /// tools — NOT spawn_worker / cancel_worker / wait_for_worker / etc.
 /// The bridge command includes the worker's actor_id + actor_role=worker
 /// so the dispatcher can identify the caller and enforce namespace authz.
+///
+/// `token` is the worker's auth token (issue #145). When `Some`, it is
+/// embedded so the bridge can prove the connection's identity to the
+/// server; when `None`, no token is written (server falls back to
+/// rejecting calls without bound identity).
 pub async fn write_worker_mcp_config(
     path: &std::path::Path,
     socket: &std::path::Path,
     worker_id: &str,
+    token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<()> {
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
-    let mcp_servers =
-        build_mcp_servers_json(&pitboss_exe, socket, worker_id, "worker", extra_servers);
+    let mcp_servers = build_mcp_servers_json(
+        &pitboss_exe,
+        socket,
+        worker_id,
+        "worker",
+        token,
+        extra_servers,
+    );
     let cfg = serde_json::json!({
         "mcpServers": mcp_servers,
         "allowedTools": [
@@ -714,6 +760,13 @@ pub async fn write_worker_mcp_config(
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
     tokio::fs::write(path, bytes).await?;
+    // Same 0o600 hardening as write_mcp_config: keeps the embedded token
+    // unreadable to other local users (issue #145).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    }
     Ok(())
 }
 
@@ -721,18 +774,28 @@ pub async fn write_worker_mcp_config(
 /// (no spawn_sublead, no wait_for_sublead — depth-2 cap enforced).
 /// The bridge command includes the sublead's actor_id + actor_role=sublead
 /// so the dispatcher can identify the caller and enforce namespace authz.
+///
+/// `token` is the sublead's auth token (issue #145). When `Some`, it is
+/// embedded into the bridge args.
 pub async fn build_sublead_mcp_config(
     sublead_id: &str,
     socket: &std::path::Path,
     run_subdir: &std::path::Path,
+    token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<PathBuf> {
     use crate::dispatch::runner::SUBLEAD_MCP_TOOLS;
 
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
-    let mcp_servers =
-        build_mcp_servers_json(&pitboss_exe, socket, sublead_id, "sublead", extra_servers);
+    let mcp_servers = build_mcp_servers_json(
+        &pitboss_exe,
+        socket,
+        sublead_id,
+        "sublead",
+        token,
+        extra_servers,
+    );
     let cfg = serde_json::json!({
         "mcpServers": mcp_servers,
         "allowedTools": SUBLEAD_MCP_TOOLS.iter().collect::<Vec<_>>()
@@ -746,5 +809,13 @@ pub async fn build_sublead_mcp_config(
     tokio::fs::create_dir_all(run_subdir).await?;
     let mcp_config_path = run_subdir.join(format!("sublead-{sublead_id}-mcp-config.json"));
     tokio::fs::write(&mcp_config_path, bytes).await?;
+    // Same 0o600 hardening as the lead/worker config writers (#145).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            tokio::fs::set_permissions(&mcp_config_path, std::fs::Permissions::from_mode(0o600))
+                .await;
+    }
     Ok(mcp_config_path)
 }

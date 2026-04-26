@@ -312,7 +312,7 @@ fn mcp_bridge_accepts_sublead_role_in_meta() {
         "method": "tools/call",
         "params": { "name": "spawn_worker", "arguments": {} }
     });
-    inject_meta(&mut request, "sublead-1", "sublead");
+    inject_meta(&mut request, "sublead-1", "sublead", None);
     let meta = request
         .pointer("/params/arguments/_meta")
         .expect("_meta should be injected at params.arguments._meta");
