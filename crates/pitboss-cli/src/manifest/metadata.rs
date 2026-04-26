@@ -94,7 +94,11 @@ mod tests {
             );
             let mut seen = std::collections::HashSet::new();
             for f in section.fields {
-                assert!(!f.name.is_empty(), "empty field name in {}", section.toml_path);
+                assert!(
+                    !f.name.is_empty(),
+                    "empty field name in {}",
+                    section.toml_path
+                );
                 assert!(
                     seen.insert(f.name),
                     "duplicate field {} in {}",

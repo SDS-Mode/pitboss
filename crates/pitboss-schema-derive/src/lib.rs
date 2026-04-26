@@ -32,8 +32,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, Data, DeriveInput, Expr, ExprArray, ExprLit, Fields, GenericArgument,
-    Lit, PathArguments, Type,
+    parse_macro_input, Data, DeriveInput, Expr, ExprArray, ExprLit, Fields, GenericArgument, Lit,
+    PathArguments, Type,
 };
 
 const KNOWN_FORM_TYPES: &[&str] = &[
@@ -64,10 +64,7 @@ pub fn derive_field_metadata(input: TokenStream) -> TokenStream {
             }
         },
         _ => {
-            return compile_error(
-                "FieldMetadata only supports structs",
-                struct_name.span(),
-            );
+            return compile_error("FieldMetadata only supports structs", struct_name.span());
         }
     };
 
