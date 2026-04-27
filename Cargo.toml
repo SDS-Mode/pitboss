@@ -4,6 +4,7 @@ members = [
     "crates/pitboss-core",
     "crates/pitboss-cli",
     "crates/pitboss-tui",
+    "crates/pitboss-web",
     "crates/pitboss-schema",
     "crates/pitboss-schema-derive",
     "tests-support/fake-claude",
@@ -53,6 +54,14 @@ wiremock           = "0.6"
 tracing-test       = "0.2"
 glob               = "0.3"
 base64             = "0.22"
+axum               = { version = "0.8", features = ["macros"] }
+tower              = "0.5"
+tower-http         = { version = "0.6", features = ["fs", "cors", "trace", "set-header"] }
+rust-embed         = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess         = "2"
+futures-util       = "0.3"
+notify             = "6"
+dirs               = "5"
 
 # The profile that 'dist' will build with
 [profile.dist]
