@@ -369,6 +369,43 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**CLI (active-run liveness + audit follow-ups):**
+- `runs::resolve_socket_path` — fallback path no longer joins `run_id` a
+  second time. The runs-discovery caller already passes the per-run
+  subdirectory (`<base>/<uuid>/`), but the fallback was constructing
+  `<base>/<uuid>/<uuid>/control.sock` — a path the dispatcher never
+  writes. On any system without `$XDG_RUNTIME_DIR` (containers without
+  a login session, minimal init, some CI runners) the liveness probe
+  silently failed for every run and `pitboss list --active` reported
+  the system as idle while runs were actively executing. Closes #141.
+- `main::run_validate` — exits `2` on validation failure instead of
+  `1`, matching the dispatch-side convention. Scripts wrapping
+  `pitboss validate` can now distinguish a missing binary (OS error,
+  exit 1) from a bad manifest (validation error, exit 2). (Item from #157.)
+- `cli::Command::Diff` / `cli::Command::Attach` — added `--run-dir`
+  override, mirroring `status` / `resume` / `list` / `prune`. Operators
+  with a custom runs directory no longer have to drop down to
+  `pitboss list --json` to find the absolute path before running
+  `attach` or `diff`. (Item from #157.)
+- `cli::Command::Dispatch` — `--background` / `--dry-run` /
+  `--internal-run-id` mutual-exclusions are now declared via clap
+  `conflicts_with` / `conflicts_with_all` so the conflicts surface in
+  `--help`, shell completions, and parse-time errors instead of an
+  opaque exit-2 mid-handler. The redundant runtime checks in
+  `main.rs` were removed. (Item from #157.)
+- `runs::collect_run_entry` — a `summary.json` that exists but fails
+  to deserialize is now classified as `Aborted` with a `tracing::warn`
+  surfacing the parse error. Previously the call silently fell through
+  to jsonl classification, which would happily report a corrupted
+  finalised run as `Running` if the jsonl mtime was recent — actively
+  misleading the orchestrator. (Item from #157.)
+- `list::RunListEntry.status` — typed as `runs::RunStatus` (with
+  `Serialize` and `serde(rename_all = "lowercase")`) instead of
+  `&'static str`. The wire format is unchanged, but renaming a
+  variant or its label is now a type-checked breaking change for
+  consumers of the JSON enum-string set rather than a silent flip.
+  (Item from #157.)
+
 **Manifest (container-dispatch unblock + audit follow-ups):**
 - `manifest::validate::validate_lead` — `is_in_git_repo` probe now
   gated on `!skip_dir_check`, mirroring the directory-existence check.

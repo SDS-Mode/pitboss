@@ -29,7 +29,11 @@ fn runs_base_dir() -> PathBuf {
         .join(".local/share/pitboss/runs")
 }
 
-fn resolve_run_under(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
+/// Locate a run directory by UUID prefix under an explicit base directory.
+///
+/// Used by `pitboss diff --run-dir <PATH>` to point at an alternate runs
+/// store (mirrors the same flag on `status`/`resume`/`list`/`prune`).
+pub fn resolve_run_under(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
     // Exact match first.
     let exact = base.join(id_or_prefix);
     if exact.is_dir() {

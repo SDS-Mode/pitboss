@@ -49,7 +49,7 @@ pub enum Command {
         #[arg(long)]
         run_dir: Option<PathBuf>,
         /// Print the resolved claude spawn commands and exit.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["background", "internal_run_id"])]
         dry_run: bool,
         /// Detach the dispatcher to run in the background (`nohup`-equivalent).
         /// Mints a `run_id`, spawns the dispatcher as a session-leader child
@@ -65,12 +65,16 @@ pub enum Command {
         ///
         /// Mode-agnostic: works with both flat (`[[task]]`) and
         /// hierarchical (`[lead]`) manifests.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "internal_run_id")]
         background: bool,
         /// Internal: re-use this UUID as the run id instead of minting one.
         /// Set automatically when `--background` re-spawns the dispatcher
         /// as a detached child so the parent's announced `run_id` matches
         /// what the child writes to disk. Not for direct human use.
+        ///
+        /// Mutually exclusive with `--background` (clap-enforced) so the
+        /// conflict surfaces in `--help` and shell completions rather
+        /// than as an opaque exit-2 mid-handler. (#157)
         #[arg(long, hide = true, value_name = "UUID")]
         internal_run_id: Option<String>,
     },
@@ -91,6 +95,13 @@ pub enum Command {
         /// Emit machine-readable JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Override the runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs`. Same semantics as `status`,
+        /// `resume`, `list`, `prune` so operators with a custom runs
+        /// directory don't have to drop down to `pitboss list --json`
+        /// to find the absolute path. (#157)
+        #[arg(long, value_name = "PATH")]
+        run_dir: Option<PathBuf>,
     },
     /// Tail a specific worker's output live (`docker logs -f` shape).
     /// Resolves a run id (full UUID or unique prefix) + task id against
@@ -109,6 +120,11 @@ pub enum Command {
         /// Seed with the last N historical lines before following.
         #[arg(long, default_value_t = 20)]
         lines: usize,
+        /// Override the runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs`. Same semantics as `status`,
+        /// `resume`, `list`, `prune`. (#157)
+        #[arg(long, value_name = "PATH")]
+        run_dir: Option<PathBuf>,
     },
     /// Print version information.
     Version,
@@ -332,6 +348,63 @@ impl From<InitTemplateArg> for crate::manifest::init_template::InitTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #157: clap conflicts_with surfaces --background mutual-exclusions ──
+
+    #[test]
+    fn dispatch_rejects_background_with_dry_run() {
+        // Both flags together should fail at parse time, not deep in the
+        // dispatcher. Surfaces in --help and shell completions.
+        let err = Cli::try_parse_from([
+            "pitboss",
+            "dispatch",
+            "manifest.toml",
+            "--background",
+            "--dry-run",
+        ])
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--dry-run") || msg.contains("--background"),
+            "expected mutual-exclusion error mentioning --background/--dry-run, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_background_with_internal_run_id() {
+        let err = Cli::try_parse_from([
+            "pitboss",
+            "dispatch",
+            "manifest.toml",
+            "--background",
+            "--internal-run-id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--internal-run-id") || msg.contains("--background"),
+            "expected mutual-exclusion error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_dry_run_with_internal_run_id() {
+        let err = Cli::try_parse_from([
+            "pitboss",
+            "dispatch",
+            "manifest.toml",
+            "--dry-run",
+            "--internal-run-id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--internal-run-id") || msg.contains("--dry-run"),
+            "expected mutual-exclusion error, got: {msg}"
+        );
+    }
 
     #[test]
     fn completions_bash_contains_pitboss_name() {

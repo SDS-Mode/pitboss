@@ -20,7 +20,9 @@ fn main() -> Result<()> {
             agents_md::print_agents_md();
             Ok(())
         }
-        Command::Validate { manifest } => run_validate(&manifest),
+        Command::Validate { manifest } => {
+            std::process::exit(run_validate(&manifest));
+        }
         Command::Dispatch {
             manifest,
             run_dir,
@@ -33,23 +35,13 @@ fn main() -> Result<()> {
             // JSON announcement on stdout. The child invocation receives
             // `--internal-run-id` so the announced and on-disk run ids
             // match. See `dispatch::background` for the full mechanism.
+            //
+            // The `--background`/`--dry-run`/`--internal-run-id`
+            // mutual-exclusions are enforced by `conflicts_with` /
+            // `conflicts_with_all` on the clap arg definitions, so by
+            // the time we reach this branch the combinations are
+            // guaranteed safe — no extra runtime checks needed.
             if background {
-                if dry_run {
-                    eprintln!("--background and --dry-run are mutually exclusive");
-                    std::process::exit(2);
-                }
-                if internal_run_id.is_some() {
-                    // Ambiguous: the parent already pre-mints and forwards
-                    // via --internal-run-id, so combining them means the
-                    // operator is asking us to re-detach an already-detached
-                    // dispatch. Reject rather than silently double-spawn.
-                    eprintln!(
-                        "--background and --internal-run-id are mutually exclusive\n\
-                         (--internal-run-id is set automatically by --background's \
-                         self-respawn; not for direct human use)"
-                    );
-                    std::process::exit(2);
-                }
                 match dispatch::background::run_background(&manifest, run_dir) {
                     Ok(code) => std::process::exit(code),
                     Err(e) => {
@@ -73,16 +65,22 @@ fn main() -> Result<()> {
         Command::Resume { run_id, run_dir } => {
             run_resume(&run_id, run_dir);
         }
-        Command::Diff { run_a, run_b, json } => {
-            run_diff(&run_a, &run_b, json);
+        Command::Diff {
+            run_a,
+            run_b,
+            json,
+            run_dir,
+        } => {
+            run_diff(&run_a, &run_b, json, run_dir);
         }
         Command::Attach {
             run_id,
             task_id,
             raw,
             lines,
+            run_dir,
         } => {
-            std::process::exit(attach::run(&run_id, &task_id, raw, lines)?);
+            std::process::exit(attach::run(&run_id, &task_id, raw, lines, run_dir)?);
         }
         Command::Status {
             run_id,
@@ -282,9 +280,24 @@ fn init_tracing(verbose: u8, quiet: bool) {
         .init();
 }
 
-fn run_validate(manifest: &std::path::Path) -> Result<()> {
+/// Drive `pitboss validate`. Returns the exit code so scripts wrapping
+/// `pitboss validate` can distinguish:
+///   * `0` — manifest valid
+///   * `2` — manifest failed validation (parse error, schema violation,
+///     missing field, …); all user-fixable cases land here so a CI step
+///     can hard-gate on `exit == 2`. Previously these were exit 1, which
+///     overlapped with the OS-level "binary not found" exit code and made
+///     it impossible to distinguish a missing `pitboss` binary from a bad
+///     manifest. (#157)
+fn run_validate(manifest: &std::path::Path) -> i32 {
     let env_mp = parse_env_max_parallel();
-    let r = manifest::load_manifest(manifest, env_mp)?;
+    let r = match manifest::load_manifest(manifest, env_mp) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("validation failed: {e:#}");
+            return 2;
+        }
+    };
     if let Some(lead) = &r.lead {
         println!(
             "OK (hierarchical) — lead='{}', max_workers={}, budget=${:.2}",
@@ -299,7 +312,7 @@ fn run_validate(manifest: &std::path::Path) -> Result<()> {
             r.max_parallel_tasks
         );
     }
-    Ok(())
+    0
 }
 
 fn run_dispatch(
@@ -436,15 +449,24 @@ fn parse_env_max_parallel() -> Option<u32> {
         .and_then(|s| s.parse().ok())
 }
 
-fn run_diff(run_a: &str, run_b: &str, json: bool) -> ! {
-    let dir_a = match diff::resolve_run(run_a) {
+fn run_diff(
+    run_a: &str,
+    run_b: &str,
+    json: bool,
+    run_dir_override: Option<std::path::PathBuf>,
+) -> ! {
+    let resolve = |id: &str| match &run_dir_override {
+        Some(base) => diff::resolve_run_under(base, id),
+        None => diff::resolve_run(id),
+    };
+    let dir_a = match resolve(run_a) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("pitboss diff: run A: {e:#}");
             std::process::exit(1);
         }
     };
-    let dir_b = match diff::resolve_run(run_b) {
+    let dir_b = match resolve(run_b) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("pitboss diff: run B: {e:#}");

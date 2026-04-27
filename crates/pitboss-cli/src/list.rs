@@ -33,6 +33,12 @@ use crate::runs;
 
 /// JSON shape emitted with `--json`. Stable contract for orchestrators —
 /// one record per run directory under `~/.local/share/pitboss/runs/`.
+///
+/// `status` carries the typed [`runs::RunStatus`] enum (serialized lowercase
+/// so it matches `RunStatus::label()`'s string form). Using the enum
+/// rather than a `&'static str` means renaming a variant or its label is a
+/// type-checked breaking change for consumers, not a silent JSON-shape
+/// flip.
 #[derive(Debug, Serialize)]
 pub struct RunListEntry {
     pub run_id: String,
@@ -41,8 +47,9 @@ pub struct RunListEntry {
     pub started_at: String,
     pub tasks_total: usize,
     pub tasks_failed: usize,
-    /// One of "complete", "running", "stale", "aborted".
-    pub status: &'static str,
+    /// Run status — serialised as one of `"complete"`, `"running"`,
+    /// `"stale"`, `"aborted"`.
+    pub status: runs::RunStatus,
 }
 
 impl From<&runs::RunEntry> for RunListEntry {
@@ -53,7 +60,7 @@ impl From<&runs::RunEntry> for RunListEntry {
             started_at: rfc3339(e.mtime),
             tasks_total: e.tasks_total,
             tasks_failed: e.tasks_failed,
-            status: e.status.label(),
+            status: e.status,
         }
     }
 }
@@ -204,6 +211,19 @@ mod tests {
         let nonexistent = tmp.path().join("does-not-exist");
         let rc = run(true, false, Some(nonexistent)).unwrap();
         assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn list_json_status_serializes_as_lowercase_string() {
+        // The wire format must remain a lowercase string ("complete",
+        // "running", "stale", "aborted") — switching to the typed
+        // RunStatus enum was a refactor, not a behavior change.
+        let tmp = TempDir::new().unwrap();
+        make_run_dir(tmp.path(), "019d-aaaa", true);
+        let entries = runs::collect_run_entries(tmp.path());
+        let out: Vec<RunListEntry> = entries.iter().map(RunListEntry::from).collect();
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"status\":\"complete\""), "got: {json}");
     }
 
     #[test]
