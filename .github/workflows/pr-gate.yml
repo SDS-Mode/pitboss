@@ -55,7 +55,7 @@ jobs:
 
       - name: Detect changed path categories
         id: paths
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             code:
