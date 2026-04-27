@@ -1396,6 +1396,8 @@ name = "pitboss-schema"
 version = "0.8.0"
 dependencies = [
  "pitboss-schema-derive",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

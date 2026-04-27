@@ -29,24 +29,32 @@
 //!   fields that should never appear in a form).
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{
-    parse_macro_input, Data, DeriveInput, Expr, ExprArray, ExprLit, Fields, GenericArgument, Lit,
-    PathArguments, Type,
+    parse_macro_input, punctuated::Punctuated, Data, DeriveInput, Expr, ExprArray, ExprLit, Fields,
+    GenericArgument, Lit, Meta, PathArguments, Token, Type,
 };
 
-const KNOWN_FORM_TYPES: &[&str] = &[
-    "text",
-    "long_text",
-    "integer",
-    "float",
-    "boolean",
-    "path",
-    "enum_select",
-    "string_list",
-    "key_value_map",
+const KNOWN_FORM_TYPES: &[(&str, &str)] = &[
+    ("text", "Text"),
+    ("long_text", "LongText"),
+    ("integer", "Integer"),
+    ("float", "Float"),
+    ("boolean", "Boolean"),
+    ("path", "Path"),
+    ("enum_select", "EnumSelect"),
+    ("string_list", "StringList"),
+    ("key_value_map", "KeyValueMap"),
 ];
+
+fn known_form_type_keys() -> Vec<&'static str> {
+    KNOWN_FORM_TYPES.iter().map(|(k, _)| *k).collect()
+}
+
+fn form_type_variant(s: &str) -> Option<&'static str> {
+    KNOWN_FORM_TYPES.iter().find_map(|(k, v)| (*k == s).then_some(*v))
+}
 
 #[proc_macro_derive(FieldMetadata, attributes(field))]
 pub fn derive_field_metadata(input: TokenStream) -> TokenStream {
@@ -57,14 +65,20 @@ pub fn derive_field_metadata(input: TokenStream) -> TokenStream {
         Data::Struct(s) => match &s.fields {
             Fields::Named(named) => &named.named,
             _ => {
+                // Use call_site() so the error points at the
+                // `#[derive(FieldMetadata)]` line rather than the type
+                // identifier, which is where the operator's eye lands.
                 return compile_error(
                     "FieldMetadata only supports structs with named fields",
-                    struct_name.span(),
+                    Span::call_site(),
                 );
             }
         },
         _ => {
-            return compile_error("FieldMetadata only supports structs", struct_name.span());
+            return compile_error(
+                "FieldMetadata only supports structs",
+                Span::call_site(),
+            );
         }
     };
 
@@ -84,6 +98,7 @@ pub fn derive_field_metadata(input: TokenStream) -> TokenStream {
             /// The slice is `'static` and reflects the source-order field
             /// declaration. See [`pitboss_schema::FieldDescriptor`] for the
             /// semantics of each entry.
+            #[allow(dead_code)]
             pub fn field_metadata() -> &'static [::pitboss_schema::FieldDescriptor] {
                 // `const` promotes the array literal to a static so the
                 // returned slice has `'static` lifetime.
@@ -112,46 +127,79 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
     let mut required_override: Option<bool> = None;
     let mut skip = false;
 
+    // Track which keys we've seen so a duplicate (across the same or
+    // separate `#[field(...)]` attributes) becomes a hard compile error
+    // rather than a silent last-write-wins. (#159)
+    let mut seen_keys: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
+
     for attr in &field.attrs {
         if !attr.path().is_ident("field") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("label") {
-                label = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            let key: &'static str = if meta.path.is_ident("label") {
+                "label"
             } else if meta.path.is_ident("help") {
-                help = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                "help"
             } else if meta.path.is_ident("form_type") {
-                let v = meta.value()?.parse::<syn::LitStr>()?.value();
-                if !KNOWN_FORM_TYPES.contains(&v.as_str()) {
-                    return Err(meta.error(format!(
-                        "unknown form_type {:?}; expected one of {:?}",
-                        v, KNOWN_FORM_TYPES
-                    )));
-                }
-                form_type = Some(v);
+                "form_type"
             } else if meta.path.is_ident("enum_values") {
-                let arr: ExprArray = meta.value()?.parse()?;
-                for e in arr.elems {
-                    let s = match e {
-                        Expr::Lit(ExprLit {
-                            lit: Lit::Str(s), ..
-                        }) => s.value(),
-                        other => {
-                            return Err(syn::Error::new_spanned(
-                                other,
-                                "enum_values entries must be string literals",
-                            ));
-                        }
-                    };
-                    enum_values.push(s);
-                }
+                "enum_values"
             } else if meta.path.is_ident("required") {
-                required_override = Some(meta.value()?.parse::<syn::LitBool>()?.value);
+                "required"
             } else if meta.path.is_ident("skip") {
-                skip = true;
+                "skip"
             } else {
                 return Err(meta.error("unknown #[field(...)] attribute"));
+            };
+            if !seen_keys.insert(key) {
+                return Err(meta.error(format!(
+                    "duplicate #[field({key} = ...)] entry; specify each key at most once",
+                )));
+            }
+            match key {
+                "label" => {
+                    label = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                }
+                "help" => {
+                    help = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                }
+                "form_type" => {
+                    let v = meta.value()?.parse::<syn::LitStr>()?.value();
+                    if form_type_variant(&v).is_none() {
+                        return Err(meta.error(format!(
+                            "unknown form_type {:?}; expected one of {:?}",
+                            v,
+                            known_form_type_keys()
+                        )));
+                    }
+                    form_type = Some(v);
+                }
+                "enum_values" => {
+                    let arr: ExprArray = meta.value()?.parse()?;
+                    for e in arr.elems {
+                        let s = match e {
+                            Expr::Lit(ExprLit {
+                                lit: Lit::Str(s), ..
+                            }) => s.value(),
+                            other => {
+                                return Err(syn::Error::new_spanned(
+                                    other,
+                                    "enum_values entries must be string literals",
+                                ));
+                            }
+                        };
+                        enum_values.push(s);
+                    }
+                }
+                "required" => {
+                    required_override = Some(meta.value()?.parse::<syn::LitBool>()?.value);
+                }
+                "skip" => {
+                    skip = true;
+                }
+                _ => unreachable!(),
             }
             Ok(())
         })?;
@@ -180,12 +228,23 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
 
     let enum_values_lits = enum_values.iter().map(|v| quote! { #v });
 
+    // Resolve the form_type string to a concrete variant at macro-expand
+    // time and emit `::pitboss_schema::FormType::Text` directly. The
+    // earlier code emitted a runtime `FormType::from_str(<lit>)` call,
+    // which silently degraded to `Text` if KNOWN_FORM_TYPES drifted from
+    // the enum. The known-form-type table is now the single source of
+    // truth for both the validation set and the variant mapping. (#159)
+    let variant_ident = syn::Ident::new(
+        form_type_variant(&form_type_str).expect("validated above"),
+        proc_macro2::Span::call_site(),
+    );
+
     Ok(Some(quote! {
         ::pitboss_schema::FieldDescriptor {
             name: #name_str,
             label: #label_str,
             help: #help_str,
-            form_type: ::pitboss_schema::FormType::from_str(#form_type_str),
+            form_type: ::pitboss_schema::FormType::#variant_ident,
             required: #required,
             enum_values: &[ #( #enum_values_lits ),* ],
         }
@@ -193,26 +252,31 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
 }
 
 /// `true` when the field carries any flavor of `#[serde(default)]` —
-/// either the bare `default` token or `default = "func"`. The serde
-/// attribute is parsed token-by-token rather than via `attr.parse_args`
-/// so we don't choke on combined attributes like
-/// `#[serde(default, rename = "task")]`.
+/// either the bare `default` token or `default = "func"`. Parses the
+/// nested meta as a comma-separated list of `Meta` items so the check
+/// only matches `default` at the top level of each entry, not e.g. a
+/// path-segment named `default` inside `skip_serializing_if =
+/// "default::is_none"` or a string literal `rename = "default"`. (#159)
 fn field_has_serde_default(field: &syn::Field) -> bool {
-    use syn::Meta;
     for attr in &field.attrs {
         if !attr.path().is_ident("serde") {
             continue;
         }
-        let Meta::List(list) = &attr.meta else {
+        let Ok(items) =
+            attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        else {
             continue;
         };
-        // Walk the comma-separated nested meta items. `default` and
-        // `default = "..."` both signal a serde default.
-        for tok in list.tokens.clone() {
-            if let proc_macro2::TokenTree::Ident(ident) = &tok {
-                if ident == "default" {
-                    return true;
-                }
+        for item in items {
+            let path = match &item {
+                Meta::Path(p) => p,
+                Meta::List(l) => &l.path,
+                Meta::NameValue(nv) => &nv.path,
+            };
+            // `default` must be the *only* segment of the path — guards
+            // against `default::is_none` style values surfacing as a hit.
+            if path.segments.len() == 1 && path.is_ident("default") {
+                return true;
             }
         }
     }

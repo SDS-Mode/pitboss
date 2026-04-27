@@ -12,3 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 pitboss-schema-derive = { path = "../pitboss-schema-derive" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
