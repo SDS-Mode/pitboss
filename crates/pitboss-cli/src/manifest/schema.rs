@@ -259,6 +259,7 @@ pub struct Lifecycle {
 
 /// TOML schema for a single `[[approval_policy]]` rule.
 #[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalRuleSpec {
     #[serde(default, rename = "match")]
     #[field(skip)]
@@ -275,6 +276,7 @@ pub struct ApprovalRuleSpec {
 
 /// TOML schema for the `[match]` sub-table within an `[[approval_policy]]` rule.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalMatchSpec {
     #[field(
         label = "Actor",
@@ -295,6 +297,13 @@ pub struct ApprovalMatchSpec {
     pub cost_over: Option<f64>,
 }
 
+/// Effective default for [`RunConfig::max_parallel_tasks`] when neither
+/// the manifest nor the `ANTHROPIC_MAX_CONCURRENT` env var sets it.
+/// Re-exported from `resolve` so consumers reading just this schema
+/// file (form renderers, `pitboss schema` output, doc generators) can
+/// discover the default without grepping the resolver.
+pub const DEFAULT_MAX_PARALLEL_TASKS: u32 = 4;
+
 /// Run-wide infrastructure config (NOT lead-specific).
 ///
 /// Lead-specific caps moved to `[lead]` in v0.9 (`max_workers`, `budget_usd`,
@@ -303,7 +312,9 @@ pub struct ApprovalMatchSpec {
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
     /// Concurrency cap for `[[task]]` flat mode. Renamed from `max_parallel`
-    /// in v0.9. Overridden by `ANTHROPIC_MAX_CONCURRENT` env var. Default: 4.
+    /// in v0.9. Overridden by `ANTHROPIC_MAX_CONCURRENT` env var. Default:
+    /// [`DEFAULT_MAX_PARALLEL_TASKS`] (4).
+    #[serde(default)]
     #[field(
         label = "Max parallel tasks",
         help = "Flat-mode concurrency cap for [[task]] runs. Default 4. Overridden by ANTHROPIC_MAX_CONCURRENT."

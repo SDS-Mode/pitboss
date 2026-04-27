@@ -65,12 +65,13 @@ fn validate_lifecycle(r: &ResolvedManifest) -> Result<()> {
                 "[lifecycle] survive_parent = true requires a notification target so the \
                  orchestrator can observe run completion. Add either:\n  \
                  - a [lifecycle.notify] inline sink (same shape as [[notification]]), or\n  \
-                 - at least one top-level [[notification]] section.\n\
+                 - at least one top-level [[notification]] section.\n\n\
                  If you intend to deliver lifecycle events via the \
-                 PITBOSS_PARENT_NOTIFY_URL env var, also declare a no-cost \
-                 [[notification]]\n  kind = \"log\"\n\
-                 to satisfy this validate-time gate (the env-var sink is configured at \
-                 dispatch-time and validate cannot see it)."
+                 PITBOSS_PARENT_NOTIFY_URL env var, add a no-cost log block to satisfy \
+                 this validate-time gate (the env-var sink is configured at dispatch-time \
+                 and validate cannot see it):\n\n    \
+                 [[notification]]\n    \
+                 kind = \"log\"\n"
             );
         }
     }
@@ -134,7 +135,13 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
             lead.directory.display()
         );
     }
-    if lead.use_worktree && !is_in_git_repo(&lead.directory) {
+    // skip_dir_check also gates the git-repo probe — container-dispatch
+    // manifests use container-side paths (`/workspace/foo`) that don't
+    // exist on the host, so `git2::Repository::discover` would always
+    // fail and reject every hierarchical container manifest with the
+    // default `use_worktree = true`. Mirrors the existing flat-mode
+    // gating in `validate_directories`.
+    if !skip_dir_check && lead.use_worktree && !is_in_git_repo(&lead.directory) {
         bail!(
             "lead has use_worktree=true but directory is not a git work-tree: {}",
             lead.directory.display()
@@ -201,9 +208,13 @@ fn validate_hierarchical_ranges(r: &ResolvedManifest) -> Result<()> {
             bail!("[lead].lead_timeout_secs must be > 0");
         }
     }
-    if r.max_parallel_tasks == 0 {
-        bail!("[run].max_parallel_tasks must be > 0");
-    }
+    // No `max_parallel_tasks == 0` check here: that's a flat-mode
+    // ([[task]]) concurrency cap. In hierarchical mode the lead's own
+    // `[lead].max_workers` governs concurrency, and the resolved
+    // ResolvedManifest.max_parallel_tasks always has the resolver
+    // default (DEFAULT_MAX_PARALLEL_TASKS) applied, so an `== 0`
+    // assertion here would never fire. The legitimate range check
+    // lives in validate_ranges (flat-mode path) instead.
     Ok(())
 }
 
@@ -373,20 +384,29 @@ pub fn translate_legacy_parse_error(parse_err: &toml::de::Error, src: &str) -> O
 }
 
 /// Returns true iff the source contains a `[[<name>]]` array-of-tables marker
-/// (with optional whitespace) at the start of a line.
+/// (with optional whitespace) at the start of a line. Skips comment lines so
+/// `# [[lead]] (legacy)` in a docstring doesn't false-positive.
 fn has_top_level_array_table(src: &str, name: &str) -> bool {
     let needle = format!("[[{name}]]");
-    src.lines()
-        .any(|line| line.trim_start().starts_with(&needle))
+    src.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && trimmed.starts_with(&needle)
+    })
 }
 
 /// Returns true iff the source contains a top-level `[<section>]` table
-/// containing a `<field> =` assignment before the next `[` line.
+/// containing a `<field> =` assignment before the next `[` line. Comment
+/// lines (`# …`) are skipped entirely so a commented-out legacy field
+/// (`# approval_policy = "block"`) doesn't trigger a false migration hint
+/// and `# [run]` doesn't mistakenly enter or leave the target section.
 fn has_field_in_section(src: &str, section: &str, field: &str) -> bool {
     let header = format!("[{section}]");
     let mut in_section = false;
     for line in src.lines() {
         let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
         if trimmed.starts_with('[') {
             // Entering a new table — true if we hit the target header,
             // false on any other table (including subtables of the section).
@@ -406,11 +426,14 @@ fn has_field_in_section(src: &str, section: &str, field: &str) -> bool {
     false
 }
 
-/// Returns true iff the source contains a `[<parent>.<child>]` subtable header.
+/// Returns true iff the source contains a `[<parent>.<child>]` subtable
+/// header. Skips comment lines (see [`has_top_level_array_table`]).
 fn has_subtable(src: &str, parent: &str, child: &str) -> bool {
     let needle = format!("[{parent}.{child}]");
-    src.lines()
-        .any(|line| line.trim_start().starts_with(&needle))
+    src.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && trimmed.starts_with(&needle)
+    })
 }
 
 #[cfg(test)]
@@ -1051,5 +1074,101 @@ mod tests {
         let d = with_tmp_repo(true);
         let m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
         validate(&m).expect("manifests without [lifecycle] continue to validate");
+    }
+
+    #[test]
+    fn skip_dir_check_skips_git_repo_probe_for_lead() {
+        // Regression for #142: container-dispatch hierarchical manifests
+        // carry container-side directories (`/workspace/foo`) that don't
+        // exist on the host, so the lead's git-repo probe must be gated
+        // on `skip_dir_check` just like the directory-existence check.
+        // Pre-fix this validate path would fail with
+        // "directory is not a git work-tree" for every container manifest.
+        let mut lead = rl("lead", PathBuf::from("/workspace/does-not-exist-on-host"));
+        lead.use_worktree = true;
+        let mut m = ResolvedManifest {
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        // Sanity: with skip_dir_check=false the validator rejects (the
+        // host-side path is bogus).
+        assert!(validate(&m).is_err());
+        // The container-dispatch entry point must accept this manifest:
+        // the probe is gated on skip_dir_check so a host-side absence
+        // doesn't leak into validation.
+        validate_skip_dir_check(&m)
+            .expect("skip_dir_check must skip the git-repo probe for container-dispatch manifests");
+        // Same when use_worktree is false — the gate covers both paths.
+        m.lead.as_mut().unwrap().use_worktree = false;
+        validate_skip_dir_check(&m).expect("skip_dir_check skips dir checks unconditionally");
+    }
+
+    #[test]
+    fn translator_ignores_legacy_field_in_comment_lines() {
+        // #155: a commented-out v0.8 field name in [run] must not trigger
+        // a false-positive migration hint. Pre-fix the line scanner did
+        // a prefix match without skipping `#` lines.
+        let src = "# previously: max_workers = 4\n[run]\n# approval_policy = \"block\"\nmax_parallel_tasks = 2\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        // The [[run]] body is otherwise valid v0.9, so toml may or may
+        // not error — only run the scanner if it did.
+        if let Err(e) = parse_err {
+            let translated = translate_legacy_parse_error(&e, src);
+            assert!(
+                translated.is_none(),
+                "comment-only mentions of legacy fields must not be translated as migration hints: {translated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn translator_scanner_skips_commented_section_brackets() {
+        // `# [[lead]]` in a leading comment used to satisfy
+        // has_top_level_array_table; now it must not.
+        let src =
+            "# legacy syntax: [[lead]]\n[lead]\nid = \"x\"\ndirectory = \"/tmp\"\nprompt = \"p\"\n";
+        let parse_err: Result<super::super::schema::Manifest, _> = toml::from_str(src);
+        if let Err(e) = parse_err {
+            let translated = translate_legacy_parse_error(&e, src);
+            assert!(
+                translated.is_none(),
+                "commented-out [[lead]] must not be flagged as legacy: {translated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_rule_rejects_unknown_fields() {
+        // #155: ApprovalRuleSpec lacked deny_unknown_fields, so a typo'd
+        // sub-field would silently pass through.
+        let src = r#"actoin = "auto_approve""#;
+        let err: Result<super::super::schema::ApprovalRuleSpec, _> = toml::from_str(src);
+        assert!(err.is_err(), "unknown field 'actoin' must be rejected");
+    }
+
+    #[test]
+    fn approval_match_rejects_unknown_fields() {
+        // The classic typo from the audit: `catagory` instead of `category`.
+        // Without deny_unknown_fields, the rule parses with no match filter
+        // (every field None) and silently matches every event.
+        let src = r#"catagory = "tool_use""#;
+        let err: Result<super::super::schema::ApprovalMatchSpec, _> = toml::from_str(src);
+        assert!(err.is_err(), "unknown field 'catagory' must be rejected");
     }
 }

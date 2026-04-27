@@ -369,6 +369,46 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**Manifest (container-dispatch unblock + audit follow-ups):**
+- `manifest::validate::validate_lead` — `is_in_git_repo` probe now
+  gated on `!skip_dir_check`, mirroring the directory-existence check.
+  Container-dispatch manifests carry container-side paths
+  (`/workspace/foo`) that don't exist on the host, so the prior
+  unconditional `git2::Repository::discover` call rejected every
+  hierarchical container manifest with the default `use_worktree = true`.
+  Closes #142.
+- `manifest::schema::ApprovalRuleSpec` /
+  `manifest::schema::ApprovalMatchSpec` — added `#[serde(deny_unknown_fields)]`.
+  A typo'd field in an `[[approval_policy]]` block (e.g. `catagory`
+  instead of `category`) used to silently parse with no match filter,
+  matching every event. (Item from #155.)
+- `manifest::validate::validate_hierarchical_ranges` — removed the
+  meaningless `max_parallel_tasks == 0` check. That field is a flat-mode
+  ([[task]]) concurrency cap, and `ResolvedManifest.max_parallel_tasks`
+  always carries the resolver default
+  (`schema::DEFAULT_MAX_PARALLEL_TASKS`), so the assertion never fired
+  for properly-resolved manifests and was misleading to read in lead-mode
+  validation. The legitimate range check stays in `validate_ranges`
+  (flat-mode path). (Item from #155.)
+- `manifest::validate::translate_legacy_parse_error` scanners
+  (`has_top_level_array_table`, `has_field_in_section`, `has_subtable`)
+  — now skip `#`-prefixed comment lines. A commented-out v0.8 field
+  inside `[run]` (e.g. `# approval_policy = "block"`) used to trigger a
+  false-positive migration hint, and `# [[lead]]` in a leading docstring
+  used to satisfy the array-table probe. (Two items from #155.)
+- `manifest::validate::validate_lifecycle` — error message rewritten so
+  the inline `[[notification]] / kind = "log"` snippet renders as a
+  separate indented block rather than as flowing prose; an operator
+  copy-pasting the message no longer ends up with text fragments
+  embedded next to the TOML keys. (Item from #155.)
+- `manifest::schema` — promoted `DEFAULT_MAX_PARALLEL_TASKS` to a
+  `pub const` in `schema.rs` (re-imported by `resolve.rs`) so the
+  effective default is discoverable from the schema source by form
+  renderers, `pitboss schema` consumers, and doc generators without
+  reading resolver internals. Also added `#[serde(default)]` to
+  `RunConfig.max_parallel_tasks` for parity with the other optional
+  fields. (Item from #155.)
+
 **Notify (webhook secret hygiene + SSRF blocklist):**
 - `notify::config::redact_webhook_url` (new helper) — strips path, query,
   and fragment from any webhook URL before it lands in an error message
