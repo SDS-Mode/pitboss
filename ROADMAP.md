@@ -3,10 +3,10 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: 2026-04-25 (post-v0.8.0 session).** Everything shipped through
-v0.8.0 has been removed from this file — check `CHANGELOG.md` for
-per-version history. If you're about to add an item, slot it into one
-of the tiered sections below (biggest effort first).
+**Last refresh: v0.9.0 (2026-04-27).** Everything shipped through v0.9.0
+has been removed from this file — check `CHANGELOG.md` for per-version
+history. If you're about to add an item, slot it into one of the tiered
+sections below (biggest effort first).
 
 ---
 
@@ -383,9 +383,9 @@ form explicitly retired.
 
 ---
 
-## Deferred from v0.8.0 (targeting v0.9+)
+## Deferred from v0.9.0 (targeting v0.10+)
 
-Items that were scoped or considered during v0.8 development but
+Items that were scoped or considered during v0.8 / v0.9 development but
 explicitly deferred. These are reasonably well-understood problems,
 not blue-sky ideas.
 
