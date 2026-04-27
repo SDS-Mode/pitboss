@@ -426,6 +426,52 @@ This project uses [Semantic Versioning](https://semver.org/).
   longer false-positive every drift check. The generator only emits LF;
   any CR present came from git, not from drift. (#155)
 
+**Control plane (#152, all 7 audit items):**
+- `control::server::serve_connection` — `CancelWorker`, `PauseWorker`,
+  `ContinueWorker`, `RepromptWorker` (worker-id branch), and
+  `ListWorkers` are now sub-lead-aware. A new `find_worker_layer` helper
+  searches `state.root` first, then iterates `state.subleads`, and the
+  handlers run against the discovered layer's `workers` /
+  `worker_cancels` / `worker_pids` / `worker_counters` maps. Pre-fix all
+  five hard-coded `state.root.workers` and so returned `unknown task_id`
+  for any sub-lead-owned worker (and `ListWorkers` snapshots omitted them
+  entirely). `WorkerSnapshotEntry.parent_task_id` is now populated with
+  the sub-lead's id for sub-lead-owned workers (was always `None`). (#152 M2)
+- `control::server::serve_connection` — when the prior connection's
+  outbound queue is full or closed, the `Superseded` `try_send` failure
+  now logs at `warn` level (was a silent `let _ =`). The displaced TUI
+  may not learn it was superseded if its socket is wedged, but the drop
+  is now observable in journald. (#152 M1)
+- `control::server::serve_connection` parse-error path now extracts the
+  `op` field from the raw JSON line so `OpFailed.op` is non-empty (the
+  literal request tag when the line is parseable JSON, the
+  `parse_error` sentinel otherwise). The empty-string `op` was the only
+  signal to the TUI before, leaving it no way to attribute the failure.
+  (#152 L4)
+- `control::server::serve_connection` outbound pump batches `try_recv`
+  drains and calls `flush()` exactly once per batch via the new
+  `send_events_batch` helper. The hello handshake (Hello + N queued
+  ApprovalRequests) and overlapping `WorkersUpdate` + `StoreActivity`
+  ticks no longer pay one syscall per event. Single-event throughput
+  unchanged. (#152 L5)
+- `control::control_socket_path` now sweeps stale `*.control.sock` files
+  in `$XDG_RUNTIME_DIR/pitboss/` whose mtime is older than 24 h. Pitboss
+  removes its own socket on clean shutdown via `ControlServerHandle::Drop`,
+  so older files came from crashed runs that would otherwise accumulate
+  forever. Sweep is best-effort; permission/in-use errors are silently
+  ignored. (#152 L3)
+- `control::server::serve_connection` writer-id-based slot match — the
+  load-bearing reconnect-safety guard is now documented at both ends
+  (install site + disconnect cleanup) with explicit "do not remove"
+  language so a future refactor can't silently drop the id check and
+  recreate the silent-disconnect-on-reconnect race. (#152 L1)
+- `control::protocol` — module-level wire-compatibility convention added:
+  every new field on an existing `ControlOp`/`ControlEvent` variant must
+  carry `#[serde(default)]` (or `default = "fn"` / `skip_serializing_if`)
+  so old TUI clients keep parsing. New variants are always safe; mutating
+  existing variants without the default is what breaks older clients
+  silently. (#152 L2)
+
 **Schema metadata (pitboss-schema + pitboss-schema-derive audit follow-ups):**
 - `pitboss_schema::FormType` — marked `#[non_exhaustive]`, derives
   `Hash`, `PartialOrd`, `Ord`, and `serde::Serialize` (snake_case names

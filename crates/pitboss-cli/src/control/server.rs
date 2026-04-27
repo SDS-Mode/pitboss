@@ -209,17 +209,37 @@ async fn serve_connection(
     .await;
 
     // Install this connection as the control_writer (displace any prior).
-    // The connection-unique `writer_id` lets the disconnect cleanup block
-    // verify the slot still holds OUR writer before clearing — a racing
-    // reconnect that swapped in its own writer between this install and
-    // our disconnect has a different id, so our cleanup skips the clear.
+    //
+    // LOAD-BEARING: the connection-unique `writer_id` is checked by the
+    // disconnect cleanup block at the bottom of this function before it
+    // clears `state.root.control_writer`. Without that id-match guard,
+    // a TUI that reconnects in the narrow window between this read loop
+    // exiting and the cleanup block running would have its own writer
+    // slot silently cleared by the previous connection's cleanup —
+    // leading to a connected TUI that receives no events with no
+    // diagnostic surface. **Do not remove the writer_id field, the slot
+    // assignment, or the id-match check at the disconnect site without
+    // first introducing an equivalent reconnect-safety mechanism.**
     let writer_id = uuid::Uuid::now_v7();
     let (ev_tx, mut ev_rx) =
         tokio::sync::mpsc::channel::<ControlEvent>(crate::dispatch::layer::CONTROL_EVENT_QUEUE_CAP);
     {
         let mut cw = state.root.control_writer.lock().await;
         if let Some(old) = cw.take() {
-            let _ = old.sender.try_send(ControlEvent::Superseded);
+            // `try_send` fails when the prior connection's outbound
+            // queue is already full — its TUI is unresponsive or its
+            // socket is wedged. Log the drop so the silent failure is
+            // observable: the displaced TUI will not learn it was
+            // superseded and may keep rendering stale tiles until its
+            // socket EOFs. (#152 M1)
+            if let Err(e) = old.sender.try_send(ControlEvent::Superseded) {
+                tracing::warn!(
+                    new_writer_id = %writer_id,
+                    error = %e,
+                    "could not deliver Superseded to displaced TUI; \
+                     prior connection's queue full or closed"
+                );
+            }
         }
         *cw = Some(crate::dispatch::layer::ControlWriterSlot {
             id: writer_id,
@@ -300,10 +320,28 @@ async fn serve_connection(
     }
 
     // Concurrent outbound pump: forward events from the mpsc to the socket.
+    //
+    // Batched-flush optimisation (#152 L5): the hello handshake bursts
+    // a `Hello` event plus N queued/pending `ApprovalRequest` events
+    // back-to-back, and a steady-state period of `WorkersUpdate` +
+    // `StoreActivity` ticks frequently overlap. With per-message flush
+    // each call paid one syscall on a TCP/Unix-stream send buffer that
+    // had room for the whole batch. Now: drain everything immediately
+    // available with `try_recv` after each `recv`, write all of them in
+    // one buffered pass, and call `flush()` exactly once per drain.
+    // Falls back to the old per-message behaviour when no further
+    // events are queued — latency is unchanged for sparse traffic.
     let writer_for_pump = writer.clone();
     let pump = tokio::spawn(async move {
         while let Some(ev) = ev_rx.recv().await {
-            if send_event(&writer_for_pump, &ev).await.is_err() {
+            let mut batch: Vec<ControlEvent> = vec![ev];
+            // Drain anything else already in the channel without
+            // awaiting — bounded by the channel capacity, so this loop
+            // can't run unboundedly.
+            while let Ok(next) = ev_rx.try_recv() {
+                batch.push(next);
+            }
+            if send_events_batch(&writer_for_pump, &batch).await.is_err() {
                 break;
             }
         }
@@ -351,7 +389,14 @@ async fn serve_connection(
         let reply = match serde_json::from_str::<ControlOp>(&line) {
             Ok(op) => dispatch_op(&state, op).await,
             Err(e) => ControlEvent::OpFailed {
-                op: String::new(),
+                // Best-effort: extract the `op` string from the raw JSON
+                // so the TUI can correlate the failure with the request
+                // that triggered it. Falls back to a `parse_error`
+                // sentinel when the line is not even partially-valid
+                // JSON or the `op` discriminator is missing. The empty
+                // string used to be the only signal here, leaving the
+                // TUI no way to attribute the failure. (#152 L4)
+                op: extract_op_tag_from_raw(&line),
                 task_id: None,
                 error: format!("parse error: {e}"),
             },
@@ -362,10 +407,12 @@ async fn serve_connection(
     }
 
     // Clear control_writer on disconnect — but ONLY if the slot still
-    // holds OUR writer. A reconnecting TUI can install its own writer
-    // between our read loop exiting and this cleanup block running; a
-    // blind clear would silently disconnect the reconnected client
-    // (events go nowhere, no diagnostic surface).
+    // holds OUR writer (id-match against the `writer_id` minted at the
+    // install site above). LOAD-BEARING — see the install site for the
+    // full rationale. A reconnecting TUI can install its own writer in
+    // the window between our read loop exiting and this cleanup block
+    // running; a blind clear would silently disconnect the reconnected
+    // client.
     {
         let mut cw = state.root.control_writer.lock().await;
         if cw.as_ref().is_some_and(|slot| slot.id == writer_id) {
@@ -381,16 +428,15 @@ async fn serve_connection(
 /// delivered. No-op if the worker isn't frozen or the pid slot is
 /// empty. Errors are logged and swallowed — cancel paths must not
 /// fail because of signal cleanup.
-async fn thaw_if_frozen(state: &Arc<crate::dispatch::state::DispatchState>, task_id: &str) {
+async fn thaw_if_frozen(layer: &Arc<crate::dispatch::layer::LayerState>, task_id: &str) {
     let is_frozen = matches!(
-        state.root.workers.read().await.get(task_id),
+        layer.workers.read().await.get(task_id),
         Some(crate::dispatch::state::WorkerState::Frozen { .. })
     );
     if !is_frozen {
         return;
     }
-    let pid = state
-        .root
+    let pid = layer
         .worker_pids
         .read()
         .await
@@ -402,6 +448,98 @@ async fn thaw_if_frozen(state: &Arc<crate::dispatch::state::DispatchState>, task
             tracing::debug!(task_id, pid, "pre-cancel SIGCONT failed: {e}");
         }
     }
+}
+
+/// Append every worker in `layer` to `out` as a
+/// `WorkerSnapshotEntry`. Used by `ListWorkers` to aggregate root +
+/// sub-lead workers into a single snapshot. Pre-fix this lived inline
+/// in the handler and only ever ran against `state.root`. (#152 M2)
+async fn collect_layer_workers(
+    layer: &Arc<crate::dispatch::layer::LayerState>,
+    parent_task_id: Option<String>,
+    out: &mut Vec<crate::control::protocol::WorkerSnapshotEntry>,
+) {
+    let workers = layer.workers.read().await;
+    let prompts = layer.worker_prompts.read().await;
+    for (id, w) in workers.iter() {
+        let (state_str, started_at, session_id) = match w {
+            crate::dispatch::state::WorkerState::Pending => ("pending".to_string(), None, None),
+            crate::dispatch::state::WorkerState::Running {
+                started_at,
+                session_id,
+            } => (
+                "running".to_string(),
+                Some(started_at.to_rfc3339()),
+                session_id.clone(),
+            ),
+            crate::dispatch::state::WorkerState::Paused {
+                paused_at,
+                session_id,
+                ..
+            } => (
+                "paused".to_string(),
+                Some(paused_at.to_rfc3339()),
+                Some(session_id.clone()),
+            ),
+            crate::dispatch::state::WorkerState::Frozen {
+                frozen_at,
+                session_id,
+                ..
+            } => (
+                "frozen".to_string(),
+                Some(frozen_at.to_rfc3339()),
+                Some(session_id.clone()),
+            ),
+            crate::dispatch::state::WorkerState::Done(rec) => (
+                match rec.status {
+                    pitboss_core::store::TaskStatus::Success => "done_success",
+                    pitboss_core::store::TaskStatus::Failed => "done_failed",
+                    pitboss_core::store::TaskStatus::TimedOut => "done_timed_out",
+                    pitboss_core::store::TaskStatus::Cancelled => "done_cancelled",
+                    pitboss_core::store::TaskStatus::SpawnFailed => "done_spawn_failed",
+                    pitboss_core::store::TaskStatus::ApprovalRejected => "done_approval_rejected",
+                    pitboss_core::store::TaskStatus::ApprovalTimedOut => "done_approval_timed_out",
+                }
+                .to_string(),
+                Some(rec.started_at.to_rfc3339()),
+                rec.claude_session_id.clone(),
+            ),
+        };
+        out.push(crate::control::protocol::WorkerSnapshotEntry {
+            task_id: id.clone(),
+            state: state_str,
+            prompt_preview: prompts.get(id).cloned().unwrap_or_default(),
+            started_at,
+            parent_task_id: parent_task_id.clone(),
+            session_id,
+        });
+    }
+}
+
+/// Find the layer (root or a sub-lead) that owns `task_id`. Searches
+/// root first, then each sub-lead. Returns `None` when the id is
+/// unknown to every layer. (#152 M2)
+///
+/// Background: pre-fix, every worker-targeted control op (`CancelWorker`,
+/// `PauseWorker`, `ContinueWorker`, `ListWorkers`) hard-coded
+/// `state.root.workers` and friends, which made sub-lead-owned workers
+/// invisible — a `cancel_worker` on a worker spawned by a sub-lead
+/// returned `unknown task_id` and the `list_workers` snapshot omitted
+/// them entirely.
+async fn find_worker_layer(
+    state: &Arc<crate::dispatch::state::DispatchState>,
+    task_id: &str,
+) -> Option<Arc<crate::dispatch::layer::LayerState>> {
+    if state.root.workers.read().await.contains_key(task_id) {
+        return Some(state.root.clone());
+    }
+    let subleads = state.subleads.read().await;
+    for layer in subleads.values() {
+        if layer.workers.read().await.contains_key(task_id) {
+            return Some(layer.clone());
+        }
+    }
+    None
 }
 
 /// Period between `StoreActivity` broadcasts on the control socket.
@@ -419,6 +557,45 @@ async fn send_event(
     guard.write_all(line.as_bytes()).await?;
     guard.flush().await?;
     Ok(())
+}
+
+/// Send a batch of events with exactly one `flush()` at the end.
+/// Reduces syscall overhead during multi-event bursts (hello handshake,
+/// overlapping `WorkersUpdate` + `StoreActivity` ticks). See the pump
+/// loop's call site for the latency rationale. Used by the outbound
+/// pump only; ad-hoc senders still use `send_event`. (#152 L5)
+async fn send_events_batch(
+    writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    batch: &[ControlEvent],
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    // Serialize first so the lock window is just the syscalls.
+    let mut payload = Vec::with_capacity(batch.len() * 256 /* heuristic per-event size */);
+    for ev in batch {
+        let line = serde_json::to_string(ev)?;
+        payload.extend_from_slice(line.as_bytes());
+        payload.push(b'\n');
+    }
+    let mut guard = writer.lock().await;
+    guard.write_all(&payload).await?;
+    guard.flush().await?;
+    Ok(())
+}
+
+/// Best-effort: pull the `op` field out of a raw JSON line that failed
+/// strict `ControlOp` deserialization. Used to give parse-error
+/// `OpFailed` responses a non-empty `op` so the TUI can correlate the
+/// failure with the request it sent. Returns `"parse_error"` when the
+/// line isn't valid JSON, isn't an object, or doesn't carry an `op`
+/// string field — i.e. the worst case is the same opaque tag the
+/// previous code emitted instead of the silent empty string. (#152 L4)
+fn extract_op_tag_from_raw(line: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("op").and_then(|s| s.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "parse_error".to_string())
 }
 
 fn op_tag(op: &ControlOp) -> &'static str {
@@ -446,12 +623,22 @@ async fn dispatch_op(
             task_id: None,
         },
         ControlOp::CancelWorker { task_id } => {
+            // Search root + all sub-leads for the owning layer (#152 M2).
+            // Pre-fix only consulted state.root.worker_cancels and so
+            // returned "unknown task_id" for any sub-lead-owned worker.
+            let Some(layer) = find_worker_layer(state, &task_id).await else {
+                return ControlEvent::OpFailed {
+                    op: "cancel_worker".into(),
+                    task_id: Some(task_id.clone()),
+                    error: format!("unknown task_id: {task_id}"),
+                };
+            };
             // If this worker is currently Frozen (SIGSTOP'd), we must
             // SIGCONT it first so the subsequent SIGTERM is actually
             // deliverable — a stopped process can't drain signals until
             // it's running again. Harmless for non-frozen workers.
-            thaw_if_frozen(state, &task_id).await;
-            let cancels = state.root.worker_cancels.read().await;
+            thaw_if_frozen(&layer, &task_id).await;
+            let cancels = layer.worker_cancels.read().await;
             if let Some(tok) = cancels.get(&task_id) {
                 tok.terminate();
                 ControlEvent::OpAcked {
@@ -459,10 +646,12 @@ async fn dispatch_op(
                     task_id: Some(task_id),
                 }
             } else {
+                // Layer's workers map had the entry but worker_cancels
+                // didn't — a transient state during spawn or completion.
                 ControlEvent::OpFailed {
                     op: "cancel_worker".into(),
                     task_id: Some(task_id.clone()),
-                    error: format!("unknown task_id: {task_id}"),
+                    error: format!("no cancel token for task_id: {task_id}"),
                 }
             }
         }
@@ -559,8 +748,18 @@ async fn dispatch_op(
             }
         }
         ControlOp::PauseWorker { task_id, mode } => {
-            let mut workers = state.root.workers.write().await;
+            // #152 M2: route to the owning layer (root or any sub-lead).
+            let Some(layer) = find_worker_layer(state, &task_id).await else {
+                return ControlEvent::OpFailed {
+                    op: "pause_worker".into(),
+                    task_id: Some(task_id),
+                    error: "unknown task_id".into(),
+                };
+            };
+            let mut workers = layer.workers.write().await;
             let Some(entry) = workers.get(&task_id).cloned() else {
+                // Worker disappeared between layer discovery and lock —
+                // treat as unknown.
                 return ControlEvent::OpFailed {
                     op: "pause_worker".into(),
                     task_id: Some(task_id),
@@ -574,7 +773,7 @@ async fn dispatch_op(
                 } => {
                     match mode {
                         crate::control::protocol::PauseMode::Cancel => {
-                            let cancels = state.root.worker_cancels.read().await;
+                            let cancels = layer.worker_cancels.read().await;
                             if let Some(tok) = cancels.get(&task_id) {
                                 tok.terminate();
                             }
@@ -588,8 +787,7 @@ async fn dispatch_op(
                             );
                         }
                         crate::control::protocol::PauseMode::Freeze => {
-                            let pid = state
-                                .root
+                            let pid = layer
                                 .worker_pids
                                 .read()
                                 .await
@@ -620,6 +818,9 @@ async fn dispatch_op(
                             );
                         }
                     }
+                    // run_subdir is shared run-wide (root layer owns the
+                    // canonical path, sub-leads share it for events.jsonl
+                    // lineage), so write through state.root.run_subdir.
                     let _ = crate::dispatch::events::append_event(
                         &state.root.run_subdir,
                         &task_id,
@@ -629,8 +830,7 @@ async fn dispatch_op(
                         },
                     )
                     .await;
-                    state
-                        .root
+                    layer
                         .worker_counters
                         .write()
                         .await
@@ -676,7 +876,15 @@ async fn dispatch_op(
             }
         }
         ControlOp::ContinueWorker { task_id, prompt } => {
-            let current = state.root.workers.read().await.get(&task_id).cloned();
+            // #152 M2: route to the owning layer (root or any sub-lead).
+            let Some(layer) = find_worker_layer(state, &task_id).await else {
+                return ControlEvent::OpFailed {
+                    op: "continue_worker".into(),
+                    task_id: Some(task_id),
+                    error: "unknown task_id".into(),
+                };
+            };
+            let current = layer.workers.read().await.get(&task_id).cloned();
             match current {
                 Some(crate::dispatch::state::WorkerState::Paused { session_id, .. }) => {
                     let prompt_text = prompt.unwrap_or_else(|| "continue".into());
@@ -720,8 +928,7 @@ async fn dispatch_op(
                 }) => {
                     // SIGCONT the frozen process. `prompt` is ignored —
                     // freeze-mode preserves state and has no resume point.
-                    let pid = state
-                        .root
+                    let pid = layer
                         .worker_pids
                         .read()
                         .await
@@ -742,7 +949,7 @@ async fn dispatch_op(
                             error: format!("SIGCONT failed: {e}"),
                         };
                     }
-                    state.root.workers.write().await.insert(
+                    layer.workers.write().await.insert(
                         task_id.clone(),
                         crate::dispatch::state::WorkerState::Running {
                             started_at,
@@ -805,13 +1012,23 @@ async fn dispatch_op(
                 }
             }
 
-            let current = state.root.workers.read().await.get(&task_id).cloned();
+            // #152 M2: route to the owning layer (root or sub-lead) for
+            // worker-id reprompts. Sub-lead-id reprompts already routed
+            // above via `state.subleads`.
+            let Some(layer) = find_worker_layer(state, &task_id).await else {
+                return ControlEvent::OpFailed {
+                    op: "reprompt_worker".into(),
+                    task_id: Some(task_id),
+                    error: "unknown task_id".into(),
+                };
+            };
+            let current = layer.workers.read().await.get(&task_id).cloned();
             let session_id = match current {
                 Some(crate::dispatch::state::WorkerState::Running {
                     session_id: Some(sid),
                     ..
                 }) => {
-                    let cancels = state.root.worker_cancels.read().await;
+                    let cancels = layer.worker_cancels.read().await;
                     if let Some(tok) = cancels.get(&task_id) {
                         tok.terminate();
                     }
@@ -849,8 +1066,7 @@ async fn dispatch_op(
                 .await
             {
                 Ok(()) => {
-                    state
-                        .root
+                    layer
                         .worker_counters
                         .write()
                         .await
@@ -870,70 +1086,21 @@ async fn dispatch_op(
             }
         }
         ControlOp::ListWorkers => {
-            let workers = state.root.workers.read().await;
-            let prompts = state.root.worker_prompts.read().await;
-            let entries = workers
-                .iter()
-                .map(|(id, w)| {
-                    let (state_str, started_at, session_id) = match w {
-                        crate::dispatch::state::WorkerState::Pending => {
-                            ("pending".to_string(), None, None)
-                        }
-                        crate::dispatch::state::WorkerState::Running {
-                            started_at,
-                            session_id,
-                        } => (
-                            "running".to_string(),
-                            Some(started_at.to_rfc3339()),
-                            session_id.clone(),
-                        ),
-                        crate::dispatch::state::WorkerState::Paused {
-                            paused_at,
-                            session_id,
-                            ..
-                        } => (
-                            "paused".to_string(),
-                            Some(paused_at.to_rfc3339()),
-                            Some(session_id.clone()),
-                        ),
-                        crate::dispatch::state::WorkerState::Frozen {
-                            frozen_at,
-                            session_id,
-                            ..
-                        } => (
-                            "frozen".to_string(),
-                            Some(frozen_at.to_rfc3339()),
-                            Some(session_id.clone()),
-                        ),
-                        crate::dispatch::state::WorkerState::Done(rec) => (
-                            match rec.status {
-                                pitboss_core::store::TaskStatus::Success => "done_success",
-                                pitboss_core::store::TaskStatus::Failed => "done_failed",
-                                pitboss_core::store::TaskStatus::TimedOut => "done_timed_out",
-                                pitboss_core::store::TaskStatus::Cancelled => "done_cancelled",
-                                pitboss_core::store::TaskStatus::SpawnFailed => "done_spawn_failed",
-                                pitboss_core::store::TaskStatus::ApprovalRejected => {
-                                    "done_approval_rejected"
-                                }
-                                pitboss_core::store::TaskStatus::ApprovalTimedOut => {
-                                    "done_approval_timed_out"
-                                }
-                            }
-                            .to_string(),
-                            Some(rec.started_at.to_rfc3339()),
-                            rec.claude_session_id.clone(),
-                        ),
-                    };
-                    crate::control::protocol::WorkerSnapshotEntry {
-                        task_id: id.clone(),
-                        state: state_str,
-                        prompt_preview: prompts.get(id).cloned().unwrap_or_default(),
-                        started_at,
-                        parent_task_id: None,
-                        session_id,
-                    }
-                })
-                .collect();
+            // #152 M2: aggregate root-layer workers AND each sub-lead's
+            // workers. Pre-fix only emitted root.workers, so a TUI
+            // attached to a hierarchical run with sub-leads saw an
+            // incomplete tree (sub-lead-owned workers were invisible).
+            //
+            // `parent_task_id` is set to the sub-lead's id for
+            // sub-lead-owned workers (and `None` for root-owned), so the
+            // TUI can render the tree shape correctly. Pre-fix it was
+            // hard-coded to `None` for everything.
+            let mut entries: Vec<crate::control::protocol::WorkerSnapshotEntry> = Vec::new();
+            collect_layer_workers(&state.root, None, &mut entries).await;
+            let subleads = state.subleads.read().await;
+            for (sublead_id, layer) in subleads.iter() {
+                collect_layer_workers(layer, Some(sublead_id.clone()), &mut entries).await;
+            }
             ControlEvent::WorkersSnapshot { workers: entries }
         }
         ControlOp::Approve {
@@ -1009,6 +1176,7 @@ async fn dispatch_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::layer::LayerState;
     use crate::dispatch::state::{ApprovalPolicy, DispatchState};
     use crate::manifest::resolve::ResolvedManifest;
     use crate::manifest::schema::WorktreeCleanup;
@@ -1131,9 +1299,49 @@ mod tests {
         let _hello = lines.next_line().await.unwrap();
         let reply_line = lines.next_line().await.unwrap().unwrap();
         let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        // #152 L4: the op tag is now extracted from the raw JSON so the
+        // TUI can correlate the failure with the op that caused it.
+        // For a JSON line with a known `op` field but unknown variant,
+        // the extracted tag is the string from that field.
         assert!(matches!(
             reply,
-            ControlEvent::OpFailed { op, .. } if op.is_empty()
+            ControlEvent::OpFailed { op, .. } if op == "wibble"
+        ));
+        drop(handle);
+    }
+
+    /// #152 L4: when the raw line isn't even valid JSON, the parse-error
+    /// `op` field falls back to the `parse_error` sentinel — never
+    /// silently empty.
+    #[tokio::test]
+    async fn malformed_json_returns_parse_error_sentinel() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        let sock = dir.path().join("malformed.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "flat".into(),
+            state,
+        )
+        .await
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream.write_all(b"not json at all\n").await.unwrap();
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpFailed { op, .. } if op == "parse_error"
         ));
         drop(handle);
     }
@@ -1858,6 +2066,211 @@ mod tests {
             }
             other => panic!("expected WorkersSnapshot, got {other:?}"),
         }
+        drop(handle);
+    }
+
+    /// #152 M2 regression: list_workers must aggregate root-layer
+    /// workers AND each sub-lead's workers, with `parent_task_id` set
+    /// to the sub-lead id for sub-lead-owned workers. Pre-fix only
+    /// emitted root.workers, leaving the TUI blind to the sub-tree.
+    #[tokio::test]
+    async fn list_workers_aggregates_root_and_sublead_workers() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        // One root-layer worker, one sub-lead with one worker.
+        state.root.workers.write().await.insert(
+            "root-w".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("root-sess".into()),
+            },
+        );
+
+        let sub_manifest = ResolvedManifest {
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::Never,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(50.0),
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        let sub_layer = std::sync::Arc::new(LayerState::new(
+            run_id,
+            sub_manifest,
+            state.root.store.clone(),
+            CancelToken::new(),
+            "sublead-A".into(),
+            state.root.spawner.clone(),
+            PathBuf::from("/bin/true"),
+            state.root.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            dir.path().join(run_id.to_string()),
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+        sub_layer.workers.write().await.insert(
+            "sub-w".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sub-sess".into()),
+            },
+        );
+        state
+            .subleads
+            .write()
+            .await
+            .insert("sublead-A".into(), sub_layer);
+
+        let sock = dir.path().join("list-aggregate.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"list_workers\"}\n")
+            .await
+            .unwrap();
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        match reply {
+            ControlEvent::WorkersSnapshot { mut workers } => {
+                workers.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+                assert_eq!(workers.len(), 2, "must include root + sub-lead workers");
+                let root_entry = workers.iter().find(|e| e.task_id == "root-w").unwrap();
+                assert!(root_entry.parent_task_id.is_none());
+                let sub_entry = workers.iter().find(|e| e.task_id == "sub-w").unwrap();
+                assert_eq!(sub_entry.parent_task_id.as_deref(), Some("sublead-A"));
+            }
+            other => panic!("expected WorkersSnapshot, got {other:?}"),
+        }
+        drop(handle);
+    }
+
+    /// #152 M2 regression: cancel_worker on a sub-lead-owned worker
+    /// must terminate the sub-lead's worker_cancels token, not return
+    /// "unknown task_id" because the handler only consulted root.
+    #[tokio::test]
+    async fn cancel_worker_routes_to_sublead_layer() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        let sub_manifest = ResolvedManifest {
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::Never,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(50.0),
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        let sub_layer = std::sync::Arc::new(LayerState::new(
+            run_id,
+            sub_manifest,
+            state.root.store.clone(),
+            CancelToken::new(),
+            "sublead-B".into(),
+            state.root.spawner.clone(),
+            PathBuf::from("/bin/true"),
+            state.root.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            dir.path().join(run_id.to_string()),
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+        let sub_w = pitboss_core::session::CancelToken::new();
+        sub_layer.workers.write().await.insert(
+            "sub-w".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sub-sess".into()),
+            },
+        );
+        sub_layer
+            .worker_cancels
+            .write()
+            .await
+            .insert("sub-w".into(), sub_w.clone());
+        state
+            .subleads
+            .write()
+            .await
+            .insert("sublead-B".into(), sub_layer);
+
+        let sock = dir.path().join("cancel-sublead-worker.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state,
+        )
+        .await
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"cancel_worker\",\"task_id\":\"sub-w\"}\n")
+            .await
+            .unwrap();
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(
+            matches!(reply, ControlEvent::OpAcked { ref op, .. } if op == "cancel_worker"),
+            "expected OpAcked, got {reply:?}"
+        );
+        assert!(
+            sub_w.is_terminated(),
+            "sub-lead-owned worker token must be terminated by the routed cancel"
+        );
         drop(handle);
     }
 }
