@@ -121,9 +121,23 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
     let started = meta.started_at;
     let ended = tasks.last().map_or(started, |t| t.ended_at);
 
+    // Best-effort: pull manifest_name from resolved.json if present so partial
+    // (in-progress) runs synthesized from summary.jsonl still surface the run
+    // name in the operational console. Falls back to None if resolved.json is
+    // missing/malformed or the field is unset (pre-name-field manifests).
+    let manifest_name = std::fs::read(run_dir.join("resolved.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| {
+            v.get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+        });
+
     Ok(RunSummary {
         run_id: meta.run_id,
         manifest_path: meta.manifest_path,
+        manifest_name,
         pitboss_version: meta.pitboss_version,
         claude_version: meta.claude_version,
         started_at: started,
@@ -561,6 +575,7 @@ mod tests {
         RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::from("/tmp/test.toml"),
+            manifest_name: None,
             pitboss_version: "0.1.0".to_string(),
             claude_version: None,
             started_at: now,

@@ -116,6 +116,12 @@ pub struct RunMeta {
 pub struct RunSummary {
     pub run_id: Uuid,
     pub manifest_path: PathBuf,
+    /// Human-readable label from `[run].name`. Lets the operational console
+    /// group related runs without re-reading `manifest.snapshot.toml` per
+    /// digest. `None` for pre-name-field runs and for manifests that omit
+    /// `[run].name`. Added in v0.10.
+    #[serde(default)]
+    pub manifest_name: Option<String>,
     pub pitboss_version: String,
     pub claude_version: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -357,6 +363,48 @@ mod tests {
             back.final_message_preview.as_ref().unwrap().chars().count(),
             201
         );
+    }
+
+    #[test]
+    fn run_summary_round_trips_manifest_name() {
+        let summary = RunSummary {
+            run_id: uuid::Uuid::now_v7(),
+            manifest_path: PathBuf::from("/x.toml"),
+            manifest_name: Some("nightly".into()),
+            pitboss_version: "0.10".into(),
+            claude_version: None,
+            started_at: Utc.with_ymd_and_hms(2026, 4, 27, 0, 0, 0).unwrap(),
+            ended_at: Utc.with_ymd_and_hms(2026, 4, 27, 0, 1, 0).unwrap(),
+            total_duration_ms: 60_000,
+            tasks_total: 0,
+            tasks_failed: 0,
+            was_interrupted: false,
+            tasks: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("nightly"));
+        let back: RunSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.manifest_name.as_deref(), Some("nightly"));
+    }
+
+    #[test]
+    fn pre_v0_10_run_summary_back_compat() {
+        // Old summary.json without manifest_name must still parse.
+        let old = r#"{
+            "run_id": "01950abc-1234-7def-8000-000000000000",
+            "manifest_path": "/x.toml",
+            "pitboss_version": "0.9.0",
+            "claude_version": null,
+            "started_at": "2026-04-26T00:00:00Z",
+            "ended_at":   "2026-04-26T00:01:00Z",
+            "total_duration_ms": 60000,
+            "tasks_total": 0,
+            "tasks_failed": 0,
+            "was_interrupted": false,
+            "tasks": []
+        }"#;
+        let s: RunSummary = serde_json::from_str(old).unwrap();
+        assert!(s.manifest_name.is_none());
     }
 
     #[test]

@@ -58,6 +58,7 @@ struct ResolvedLead {
 
 #[derive(Debug, Deserialize)]
 struct ResolvedManifest {
+    name: None,
     #[serde(default)]
     pub tasks: Vec<ResolvedTask>,
     #[serde(default)]

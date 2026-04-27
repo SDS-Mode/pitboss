@@ -76,6 +76,7 @@ mod integration_tests {
         let summary = RunSummary {
             run_id,
             manifest_path: dir.path().join("pitboss.toml"),
+            manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: Utc::now(),

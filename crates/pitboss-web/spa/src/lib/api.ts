@@ -310,6 +310,101 @@ export function getSchema(): Promise<SchemaSection[]> {
   return request<SchemaSection[]>('/api/schema');
 }
 
+// ---- Insights (cross-run aggregator) -------------------------------------
+
+export interface RunDigest {
+  run_id: string;
+  manifest_name: string;
+  manifest_path: string | null;
+  status: RunStatus;
+  outcome: 'success' | 'failed' | 'partial' | 'running' | 'stale' | 'aborted';
+  started_at: number | null;
+  ended_at: number | null;
+  duration_ms: number | null;
+  tasks_total: number;
+  tasks_failed: number;
+  failure_kinds: string[];
+}
+
+export interface TaskFailureDigest {
+  run_id: string;
+  manifest_name: string;
+  task_id: string;
+  parent_task_id: string | null;
+  failure_kind: string;
+  error_message: string | null;
+  error_template: string | null;
+  model: string | null;
+  duration_ms: number | null;
+  occurred_at: number | null;
+}
+
+export interface Cluster {
+  kind: string;
+  template: string | null;
+  count: number;
+  first_seen: number | null;
+  last_seen: number | null;
+  manifests: string[];
+  task_ids: string[];
+  run_ids: string[];
+  exemplar_message: string | null;
+}
+
+export interface ManifestSummary {
+  manifest_name: string;
+  runs_total: number;
+  runs_failed: number;
+  success_rate: number;
+  last_run_at: number | null;
+  avg_duration_ms: number | null;
+  failure_kinds: string[];
+}
+
+export interface InsightsFilter {
+  manifest?: string;
+  since?: number;
+  until?: number;
+  status?: string;
+  kind?: string;
+  limit?: number;
+  offset?: number;
+  min_count?: number;
+}
+
+function insightsQuery(f: InsightsFilter): string {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) {
+    if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+export function listInsightsRuns(
+  filter: InsightsFilter = {}
+): Promise<{ runs: RunDigest[]; total: number }> {
+  return request(`/api/insights/runs${insightsQuery(filter)}`);
+}
+
+export function listInsightsFailures(
+  filter: InsightsFilter = {}
+): Promise<{ failures: TaskFailureDigest[]; total: number }> {
+  return request(`/api/insights/failures${insightsQuery(filter)}`);
+}
+
+export function listInsightsClusters(
+  filter: InsightsFilter = {}
+): Promise<{ clusters: Cluster[]; total: number }> {
+  return request(`/api/insights/clusters${insightsQuery(filter)}`);
+}
+
+export function listInsightsManifests(
+  filter: InsightsFilter = {}
+): Promise<{ manifests: ManifestSummary[]; total: number }> {
+  return request(`/api/insights/manifests${insightsQuery(filter)}`);
+}
+
 // ---- SSE: live control events --------------------------------------------
 
 /** Per-event payload from the dispatcher's control socket, JSON-decoded. */

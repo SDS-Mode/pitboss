@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::control_bridge::ControlBridge;
+use crate::insights::InsightsCache;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +17,7 @@ struct Inner {
     runs_dir: PathBuf,
     manifests_dir: PathBuf,
     token: Option<String>,
+    insights_cache: InsightsCache,
 }
 
 impl AppState {
@@ -26,9 +28,14 @@ impl AppState {
                 runs_dir,
                 manifests_dir,
                 token,
+                insights_cache: InsightsCache::new(),
             }),
             bridge,
         }
+    }
+
+    pub fn insights_cache(&self) -> &InsightsCache {
+        &self.inner.insights_cache
     }
 
     pub fn runs_dir(&self) -> &std::path::Path {

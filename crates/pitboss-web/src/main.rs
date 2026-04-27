@@ -16,6 +16,7 @@ mod api;
 mod assets;
 mod control_bridge;
 mod error;
+mod insights;
 mod runs_index;
 mod state;
 

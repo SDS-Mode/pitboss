@@ -496,6 +496,7 @@ mod tests {
 
     fn rm(tasks: Vec<ResolvedTask>) -> ResolvedManifest {
         ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -523,6 +524,7 @@ mod tests {
     {
         let d = with_tmp_repo(true);
         let mut m = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -606,6 +608,7 @@ mod tests {
     fn rejects_mixing_tasks_and_lead() {
         let d = with_tmp_repo(true);
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -636,6 +639,7 @@ mod tests {
     fn rejects_max_workers_out_of_range() {
         let d = with_tmp_repo(true);
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -662,6 +666,7 @@ mod tests {
     fn rejects_non_positive_budget() {
         let d = with_tmp_repo(true);
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -693,6 +698,7 @@ mod tests {
         lead.allow_subleads = allow_subleads;
         lead.sublead_defaults = sublead_defaults;
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -805,6 +811,7 @@ mod tests {
     #[test]
     fn rejects_manifest_with_no_tasks_and_no_lead() {
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -856,6 +863,7 @@ mod tests {
         let mut lead = rl("l", d.path().to_path_buf());
         lead.prompt = String::new();
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -888,6 +896,7 @@ mod tests {
         let mut lead = rl("l", d.path().to_path_buf());
         lead.prompt = "   \t\n  ".to_string();
         let r = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
@@ -1091,6 +1100,7 @@ mod tests {
         let mut lead = rl("lead", PathBuf::from("/workspace/does-not-exist-on-host"));
         lead.use_worktree = true;
         let mut m = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: PathBuf::from("."),

@@ -98,9 +98,35 @@ worker pattern above — once nested dispatches are real, the live
 graph is how an operator follows a multi-tier infra build without
 camping a terminal.
 
-**Status:** scoped, unstarted. Step 1 is the highest-leverage
-single-PR slice and could ship independent of any other roadmap
-item.
+**Status:** Phases 1–5 + tile grid + live graph + **Slice A
+(Insights & Error Patterns)** all live. The cross-run aggregator,
+Drain-lite failure clustering, errors dashboard at
+`/insights/failures`, and run-list facets are merged. Remaining
+slices below are deferred follow-ups that reuse the Slice A data
+layer with no re-architecture.
+
+#### Slice B — Manifest detail + per-task historical drill
+
+Per-manifest landing page that reuses the aggregator: run history
+table, KPI strip (success rate, avg cost, avg duration), trend
+sparklines for cost + duration, run-timeline strip. Click-through
+from any task row in the existing per-run Tasks tab to a side
+panel showing that task ID's history across the manifest's runs
+(failure-rate, last 10 outcomes, dominant cluster). Depends only
+on Slice A's `RunDigest` + `TaskFailureDigest` — no new backend
+storage. Estimated: one PR for the manifest page, one for the
+per-task drill panel.
+
+#### Slice C — Run comparison + standalone Gantt
+
+Side-by-side compare of two runs of the same manifest: gantt diff,
+per-task cost/duration delta, status change highlights, manifest
+TOML diff. Extracts the per-run task-tree drawing into a reusable
+Gantt component so both the new compare view and the existing
+single-run task tab consume one renderer. Depends on Slice A
+aggregator + a new `lib/components/charts/gantt.svelte` shared
+primitive. Estimated: one PR for the Gantt extract, one for the
+compare route.
 
 ---
 

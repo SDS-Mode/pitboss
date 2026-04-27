@@ -237,6 +237,7 @@ async fn approval_pending_notification_fires_on_enqueue() {
     // Set up dispatch state with the notification router
     let dir = TempDir::new().unwrap();
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),

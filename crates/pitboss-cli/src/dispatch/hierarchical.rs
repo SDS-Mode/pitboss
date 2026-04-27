@@ -577,6 +577,7 @@ pub async fn run_hierarchical(
     let summary = RunSummary {
         run_id,
         manifest_path,
+        manifest_name: resolved.name.clone(),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version,
         started_at: meta.started_at,

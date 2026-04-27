@@ -14,6 +14,7 @@ use crate::{assets, state::AppState};
 
 mod control;
 mod events;
+mod insights;
 mod manifests;
 mod runs;
 
@@ -32,6 +33,10 @@ pub fn router(state: AppState) -> Router {
         .route("/manifests", get(manifests::list).post(manifests::save))
         .route("/manifests/validate", post(manifests::validate))
         .route("/manifests/{name}", get(manifests::read_one))
+        .route("/insights/runs", get(insights::runs))
+        .route("/insights/failures", get(insights::failures))
+        .route("/insights/clusters", get(insights::clusters))
+        .route("/insights/manifests", get(insights::manifests))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 

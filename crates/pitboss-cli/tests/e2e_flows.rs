@@ -60,6 +60,7 @@ fn mk_state(
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: run_dir.to_path_buf(),
@@ -361,6 +362,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -616,6 +618,7 @@ async fn e2e_lead_reprompts_running_worker() {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -810,6 +813,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -1110,6 +1114,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),

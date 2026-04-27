@@ -552,6 +552,7 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
     Ok(RunSummary {
         run_id,
         manifest_path,
+        manifest_name: None,
         pitboss_version: run.pitboss_version,
         claude_version: run.claude_version,
         started_at,
@@ -789,6 +790,7 @@ mod sqlite_tests {
         let summary = RunSummary {
             run_id,
             manifest_path: dir.path().join("pitboss.toml"),
+            manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: Utc::now(),
@@ -883,6 +885,7 @@ mod sqlite_tests {
         let summary = RunSummary {
             run_id,
             manifest_path: PathBuf::new(),
+            manifest_name: None,
             pitboss_version: "0.3.0".into(),
             claude_version: None,
             started_at: Utc::now(),
@@ -974,6 +977,7 @@ mod sqlite_tests {
         let summary = RunSummary {
             run_id,
             manifest_path: dir.path().join("pitboss.toml"),
+            manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: Utc::now(),

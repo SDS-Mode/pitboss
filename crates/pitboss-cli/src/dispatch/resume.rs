@@ -136,6 +136,7 @@ pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
     }
 
     Ok(ResolvedManifest {
+        name: None,
         tasks: resumed_tasks,
         ..base
     })
@@ -355,6 +356,7 @@ mod tests {
         let summary = RunSummary {
             run_id,
             manifest_path: std::path::PathBuf::from("/tmp/pitboss.toml"),
+            manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
             started_at: now,
@@ -506,6 +508,7 @@ mod tests {
 
         // Synthesize resolved.json with a lead.
         let mut resolved = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: run_dir.to_path_buf(),
@@ -575,6 +578,7 @@ mod tests {
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::new(),
+            manifest_name: None,
             pitboss_version: "0.3.0".into(),
             claude_version: None,
             started_at: chrono::Utc::now(),
@@ -614,6 +618,7 @@ mod tests {
 
         // Write a bare-bones resolved.json.
         let resolved = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: run_dir.to_path_buf(),
@@ -686,6 +691,7 @@ mod tests {
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::new(),
+            manifest_name: None,
             pitboss_version: "0.4.3".into(),
             claude_version: None,
             started_at: chrono::Utc::now(),
@@ -725,6 +731,7 @@ mod tests {
         let run_dir = dir.path();
 
         let resolved = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: run_dir.to_path_buf(),
@@ -793,6 +800,7 @@ mod tests {
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::new(),
+            manifest_name: None,
             pitboss_version: "0.8.0".into(),
             claude_version: None,
             started_at: chrono::Utc::now(),

@@ -25,6 +25,12 @@
       >
         Manifests
       </a>
+      <a
+        href="/insights/failures"
+        class="text-muted-foreground hover:text-foreground rounded-md px-3 py-1.5 transition"
+      >
+        Insights
+      </a>
     </nav>
 
     <div class="ml-auto flex items-center gap-1">

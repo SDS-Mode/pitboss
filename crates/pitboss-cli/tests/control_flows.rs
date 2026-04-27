@@ -35,6 +35,7 @@ async fn pause_op_writes_events_jsonl() {
     let run_subdir = dir.path().join(run_id.to_string());
     tokio::fs::create_dir_all(&run_subdir).await.unwrap();
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -240,6 +241,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
     let dir = TempDir::new().unwrap();
     let run_id = uuid::Uuid::now_v7();
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -354,6 +356,7 @@ async fn auto_approve_policy_responds_without_tui() {
     let dir = TempDir::new().unwrap();
     let run_id = uuid::Uuid::now_v7();
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -415,6 +418,7 @@ async fn auto_reject_policy_responds_without_tui() {
     let dir = TempDir::new().unwrap();
     let run_id = uuid::Uuid::now_v7();
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -484,6 +488,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
     let run_subdir = dir.path().join(run_id.to_string());
     tokio::fs::create_dir_all(&run_subdir).await.unwrap();
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
