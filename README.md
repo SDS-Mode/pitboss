@@ -16,18 +16,20 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.8.0** is the correctness hardening and new-capabilities release.
-All 34 medium- and high-severity bugs catalogued since v0.7 are resolved.
-New subcommands: `pitboss container-dispatch` (run dispatch inside a
-Docker/Podman container with declarative bind mounts) and `pitboss status`
-(snapshot task table for any run, in-flight or finalized). The TUI gains a
-live policy editor (`P`) for editing `[[approval_policy]]` rules without
-restarting. Approval TTL is now fully wired end-to-end — `ApprovalTimedOut`
-correctly fires even when a TUI was connected during the approval window.
-`DispatchState` no longer implements `Deref` — layer misrouting is now a
-compile error. Per-sub-tree cancel cascade closes the second-Ctrl-C gap for
-sub-lead workers. See `CHANGELOG.md` for the full per-version history and
-`AGENTS.md` for the MCP tool reference, keybindings, and manifest schema.
+**v0.9.0** is the web operational console release. Pitboss now ships a
+single-binary HTTP server (`pitboss-web`) with an embedded SvelteKit
+SPA that gives the dispatcher a full browser surface alongside the TUI:
+live SSE event streams from in-flight runs, control writes (cancel /
+pause / reprompt / approve) over per-run sockets, manifest authoring
+through a 5-step guided wizard with hover tooltips sourced from the
+canonical schema metadata, and a cross-run failures dashboard with
+Drain-lite clustering of error templates. New `[run].name` field
+surfaces a human-readable label so related runs group together in the
+console. The TUI and the web console are first-class peers against the
+same `~/.local/share/pitboss/runs` directory; pick whichever fits the
+moment. See `CHANGELOG.md` for the full per-version history and
+`AGENTS.md` for the MCP tool reference, keybindings, and manifest
+schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency

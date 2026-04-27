@@ -26,6 +26,6 @@ Language models are stochastic. A well-run pit is not.
 
 ## Current version
 
-**v0.8.0** — correctness hardening and new capabilities. All 34 medium/high-severity issues from the post-v0.7 audit resolved. New subcommands: `pitboss container-dispatch` (declarative bind-mount container dispatch), `pitboss status` (task snapshot table). TUI live policy editor (`P`). Full `ApprovalTimedOut` TTL wiring via `BridgeEntry`. `DispatchState` Deref removed — layer misrouting is now a compile error. Per-sub-tree cancel cascade. Sub-lead resume. Slack Block Kit notifications.
+**v0.9.0** — web operational console. New `pitboss-web` binary (single-binary axum + embedded SvelteKit SPA) gives the dispatcher a full browser surface alongside the TUI: live SSE event streams, control writes (cancel / pause / reprompt / approve), manifest authoring through a 5-step guided wizard with schema-driven hover tooltips, and a cross-run failures dashboard with Drain-lite clustering of error templates. New `[run].name` field surfaces a human-readable label so related runs group together in the console.
 
 See [Changelog](./reference/changelog.md) for the full version history.

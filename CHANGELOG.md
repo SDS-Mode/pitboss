@@ -7,6 +7,36 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+*(nothing yet)*
+
+## [0.9.0] — 2026-04-27
+
+The web operational console release. Pitboss now ships a single-binary
+HTTP server (`pitboss-web`) with an embedded SvelteKit SPA that gives
+the dispatcher a full browser surface — read every run's filesystem
+artefacts, drive live runs through their control sockets, author and
+import manifests via a guided wizard, and track failure patterns
+across runs with a Drain-lite clustering dashboard. The TUI and the
+web console are now first-class peers against the same
+`~/.local/share/pitboss/runs` directory.
+
+Highlights:
+- **Web operational console (Phases 1–5 + tile grid + flow graph).**
+  Read endpoints, SSE event stream, control writes (cancel / pause /
+  reprompt / approve), manifest authoring, dispatch from browser, fork
+  from completed runs.
+- **Manifests wizard.** 5-step Guided / Import / Export flow on
+  `/manifests`, with hover tooltips sourced from the canonical
+  `FieldDescriptor.help` strings — single source of truth with the
+  schema docs.
+- **Cross-run insights + Drain-lite failure clustering.** New
+  `/insights/failures` dashboard with ECharts bar + heatmap, top
+  clusters with template-pill rendering, manifest-health rollup. New
+  `[run].name` field surfaces a human-readable label for grouping
+  related runs.
+- **macOS-aware runs_base_dir.** TUI, CLI, and web console now share a
+  default base on macOS without operators having to pass `--runs-dir`.
+
 ### Fixed
 
 - **`pitboss-cli::runs::runs_base_dir()` is now macOS-aware.** Resolves
