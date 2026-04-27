@@ -185,12 +185,21 @@ fn build_line_index(src: &str) -> LineIndex {
         }
 
         if current_struct.is_some() {
-            // Track depth so we know when to leave the struct body.
-            for c in line.chars() {
-                match c {
-                    '{' => brace_depth += 1,
-                    '}' => brace_depth -= 1,
-                    _ => {}
+            // Skip doc-comment / line-comment lines entirely so a `///` block
+            // containing braces (e.g. an example showing a struct literal)
+            // doesn't disturb depth tracking and falsely close the body. The
+            // narrow grammar this scanner accepts already excludes comments
+            // from being struct or field declarations, so the only effect of
+            // counting braces inside them was to corrupt the depth state.
+            let is_comment_line = line.starts_with("//") || line.starts_with("///");
+            if !is_comment_line {
+                // Track depth so we know when to leave the struct body.
+                for c in line.chars() {
+                    match c {
+                        '{' => brace_depth += 1,
+                        '}' => brace_depth -= 1,
+                        _ => {}
+                    }
                 }
             }
             if brace_depth <= 0 {
@@ -317,6 +326,13 @@ mod tests {
     /// subprocess), and is also wired up to the CLI as
     /// `pitboss schema --format=map --check docs/manifest-map.md` for
     /// CI / contributor use.
+    ///
+    /// Comparison is done against a CRLF-stripped copy of the checked-in
+    /// file: contributors on Windows whose git config has `core.autocrlf=true`
+    /// would otherwise see this fail on every clone with a diff that's
+    /// invisible in their editor. Drift over actual content is unaffected —
+    /// the generator only ever emits LF, so any CR appearing here came from
+    /// the checkout, not the source of truth.
     #[test]
     fn checked_in_doc_matches_generator() {
         // `include_str!` resolves relative to *this file's* directory.
@@ -324,7 +340,8 @@ mod tests {
         // `<repo>/docs/manifest-map.md` is six "../" hops.
         const CHECKED_IN: &str = include_str!("../../../../docs/manifest-map.md");
         let generated = render();
-        if generated != CHECKED_IN {
+        let normalized: String = CHECKED_IN.replace("\r\n", "\n");
+        if generated != normalized {
             panic!(
                 "docs/manifest-map.md is stale.\n\
                  Regenerate with:\n\

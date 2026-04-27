@@ -1,3 +1,4 @@
+use crate::notify::config::{build_pinned_client, pre_request_ssrf_check, resolve_request_timeout};
 use crate::notify::{NotificationEnvelope, NotificationSink};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,7 +9,13 @@ use std::time::Duration;
 pub struct WebhookSink {
     id: String,
     url: String,
+    /// Shared client used only on the SSRF-bypass path
+    /// (`PITBOSS_PARENT_NOTIFY_URL`). The DNS-pinned path builds a fresh
+    /// client per emit so [`reqwest::ClientBuilder::resolve_to_addrs`] can
+    /// override DNS for the destination host — kept here to preserve the
+    /// connection pool for trusted sinks.
     http: Arc<reqwest::Client>,
+    request_timeout: Duration,
     /// Skip the per-request SSRF guard. Set only for sinks built from the
     /// `PITBOSS_PARENT_NOTIFY_URL` env var, since the canonical use case for
     /// that var is "POST to my local orchestrator on `http://localhost:N`"
@@ -19,7 +26,12 @@ pub struct WebhookSink {
 }
 
 impl WebhookSink {
-    pub fn new(idx: usize, url: String, http: Arc<reqwest::Client>) -> Self {
+    pub fn new(
+        idx: usize,
+        url: String,
+        http: Arc<reqwest::Client>,
+        request_timeout: Duration,
+    ) -> Self {
         let id = if idx == 0 {
             "webhook".to_string()
         } else {
@@ -29,18 +41,21 @@ impl WebhookSink {
             id,
             url,
             http,
+            request_timeout,
             bypass_ssrf: false,
         }
     }
 
     /// Like [`WebhookSink::new`] but tags the sink as operator-trusted so
     /// emit-time SSRF checks are skipped. Reserved for the
-    /// `PITBOSS_PARENT_NOTIFY_URL` ingest path.
+    /// `PITBOSS_PARENT_NOTIFY_URL` ingest path. Uses the
+    /// [`crate::notify::config::DEFAULT_REQUEST_TIMEOUT_SECS`] timeout.
     pub fn new_trusted(id: String, url: String, http: Arc<reqwest::Client>) -> Self {
         Self {
             id,
             url,
             http,
+            request_timeout: resolve_request_timeout(None),
             bypass_ssrf: true,
         }
     }
@@ -53,27 +68,35 @@ impl NotificationSink for WebhookSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
-        if !self.bypass_ssrf {
-            // DNS rebinding / mutable-CNAME SSRF guard: re-validate the URL's
-            // currently-resolved IP against the private-range blocklist
-            // before sending.
-            crate::notify::config::pre_request_ssrf_check(&self.url).await?;
-        }
-
         // `.without_url()` strips the request URL from the error chain
         // before it bubbles up: reqwest's Display impl includes the full
         // URL by default, which would leak Slack/Discord webhook tokens
         // (in path or query) into tracing output. See
         // notify::config::redact_webhook_url for the matching helper used
         // on string-formatted error messages.
-        let response = self
-            .http
-            .post(&self.url)
-            .json(env)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| e.without_url())?;
+        let response = if self.bypass_ssrf {
+            self.http
+                .post(&self.url)
+                .json(env)
+                .timeout(self.request_timeout)
+                .send()
+                .await
+                .map_err(|e| e.without_url())?
+        } else {
+            // DNS-rebinding-resistant path: the SSRF check returns the exact
+            // SocketAddrs it validated, and we build a one-shot client whose
+            // DNS resolver is pinned to those addrs so reqwest's own internal
+            // lookup at send() time can't be steered to a private IP between
+            // the check and the POST. Issue #156 (M2).
+            let preflight = pre_request_ssrf_check(&self.url).await?;
+            let client = build_pinned_client(&preflight, self.request_timeout)?;
+            client
+                .post(&self.url)
+                .json(env)
+                .send()
+                .await
+                .map_err(|e| e.without_url())?
+        };
 
         match response.status() {
             status if status.is_success() => Ok(()),

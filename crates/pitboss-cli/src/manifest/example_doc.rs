@@ -198,11 +198,17 @@ mod tests {
     /// match what the generator currently emits. Mirrored at the CLI
     /// surface as `pitboss schema --format=example --check
     /// docs/manifest-reference.toml`.
+    ///
+    /// Comparison strips CR before LF in the checked-in file so a
+    /// `core.autocrlf=true` checkout doesn't false-positive every run. The
+    /// generator only emits LF; any CR appearing here came from git, not
+    /// from drift.
     #[test]
     fn checked_in_doc_matches_generator() {
         const CHECKED_IN: &str = include_str!("../../../../docs/manifest-reference.toml");
         let generated = render();
-        if generated != CHECKED_IN {
+        let normalized: String = CHECKED_IN.replace("\r\n", "\n");
+        if generated != normalized {
             panic!(
                 "docs/manifest-reference.toml is stale.\n\
                  Regenerate with:\n\
