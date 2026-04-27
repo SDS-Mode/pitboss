@@ -71,7 +71,7 @@ jobs:
               - '.github/workflows/book.yml'
 
       - name: Wait for required checks and verify conclusions
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           PR_SHA: ${{ github.event.pull_request.head.sha }}
           CODE_CHANGED: ${{ steps.paths.outputs.code }}
