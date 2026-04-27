@@ -31,7 +31,7 @@ toml               = "0.8"
 uuid               = { version = "1", features = ["v7","serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
 git2               = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
-thiserror          = "1"
+thiserror          = "2"
 anyhow             = "1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter","fmt"] }
