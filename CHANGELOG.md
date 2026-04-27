@@ -9,6 +9,34 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Web operational console — tile grid + Svelte Flow run-tree graph**
+  (cross-cutting items from the planning doc, the visual layer that
+  pushes the console past TUI parity).
+  - `RunTileGrid`: TUI Normal-view-equivalent in the browser. One
+    color-coded tile per worker (border + bg keyed off `state` /
+    `failure`), grouped by `parent_task_id` (children indent under
+    parents). Tiles fold in store-op counters (`StoreActivity`),
+    failure reasons (`WorkerFailed`), and sublead metadata
+    (`SubleadSpawned`). Inline pause / continue / reprompt / cancel
+    buttons. Replaces the old workers table on the Live tab.
+  - `RunGraph` (`@xyflow/svelte` + `@dagrejs/dagre`): zoomable,
+    pannable, mini-map-equipped graph laid out top-to-bottom by
+    Dagre. Custom node shows status-coloured tile with kv/lease
+    counts; edges are animated when the child worker is `running`.
+    Exposed as a new "Graph" tab next to "Live" on every in-progress
+    run. Doesn't compete with the TUI tile grid — it shows the
+    *hierarchy* the TUI fundamentally cannot render.
+  - Aggregation: the SSE ingest function now also tracks per-actor
+    store activity, per-task failure reasons, and per-sublead
+    metadata (budget / max workers / read-down + terminal outcome).
+    None of it round-trips to disk; reload rebuilds from the next
+    `Hello` + `WorkersSnapshot` pair. Shared types
+    (`WorkerEntry` / `ActorActivity` / `SubleadInfo` / `FailureReason`)
+    live in `lib/api.ts` so the tile grid and graph render off the
+    exact same shape.
+  - Deps added (SPA only): `@xyflow/svelte ^1.5.2` (Svelte 5
+    compatible), `@dagrejs/dagre ^3`.
+
 - **Web operational console — Phase 4 + 5** (manifest authoring, dispatch
   from console, fork from completed runs). The browser is now a complete
   authoring surface: write a manifest, validate as you type, save to the

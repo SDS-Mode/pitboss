@@ -185,6 +185,43 @@ export async function postControlOp(runId: string, op: ControlOp): Promise<void>
   });
 }
 
+// ---- Live actor state (mirrors control::protocol on the wire) ------------
+
+/**
+ * One row of `WorkersSnapshot.workers`. Loose typing for fields the SPA
+ * doesn't render today so dispatcher additions don't break the UI.
+ */
+export interface WorkerEntry {
+  task_id: string;
+  state: string;
+  prompt_preview: string;
+  started_at?: string;
+  parent_task_id?: string;
+  session_id?: string;
+}
+
+/** Per-actor row in `StoreActivity.counters`. */
+export interface ActorActivity {
+  actor_id: string;
+  kv_ops: number;
+  lease_ops: number;
+}
+
+/** Snapshot of a sublead derived from `SubleadSpawned` (+ Terminated). */
+export interface SubleadInfo {
+  sublead_id: string;
+  budget_usd?: number | null;
+  max_workers?: number | null;
+  read_down: boolean;
+  /** Set once the sub-tree exits — `success` | `cancel` | `timeout` | `error`. */
+  outcome?: string;
+  spent_usd?: number;
+  unspent_usd?: number;
+}
+
+/** `WorkerFailed.reason` payload. Treated loosely; renderer reads `kind`. */
+export type FailureReason = { kind: string; [k: string]: unknown };
+
 // ---- Manifest workspace (Phase 4) ----------------------------------------
 
 export interface ManifestEntry {

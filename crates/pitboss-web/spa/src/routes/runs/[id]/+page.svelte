@@ -13,12 +13,18 @@
     type ControlEnvelope,
     type RunDetailDto,
     type PolicyRule,
+    type WorkerEntry,
+    type ActorActivity,
+    type SubleadInfo,
+    type FailureReason,
     ApiError
   } from '$lib/api';
   import { formatUnixSeconds, relativeFromUnix } from '$lib/utils';
   import StatusBadge from '$lib/components/status-badge.svelte';
   import ApprovalModal, { type ApprovalRequest } from '$lib/components/approval-modal.svelte';
   import PolicyEditor from '$lib/components/policy-editor.svelte';
+  import RunTileGrid from '$lib/components/run-tile-grid.svelte';
+  import RunGraph from '$lib/components/run-graph.svelte';
   import {
     Card,
     CardContent,
@@ -43,10 +49,6 @@
     RefreshCw,
     AlertTriangle,
     Octagon,
-    Pause,
-    Play,
-    MessageSquare,
-    Ban,
     GitFork
   } from 'lucide-svelte';
   import type { RunStatus } from '$lib/api';
@@ -119,13 +121,13 @@
   // each kind we render in the UI. None of this needs to round-trip to
   // disk — refreshing the page rebuilds it from the next Hello +
   // WorkersSnapshot pair.
-  type WorkerEntry = {
-    task_id: string;
-    state: string;
-    prompt_preview: string;
-    parent_task_id?: string;
-  };
   let workers = $state<WorkerEntry[]>([]);
+  /** actor_id → store-op counters from the latest StoreActivity event. */
+  let storeActivity = $state<Record<string, ActorActivity>>({});
+  /** task_id → failure reason from the most recent WorkerFailed for that worker. */
+  let failures = $state<Record<string, FailureReason>>({});
+  /** sublead_id → snapshot built from SubleadSpawned (+ Terminated). */
+  let subleads = $state<Record<string, SubleadInfo>>({});
   let policyRules = $state<PolicyRule[]>([]);
   let serverVersion = $state<string | null>(null);
   let pendingApprovals = $state<ApprovalRequest[]>([]);
@@ -164,6 +166,58 @@
       case 'workers_snapshot': {
         const ev = e as ControlEnvelope & { workers?: WorkerEntry[] };
         workers = Array.isArray(ev.workers) ? ev.workers : [];
+        break;
+      }
+      case 'store_activity': {
+        const ev = e as ControlEnvelope & { counters?: ActorActivity[] };
+        const next: Record<string, ActorActivity> = {};
+        for (const c of ev.counters ?? []) next[c.actor_id] = c;
+        storeActivity = next;
+        break;
+      }
+      case 'worker_failed': {
+        const ev = e as ControlEnvelope & {
+          task_id?: string;
+          reason?: FailureReason;
+        };
+        if (ev.task_id && ev.reason) {
+          failures = { ...failures, [ev.task_id]: ev.reason };
+        }
+        break;
+      }
+      case 'sublead_spawned': {
+        const ev = e as ControlEnvelope & SubleadInfo;
+        if (ev.sublead_id) {
+          subleads = {
+            ...subleads,
+            [ev.sublead_id]: {
+              sublead_id: ev.sublead_id,
+              budget_usd: ev.budget_usd ?? null,
+              max_workers: ev.max_workers ?? null,
+              read_down: ev.read_down ?? false
+            }
+          };
+        }
+        break;
+      }
+      case 'sublead_terminated': {
+        const ev = e as ControlEnvelope & {
+          sublead_id?: string;
+          spent_usd?: number;
+          unspent_usd?: number;
+          outcome?: string;
+        };
+        if (ev.sublead_id && subleads[ev.sublead_id]) {
+          subleads = {
+            ...subleads,
+            [ev.sublead_id]: {
+              ...subleads[ev.sublead_id],
+              outcome: ev.outcome,
+              spent_usd: ev.spent_usd,
+              unspent_usd: ev.unspent_usd
+            }
+          };
+        }
         break;
       }
       case 'approval_request': {
@@ -207,6 +261,9 @@
     sseStatus = 'connecting';
     liveEvents = [];
     workers = [];
+    storeActivity = {};
+    failures = {};
+    subleads = {};
     policyRules = [];
     pendingApprovals = [];
     activeApproval = null;
@@ -443,6 +500,7 @@
             aria-hidden="true"
           ></span>
         </TabsTrigger>
+        <TabsTrigger value="graph">Graph</TabsTrigger>
       {/if}
       <TabsTrigger value="tasks">Tasks ({tasksToRender.length})</TabsTrigger>
       <TabsTrigger value="manifest">Manifest</TabsTrigger>
@@ -512,9 +570,15 @@
             <CardTitle class="text-base">
               Workers
               <Badge variant="outline" class="ml-2 text-xs">{workers.length}</Badge>
+              {#if Object.keys(subleads).length > 0}
+                <Badge variant="outline" class="ml-1 text-xs">
+                  {Object.keys(subleads).length} sublead{Object.keys(subleads).length === 1 ? '' : 's'}
+                </Badge>
+              {/if}
             </CardTitle>
             <CardDescription class="text-xs">
-              Live snapshot from `WorkersSnapshot` events.
+              Tile grid built from `WorkersSnapshot` + `StoreActivity` + `WorkerFailed` +
+              `SubleadSpawned`. Children nest under their parent.
             </CardDescription>
           </CardHeader>
           <CardContent class="pt-0">
@@ -525,86 +589,17 @@
                   : 'Waiting for first snapshot…'}
               </p>
             {:else}
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Task</TableHead>
-                    <TableHead>State</TableHead>
-                    <TableHead>Prompt</TableHead>
-                    <TableHead class="w-[18ch] text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {#each workers as w (w.task_id)}
-                    <TableRow>
-                      <TableCell>
-                        <code class="text-xs">{w.task_id}</code>
-                        {#if w.parent_task_id}
-                          <span class="text-muted-foreground ml-1 text-xs">← {w.parent_task_id}</span>
-                        {/if}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={w.state === 'running'
-                            ? 'outline'
-                            : w.state === 'failed'
-                              ? 'destructive'
-                              : 'secondary'}
-                        >
-                          {w.state}
-                        </Badge>
-                      </TableCell>
-                      <TableCell class="text-muted-foreground max-w-[40ch] truncate text-xs">
-                        {w.prompt_preview}
-                      </TableCell>
-                      <TableCell class="text-right">
-                        <div class="flex justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            class="h-7 px-2"
-                            title="Pause (freeze)"
-                            disabled={superseded}
-                            onclick={() => pauseWorker(w.task_id)}
-                          >
-                            <Pause class="size-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            class="h-7 px-2"
-                            title="Continue"
-                            disabled={superseded}
-                            onclick={() => continueWorker(w.task_id)}
-                          >
-                            <Play class="size-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            class="h-7 px-2"
-                            title="Reprompt"
-                            disabled={superseded}
-                            onclick={() => repromptWorker(w.task_id)}
-                          >
-                            <MessageSquare class="size-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            class="text-destructive hover:text-destructive h-7 px-2"
-                            title="Cancel worker"
-                            disabled={superseded}
-                            onclick={() => cancelWorker(w.task_id)}
-                          >
-                            <Ban class="size-3.5" />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  {/each}
-                </TableBody>
-              </Table>
+              <RunTileGrid
+                {workers}
+                {storeActivity}
+                {failures}
+                {subleads}
+                disabled={superseded}
+                onPause={pauseWorker}
+                onContinue={continueWorker}
+                onReprompt={repromptWorker}
+                onCancel={cancelWorker}
+              />
             {/if}
           </CardContent>
         </Card>
@@ -647,6 +642,21 @@
                 {/each}
               </div>
             {/if}
+          </CardContent>
+        </Card>
+      </TabsContent>
+
+      <TabsContent value="graph" class="mt-4">
+        <Card>
+          <CardHeader class="pb-3">
+            <CardTitle class="text-base">Run hierarchy</CardTitle>
+            <CardDescription class="text-xs">
+              Live graph laid out via Dagre. Animated edges trace `running` workers; sublead
+              nodes are marked with a layers icon.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="pt-0">
+            <RunGraph {workers} {storeActivity} {failures} {subleads} />
           </CardContent>
         </Card>
       </TabsContent>
