@@ -30,6 +30,7 @@ tower-http         = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
 futures-util       = { workspace = true }
+tokio-stream       = { workspace = true }
 dirs               = { workspace = true }
 
 [dev-dependencies]

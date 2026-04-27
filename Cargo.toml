@@ -47,6 +47,7 @@ crossterm          = "0.28"
 rusqlite           = { version = "0.32", features = ["bundled"] }
 rmcp               = { version = "0.8", features = ["server", "client", "transport-io", "macros"] }
 tokio-util         = { version = "0.7", features = ["rt"] }
+tokio-stream       = { version = "0.1", features = ["sync"] }
 tui-textarea       = "0.7"
 reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 lru                = "0.12"

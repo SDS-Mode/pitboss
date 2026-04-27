@@ -125,3 +125,48 @@ export function getTaskLog(runId: string, taskId: string, opts: TaskLogOpts = {}
   const path = `/api/runs/${enc(runId)}/tasks/${enc(taskId)}/log${qs ? `?${qs}` : ''}`;
   return request<string>(path, { accept: 'text' });
 }
+
+// ---- SSE: live control events --------------------------------------------
+
+/** Per-event payload from the dispatcher's control socket, JSON-decoded. */
+export type ControlEnvelope = Record<string, unknown> & {
+  event: string;
+  actor_path?: string[];
+};
+
+export interface SubscribeHandlers {
+  onEvent: (envelope: ControlEnvelope) => void;
+  onLagged?: (skipped: number) => void;
+  onError?: (err: Event) => void;
+  onOpen?: () => void;
+}
+
+/**
+ * Subscribe to a run's live control events. Returns a teardown function;
+ * call it to close the EventSource. Note: EventSource does NOT support
+ * custom headers, so this endpoint cannot use the bearer-token header
+ * scheme. When auth is enabled, the path can carry a token via query
+ * param (Phase 3) — for now, SSE only works against unauthenticated
+ * loopback servers.
+ */
+export function subscribeRunEvents(runId: string, handlers: SubscribeHandlers): () => void {
+  const url = `/api/runs/${enc(runId)}/events`;
+  const es = new EventSource(url);
+  if (handlers.onOpen) es.addEventListener('open', handlers.onOpen);
+  if (handlers.onError) es.addEventListener('error', handlers.onError);
+  es.addEventListener('control', (ev) => {
+    try {
+      const data = JSON.parse((ev as MessageEvent).data) as ControlEnvelope;
+      handlers.onEvent(data);
+    } catch {
+      /* skip malformed event */
+    }
+  });
+  if (handlers.onLagged) {
+    es.addEventListener('lagged', (ev) => {
+      const n = Number((ev as MessageEvent).data);
+      if (handlers.onLagged) handlers.onLagged(Number.isFinite(n) ? n : 0);
+    });
+  }
+  return () => es.close();
+}

@@ -11,6 +11,7 @@ use axum::{
 
 use crate::{assets, state::AppState};
 
+mod events;
 mod runs;
 
 pub fn router(state: AppState) -> Router {
@@ -21,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/{run_id}/resolved", get(runs::resolved))
         .route("/runs/{run_id}/summary-jsonl", get(runs::summary_jsonl))
         .route("/runs/{run_id}/tasks/{task_id}/log", get(runs::task_log))
+        .route("/runs/{run_id}/events", get(events::events))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 

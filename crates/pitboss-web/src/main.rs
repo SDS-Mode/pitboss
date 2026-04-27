@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 mod assets;
+mod control_bridge;
 mod error;
 mod runs_index;
 mod state;

@@ -1,12 +1,15 @@
-//! Shared application state. Cheap to clone (Arc internally for the
-//! token; paths are owned PathBufs so cheap-ish on clone).
+//! Shared application state. Cheap to clone (`Arc` internally for the
+//! token + control bridge; paths are owned PathBufs so cheap-ish).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::control_bridge::ControlBridge;
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Inner>,
+    bridge: ControlBridge,
 }
 
 struct Inner {
@@ -17,12 +20,14 @@ struct Inner {
 
 impl AppState {
     pub fn new(runs_dir: PathBuf, manifests_dir: PathBuf, token: Option<String>) -> Self {
+        let bridge = ControlBridge::new(runs_dir.clone());
         Self {
             inner: Arc::new(Inner {
                 runs_dir,
                 manifests_dir,
                 token,
             }),
+            bridge,
         }
     }
 
@@ -37,5 +42,9 @@ impl AppState {
 
     pub fn token(&self) -> Option<&str> {
         self.inner.token.as_deref()
+    }
+
+    pub fn bridge(&self) -> &ControlBridge {
+        &self.bridge
     }
 }

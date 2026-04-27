@@ -6,6 +6,8 @@
     getResolvedManifest,
     getManifestToml,
     getSummaryJsonl,
+    subscribeRunEvents,
+    type ControlEnvelope,
     type RunDetailDto,
     ApiError
   } from '$lib/api';
@@ -85,6 +87,41 @@
   );
 
   const tasksToRender = $derived(taskList.length > 0 ? taskList : liveTasks);
+
+  // ---- Phase 2: live control events (SSE) -----------------------------
+  // The dispatcher's per-run control socket is bridged to /api/runs/:id/events
+  // by `pitboss-web` and fanned out to N browser tabs via tokio broadcast.
+  // We only attach an EventSource for in-progress runs — completed runs
+  // have nothing live to stream.
+  let liveEvents = $state<ControlEnvelope[]>([]);
+  let sseStatus = $state<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
+  const MAX_LIVE_EVENTS = 200;
+
+  $effect(() => {
+    if (!runId || !inProgress) {
+      sseStatus = 'idle';
+      return;
+    }
+    sseStatus = 'connecting';
+    liveEvents = [];
+    const teardown = subscribeRunEvents(runId, {
+      onOpen: () => (sseStatus = 'open'),
+      onError: () => (sseStatus = 'error'),
+      onEvent: (envelope) => {
+        liveEvents = [envelope, ...liveEvents].slice(0, MAX_LIVE_EVENTS);
+      },
+      onLagged: (skipped) => {
+        liveEvents = [{ event: 'lagged', skipped } as ControlEnvelope, ...liveEvents].slice(
+          0,
+          MAX_LIVE_EVENTS
+        );
+      }
+    });
+    return () => {
+      teardown();
+      sseStatus = 'closed';
+    };
+  });
 
   async function load() {
     loading = true;
@@ -220,13 +257,71 @@
     </Card>
   </div>
 
-  <Tabs value="tasks" class="w-full">
+  <Tabs value={inProgress ? 'live' : 'tasks'} class="w-full">
     <TabsList>
+      {#if inProgress}
+        <TabsTrigger value="live">
+          Live
+          <span
+            class="ml-2 inline-block size-2 rounded-full {sseStatus === 'open'
+              ? 'bg-emerald-500 animate-pulse'
+              : sseStatus === 'connecting'
+                ? 'bg-amber-500'
+                : sseStatus === 'error'
+                  ? 'bg-red-500'
+                  : 'bg-muted-foreground'}"
+            aria-hidden="true"
+          ></span>
+        </TabsTrigger>
+      {/if}
       <TabsTrigger value="tasks">Tasks ({tasksToRender.length})</TabsTrigger>
       <TabsTrigger value="manifest">Manifest</TabsTrigger>
       <TabsTrigger value="resolved">Resolved</TabsTrigger>
       <TabsTrigger value="summary">Summary JSON</TabsTrigger>
     </TabsList>
+
+    {#if inProgress}
+      <TabsContent value="live" class="mt-4">
+        <Card>
+          <CardContent class="pt-6">
+            <div class="text-muted-foreground mb-3 flex items-center gap-3 text-xs">
+              <span>SSE bridge:</span>
+              <span class="font-mono">{sseStatus}</span>
+              <span class="ml-auto">
+                {liveEvents.length} event{liveEvents.length === 1 ? '' : 's'}
+                {#if liveEvents.length === MAX_LIVE_EVENTS}(latest only){/if}
+              </span>
+            </div>
+            {#if liveEvents.length === 0}
+              <p class="text-muted-foreground py-6 text-center text-sm">
+                {sseStatus === 'open'
+                  ? 'Waiting for first event…'
+                  : sseStatus === 'error'
+                    ? 'Connection failed. Run may have ended or dispatcher is unreachable.'
+                    : 'Connecting…'}
+              </p>
+            {:else}
+              <div class="max-h-[60vh] space-y-1 overflow-auto font-mono text-xs">
+                {#each liveEvents as e, idx (idx)}
+                  <div class="bg-muted/30 rounded border-l-2 border-sky-500/40 px-2 py-1">
+                    <span class="text-sky-700 dark:text-sky-400">{e.event}</span>
+                    {#if e.actor_path && Array.isArray(e.actor_path) && e.actor_path.length > 0}
+                      <span class="text-muted-foreground ml-2">{e.actor_path.join('/')}</span>
+                    {/if}
+                    <pre
+                      class="text-muted-foreground mt-0.5 overflow-x-auto whitespace-pre-wrap text-[11px]">{JSON.stringify(
+                        e,
+                        null,
+                        2
+                      )}</pre>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </CardContent>
+        </Card>
+      </TabsContent>
+    {/if}
 
     <TabsContent value="tasks" class="mt-4">
       <Card>
