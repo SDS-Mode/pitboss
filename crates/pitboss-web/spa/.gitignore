@@ -1,0 +1,12 @@
+node_modules/
+.svelte-kit/
+# Ignore everything inside build/ except the tracked placeholder
+# (so rust-embed has at least one file at compile time even before
+# `npm run build`). `npm run build` overwrites the directory.
+build/*
+!build/.gitkeep
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

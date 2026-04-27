@@ -326,6 +326,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
@@ -412,6 +413,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),

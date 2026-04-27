@@ -1,0 +1,11 @@
+<script lang="ts">
+  import { Dialog as DialogPrimitive } from 'bits-ui';
+  import { cn } from '$lib/utils';
+
+  let { class: className, ...rest }: DialogPrimitive.TitleProps & { class?: string } = $props();
+</script>
+
+<DialogPrimitive.Title
+  class={cn('text-lg leading-none font-semibold tracking-tight', className)}
+  {...rest}
+/>

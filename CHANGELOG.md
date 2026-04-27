@@ -7,6 +7,152 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pitboss-cli::runs::runs_base_dir()` is now macOS-aware.** Resolves
+  via `dirs::data_dir()` (Linux: `~/.local/share/pitboss/runs`; macOS:
+  `~/Library/Application Support/pitboss/runs`) with a back-compat
+  fallback to the legacy `$HOME/.local/share/pitboss/runs` if the
+  canonical dir doesn't exist yet but the legacy one does. The TUI,
+  the web console, and the CLI now share a default base on macOS
+  without operators having to pass `--runs-dir`. `pitboss diff`'s
+  internal `runs_base_dir` shim was deleted in favour of the canonical
+  one. `dirs` added as a direct dep of `pitboss-cli` (already a
+  workspace dep used by `pitboss-web`).
+
+### Added
+
+- **Web operational console — tile grid + Svelte Flow run-tree graph**
+  (cross-cutting items from the planning doc, the visual layer that
+  pushes the console past TUI parity).
+  - `RunTileGrid`: TUI Normal-view-equivalent in the browser. One
+    color-coded tile per worker (border + bg keyed off `state` /
+    `failure`), grouped by `parent_task_id` (children indent under
+    parents). Tiles fold in store-op counters (`StoreActivity`),
+    failure reasons (`WorkerFailed`), and sublead metadata
+    (`SubleadSpawned`). Inline pause / continue / reprompt / cancel
+    buttons. Replaces the old workers table on the Live tab.
+  - `RunGraph` (`@xyflow/svelte` + `@dagrejs/dagre`): zoomable,
+    pannable, mini-map-equipped graph laid out top-to-bottom by
+    Dagre. Custom node shows status-coloured tile with kv/lease
+    counts; edges are animated when the child worker is `running`.
+    Exposed as a new "Graph" tab next to "Live" on every in-progress
+    run. Doesn't compete with the TUI tile grid — it shows the
+    *hierarchy* the TUI fundamentally cannot render.
+  - Aggregation: the SSE ingest function now also tracks per-actor
+    store activity, per-task failure reasons, and per-sublead
+    metadata (budget / max workers / read-down + terminal outcome).
+    None of it round-trips to disk; reload rebuilds from the next
+    `Hello` + `WorkersSnapshot` pair. Shared types
+    (`WorkerEntry` / `ActorActivity` / `SubleadInfo` / `FailureReason`)
+    live in `lib/api.ts` so the tile grid and graph render off the
+    exact same shape.
+  - Deps added (SPA only): `@xyflow/svelte ^1.5.2` (Svelte 5
+    compatible), `@dagrejs/dagre ^3`.
+
+- **Web operational console — Phase 4 + 5** (manifest authoring, dispatch
+  from console, fork from completed runs). The browser is now a complete
+  authoring surface: write a manifest, validate as you type, save to the
+  workspace, dispatch in the background, watch the run go live, and fork
+  the snapshot back into a new manifest with one button.
+  - Backend (all sandboxed to `state.manifests_dir()`):
+    - `GET  /api/schema` — full `SchemaSection` tree as JSON. Comes for
+      free off the existing `pitboss-schema-derive` `field_metadata()`
+      slices; no schema work required.
+    - `GET  /api/manifests` — list TOML files in the workspace
+      (sorted by mtime, newest first).
+    - `GET  /api/manifests/:name` — read one manifest's raw TOML.
+    - `POST /api/manifests` — save (create or overwrite) a manifest.
+    - `POST /api/manifests/validate` — runs `load_manifest_from_str` +
+      `validate_skip_dir_check` against the body and returns the same
+      error chain the CLI emits, flattened into a JSON array.
+    - `POST /api/runs` — execs `pitboss dispatch --background <path>`
+      (binary path overridable via `PITBOSS_BIN`), parses the JSON
+      descriptor the dispatcher prints, and returns it. The SPA uses
+      `descriptor.run_id` to redirect to the live run page.
+    - `POST /api/runs/:id/fork` — copies the run's
+      `manifest.snapshot.toml` into the workspace under a new name.
+      Refuses to overwrite existing manifests.
+  - Sandbox: `sanitize_manifest_name()` rejects path separators, `..`,
+    overlong / non-ASCII names, then forces a `.toml` suffix. 256 KiB
+    upper bound on manifest body size.
+  - SPA: new `/manifests` route lists the workspace and creates new
+    manifests from a stub. `/manifests/[name]` is a TOML editor with
+    debounced validate-on-keystroke (600 ms), Save and Dispatch
+    buttons; Dispatch saves first if the buffer is dirty, then
+    redirects to the run page on success.
+  - SPA: "Fork manifest" button on every run-detail page (live or
+    completed). Prompts for a new name, POSTs the fork, jumps straight
+    into the editor.
+  - Site header: "Manifests" nav link added next to "Runs".
+
+- **Web operational console — Phase 3** (control writes). The bridge
+  now retains the per-run socket's write half so REST callers can push
+  `ControlOp` messages to the live dispatcher. The SPA exposes the
+  full TUI control surface in the browser.
+  - `POST /api/runs/{id}/control` accepts a JSON-tagged `ControlOp`
+    body (`cancel_worker`, `cancel_run`, `pause_worker`,
+    `continue_worker`, `reprompt_worker`, `approve`, `update_policy`).
+    Returns `202 Accepted` on flush; the dispatcher's `OpAcked` /
+    `OpFailed` reply is delivered out-of-band on the SSE stream. The
+    server-only `hello` op is rejected up front.
+  - Bridge: `ControlBridge::send_op(run_id, op)` auto-connects the
+    socket on first call and serialises writes through a per-run
+    `Arc<Mutex<OwnedWriteHalf>>`, so concurrent SPA tabs cannot
+    interleave bytes.
+  - Auth: `require_token` middleware now also accepts `?token=` as a
+    query-param. Required for the SSE `/events` route — `EventSource`
+    has no header API. The SPA only sends the token on SSE; everything
+    else still uses the `Authorization: Bearer …` header.
+  - SPA Live tab: `Cancel run` button, per-worker action menu
+    (pause / continue / reprompt / cancel), live workers table built
+    from `WorkersSnapshot` events, and an inline op-feedback banner
+    driven by `OpAcked` / `OpFailed` / `OpUnknownState` events.
+  - SPA approval modal: `ApprovalRequest` events auto-pop a dialog
+    rendering the summary, plan rationale / resources / risks /
+    rollback. Operator can approve (with optional edited summary +
+    comment) or deny (with reason); the response POSTs `approve`.
+    Multiple in-flight requests queue and surface one at a time.
+  - SPA policy editor: collapsible card on the Live tab seeded from
+    the dispatcher's `Hello.policy_rules`. JSON-textarea editor for
+    each rule (schema-driven form is Phase 4); `Save policy` POSTs
+    `update_policy`. Re-seeds when the dispatcher pushes a fresh
+    Hello (e.g. on take-over).
+  - Take-control banner: `Superseded` events from the dispatcher
+    surface as an amber notice ("another client took control") and
+    disable the action buttons until the operator dismisses it.
+  - Tests: new `bridge_send_op_round_trips_through_dispatcher` and
+    `bridge_send_op_rejects_client_hello` integration tests. Existing
+    bridge multiplex / connect tests still pass.
+
+- **Web operational console — Phase 1** (`pitboss-web` crate, new
+  workspace member). Single-binary axum HTTP server + embedded SvelteKit
+  SPA. Read-only post-run archaeology over the runs filesystem; live
+  control-socket bridging is Phase 2 (in progress on the same branch).
+  - Backend: `GET /api/runs`, `/api/runs/{id}` (with synthesised stub
+    for in-progress runs), `/api/runs/{id}/manifest`,
+    `/api/runs/{id}/resolved`, `/api/runs/{id}/summary-jsonl`,
+    `/api/runs/{id}/tasks/{task_id}/log` (with `?limit` + `?tail`
+    controls). Bearer-token auth, loopback-default bind, mandatory
+    token when binding non-loopback.
+  - Frontend: SvelteKit 2 + Svelte 5 + adapter-static + Tailwind v4 +
+    shadcn-svelte (bits-ui v2). Run list with color-coded status
+    badges, run detail with KPI cards + tabs (Tasks / Manifest /
+    Resolved / Summary), per-task log viewer with tail/head toggle.
+  - Path config: `--runs-dir` / `--manifests-dir` flags plus matching
+    `PITBOSS_RUNS_DIR` / `PITBOSS_MANIFESTS_DIR` env vars. Defaults
+    flow through `pitboss_cli::runs::runs_base_dir()` so the console
+    auto-tracks any future macOS-aware fix to that function. Manifests
+    workspace defaults via `dirs::data_dir()` (Linux: `~/.local/share`,
+    macOS: `~/Library/Application Support`).
+  - No changes to existing crates — `pitboss-cli` already exposed
+    `runs::*` and `control::protocol::*` as `pub` modules via its
+    `lib.rs`, so the web crate consumes them directly.
+  - Build: `cd crates/pitboss-web/spa && npm install && npm run build`,
+    then `cargo build -p pitboss-web`. The placeholder fallback HTML
+    keeps the binary runnable when the SPA bundle isn't built yet, so
+    backend smoke tests don't require a node toolchain.
+
 ### Changed (breaking, pre-v1)
 
 - **Manifest TOML schema redesign (v0.9)** — collapses the v0.8

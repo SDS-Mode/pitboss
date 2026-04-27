@@ -14,19 +14,16 @@ use serde::Serialize;
 // Public resolver helpers
 // ---------------------------------------------------------------------------
 
-/// Locate a run directory by UUID prefix under `~/.local/share/pitboss/runs/`.
+/// Locate a run directory by UUID prefix under the canonical runs base
+/// (see `crate::runs::runs_base_dir` for resolution rules — Linux uses
+/// `~/.local/share/pitboss/runs`, macOS uses
+/// `~/Library/Application Support/pitboss/runs`, with a back-compat
+/// fallback to the legacy Linux path).
 ///
 /// Returns an error when zero or more than one directory matches the prefix.
 pub fn resolve_run(id_or_prefix: &str) -> Result<PathBuf> {
-    let base = runs_base_dir();
+    let base = crate::runs::runs_base_dir();
     resolve_run_under(&base, id_or_prefix)
-}
-
-fn runs_base_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".local/share/pitboss/runs")
 }
 
 /// Locate a run directory by UUID prefix under an explicit base directory.
@@ -124,9 +121,23 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
     let started = meta.started_at;
     let ended = tasks.last().map_or(started, |t| t.ended_at);
 
+    // Best-effort: pull manifest_name from resolved.json if present so partial
+    // (in-progress) runs synthesized from summary.jsonl still surface the run
+    // name in the operational console. Falls back to None if resolved.json is
+    // missing/malformed or the field is unset (pre-name-field manifests).
+    let manifest_name = std::fs::read(run_dir.join("resolved.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| {
+            v.get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+        });
+
     Ok(RunSummary {
         run_id: meta.run_id,
         manifest_path: meta.manifest_path,
+        manifest_name,
         pitboss_version: meta.pitboss_version,
         claude_version: meta.claude_version,
         started_at: started,
@@ -564,6 +575,7 @@ mod tests {
         RunSummary {
             run_id: Uuid::now_v7(),
             manifest_path: PathBuf::from("/tmp/test.toml"),
+            manifest_name: None,
             pitboss_version: "0.1.0".to_string(),
             claude_version: None,
             started_at: now,

@@ -21,6 +21,7 @@
 # map at `docs/manifest-map.md` provides clickable file:line refs.
 
 [run]
+name = "<value>"
 max_parallel_tasks = 0
 halt_on_failure = false
 run_dir = "/path/to/value"

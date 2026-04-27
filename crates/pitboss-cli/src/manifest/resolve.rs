@@ -89,6 +89,12 @@ pub struct ResolvedSubleadDefaults {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedManifest {
+    /// Human-readable label from `[run].name`. Surfaced into `RunSummary`
+    /// so the operational console can group related runs without re-reading
+    /// `manifest.snapshot.toml` per digest. `None` when the manifest omits
+    /// the field.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Renamed from `max_parallel` in v0.9 to match the TOML field name.
     /// `alias` keeps pre-v0.9 `resolved.json` snapshots resumable.
     #[serde(alias = "max_parallel")]
@@ -201,6 +207,7 @@ pub fn resolve(
     };
 
     Ok(ResolvedManifest {
+        name: manifest.run.name.clone(),
         max_parallel_tasks,
         halt_on_failure: manifest.run.halt_on_failure,
         run_dir,

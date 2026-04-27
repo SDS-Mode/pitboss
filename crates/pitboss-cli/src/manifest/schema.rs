@@ -311,6 +311,17 @@ pub const DEFAULT_MAX_PARALLEL_TASKS: u32 = 4;
 #[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
+    /// Human-readable label used to group related runs in the operational
+    /// console (e.g. `"build-db"`, `"nightly-sync"`). When unset, the
+    /// console falls back to the manifest filename. The canonical reference
+    /// to a run remains its UUIDv7 `run_id`; this name is purely for
+    /// cross-run grouping.
+    #[serde(default)]
+    #[field(
+        label = "Run name",
+        help = "Human-readable label used to group related runs in the console (e.g. \"build-db\", \"nightly-sync\"). When unset, the manifest filename is used as fallback."
+    )]
+    pub name: Option<String>,
     /// Concurrency cap for `[[task]]` flat mode. Renamed from `max_parallel`
     /// in v0.9. Overridden by `ANTHROPIC_MAX_CONCURRENT` env var. Default:
     /// [`DEFAULT_MAX_PARALLEL_TASKS`] (4).
@@ -380,6 +391,7 @@ pub struct RunConfig {
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
+            name: None,
             max_parallel_tasks: None,
             halt_on_failure: false,
             run_dir: None,
@@ -876,6 +888,33 @@ mod tests {
         "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert!(m.run.require_plan_approval);
+    }
+
+    #[test]
+    fn parses_run_name_when_present() {
+        let toml_src = r#"
+            [run]
+            name = "nightly-sync"
+
+            [[task]]
+            id = "x"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.run.name.as_deref(), Some("nightly-sync"));
+    }
+
+    #[test]
+    fn run_name_defaults_to_none_for_back_compat() {
+        let toml_src = r#"
+            [[task]]
+            id = "x"
+            directory = "/tmp"
+            prompt = "p"
+        "#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(m.run.name.is_none(), "missing [run].name must be None");
     }
 
     #[test]

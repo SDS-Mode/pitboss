@@ -1191,6 +1191,7 @@ mod tests {
 
     fn mk_state(dir: &Path, run_id: Uuid) -> Arc<DispatchState> {
         let manifest = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.to_path_buf(),
@@ -1607,6 +1608,7 @@ mod tests {
         let sub_w1 = pitboss_core::session::CancelToken::new();
         let sub_w2 = pitboss_core::session::CancelToken::new();
         let sub_manifest = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
@@ -2089,6 +2091,7 @@ mod tests {
         );
 
         let sub_manifest = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
@@ -2185,6 +2188,7 @@ mod tests {
         let state = mk_state(dir.path(), run_id);
 
         let sub_manifest = ResolvedManifest {
+            name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),

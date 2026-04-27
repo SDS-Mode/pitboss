@@ -445,6 +445,7 @@ async fn lease_released_when_mcp_connection_drops() {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
@@ -585,6 +586,7 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        name: None,
         max_parallel_tasks: 4,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),

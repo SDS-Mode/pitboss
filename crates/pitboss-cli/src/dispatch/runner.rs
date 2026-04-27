@@ -408,6 +408,7 @@ pub async fn execute(
     let summary = RunSummary {
         run_id,
         manifest_path: manifest_path.clone(),
+        manifest_name: resolved.name.clone(),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version: claude_version.clone(),
         started_at,
@@ -1091,6 +1092,7 @@ mod tests {
 
     fn minimal_manifest() -> ResolvedManifest {
         ResolvedManifest {
+            name: None,
             max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: PathBuf::from("/tmp/pitboss-test"),
@@ -1207,6 +1209,7 @@ mod tests {
         let run_dir = TempDir::new().unwrap();
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
+            name: None,
             max_parallel_tasks: 2,
             halt_on_failure: false,
             run_dir: run_dir.path().to_path_buf(),
@@ -1326,6 +1329,7 @@ mod tests {
         };
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
+            name: None,
             max_parallel_tasks: 1, // serialize so ordering is deterministic
             halt_on_failure: true,
             run_dir: run_dir.path().to_path_buf(),
@@ -1404,6 +1408,7 @@ mod tests {
         let run_dir = TempDir::new().unwrap();
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
+            name: None,
             max_parallel_tasks: 1,
             halt_on_failure: false,
             run_dir: run_dir.path().to_path_buf(),

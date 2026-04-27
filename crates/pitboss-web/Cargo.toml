@@ -1,0 +1,44 @@
+[package]
+name         = "pitboss-web"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Web operational console for the Pitboss dispatcher"
+repository   = { workspace = true }
+homepage     = { workspace = true }
+readme       = { workspace = true }
+
+[[bin]]
+name = "pitboss-web"
+path = "src/main.rs"
+
+[dependencies]
+pitboss-cli        = { path = "../pitboss-cli" }
+pitboss-core       = { path = "../pitboss-core" }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+clap               = { workspace = true, features = ["derive", "env"] }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+axum               = { workspace = true }
+tower              = { workspace = true }
+tower-http         = { workspace = true }
+rust-embed         = { workspace = true }
+mime_guess         = { workspace = true }
+futures-util       = { workspace = true }
+tokio-stream       = { workspace = true }
+dirs               = { workspace = true }
+chrono             = { workspace = true }
+uuid               = { workspace = true }
+lru                = { workspace = true }
+toml               = { workspace = true }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tokio              = { workspace = true }
+serde_json         = { workspace = true }
+tower              = { workspace = true, features = ["util"] }
