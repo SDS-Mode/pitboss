@@ -1,3 +1,6 @@
+#[cfg(test)]
+use crate::notify::config::resolve_request_timeout;
+use crate::notify::config::{build_pinned_client, pre_request_ssrf_check};
 use crate::notify::{NotificationEnvelope, NotificationSink, PitbossEvent, Severity};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -10,11 +13,17 @@ pub struct DiscordSink {
     id: String,
     url: String,
     http: Arc<reqwest::Client>,
+    request_timeout: Duration,
     bypass_ssrf: bool,
 }
 
 impl DiscordSink {
-    pub fn new(idx: usize, url: String, http: Arc<reqwest::Client>) -> Self {
+    pub fn new(
+        idx: usize,
+        url: String,
+        http: Arc<reqwest::Client>,
+        request_timeout: Duration,
+    ) -> Self {
         let id = if idx == 0 {
             "discord".to_string()
         } else {
@@ -24,6 +33,7 @@ impl DiscordSink {
             id,
             url,
             http,
+            request_timeout,
             bypass_ssrf: false,
         }
     }
@@ -37,6 +47,7 @@ impl DiscordSink {
             id: "discord".to_string(),
             url,
             http,
+            request_timeout: resolve_request_timeout(None),
             bypass_ssrf: true,
         }
     }
@@ -187,23 +198,31 @@ impl NotificationSink for DiscordSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
-        if !self.bypass_ssrf {
-            crate::notify::config::pre_request_ssrf_check(&self.url).await?;
-        }
-
         let body = self.build_body(env);
         // Strip the URL from any reqwest error before it bubbles up — the
         // path carries the bot token (`/api/webhooks/<id>/<token>`) and
         // would otherwise land verbatim in tracing output. See
         // notify::config::redact_webhook_url for the formatted-string variant.
-        let response = self
-            .http
-            .post(&self.url)
-            .json(&body)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| e.without_url())?;
+        let response = if self.bypass_ssrf {
+            self.http
+                .post(&self.url)
+                .json(&body)
+                .timeout(self.request_timeout)
+                .send()
+                .await
+                .map_err(|e| e.without_url())?
+        } else {
+            // DNS-rebinding-resistant path; see WebhookSink::emit for the
+            // identical pattern. Issue #156 (M2).
+            let preflight = pre_request_ssrf_check(&self.url).await?;
+            let client = build_pinned_client(&preflight, self.request_timeout)?;
+            client
+                .post(&self.url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| e.without_url())?
+        };
 
         match response.status() {
             status if status.is_success() => Ok(()),
@@ -246,6 +265,7 @@ mod tests {
             0,
             "https://example.com".into(),
             Arc::new(reqwest::Client::new()),
+            Duration::from_secs(30),
         );
         let env = NotificationEnvelope::new(
             "run-1",

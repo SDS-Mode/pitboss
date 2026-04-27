@@ -215,6 +215,11 @@ fn run_schema(format: cli::SchemaFormat, check: Option<&std::path::Path>) -> i32
                     return 2;
                 }
             };
+            // Strip CR before LF so a Windows checkout with
+            // `core.autocrlf=true` doesn't flag every run as stale. The
+            // generator only emits LF — any CR here came from git, not
+            // from drift.
+            let existing = existing.replace("\r\n", "\n");
             if existing == generated {
                 eprintln!("pitboss schema --check: {} is up to date", path.display());
                 0

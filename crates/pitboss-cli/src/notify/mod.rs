@@ -177,25 +177,97 @@ impl From<&crate::notify::config::NotificationConfig> for SinkFilter {
 
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Default LRU dedup cache size. The router has no persistent state — a
+/// process restart inside a long run can re-emit `RunDispatched` /
+/// `RunFinished` if the parent never acks them. 64 covers ~32 in-flight
+/// approval pairs (`approval_request` + `approval_pending`) plus the four
+/// run-scoped events with comfortable headroom; busy multi-task runs that
+/// hit the ceiling can raise it via `PITBOSS_NOTIFY_DEDUP_CACHE_SIZE`.
+pub const DEFAULT_DEDUP_CACHE_SIZE: usize = 64;
+
+/// Env var operators can set to tune the LRU dedup cache size at process
+/// start. Parsed once when [`NotificationRouter::new`] runs; ignored if
+/// the value is non-numeric or zero. Issue #156 (L1).
+pub const DEDUP_CACHE_SIZE_ENV: &str = "PITBOSS_NOTIFY_DEDUP_CACHE_SIZE";
 
 /// Router fans envelopes to multiple sinks with LRU dedup and retry.
 pub struct NotificationRouter {
     sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>,
     dedup_cache: Mutex<LruCache<String, ()>>,
+    /// Total emit-after-retry failures across the whole router lifetime.
+    /// Counts one per `(sink, dedup_key)` exhausted retry — fatal 4xx
+    /// short-circuits also count. Wrapped in `Arc` so per-emit
+    /// `tokio::spawn` bodies can increment it without borrowing `&self`.
+    /// Surfaced for operator dashboards and tests; never reset. #156 (M4).
+    failed_emits_total: Arc<AtomicU64>,
+    /// Per-run subdir written by the dispatcher right after `pitboss
+    /// dispatch` mints a run id; consumed by [`Self::dispatch`] to write
+    /// `TaskEvent::NotificationFailed` entries to a per-run JSONL on
+    /// terminal failure. `None` for routers built before any run subdir
+    /// exists (rare; only the test paths). Issue #156 (M4).
+    run_subdir: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl NotificationRouter {
-    /// Create a router with the given sinks and filters.
+    /// Create a router with the given sinks and filters. The LRU cache size
+    /// honors `PITBOSS_NOTIFY_DEDUP_CACHE_SIZE` when set to a positive
+    /// integer, otherwise falls back to [`DEFAULT_DEDUP_CACHE_SIZE`].
     pub fn new(sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>) -> Self {
+        let capacity = std::env::var(DEDUP_CACHE_SIZE_ENV)
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_DEDUP_CACHE_SIZE);
+        Self::new_with_capacity(sinks, capacity)
+    }
+
+    /// Like [`Self::new`] but with an explicit dedup-cache size — used by
+    /// tests that need deterministic cache behavior independent of the
+    /// process env. `capacity` is clamped to a minimum of 1 (the underlying
+    /// `LruCache` cannot be zero-sized).
+    pub fn new_with_capacity(
+        sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>,
+        capacity: usize,
+    ) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity clamped >= 1");
         Self {
             sinks,
-            dedup_cache: Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap())),
+            dedup_cache: Mutex::new(LruCache::new(cap)),
+            failed_emits_total: Arc::new(AtomicU64::new(0)),
+            run_subdir: Mutex::new(None),
         }
     }
 
+    /// Total terminal emit failures since router start. Exposed for tests
+    /// and future operator dashboards. Issue #156 (M4).
+    pub fn failed_emits_total(&self) -> u64 {
+        self.failed_emits_total.load(Ordering::Relaxed)
+    }
+
+    /// Set the per-run subdir used for `TaskEvent::NotificationFailed`
+    /// journal writes. Called by the dispatcher right after `run_subdir` is
+    /// created so subsequent emit failures land in
+    /// `<run_subdir>/notifications.jsonl`. Idempotent; the second call
+    /// overwrites the first. Issue #156 (M4).
+    pub fn set_run_subdir(&self, run_subdir: std::path::PathBuf) {
+        if let Ok(mut slot) = self.run_subdir.lock() {
+            *slot = Some(run_subdir);
+        }
+    }
+
+    fn run_subdir_snapshot(&self) -> Option<std::path::PathBuf> {
+        self.run_subdir.lock().ok().and_then(|g| g.clone())
+    }
+
     /// Dispatch envelope to all matching sinks. Deduplicates by dedup_key
-    /// and spawns fire-and-forget tasks with retry.
+    /// and spawns fire-and-forget tasks with retry. Terminal failures are
+    /// (a) logged at `error`, (b) counted in [`Self::failed_emits_total`],
+    /// and (c) appended to `<run_subdir>/notifications.jsonl` when a run
+    /// subdir is bound — so operators get a durable per-run audit trail
+    /// instead of having to scrape journald.
     pub async fn dispatch(&self, env: NotificationEnvelope) -> Result<()> {
         {
             let mut cache = self.dedup_cache.lock().unwrap();
@@ -211,6 +283,8 @@ impl NotificationRouter {
             }
             let sink = Arc::clone(sink);
             let env = env.clone();
+            let run_subdir = self.run_subdir_snapshot();
+            let counter = Arc::clone(&self.failed_emits_total);
             tokio::spawn(async move {
                 if let Err(e) = emit_with_retry(&sink, &env).await {
                     tracing::error!(
@@ -219,10 +293,57 @@ impl NotificationRouter {
                         error = %e,
                         "notification emit failed after retries"
                     );
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    if let Some(subdir) = run_subdir.as_ref() {
+                        record_notification_failure(subdir, &sink, &env, &e).await;
+                    }
                 }
             });
         }
         Ok(())
+    }
+}
+
+/// Append a `TaskEvent::NotificationFailed` line to
+/// `<run_subdir>/notifications.jsonl`. Best-effort: any I/O error here is
+/// only `tracing::warn`'d (failing to write the audit trail must never
+/// crash a dispatcher). Issue #156 (M4).
+async fn record_notification_failure(
+    run_subdir: &std::path::Path,
+    sink: &Arc<dyn NotificationSink>,
+    env: &NotificationEnvelope,
+    err: &anyhow::Error,
+) {
+    use chrono::Utc;
+    use tokio::io::AsyncWriteExt;
+    let event = crate::dispatch::events::TaskEvent::NotificationFailed {
+        at: Utc::now(),
+        sink_id: sink.id().to_string(),
+        event_kind: env.event.kind().to_string(),
+        error: err.to_string(),
+    };
+    let line = match serde_json::to_string(&event) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not serialize NotificationFailed event");
+            return;
+        }
+    };
+    let path = run_subdir.join("notifications.jsonl");
+    let res = async {
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        f.write_all(line.as_bytes()).await?;
+        f.write_all(b"\n").await?;
+        f.flush().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    if let Err(e) = res {
+        tracing::warn!(path = %path.display(), error = %e, "could not write notifications.jsonl");
     }
 }
 
@@ -437,5 +558,88 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(env.dedup_key, "run-1:approval_pending:req-5");
+    }
+
+    /// #156 (M4) regression: a sink that always returns Err must drive
+    /// `failed_emits_total` up by 1 per envelope and append a
+    /// `NotificationFailed` line to `<run_subdir>/notifications.jsonl`.
+    #[tokio::test]
+    async fn router_records_failed_emit_metric_and_journal_line() {
+        use chrono::Utc;
+        struct AlwaysFails;
+        #[async_trait]
+        impl NotificationSink for AlwaysFails {
+            fn id(&self) -> &str {
+                "test-fail"
+            }
+            async fn emit(&self, _env: &NotificationEnvelope) -> Result<()> {
+                Err(anyhow::anyhow!("synthetic emit failure"))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let router = NotificationRouter::new_with_capacity(
+            vec![(
+                Arc::new(AlwaysFails),
+                SinkFilter {
+                    events: None,
+                    severity_min: Severity::Info,
+                },
+            )],
+            8,
+        );
+        router.set_run_subdir(tmp.path().to_path_buf());
+
+        let env = NotificationEnvelope::new(
+            "run-x",
+            Severity::Info,
+            PitbossEvent::RunFinished {
+                run_id: "run-x".into(),
+                tasks_total: 0,
+                tasks_failed: 0,
+                duration_ms: 1,
+                spent_usd: 0.0,
+            },
+            Utc::now(),
+        );
+        router.dispatch(env).await.unwrap();
+
+        // The retry loop runs three attempts with 100/300ms backoffs ⇒
+        // ~1.3s total. Poll the counter so we don't depend on a fixed
+        // sleep.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if router.failed_emits_total() >= 1 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("failed_emits_total never reached 1");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let log_path = tmp.path().join("notifications.jsonl");
+        let body = tokio::fs::read_to_string(&log_path)
+            .await
+            .expect("notifications.jsonl must exist after emit failure");
+        assert!(body.contains("\"kind\":\"notification_failed\""), "{body}");
+        assert!(body.contains("\"sink_id\":\"test-fail\""), "{body}");
+        assert!(body.contains("\"event_kind\":\"run_finished\""), "{body}");
+        assert!(body.contains("synthetic emit failure"), "{body}");
+    }
+
+    /// #156 (L1) regression: env-var override of dedup cache size is
+    /// honored by `NotificationRouter::new`. We can't observe the cache
+    /// size directly, so we verify the constructor doesn't panic for an
+    /// extreme value (which a misuse of NonZeroUsize might).
+    #[test]
+    fn router_new_honors_dedup_cache_size_env() {
+        std::env::set_var(DEDUP_CACHE_SIZE_ENV, "1024");
+        let _ = NotificationRouter::new(vec![]);
+        std::env::set_var(DEDUP_CACHE_SIZE_ENV, "0"); // should fall back to default
+        let _ = NotificationRouter::new(vec![]);
+        std::env::set_var(DEDUP_CACHE_SIZE_ENV, "not a number");
+        let _ = NotificationRouter::new(vec![]);
+        std::env::remove_var(DEDUP_CACHE_SIZE_ENV);
     }
 }

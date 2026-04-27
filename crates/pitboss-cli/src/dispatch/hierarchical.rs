@@ -107,6 +107,12 @@ pub async fn run_hierarchical(
     // for the parent-orchestrator hook contract (issue #133).
     let http = std::sync::Arc::new(reqwest::Client::new());
     let notification_router = crate::notify::parent::build_router(&resolved.notifications, &http)?;
+    if let Some(router) = &notification_router {
+        // Bind the run subdir so terminal emit failures land in
+        // <run_subdir>/notifications.jsonl as TaskEvent::NotificationFailed.
+        // Issue #156 (M4).
+        router.set_run_subdir(run_subdir.clone());
+    }
 
     // Fire RunDispatched up front so a parent orchestrator can register the
     // run before any tokens spend.

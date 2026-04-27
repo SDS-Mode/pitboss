@@ -919,6 +919,7 @@ mod tests {
                     url: None,
                     events: None,
                     severity_min: crate::notify::Severity::Info,
+                    request_timeout_secs: None,
                 });
         });
         let err = validate(&m).unwrap_err();
@@ -934,6 +935,7 @@ mod tests {
                     url: None,
                     events: Some(vec!["hallucinate".into()]),
                     severity_min: crate::notify::Severity::Info,
+                    request_timeout_secs: None,
                 });
         });
         let err = validate(&m).unwrap_err();
@@ -993,6 +995,7 @@ mod tests {
             url: None,
             events: None,
             severity_min: crate::notify::Severity::Info,
+            request_timeout_secs: None,
         }
     }
 
@@ -1056,6 +1059,7 @@ mod tests {
                 url: Some("http://localhost/hook".to_string()),
                 events: None,
                 severity_min: crate::notify::Severity::Info,
+                request_timeout_secs: None,
             }),
         });
         // The inline notify gets validated by the same logic as
