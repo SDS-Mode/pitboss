@@ -53,7 +53,9 @@ fn known_form_type_keys() -> Vec<&'static str> {
 }
 
 fn form_type_variant(s: &str) -> Option<&'static str> {
-    KNOWN_FORM_TYPES.iter().find_map(|(k, v)| (*k == s).then_some(*v))
+    KNOWN_FORM_TYPES
+        .iter()
+        .find_map(|(k, v)| (*k == s).then_some(*v))
 }
 
 #[proc_macro_derive(FieldMetadata, attributes(field))]
@@ -75,10 +77,7 @@ pub fn derive_field_metadata(input: TokenStream) -> TokenStream {
             }
         },
         _ => {
-            return compile_error(
-                "FieldMetadata only supports structs",
-                Span::call_site(),
-            );
+            return compile_error("FieldMetadata only supports structs", Span::call_site());
         }
     };
 
@@ -130,8 +129,7 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
     // Track which keys we've seen so a duplicate (across the same or
     // separate `#[field(...)]` attributes) becomes a hard compile error
     // rather than a silent last-write-wins. (#159)
-    let mut seen_keys: std::collections::HashSet<&'static str> =
-        std::collections::HashSet::new();
+    let mut seen_keys: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
 
     for attr in &field.attrs {
         if !attr.path().is_ident("field") {
@@ -262,8 +260,7 @@ fn field_has_serde_default(field: &syn::Field) -> bool {
         if !attr.path().is_ident("serde") {
             continue;
         }
-        let Ok(items) =
-            attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        let Ok(items) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
         else {
             continue;
         };
