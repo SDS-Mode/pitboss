@@ -43,17 +43,35 @@ const CAP_TOOL_RESULT: usize = 3000;
 /// tokio runtime for the Ctrl-C handler then drives the sync polling
 /// loop inline. Returns a process exit code: 0 on clean completion /
 /// Ctrl-C, non-zero on resolution / IO errors.
-pub fn run(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) -> Result<i32> {
+pub fn run(
+    run_id_prefix: &str,
+    task_id: &str,
+    raw: bool,
+    lines: usize,
+    runs_dir_override: Option<PathBuf>,
+) -> Result<i32> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("build tokio runtime")?;
-    rt.block_on(run_async(run_id_prefix, task_id, raw, lines))
+    rt.block_on(run_async(
+        run_id_prefix,
+        task_id,
+        raw,
+        lines,
+        runs_dir_override,
+    ))
 }
 
-async fn run_async(run_id_prefix: &str, task_id: &str, raw: bool, lines: usize) -> Result<i32> {
+async fn run_async(
+    run_id_prefix: &str,
+    task_id: &str,
+    raw: bool,
+    lines: usize,
+    runs_dir_override: Option<PathBuf>,
+) -> Result<i32> {
     validate_task_id(task_id)?;
-    let base = default_runs_dir();
+    let base = runs_dir_override.unwrap_or_else(default_runs_dir);
     let run_dir = resolve_run_dir(&base, run_id_prefix)?;
     let tasks_root = run_dir.join("tasks");
     let task_dir = tasks_root.join(task_id);

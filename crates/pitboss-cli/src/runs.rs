@@ -50,7 +50,8 @@ use std::time::{Duration, SystemTime};
 pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(4 * 3600);
 
 /// Status of a discovered run directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     /// `summary.json` exists and parsed — run finalized cleanly.
     Complete,
@@ -142,26 +143,55 @@ pub fn collect_run_entries(base: &Path) -> Vec<RunEntry> {
 /// Build a [`RunEntry`] for one run directory.
 pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> RunEntry {
     let summary_json = run_dir.join("summary.json");
-    if let Ok(bytes) = std::fs::read(&summary_json) {
-        if let Ok(s) = serde_json::from_slice::<pitboss_core::store::RunSummary>(&bytes) {
-            return RunEntry {
-                run_id,
-                run_dir: run_dir.to_path_buf(),
-                mtime,
-                tasks_total: s.tasks_total,
-                tasks_failed: s.tasks_failed,
-                status: RunStatus::Complete,
-            };
-        }
-    }
+    let summary_json_state = match std::fs::read(&summary_json) {
+        Ok(bytes) => match serde_json::from_slice::<pitboss_core::store::RunSummary>(&bytes) {
+            Ok(s) => {
+                return RunEntry {
+                    run_id,
+                    run_dir: run_dir.to_path_buf(),
+                    mtime,
+                    tasks_total: s.tasks_total,
+                    tasks_failed: s.tasks_failed,
+                    status: RunStatus::Complete,
+                };
+            }
+            Err(e) => {
+                // The dispatcher wrote summary.json but the contents are
+                // unparseable (truncated mid-write, format skew, disk
+                // corruption). The earlier code silently fell through to
+                // jsonl classification, which would happily classify a
+                // recent run as Running even though the dispatcher is
+                // gone — actively misleading. Surface the parse error and
+                // treat the run as Aborted: the dispatcher's exit signal
+                // is more authoritative than jsonl mtime. (#157)
+                tracing::warn!(
+                    path = %summary_json.display(),
+                    error = %e,
+                    "summary.json present but unparseable — classifying as Aborted",
+                );
+                Some(())
+            }
+        },
+        Err(_) => None,
+    };
 
     let jsonl = run_dir.join("summary.jsonl");
     let (settled_total, failed) = count_jsonl_tasks(&jsonl);
-    let live = control_socket_is_live(&run_id, run_dir);
-
     let spawned_count = count_tasks_subdirs(run_dir);
     let total = settled_total.max(spawned_count);
 
+    if summary_json_state.is_some() {
+        return RunEntry {
+            run_id,
+            run_dir: run_dir.to_path_buf(),
+            mtime,
+            tasks_total: total,
+            tasks_failed: failed,
+            status: RunStatus::Aborted,
+        };
+    }
+
+    let live = control_socket_is_live(&run_id, run_dir);
     let status = classify_status(live, settled_total, jsonl_recent(&jsonl));
     RunEntry {
         run_id,
@@ -234,6 +264,14 @@ pub fn control_socket_is_live(run_id: &str, run_dir: &Path) -> bool {
 /// Mirror of `pitboss_cli::control::control_socket_path` for the case
 /// where we have a `run_id` string (not a `Uuid`) — the runs-discovery
 /// caller reads run IDs out of directory names.
+///
+/// `run_dir` is already the per-run subdirectory
+/// (`<base>/<uuid>/`), matching what the writer side passes:
+/// `control_socket_path(uuid, base)` produces `<base>/<uuid>/control.sock`.
+/// The earlier implementation double-nested the UUID
+/// (`<base>/<uuid>/<uuid>/control.sock`), so on systems without
+/// `$XDG_RUNTIME_DIR` the fallback never matched the real socket and
+/// every running run was misclassified as Stale/Aborted (#141).
 fn resolve_socket_path(run_id: &str, run_dir: &Path) -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(xdg)
@@ -243,8 +281,7 @@ fn resolve_socket_path(run_id: &str, run_dir: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let fallback = run_dir.join(run_id).join("control.sock");
-    Some(fallback)
+    Some(run_dir.join("control.sock"))
 }
 
 /// `true` when `summary.jsonl` has been written within
@@ -455,6 +492,60 @@ mod tests {
         assert!(!RunStatus::Stale.is_complete());
         assert!(!RunStatus::Aborted.is_complete());
         assert!(!RunStatus::Running.is_complete());
+    }
+
+    // ── #141: socket-path resolution doesn't double-nest the run id ─────
+
+    #[test]
+    fn resolve_socket_path_does_not_double_nest_run_id() {
+        // Simulate the no-XDG case where the fallback path matters.
+        // Stash and restore the env so the test is hermetic regardless of
+        // the host's XDG_RUNTIME_DIR.
+        let prior = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::remove_var("XDG_RUNTIME_DIR");
+
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join("run-uuid-1");
+        fs::create_dir_all(&run_dir).unwrap();
+        let got = resolve_socket_path("run-uuid-1", &run_dir).unwrap();
+
+        assert_eq!(
+            got,
+            run_dir.join("control.sock"),
+            "fallback must be <run_dir>/control.sock — joining run_id again \
+             produces a path that never matches what the writer creates (#141)"
+        );
+
+        if let Some(v) = prior {
+            std::env::set_var("XDG_RUNTIME_DIR", v);
+        }
+    }
+
+    // ── #157: corrupted summary.json is surfaced as Aborted, not Running ──
+
+    #[test]
+    fn collect_run_entry_with_corrupt_summary_json_is_aborted() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = make_run_dir(tmp.path(), "run-bad");
+        // summary.json exists but is unparseable garbage.
+        fs::write(run_dir.join("summary.json"), b"{not json").unwrap();
+        // Recent jsonl mtime — without the fix, classify_status would
+        // return Running here. The fix overrides to Aborted because the
+        // dispatcher's terminal write attempt is more authoritative than
+        // any jsonl recency.
+        fs::write(
+            run_dir.join("summary.jsonl"),
+            br#"{"task_id":"t","status":"failure","error":"x","cost_usd":0,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
+"#,
+        )
+        .unwrap();
+
+        let entry = collect_run_entry(&run_dir, "run-bad".to_string(), SystemTime::now());
+        assert_eq!(
+            entry.status,
+            RunStatus::Aborted,
+            "corrupt summary.json must classify as Aborted, not Running"
+        );
     }
 
     #[test]
