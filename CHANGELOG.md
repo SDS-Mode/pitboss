@@ -7,6 +7,36 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Web operational console — Phase 1** (`pitboss-web` crate, new
+  workspace member). Single-binary axum HTTP server + embedded SvelteKit
+  SPA. Read-only post-run archaeology over the runs filesystem; live
+  control-socket bridging is Phase 2 (in progress on the same branch).
+  - Backend: `GET /api/runs`, `/api/runs/{id}` (with synthesised stub
+    for in-progress runs), `/api/runs/{id}/manifest`,
+    `/api/runs/{id}/resolved`, `/api/runs/{id}/summary-jsonl`,
+    `/api/runs/{id}/tasks/{task_id}/log` (with `?limit` + `?tail`
+    controls). Bearer-token auth, loopback-default bind, mandatory
+    token when binding non-loopback.
+  - Frontend: SvelteKit 2 + Svelte 5 + adapter-static + Tailwind v4 +
+    shadcn-svelte (bits-ui v2). Run list with color-coded status
+    badges, run detail with KPI cards + tabs (Tasks / Manifest /
+    Resolved / Summary), per-task log viewer with tail/head toggle.
+  - Path config: `--runs-dir` / `--manifests-dir` flags plus matching
+    `PITBOSS_RUNS_DIR` / `PITBOSS_MANIFESTS_DIR` env vars. Defaults
+    flow through `pitboss_cli::runs::runs_base_dir()` so the console
+    auto-tracks any future macOS-aware fix to that function. Manifests
+    workspace defaults via `dirs::data_dir()` (Linux: `~/.local/share`,
+    macOS: `~/Library/Application Support`).
+  - No changes to existing crates — `pitboss-cli` already exposed
+    `runs::*` and `control::protocol::*` as `pub` modules via its
+    `lib.rs`, so the web crate consumes them directly.
+  - Build: `cd crates/pitboss-web/spa && npm install && npm run build`,
+    then `cargo build -p pitboss-web`. The placeholder fallback HTML
+    keeps the binary runnable when the SPA bundle isn't built yet, so
+    backend smoke tests don't require a node toolchain.
+
 ### Changed (breaking, pre-v1)
 
 - **Manifest TOML schema redesign (v0.9)** — collapses the v0.8
