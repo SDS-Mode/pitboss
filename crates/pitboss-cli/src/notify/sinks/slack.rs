@@ -10,6 +10,7 @@ pub struct SlackSink {
     id: String,
     url: String,
     http: Arc<reqwest::Client>,
+    bypass_ssrf: bool,
 }
 
 impl SlackSink {
@@ -19,7 +20,25 @@ impl SlackSink {
         } else {
             format!("slack:{}", idx)
         };
-        Self { id, url, http }
+        Self {
+            id,
+            url,
+            http,
+            bypass_ssrf: false,
+        }
+    }
+
+    /// Test-only constructor that skips the per-request SSRF guard so a
+    /// `wiremock::MockServer` (which always binds 127.0.0.1) can be used
+    /// as the destination. Production paths must use [`Self::new`].
+    #[cfg(test)]
+    fn new_unchecked(url: String, http: Arc<reqwest::Client>) -> Self {
+        Self {
+            id: "slack".to_string(),
+            url,
+            http,
+            bypass_ssrf: true,
+        }
     }
 
     fn severity_emoji(sev: Severity) -> &'static str {
@@ -144,14 +163,19 @@ impl SlackSink {
 }
 
 /// Escape characters that Slack mrkdwn interprets as formatting or mention
-/// triggers in untrusted fields. Backslash-escapes `* _ ~ ` ` | > # [ ] ( ) @ < :`.
-/// Newlines are preserved.
+/// triggers in untrusted fields. Backslash-escapes `\ * _ ~ ` ` | > # [ ] ( )
+/// @ < : &`. Newlines are preserved.
+///
+/// `&` is included because Slack HTML-entity-decodes `&amp;` / `&lt;` /
+/// `&gt;` in mrkdwn — without escaping `&`, an untrusted field containing
+/// `&lt;@U123&gt;` would render as `<@U123>` and resolve to a mention,
+/// bypassing the `<` / `@` / `>` escapes above.
 fn escape_slack_mrkdwn(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\\' | '*' | '_' | '~' | '`' | '|' | '>' | '#' | '[' | ']' | '(' | ')' | '@' | '<'
-            | ':' => {
+            | ':' | '&' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -168,22 +192,32 @@ impl NotificationSink for SlackSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
-        crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+        if !self.bypass_ssrf {
+            crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+        }
 
         let body = self.build_body(env);
+        // Strip the URL from any reqwest error before it bubbles up — the
+        // path carries the incoming-webhook token
+        // (`/services/T.../B.../<token>`) and would otherwise land verbatim
+        // in tracing output. See notify::config::redact_webhook_url for the
+        // formatted-string variant.
         let response = self
             .http
             .post(&self.url)
             .json(&body)
             .timeout(Duration::from_secs(30))
             .send()
-            .await?;
+            .await
+            .map_err(|e| e.without_url())?;
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            status if status.is_client_error() => {
-                Err(response.error_for_status().unwrap_err().into())
-            }
+            status if status.is_client_error() => Err(response
+                .error_for_status()
+                .unwrap_err()
+                .without_url()
+                .into()),
             _ => Err(anyhow::anyhow!(
                 "slack POST failed with status {}",
                 response.status()
@@ -209,6 +243,18 @@ mod tests {
         assert!(out.contains("\\)"), "got: {out}");
         assert!(out.contains("\\*bold\\*"), "got: {out}");
         assert!(out.contains("\\`code\\`"), "got: {out}");
+    }
+
+    #[test]
+    fn escape_neutralises_html_entity_mention_smuggling() {
+        // Slack mrkdwn HTML-decodes &amp; / &lt; / &gt;, so without
+        // escaping `&` an untrusted "&lt;@U123&gt;" would render as
+        // "<@U123>" and resolve to a mention. Escaping `&` to `\&` breaks
+        // the entity before Slack can decode it.
+        let out = escape_slack_mrkdwn("&lt;@U123&gt; ping &amp; you");
+        assert!(out.contains("\\&lt;"), "got: {out}");
+        assert!(out.contains("\\&gt;"), "got: {out}");
+        assert!(out.contains("\\&amp;"), "got: {out}");
     }
 
     #[test]
@@ -251,7 +297,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let sink = super::SlackSink::new(0, url, std::sync::Arc::new(reqwest::Client::new()));
+        let sink =
+            super::SlackSink::new_unchecked(url, std::sync::Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
             "run-1",
@@ -280,7 +327,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let sink = super::SlackSink::new(0, url, std::sync::Arc::new(reqwest::Client::new()));
+        let sink =
+            super::SlackSink::new_unchecked(url, std::sync::Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
             "run-1",
@@ -311,7 +359,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let sink = super::SlackSink::new(0, url, std::sync::Arc::new(reqwest::Client::new()));
+        let sink =
+            super::SlackSink::new_unchecked(url, std::sync::Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
             "run-1",

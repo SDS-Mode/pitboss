@@ -735,10 +735,14 @@ async fn e2e_run_finished_notifies_webhook() {
     let webhook_url = format!("{}/hook", mock.uri());
 
     // Build a router with one webhook sink directly (bypass manifest
-    // parse since DispatchState::new takes the router as arg).
+    // parse since DispatchState::new takes the router as arg). Use the
+    // `new_trusted` constructor so the per-request SSRF guard skips the
+    // 127.0.0.1 wiremock target — matches the production env-var path
+    // (`PITBOSS_PARENT_NOTIFY_URL`) which is the only legitimate way a
+    // sink ends up pointed at loopback.
     let http = std::sync::Arc::new(reqwest::Client::new());
-    let sink = std::sync::Arc::new(pitboss_cli::notify::sinks::WebhookSink::new(
-        0,
+    let sink = std::sync::Arc::new(pitboss_cli::notify::sinks::WebhookSink::new_trusted(
+        "webhook-e2e".into(),
         webhook_url.clone(),
         http,
     ));

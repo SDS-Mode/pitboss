@@ -121,28 +121,65 @@ pub fn validate(cfg: &NotificationConfig) -> Result<()> {
     Ok(())
 }
 
+/// Render a webhook URL safely for logs and error messages by stripping
+/// any path, query, and fragment — only `<scheme>://<host>[:<port>]` plus a
+/// `/<redacted>` marker when the original URL had a non-empty path.
+///
+/// Slack incoming-webhook URLs (`/services/T.../B.../<TOKEN>`), Discord
+/// webhook URLs (`/api/webhooks/<id>/<token>`), and any URL with a token
+/// in the query string carry the channel's authorisation in the path or
+/// query. `reqwest::Error`'s `Display` impl redacts only RFC 3986 userinfo
+/// passwords and leaves path + query intact, so a verbatim `{url:?}` in
+/// error output exposes the secret to journald, log aggregators, and
+/// crash reporters. Use this helper everywhere a URL appears in user-
+/// visible error text.
+pub fn redact_webhook_url(raw: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "<unparseable url>".to_string();
+    };
+    let scheme = url.scheme();
+    let host = url.host_str().unwrap_or("?");
+    let port = url.port().map_or(String::new(), |p| format!(":{p}"));
+    let path_present = !url.path().is_empty() && url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some();
+    if path_present {
+        format!("{scheme}://{host}{port}/<redacted>")
+    } else {
+        format!("{scheme}://{host}{port}")
+    }
+}
+
 /// Reject webhook URLs that would let a rogue manifest SSRF the host's
 /// internal network. Requires `https://` and a non-loopback / non-private
 /// host. Parse errors fail closed.
 fn validate_webhook_url(raw: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(raw)
-        .map_err(|e| anyhow::anyhow!("notification url {raw:?} is not a valid URL: {e}"))?;
+    let parsed = reqwest::Url::parse(raw).map_err(|e| {
+        anyhow::anyhow!(
+            "notification url {} is not a valid URL: {e}",
+            redact_webhook_url(raw)
+        )
+    })?;
 
     if parsed.scheme() != "https" {
         bail!(
-            "notification url must use https:// (got scheme {:?} in {raw:?})",
-            parsed.scheme()
+            "notification url must use https:// (got scheme {:?} in {})",
+            parsed.scheme(),
+            redact_webhook_url(raw),
         );
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("notification url {raw:?} has no host"))?;
+    let host = parsed.host_str().ok_or_else(|| {
+        anyhow::anyhow!("notification url {} has no host", redact_webhook_url(raw))
+    })?;
 
     // Block by name first: covers `localhost`, `localhost.localdomain`, etc.
     let host_lc = host.to_ascii_lowercase();
     if host_lc == "localhost" || host_lc.ends_with(".localhost") {
-        bail!("notification url {raw:?} points at a loopback host");
+        bail!(
+            "notification url {} points at a loopback host",
+            redact_webhook_url(raw)
+        );
     }
 
     // Block by IP: loopback, private, link-local, unspecified.
@@ -154,7 +191,10 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
         .unwrap_or(host);
     if let Ok(ip) = ip_candidate.parse::<IpAddr>() {
         if is_disallowed_ip(&ip) {
-            bail!("notification url {raw:?} points at a private / loopback / link-local address");
+            bail!(
+                "notification url {} points at a private / loopback / link-local address",
+                redact_webhook_url(raw)
+            );
         }
     }
 
@@ -173,37 +213,59 @@ fn validate_webhook_url(raw: &str) -> Result<()> {
 /// Fast-path: if the URL's host is already a literal IP, the config-time
 /// check has already classified it — skip the re-resolution.
 pub(crate) async fn pre_request_ssrf_check(url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("webhook url {url:?} is not a valid URL: {e}"))?;
+    let parsed = reqwest::Url::parse(url).map_err(|e| {
+        anyhow::anyhow!(
+            "webhook url {} is not a valid URL: {e}",
+            redact_webhook_url(url)
+        )
+    })?;
     let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("webhook url {url:?} has no host"))?;
+        .ok_or_else(|| anyhow::anyhow!("webhook url {} has no host", redact_webhook_url(url)))?;
     let host_unbracketed = host
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
-    if host_unbracketed.parse::<IpAddr>().is_ok() {
-        // Literal IP: already classified at config-time validation.
+    if let Ok(ip) = host_unbracketed.parse::<IpAddr>() {
+        // Literal IP: re-check the blocklist here too. The config-time
+        // validator already does this, but a future caller that constructs
+        // a `WebhookSink` directly (bypassing manifest validation) would
+        // otherwise be able to POST to a private IP. Fail-closed at the
+        // last gate before we hit the network.
+        if is_disallowed_ip(&ip) {
+            bail!(
+                "webhook url {} points at a private / loopback / link-local \
+                 address ({ip}); refusing to dispatch (SSRF guard)",
+                redact_webhook_url(url)
+            );
+        }
         return Ok(());
     }
     let port = parsed.port_or_known_default().unwrap_or(443);
     let target = format!("{host_unbracketed}:{port}");
     let mut saw_any = false;
-    let iter = tokio::net::lookup_host(&target)
-        .await
-        .map_err(|e| anyhow::anyhow!("webhook url {url:?} DNS lookup failed: {e}"))?;
+    let iter = tokio::net::lookup_host(&target).await.map_err(|e| {
+        anyhow::anyhow!(
+            "webhook url {} DNS lookup failed: {e}",
+            redact_webhook_url(url)
+        )
+    })?;
     for addr in iter {
         saw_any = true;
         if is_disallowed_ip(&addr.ip()) {
             bail!(
-                "webhook url {url:?} resolved to a private / loopback / link-local \
+                "webhook url {} resolved to a private / loopback / link-local \
                  address ({}); refusing to dispatch (SSRF guard)",
+                redact_webhook_url(url),
                 addr.ip()
             );
         }
     }
     if !saw_any {
-        bail!("webhook url {url:?} DNS returned no addresses");
+        bail!(
+            "webhook url {} DNS returned no addresses",
+            redact_webhook_url(url)
+        );
     }
     Ok(())
 }
@@ -214,6 +276,7 @@ fn is_disallowed_v4(v4: &Ipv4Addr) -> bool {
         || v4.is_link_local()
         || v4.is_unspecified()
         || v4.is_broadcast()
+        || v4.is_multicast()
         || {
             // Carrier-grade NAT 100.64.0.0/10 — not covered by is_private.
             let o = v4.octets();
@@ -232,12 +295,18 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_disallowed_v4(&v4);
             }
+            let seg0 = v6.segments()[0];
             v6.is_loopback()
                 || v6.is_unspecified()
                 // fc00::/7 unique-local
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (seg0 & 0xfe00) == 0xfc00
                 // fe80::/10 link-local
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (seg0 & 0xffc0) == 0xfe80
+                // ff00::/8 multicast
+                || (seg0 & 0xff00) == 0xff00
+                // fec0::/10 deprecated site-local (RFC 3879). Most stacks
+                // ignore it but Linux still routes it; treat as private.
+                || (seg0 & 0xffc0) == 0xfec0
         }
     }
 }
@@ -399,5 +468,154 @@ url = "https://example.com""#;
             severity_min: Severity::Info,
         };
         assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn webhook_rejects_ipv4_multicast() {
+        // 224.0.0.0/4 covers all v4 multicast — not blocked by is_private
+        // or is_broadcast and so must be flagged explicitly.
+        let err = validate(&cfg_webhook("https://239.255.255.250/hook")).unwrap_err();
+        assert!(err.to_string().contains("private / loopback"), "{err}");
+    }
+
+    #[test]
+    fn webhook_rejects_ipv6_multicast() {
+        let err = validate(&cfg_webhook("https://[ff02::1]/hook")).unwrap_err();
+        assert!(err.to_string().contains("private / loopback"), "{err}");
+    }
+
+    #[test]
+    fn webhook_rejects_ipv6_site_local() {
+        // fec0::/10 is RFC 3879 deprecated but Linux still routes it.
+        let err = validate(&cfg_webhook("https://[fec0::1]/hook")).unwrap_err();
+        assert!(err.to_string().contains("private / loopback"), "{err}");
+    }
+
+    // ---- redact_webhook_url ----
+
+    #[test]
+    fn redact_strips_slack_token_path() {
+        let raw = "https://hooks.slack.com/services/T01/B02/SECRETTOKEN";
+        let redacted = redact_webhook_url(raw);
+        assert!(!redacted.contains("SECRETTOKEN"), "got: {redacted}");
+        assert!(!redacted.contains("services"), "got: {redacted}");
+        assert!(redacted.contains("hooks.slack.com"), "got: {redacted}");
+        assert!(redacted.contains("<redacted>"), "got: {redacted}");
+    }
+
+    #[test]
+    fn redact_strips_discord_webhook_path() {
+        let raw = "https://discord.com/api/webhooks/123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let redacted = redact_webhook_url(raw);
+        assert!(
+            !redacted.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+            "got: {redacted}"
+        );
+        assert!(!redacted.contains("123456789"), "got: {redacted}");
+        assert!(redacted.contains("discord.com"), "got: {redacted}");
+    }
+
+    #[test]
+    fn redact_strips_query_string_token() {
+        let raw = "https://hook.example.com/notify?token=SUPERSECRET&channel=ops";
+        let redacted = redact_webhook_url(raw);
+        assert!(!redacted.contains("SUPERSECRET"), "got: {redacted}");
+        assert!(!redacted.contains("token="), "got: {redacted}");
+    }
+
+    #[test]
+    fn redact_preserves_host_only_when_no_path() {
+        assert_eq!(
+            redact_webhook_url("https://hooks.slack.com"),
+            "https://hooks.slack.com"
+        );
+    }
+
+    #[test]
+    fn redact_preserves_port() {
+        let redacted = redact_webhook_url("https://hook.example.com:8443/services/X");
+        assert!(redacted.contains(":8443"), "got: {redacted}");
+        assert!(!redacted.contains("/services/X"), "got: {redacted}");
+    }
+
+    #[test]
+    fn redact_unparseable_returns_placeholder() {
+        assert_eq!(redact_webhook_url("not a url at all"), "<unparseable url>");
+    }
+
+    #[test]
+    fn validation_error_does_not_leak_secret_path() {
+        // The whole point of #143 — manifest validation errors must not
+        // echo the path / query of the URL into the error string.
+        let raw = "https://127.0.0.1/services/T01/B02/SECRETTOKEN";
+        let err = validate(&cfg_webhook(raw)).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("SECRETTOKEN"), "leaked: {msg}");
+        assert!(!msg.contains("/services/"), "leaked: {msg}");
+    }
+
+    // ---- pre_request_ssrf_check ----
+
+    #[tokio::test]
+    async fn pre_request_ssrf_check_accepts_public_dns_name() {
+        // example.com is contractually a public address per RFC 2606.
+        // Skip if the test host has no DNS resolver.
+        let res = pre_request_ssrf_check("https://example.com/hook").await;
+        if let Err(e) = &res {
+            // Tolerate offline test environments; only fail if the error
+            // is the SSRF guard itself rejecting a public name.
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("SSRF guard"),
+                "public name should not trip SSRF guard: {msg}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_request_ssrf_check_rejects_literal_loopback_v4() {
+        // Defense against future WebhookSink::new() callers that bypass
+        // the manifest-time validator: the runtime guard must also catch
+        // literal private IPs, not just DNS-resolved ones.
+        let err = pre_request_ssrf_check("https://127.0.0.1/hook")
+            .await
+            .expect_err("should reject literal loopback");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SSRF guard") || msg.contains("private"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_request_ssrf_check_rejects_literal_link_local_v4() {
+        let err = pre_request_ssrf_check("https://169.254.169.254/latest")
+            .await
+            .expect_err("should reject AWS metadata IP");
+        assert!(
+            err.to_string().contains("SSRF guard") || err.to_string().contains("private"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_request_ssrf_check_rejects_literal_loopback_v6() {
+        let err = pre_request_ssrf_check("https://[::1]/hook")
+            .await
+            .expect_err("should reject literal v6 loopback");
+        assert!(
+            err.to_string().contains("SSRF guard") || err.to_string().contains("private"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_request_ssrf_check_error_redacts_url() {
+        let err = pre_request_ssrf_check("https://127.0.0.1/services/T1/B2/SECRET")
+            .await
+            .expect_err("loopback rejected");
+        let msg = err.to_string();
+        assert!(!msg.contains("SECRET"), "leaked: {msg}");
+        assert!(!msg.contains("/services/"), "leaked: {msg}");
     }
 }
