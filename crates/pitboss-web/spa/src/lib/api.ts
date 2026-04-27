@@ -185,6 +185,94 @@ export async function postControlOp(runId: string, op: ControlOp): Promise<void>
   });
 }
 
+// ---- Manifest workspace (Phase 4) ----------------------------------------
+
+export interface ManifestEntry {
+  name: string;
+  size: number;
+  mtime_unix: number;
+}
+
+export interface ValidateResult {
+  ok: boolean;
+  errors: string[];
+}
+
+export interface DispatchDescriptor {
+  run_id: string;
+  manifest_path: string;
+  started_at: string;
+  child_pid?: number;
+  [k: string]: unknown;
+}
+
+/**
+ * Mirror of `pitboss_schema::SchemaSection`. Treated loosely so future
+ * additions on the Rust side don't require a TS bump on every change.
+ */
+export interface SchemaSection {
+  toml_path: string;
+  type_name: string;
+  fields: SchemaField[];
+}
+
+export interface SchemaField {
+  name: string;
+  label: string;
+  help: string;
+  form_type: string;
+  required: boolean;
+  enum_values: string[];
+}
+
+export function listManifests(): Promise<ManifestEntry[]> {
+  return request<ManifestEntry[]>('/api/manifests');
+}
+
+export function readManifest(name: string): Promise<string> {
+  return request<string>(`/api/manifests/${enc(name)}`, { accept: 'text' });
+}
+
+export function saveManifest(name: string, contents: string): Promise<{ name: string; bytes: number }> {
+  return request<{ name: string; bytes: number }>('/api/manifests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, contents }),
+    accept: 'json'
+  });
+}
+
+export function validateManifest(contents: string): Promise<ValidateResult> {
+  return request<ValidateResult>('/api/manifests/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents }),
+    accept: 'json'
+  });
+}
+
+export function dispatchManifest(manifest_name: string): Promise<{ descriptor: DispatchDescriptor }> {
+  return request<{ descriptor: DispatchDescriptor }>('/api/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manifest_name }),
+    accept: 'json'
+  });
+}
+
+export function forkRun(runId: string, new_name: string): Promise<{ name: string }> {
+  return request<{ name: string }>(`/api/runs/${enc(runId)}/fork`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_name }),
+    accept: 'json'
+  });
+}
+
+export function getSchema(): Promise<SchemaSection[]> {
+  return request<SchemaSection[]>('/api/schema');
+}
+
 // ---- SSE: live control events --------------------------------------------
 
 /** Per-event payload from the dispatcher's control socket, JSON-decoded. */

@@ -19,6 +19,12 @@
       >
         Runs
       </a>
+      <a
+        href="/manifests"
+        class="text-muted-foreground hover:text-foreground rounded-md px-3 py-1.5 transition"
+      >
+        Manifests
+      </a>
     </nav>
 
     <div class="ml-auto flex items-center gap-1">

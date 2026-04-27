@@ -9,6 +9,42 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Web operational console — Phase 4 + 5** (manifest authoring, dispatch
+  from console, fork from completed runs). The browser is now a complete
+  authoring surface: write a manifest, validate as you type, save to the
+  workspace, dispatch in the background, watch the run go live, and fork
+  the snapshot back into a new manifest with one button.
+  - Backend (all sandboxed to `state.manifests_dir()`):
+    - `GET  /api/schema` — full `SchemaSection` tree as JSON. Comes for
+      free off the existing `pitboss-schema-derive` `field_metadata()`
+      slices; no schema work required.
+    - `GET  /api/manifests` — list TOML files in the workspace
+      (sorted by mtime, newest first).
+    - `GET  /api/manifests/:name` — read one manifest's raw TOML.
+    - `POST /api/manifests` — save (create or overwrite) a manifest.
+    - `POST /api/manifests/validate` — runs `load_manifest_from_str` +
+      `validate_skip_dir_check` against the body and returns the same
+      error chain the CLI emits, flattened into a JSON array.
+    - `POST /api/runs` — execs `pitboss dispatch --background <path>`
+      (binary path overridable via `PITBOSS_BIN`), parses the JSON
+      descriptor the dispatcher prints, and returns it. The SPA uses
+      `descriptor.run_id` to redirect to the live run page.
+    - `POST /api/runs/:id/fork` — copies the run's
+      `manifest.snapshot.toml` into the workspace under a new name.
+      Refuses to overwrite existing manifests.
+  - Sandbox: `sanitize_manifest_name()` rejects path separators, `..`,
+    overlong / non-ASCII names, then forces a `.toml` suffix. 256 KiB
+    upper bound on manifest body size.
+  - SPA: new `/manifests` route lists the workspace and creates new
+    manifests from a stub. `/manifests/[name]` is a TOML editor with
+    debounced validate-on-keystroke (600 ms), Save and Dispatch
+    buttons; Dispatch saves first if the buffer is dirty, then
+    redirects to the run page on success.
+  - SPA: "Fork manifest" button on every run-detail page (live or
+    completed). Prompts for a new name, POSTs the fork, jumps straight
+    into the editor.
+  - Site header: "Manifests" nav link added next to "Runs".
+
 - **Web operational console — Phase 3** (control writes). The bridge
   now retains the per-run socket's write half so REST callers can push
   `ControlOp` messages to the live dispatcher. The SPA exposes the

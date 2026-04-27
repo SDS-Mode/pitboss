@@ -14,11 +14,12 @@ use crate::{assets, state::AppState};
 
 mod control;
 mod events;
+mod manifests;
 mod runs;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
-        .route("/runs", get(runs::list))
+        .route("/runs", get(runs::list).post(manifests::dispatch))
         .route("/runs/{run_id}", get(runs::detail))
         .route("/runs/{run_id}/manifest", get(runs::manifest))
         .route("/runs/{run_id}/resolved", get(runs::resolved))
@@ -26,6 +27,11 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/{run_id}/tasks/{task_id}/log", get(runs::task_log))
         .route("/runs/{run_id}/events", get(events::events))
         .route("/runs/{run_id}/control", post(control::send))
+        .route("/runs/{run_id}/fork", post(manifests::fork_run))
+        .route("/schema", get(manifests::schema))
+        .route("/manifests", get(manifests::list).post(manifests::save))
+        .route("/manifests/validate", post(manifests::validate))
+        .route("/manifests/{name}", get(manifests::read_one))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 

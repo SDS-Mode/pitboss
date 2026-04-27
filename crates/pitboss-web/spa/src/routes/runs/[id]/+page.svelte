@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import {
     getRun,
     getResolvedManifest,
@@ -8,6 +9,7 @@
     getSummaryJsonl,
     subscribeRunEvents,
     postControlOp,
+    forkRun,
     type ControlEnvelope,
     type RunDetailDto,
     type PolicyRule,
@@ -44,7 +46,8 @@
     Pause,
     Play,
     MessageSquare,
-    Ban
+    Ban,
+    GitFork
   } from 'lucide-svelte';
   import type { RunStatus } from '$lib/api';
 
@@ -268,6 +271,22 @@
     );
   }
 
+  async function fork() {
+    const suggested = `fork-of-${runId.slice(0, 8)}`;
+    const newName = window.prompt(
+      'Save this run’s manifest into the workspace as (without .toml)?',
+      suggested
+    );
+    if (!newName || !newName.trim()) return;
+    try {
+      const res = await forkRun(runId, newName.trim());
+      await goto(`/manifests/${encodeURIComponent(res.name)}`);
+    } catch (e) {
+      const msg = e instanceof ApiError ? `${e.status}: ${e.body || e.message}` : String(e);
+      window.alert(`Fork failed: ${msg}`);
+    }
+  }
+
   async function load() {
     loading = true;
     error = null;
@@ -367,10 +386,16 @@
         {/if}
       </p>
     </div>
-    <Button variant="outline" size="sm" onclick={load} disabled={loading}>
-      <RefreshCw class="mr-2 size-4 {loading ? 'animate-spin' : ''}" />
-      Refresh
-    </Button>
+    <div class="flex items-center gap-2">
+      <Button variant="outline" size="sm" onclick={fork} disabled={!manifestToml}>
+        <GitFork class="mr-2 size-4" />
+        Fork manifest
+      </Button>
+      <Button variant="outline" size="sm" onclick={load} disabled={loading}>
+        <RefreshCw class="mr-2 size-4 {loading ? 'animate-spin' : ''}" />
+        Refresh
+      </Button>
+    </div>
   </div>
 
   <div class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">

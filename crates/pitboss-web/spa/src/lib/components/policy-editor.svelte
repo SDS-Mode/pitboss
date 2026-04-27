@@ -27,6 +27,7 @@
   // Round-trip the rules through JSON for stable text editing. The
   // editor is intentionally raw — schema-driven match builders are
   // Phase 4 work; for now operators paste TOML-equivalent JSON.
+  // svelte-ignore state_referenced_locally
   let drafts = $state<string[]>(initialRules.map((r) => JSON.stringify(r, null, 2)));
   let expanded = $state(false);
   let saving = $state(false);
@@ -36,6 +37,7 @@
   // Re-seed drafts whenever the dispatcher pushes a new policy_rules
   // (happens on reconnect / take-over). Use a stable key so we don't
   // clobber in-progress edits on every render.
+  // svelte-ignore state_referenced_locally
   let lastSeed = $state(JSON.stringify(initialRules));
   $effect(() => {
     const fresh = JSON.stringify(initialRules);
