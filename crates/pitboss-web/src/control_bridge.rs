@@ -1,25 +1,30 @@
 //! Per-run control-socket bridge. Each subscribed run gets ONE
 //! `UnixStream` connection to its dispatcher; events are fanned out to N
-//! SSE clients via a `tokio::sync::broadcast` channel.
+//! SSE clients via a `tokio::sync::broadcast` channel and outbound
+//! control ops are serialized through the shared write-half.
 //!
 //! ## Lifecycle
 //!
-//! 1. First `subscribe(run_id)` opens the socket, sends `Hello`, spawns a
-//!    reader task, and registers a `broadcast::Sender` in the bridge map.
+//! 1. First `subscribe(run_id)` (or `send_op(run_id, _)`) opens the
+//!    socket, sends `Hello`, splits the stream, spawns a reader task,
+//!    and registers an `Entry { tx, write }` in the bridge map.
 //! 2. Subsequent `subscribe(run_id)` calls return additional receivers
 //!    against the same sender — no second connection.
-//! 3. Reader task pumps `EventEnvelope`s from the socket into the
-//!    broadcast channel until the socket EOFs or all subscribers leave.
-//! 4. On exit, the reader removes the entry from the bridge map; the
-//!    next subscribe will reconnect.
+//! 3. `send_op(run_id, op)` serializes the op as a single JSON line and
+//!    writes it to the shared write-half under a tokio mutex.
+//! 4. Reader task pumps `EventEnvelope`s from the socket into the
+//!    broadcast channel until the socket EOFs.
+//! 5. On exit, the reader removes the entry from the bridge map; the
+//!    next subscribe/send_op will reconnect.
 //!
 //! ## Single-client constraint
 //!
 //! The dispatcher accepts at-most-one control client at a time. If a TUI
 //! is already connected when the web bridge tries to take the slot, the
 //! dispatcher emits `Superseded` to the TUI and binds us. v1 takes the
-//! slot opportunistically — Phase 3's "Take control" UX makes this
-//! explicit.
+//! slot opportunistically — the SPA surfaces a banner if WE in turn get
+//! superseded by another client (the bridge sees `Superseded` in the
+//! event stream, fans it out, and the reader EOFs shortly after).
 //!
 //! ## Lost-wakeup safety
 //!
@@ -36,6 +41,7 @@ use std::sync::Arc;
 
 use pitboss_cli::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, info, warn};
@@ -52,12 +58,22 @@ pub enum BridgeError {
     Io(#[from] std::io::Error),
     #[error("handshake: {0}")]
     Handshake(String),
+    #[error("op rejected: {0}")]
+    Rejected(String),
+}
+
+/// Per-run state: the broadcast sender for events going OUT to SSE
+/// clients, and the shared write-half for ops coming IN from REST clients.
+#[derive(Clone)]
+struct Entry {
+    tx: broadcast::Sender<EventEnvelope>,
+    write: Arc<Mutex<OwnedWriteHalf>>,
 }
 
 #[derive(Clone)]
 pub struct ControlBridge {
     runs_dir: Arc<PathBuf>,
-    inner: Arc<Mutex<HashMap<String, broadcast::Sender<EventEnvelope>>>>,
+    inner: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
 impl ControlBridge {
@@ -75,9 +91,45 @@ impl ControlBridge {
         &self,
         run_id: &str,
     ) -> Result<broadcast::Receiver<EventEnvelope>, BridgeError> {
+        let entry = self.ensure_connected(run_id).await?;
+        Ok(entry.tx.subscribe())
+    }
+
+    /// Send a single `ControlOp` to the dispatcher. Auto-connects the
+    /// bridge if no SSE subscriber has opened it yet. The op is
+    /// serialized as one JSON line and written under the per-run
+    /// write-half mutex, so concurrent `send_op` calls cannot interleave
+    /// bytes on the socket.
+    ///
+    /// Returns `Ok(())` once the bytes are flushed to the socket. The
+    /// dispatcher's `OpAcked` / `OpFailed` reply is delivered out-of-band
+    /// over the event stream — callers that need it should subscribe to
+    /// the event stream first.
+    pub async fn send_op(&self, run_id: &str, op: &ControlOp) -> Result<(), BridgeError> {
+        // Block server-only handshake variant: clients must not impersonate
+        // the dispatcher's Hello; the bridge sends its own client Hello
+        // automatically when establishing the socket.
+        if matches!(op, ControlOp::Hello { .. }) {
+            return Err(BridgeError::Rejected(
+                "client cannot send hello; bridge handles handshake".into(),
+            ));
+        }
+
+        let entry = self.ensure_connected(run_id).await?;
+        let mut line =
+            serde_json::to_string(op).map_err(|e| BridgeError::Handshake(e.to_string()))?;
+        line.push('\n');
+        let mut guard = entry.write.lock().await;
+        guard.write_all(line.as_bytes()).await?;
+        guard.flush().await?;
+        Ok(())
+    }
+
+    /// Returns the per-run `Entry`, opening the socket on first use.
+    async fn ensure_connected(&self, run_id: &str) -> Result<Entry, BridgeError> {
         let mut map = self.inner.lock().await;
-        if let Some(tx) = map.get(run_id) {
-            return Ok(tx.subscribe());
+        if let Some(entry) = map.get(run_id) {
+            return Ok(entry.clone());
         }
 
         let socket_path = self.runs_dir.join(run_id).join("control.sock");
@@ -104,29 +156,31 @@ impl ControlBridge {
         hello_line.push('\n');
         stream.write_all(hello_line.as_bytes()).await?;
 
-        let (tx, rx) = broadcast::channel::<EventEnvelope>(CHANNEL_CAPACITY);
+        let (read_half, write_half) = stream.into_split();
+        let (tx, _initial_rx) = broadcast::channel::<EventEnvelope>(CHANNEL_CAPACITY);
+        let entry = Entry {
+            tx: tx.clone(),
+            write: Arc::new(Mutex::new(write_half)),
+        };
+
         let tx_for_task = tx.clone();
         let run_id_for_task = run_id.to_string();
         let inner_for_task = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            reader_loop(stream, tx_for_task, run_id_for_task, inner_for_task).await;
+            reader_loop(read_half, tx_for_task, run_id_for_task, inner_for_task).await;
         });
-        map.insert(run_id.to_string(), tx);
+        map.insert(run_id.to_string(), entry.clone());
         info!(run_id, "control bridge connection opened");
-        Ok(rx)
+        Ok(entry)
     }
 }
 
 async fn reader_loop(
-    stream: UnixStream,
+    read_half: tokio::net::unix::OwnedReadHalf,
     tx: broadcast::Sender<EventEnvelope>,
     run_id: String,
-    registry: Arc<Mutex<HashMap<String, broadcast::Sender<EventEnvelope>>>>,
+    registry: Arc<Mutex<HashMap<String, Entry>>>,
 ) {
-    // Split for reading; we don't write more after Hello in v1 (control
-    // ops land in Phase 3 with a separate POST endpoint that opens its
-    // own short-lived connection).
-    let (read_half, _write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
 
     loop {
@@ -151,10 +205,13 @@ async fn reader_loop(
                         }
                     },
                 };
-                if tx.send(envelope).is_err() {
-                    debug!(run_id, "no subscribers; closing control bridge");
-                    break;
-                }
+                // tx.send returns Err(()) only when there are zero
+                // receivers AND zero buffered items. The bridge is
+                // designed to outlive subscriber gaps (a control-only
+                // POST keeps the entry alive without a receiver), so we
+                // tolerate send errors by simply dropping the event —
+                // the entry stays registered until reader EOF.
+                let _ = tx.send(envelope);
             }
             Ok(None) => {
                 debug!(run_id, "control socket closed by server (EOF)");
@@ -167,15 +224,13 @@ async fn reader_loop(
         }
     }
 
-    // Best-effort cleanup; the next subscribe() will re-establish if the
-    // dispatcher is back. If the entry has already been replaced by a
-    // newer reader (race on `subscribe` between two callers), the
-    // remove() is harmless.
+    // Best-effort cleanup; the next subscribe()/send_op() will
+    // re-establish if the dispatcher is back. If the entry has already
+    // been replaced by a newer reader (race on `ensure_connected`
+    // between two callers), only remove our own.
     let mut map = registry.lock().await;
     if let Some(existing) = map.get(&run_id) {
-        // Only remove if it's our own sender — same_channel ensures we
-        // don't yank a fresher sender that races us on the lock.
-        if existing.same_channel(&tx) {
+        if existing.tx.same_channel(&tx) {
             map.remove(&run_id);
         }
     }

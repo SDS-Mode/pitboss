@@ -126,6 +126,65 @@ export function getTaskLog(runId: string, taskId: string, opts: TaskLogOpts = {}
   return request<string>(path, { accept: 'text' });
 }
 
+// ---- Control writes (POST /api/runs/:id/control) ------------------------
+
+/**
+ * Wire-format mirror of the Rust `ControlOp` enum
+ * (`pitboss_cli::control::protocol::ControlOp`). The dispatcher decodes
+ * by the `op` discriminator; all field names match the Rust serde
+ * representation (`snake_case`).
+ *
+ * Hello is intentionally omitted — the bridge sends the client Hello
+ * automatically on first connect and rejects any client that tries to
+ * impersonate it.
+ */
+export type ControlOp =
+  | { op: 'cancel_worker'; task_id: string }
+  | { op: 'cancel_run' }
+  | { op: 'pause_worker'; task_id: string; mode?: 'cancel' | 'freeze' }
+  | { op: 'continue_worker'; task_id: string; prompt?: string }
+  | { op: 'reprompt_worker'; task_id: string; prompt: string }
+  | {
+      op: 'approve';
+      request_id: string;
+      approved: boolean;
+      comment?: string;
+      edited_summary?: string;
+      reason?: string;
+    }
+  | { op: 'list_workers' }
+  | { op: 'update_policy'; rules: PolicyRule[] };
+
+/**
+ * Mirror of `ApprovalRule`. The shape is intentionally loose — the
+ * editor renders unknown match fields as raw JSON so server-side
+ * additions don't break the UI.
+ */
+export interface PolicyRule {
+  match: Record<string, unknown>;
+  action: ApprovalAction;
+}
+
+export type ApprovalAction =
+  | { action: 'auto_approve' }
+  | { action: 'auto_deny'; reason?: string }
+  | { action: 'require_operator' };
+
+/**
+ * Send a single ControlOp to the dispatcher. Returns void on `202`. Any
+ * dispatcher-side ack/failure is delivered out-of-band on the SSE event
+ * stream (`OpAcked` / `OpFailed`); subscribe first if you need to
+ * observe it.
+ */
+export async function postControlOp(runId: string, op: ControlOp): Promise<void> {
+  await request<void>(`/api/runs/${enc(runId)}/control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(op),
+    accept: 'json'
+  });
+}
+
 // ---- SSE: live control events --------------------------------------------
 
 /** Per-event payload from the dispatcher's control socket, JSON-decoded. */
@@ -143,14 +202,15 @@ export interface SubscribeHandlers {
 
 /**
  * Subscribe to a run's live control events. Returns a teardown function;
- * call it to close the EventSource. Note: EventSource does NOT support
- * custom headers, so this endpoint cannot use the bearer-token header
- * scheme. When auth is enabled, the path can carry a token via query
- * param (Phase 3) — for now, SSE only works against unauthenticated
- * loopback servers.
+ * call it to close the EventSource. EventSource does NOT support custom
+ * headers, so when auth is enabled the token is appended as `?token=`.
+ * Lower security profile than the header (token may surface in logs /
+ * referrer / browser history) so the SPA only sends it on this route.
  */
 export function subscribeRunEvents(runId: string, handlers: SubscribeHandlers): () => void {
-  const url = `/api/runs/${enc(runId)}/events`;
+  const tok = getToken();
+  const qs = tok ? `?token=${enc(tok)}` : '';
+  const url = `/api/runs/${enc(runId)}/events${qs}`;
   const es = new EventSource(url);
   if (handlers.onOpen) es.addEventListener('open', handlers.onOpen);
   if (handlers.onError) es.addEventListener('error', handlers.onError);

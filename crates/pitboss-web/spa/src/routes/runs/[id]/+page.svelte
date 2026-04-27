@@ -7,12 +7,16 @@
     getManifestToml,
     getSummaryJsonl,
     subscribeRunEvents,
+    postControlOp,
     type ControlEnvelope,
     type RunDetailDto,
+    type PolicyRule,
     ApiError
   } from '$lib/api';
   import { formatUnixSeconds, relativeFromUnix } from '$lib/utils';
   import StatusBadge from '$lib/components/status-badge.svelte';
+  import ApprovalModal, { type ApprovalRequest } from '$lib/components/approval-modal.svelte';
+  import PolicyEditor from '$lib/components/policy-editor.svelte';
   import {
     Card,
     CardContent,
@@ -31,7 +35,17 @@
   } from '$lib/components/ui/table';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
-  import { ArrowLeft, ChevronRight, RefreshCw, AlertTriangle } from 'lucide-svelte';
+  import {
+    ArrowLeft,
+    ChevronRight,
+    RefreshCw,
+    AlertTriangle,
+    Octagon,
+    Pause,
+    Play,
+    MessageSquare,
+    Ban
+  } from 'lucide-svelte';
   import type { RunStatus } from '$lib/api';
 
   const runId = $derived(page.params.id ?? '');
@@ -97,6 +111,91 @@
   let sseStatus = $state<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
   const MAX_LIVE_EVENTS = 200;
 
+  // ---- Phase 3: control state derived from the live event stream ------
+  // The dispatcher pushes typed events; we keep the latest snapshot of
+  // each kind we render in the UI. None of this needs to round-trip to
+  // disk — refreshing the page rebuilds it from the next Hello +
+  // WorkersSnapshot pair.
+  type WorkerEntry = {
+    task_id: string;
+    state: string;
+    prompt_preview: string;
+    parent_task_id?: string;
+  };
+  let workers = $state<WorkerEntry[]>([]);
+  let policyRules = $state<PolicyRule[]>([]);
+  let serverVersion = $state<string | null>(null);
+  let pendingApprovals = $state<ApprovalRequest[]>([]);
+  let activeApproval = $state<ApprovalRequest | null>(null);
+  // Banner shown when ANOTHER client takes over our slot (we get
+  // `Superseded` from the dispatcher right before the socket closes).
+  let superseded = $state(false);
+  let opFeedback = $state<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  let opFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flashOp(kind: 'ok' | 'err', text: string) {
+    opFeedback = { kind, text };
+    if (opFeedbackTimer) clearTimeout(opFeedbackTimer);
+    opFeedbackTimer = setTimeout(() => (opFeedback = null), 4000);
+  }
+
+  $effect(() => {
+    // Promote next pending approval into the modal slot whenever the
+    // current one is dismissed. Keeps a queue if multiple workers fire
+    // at once (rare, but legal).
+    if (!activeApproval && pendingApprovals.length > 0) {
+      activeApproval = pendingApprovals[0];
+      pendingApprovals = pendingApprovals.slice(1);
+    }
+  });
+
+  function ingest(e: ControlEnvelope) {
+    switch (e.event) {
+      case 'hello': {
+        const ev = e as ControlEnvelope & { server_version?: string; policy_rules?: PolicyRule[] };
+        serverVersion = ev.server_version ?? null;
+        policyRules = Array.isArray(ev.policy_rules) ? ev.policy_rules : [];
+        superseded = false;
+        break;
+      }
+      case 'workers_snapshot': {
+        const ev = e as ControlEnvelope & { workers?: WorkerEntry[] };
+        workers = Array.isArray(ev.workers) ? ev.workers : [];
+        break;
+      }
+      case 'approval_request': {
+        const req = e as unknown as ApprovalRequest;
+        if (activeApproval || pendingApprovals.some((p) => p.request_id === req.request_id)) {
+          // Don't double-queue.
+          if (!activeApproval || activeApproval.request_id !== req.request_id) {
+            pendingApprovals = [...pendingApprovals, req];
+          }
+        } else {
+          activeApproval = req;
+        }
+        break;
+      }
+      case 'op_acked': {
+        const ev = e as ControlEnvelope & { op?: string; task_id?: string };
+        flashOp('ok', `${ev.op}${ev.task_id ? ` · ${ev.task_id}` : ''} acknowledged`);
+        break;
+      }
+      case 'op_failed': {
+        const ev = e as ControlEnvelope & { op?: string; task_id?: string; error?: string };
+        flashOp('err', `${ev.op} failed: ${ev.error ?? 'unknown error'}`);
+        break;
+      }
+      case 'op_unknown_state': {
+        const ev = e as ControlEnvelope & { op?: string; current_state?: string };
+        flashOp('err', `${ev.op} rejected — worker is ${ev.current_state}`);
+        break;
+      }
+      case 'superseded':
+        superseded = true;
+        break;
+    }
+  }
+
   $effect(() => {
     if (!runId || !inProgress) {
       sseStatus = 'idle';
@@ -104,10 +203,16 @@
     }
     sseStatus = 'connecting';
     liveEvents = [];
+    workers = [];
+    policyRules = [];
+    pendingApprovals = [];
+    activeApproval = null;
+    superseded = false;
     const teardown = subscribeRunEvents(runId, {
       onOpen: () => (sseStatus = 'open'),
       onError: () => (sseStatus = 'error'),
       onEvent: (envelope) => {
+        ingest(envelope);
         liveEvents = [envelope, ...liveEvents].slice(0, MAX_LIVE_EVENTS);
       },
       onLagged: (skipped) => {
@@ -122,6 +227,46 @@
       sseStatus = 'closed';
     };
   });
+
+  async function sendOp(opPromise: Promise<void>, label: string) {
+    try {
+      await opPromise;
+      // Don't flash here — wait for OpAcked to land via SSE so the
+      // operator sees the dispatcher actually accepted it. If the POST
+      // failed, the catch path flashes.
+    } catch (e) {
+      const msg = e instanceof ApiError ? `${e.status}: ${e.body || e.message}` : String(e);
+      flashOp('err', `${label}: ${msg}`);
+    }
+  }
+
+  function cancelRun() {
+    if (!confirm('Cancel the entire run? All in-flight workers will be aborted.')) return;
+    sendOp(postControlOp(runId, { op: 'cancel_run' }), 'cancel_run');
+  }
+  function cancelWorker(task_id: string) {
+    sendOp(postControlOp(runId, { op: 'cancel_worker', task_id }), `cancel_worker ${task_id}`);
+  }
+  function pauseWorker(task_id: string) {
+    sendOp(
+      postControlOp(runId, { op: 'pause_worker', task_id, mode: 'freeze' }),
+      `pause_worker ${task_id}`
+    );
+  }
+  function continueWorker(task_id: string) {
+    sendOp(
+      postControlOp(runId, { op: 'continue_worker', task_id }),
+      `continue_worker ${task_id}`
+    );
+  }
+  function repromptWorker(task_id: string) {
+    const prompt = window.prompt('New prompt for the worker?');
+    if (!prompt || !prompt.trim()) return;
+    sendOp(
+      postControlOp(runId, { op: 'reprompt_worker', task_id, prompt: prompt.trim() }),
+      `reprompt_worker ${task_id}`
+    );
+  }
 
   async function load() {
     loading = true;
@@ -281,19 +426,178 @@
     </TabsList>
 
     {#if inProgress}
-      <TabsContent value="live" class="mt-4">
+      <TabsContent value="live" class="mt-4 space-y-4">
+        {#if superseded}
+          <Card class="border-amber-500/50 bg-amber-500/5">
+            <CardContent class="flex items-start gap-3 pt-6">
+              <AlertTriangle class="mt-0.5 size-5 shrink-0 text-amber-600" />
+              <div>
+                <p class="font-medium text-amber-700 dark:text-amber-300">Control taken</p>
+                <p class="text-muted-foreground mt-1 text-sm">
+                  Another client (TUI or another browser) connected to this run's control
+                  socket and superseded ours. Read-only views still work.
+                  <Button
+                    variant="link"
+                    class="ml-1 h-auto p-0 text-sm"
+                    onclick={() => (superseded = false)}
+                  >
+                    Reconnect
+                  </Button>
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        {/if}
+
         <Card>
-          <CardContent class="pt-6">
-            <div class="text-muted-foreground mb-3 flex items-center gap-3 text-xs">
-              <span>SSE bridge:</span>
-              <span class="font-mono">{sseStatus}</span>
-              <span class="ml-auto">
-                {liveEvents.length} event{liveEvents.length === 1 ? '' : 's'}
-                {#if liveEvents.length === MAX_LIVE_EVENTS}(latest only){/if}
-              </span>
+          <CardHeader class="pb-3">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle class="text-base">Run controls</CardTitle>
+                <CardDescription class="text-xs">
+                  Dispatcher: <span class="font-mono">{serverVersion ?? '—'}</span>
+                </CardDescription>
+              </div>
+              <Button
+                variant="destructive"
+                size="sm"
+                onclick={cancelRun}
+                disabled={superseded || sseStatus !== 'open'}
+              >
+                <Octagon class="mr-1.5 size-4" />
+                Cancel run
+              </Button>
             </div>
+          </CardHeader>
+          {#if opFeedback}
+            <CardContent class="pt-0">
+              <div
+                class="rounded border px-3 py-2 text-xs {opFeedback.kind === 'ok'
+                  ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300'
+                  : 'border-destructive/50 bg-destructive/5 text-destructive'}"
+              >
+                {opFeedback.text}
+              </div>
+            </CardContent>
+          {/if}
+        </Card>
+
+        <Card>
+          <CardHeader class="pb-3">
+            <CardTitle class="text-base">
+              Workers
+              <Badge variant="outline" class="ml-2 text-xs">{workers.length}</Badge>
+            </CardTitle>
+            <CardDescription class="text-xs">
+              Live snapshot from `WorkersSnapshot` events.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="pt-0">
+            {#if workers.length === 0}
+              <p class="text-muted-foreground py-4 text-center text-xs">
+                {sseStatus === 'open'
+                  ? 'No workers reported yet.'
+                  : 'Waiting for first snapshot…'}
+              </p>
+            {:else}
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Task</TableHead>
+                    <TableHead>State</TableHead>
+                    <TableHead>Prompt</TableHead>
+                    <TableHead class="w-[18ch] text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {#each workers as w (w.task_id)}
+                    <TableRow>
+                      <TableCell>
+                        <code class="text-xs">{w.task_id}</code>
+                        {#if w.parent_task_id}
+                          <span class="text-muted-foreground ml-1 text-xs">← {w.parent_task_id}</span>
+                        {/if}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={w.state === 'running'
+                            ? 'outline'
+                            : w.state === 'failed'
+                              ? 'destructive'
+                              : 'secondary'}
+                        >
+                          {w.state}
+                        </Badge>
+                      </TableCell>
+                      <TableCell class="text-muted-foreground max-w-[40ch] truncate text-xs">
+                        {w.prompt_preview}
+                      </TableCell>
+                      <TableCell class="text-right">
+                        <div class="flex justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            class="h-7 px-2"
+                            title="Pause (freeze)"
+                            disabled={superseded}
+                            onclick={() => pauseWorker(w.task_id)}
+                          >
+                            <Pause class="size-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            class="h-7 px-2"
+                            title="Continue"
+                            disabled={superseded}
+                            onclick={() => continueWorker(w.task_id)}
+                          >
+                            <Play class="size-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            class="h-7 px-2"
+                            title="Reprompt"
+                            disabled={superseded}
+                            onclick={() => repromptWorker(w.task_id)}
+                          >
+                            <MessageSquare class="size-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            class="text-destructive hover:text-destructive h-7 px-2"
+                            title="Cancel worker"
+                            disabled={superseded}
+                            onclick={() => cancelWorker(w.task_id)}
+                          >
+                            <Ban class="size-3.5" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  {/each}
+                </TableBody>
+              </Table>
+            {/if}
+          </CardContent>
+        </Card>
+
+        <PolicyEditor {runId} initialRules={policyRules} />
+
+        <Card>
+          <CardHeader class="pb-2">
+            <CardTitle class="text-base">Event stream</CardTitle>
+            <CardDescription class="text-xs">
+              SSE bridge: <span class="font-mono">{sseStatus}</span>
+              · {liveEvents.length} event{liveEvents.length === 1 ? '' : 's'}{#if liveEvents.length === MAX_LIVE_EVENTS}
+                (latest only){/if}
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="pt-0">
             {#if liveEvents.length === 0}
-              <p class="text-muted-foreground py-6 text-center text-sm">
+              <p class="text-muted-foreground py-4 text-center text-sm">
                 {sseStatus === 'open'
                   ? 'Waiting for first event…'
                   : sseStatus === 'error'
@@ -301,7 +605,7 @@
                     : 'Connecting…'}
               </p>
             {:else}
-              <div class="max-h-[60vh] space-y-1 overflow-auto font-mono text-xs">
+              <div class="max-h-[40vh] space-y-1 overflow-auto font-mono text-xs">
                 {#each liveEvents as e, idx (idx)}
                   <div class="bg-muted/30 rounded border-l-2 border-sky-500/40 px-2 py-1">
                     <span class="text-sky-700 dark:text-sky-400">{e.event}</span>
@@ -428,4 +732,6 @@
       </Card>
     </TabsContent>
   </Tabs>
+
+  <ApprovalModal {runId} bind:request={activeApproval} />
 {/if}

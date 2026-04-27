@@ -1,16 +1,18 @@
 //! Router composition + auth middleware.
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use serde::Deserialize;
 
 use crate::{assets, state::AppState};
 
+mod control;
 mod events;
 mod runs;
 
@@ -23,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/{run_id}/summary-jsonl", get(runs::summary_jsonl))
         .route("/runs/{run_id}/tasks/{task_id}/log", get(runs::task_log))
         .route("/runs/{run_id}/events", get(events::events))
+        .route("/runs/{run_id}/control", post(control::send))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
@@ -32,9 +35,24 @@ pub fn router(state: AppState) -> Router {
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
+#[derive(Debug, Deserialize)]
+struct TokenQuery {
+    token: Option<String>,
+}
+
 /// Bearer-token auth. When `state.token()` is None, all requests pass.
+///
+/// Accepted credentials, in order:
+/// - `Authorization: Bearer <token>` header — preferred for fetch-based
+///   API calls (the SPA's `request()` helper sets this).
+/// - `?token=<token>` query parameter — fallback for endpoints whose
+///   client cannot set headers, namely the SSE `events` route consumed
+///   by the browser's `EventSource` (which has no header API). Lower
+///   security profile (token can leak via referer/log/history) so the
+///   SPA only sends it on SSE; everything else uses the header.
 async fn require_token(
     State(state): State<AppState>,
+    Query(q): Query<TokenQuery>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
@@ -42,13 +60,15 @@ async fn require_token(
     let Some(expected) = state.token() else {
         return Ok(next.run(request).await);
     };
-    let supplied = headers
+    let from_header = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    if supplied == Some(expected) {
-        Ok(next.run(request).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    if from_header == Some(expected) {
+        return Ok(next.run(request).await);
     }
+    if q.token.as_deref() == Some(expected) {
+        return Ok(next.run(request).await);
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }

@@ -54,6 +54,7 @@ pub async fn events(
             BridgeError::Handshake(msg) => {
                 ApiError::Io(std::io::Error::other(format!("handshake: {msg}")))
             }
+            BridgeError::Rejected(msg) => ApiError::BadRequest(msg),
         })?;
 
     let stream = BroadcastStream::new(rx).filter_map(|item| async move {

@@ -9,6 +9,45 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Web operational console — Phase 3** (control writes). The bridge
+  now retains the per-run socket's write half so REST callers can push
+  `ControlOp` messages to the live dispatcher. The SPA exposes the
+  full TUI control surface in the browser.
+  - `POST /api/runs/{id}/control` accepts a JSON-tagged `ControlOp`
+    body (`cancel_worker`, `cancel_run`, `pause_worker`,
+    `continue_worker`, `reprompt_worker`, `approve`, `update_policy`).
+    Returns `202 Accepted` on flush; the dispatcher's `OpAcked` /
+    `OpFailed` reply is delivered out-of-band on the SSE stream. The
+    server-only `hello` op is rejected up front.
+  - Bridge: `ControlBridge::send_op(run_id, op)` auto-connects the
+    socket on first call and serialises writes through a per-run
+    `Arc<Mutex<OwnedWriteHalf>>`, so concurrent SPA tabs cannot
+    interleave bytes.
+  - Auth: `require_token` middleware now also accepts `?token=` as a
+    query-param. Required for the SSE `/events` route — `EventSource`
+    has no header API. The SPA only sends the token on SSE; everything
+    else still uses the `Authorization: Bearer …` header.
+  - SPA Live tab: `Cancel run` button, per-worker action menu
+    (pause / continue / reprompt / cancel), live workers table built
+    from `WorkersSnapshot` events, and an inline op-feedback banner
+    driven by `OpAcked` / `OpFailed` / `OpUnknownState` events.
+  - SPA approval modal: `ApprovalRequest` events auto-pop a dialog
+    rendering the summary, plan rationale / resources / risks /
+    rollback. Operator can approve (with optional edited summary +
+    comment) or deny (with reason); the response POSTs `approve`.
+    Multiple in-flight requests queue and surface one at a time.
+  - SPA policy editor: collapsible card on the Live tab seeded from
+    the dispatcher's `Hello.policy_rules`. JSON-textarea editor for
+    each rule (schema-driven form is Phase 4); `Save policy` POSTs
+    `update_policy`. Re-seeds when the dispatcher pushes a fresh
+    Hello (e.g. on take-over).
+  - Take-control banner: `Superseded` events from the dispatcher
+    surface as an amber notice ("another client took control") and
+    disable the action buttons until the operator dismisses it.
+  - Tests: new `bridge_send_op_round_trips_through_dispatcher` and
+    `bridge_send_op_rejects_client_hello` integration tests. Existing
+    bridge multiplex / connect tests still pass.
+
 - **Web operational console — Phase 1** (`pitboss-web` crate, new
   workspace member). Single-binary axum HTTP server + embedded SvelteKit
   SPA. Read-only post-run archaeology over the runs filesystem; live
