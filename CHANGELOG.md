@@ -7,6 +7,19 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pitboss-cli::runs::runs_base_dir()` is now macOS-aware.** Resolves
+  via `dirs::data_dir()` (Linux: `~/.local/share/pitboss/runs`; macOS:
+  `~/Library/Application Support/pitboss/runs`) with a back-compat
+  fallback to the legacy `$HOME/.local/share/pitboss/runs` if the
+  canonical dir doesn't exist yet but the legacy one does. The TUI,
+  the web console, and the CLI now share a default base on macOS
+  without operators having to pass `--runs-dir`. `pitboss diff`'s
+  internal `runs_base_dir` shim was deleted in favour of the canonical
+  one. `dirs` added as a direct dep of `pitboss-cli` (already a
+  workspace dep used by `pitboss-web`).
+
 ### Added
 
 - **Web operational console — tile grid + Svelte Flow run-tree graph**

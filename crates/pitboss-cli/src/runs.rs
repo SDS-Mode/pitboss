@@ -106,11 +106,29 @@ pub struct RunEntry {
 }
 
 /// Returns the base directory that holds all run sub-directories.
+///
+/// Resolution order:
+/// 1. Platform-canonical data dir via `dirs::data_dir()` — on Linux this is
+///    `~/.local/share/pitboss/runs`, on macOS `~/Library/Application Support/
+///    pitboss/runs`. The TUI, web console and CLI all hit the same directory
+///    by default this way without operators having to pass `--runs-dir`.
+/// 2. Back-compat fallback: if the canonical dir does NOT yet exist BUT the
+///    legacy `$HOME/.local/share/pitboss/runs` does (Linux installs prior to
+///    this change, or macOS users who set `XDG_DATA_HOME` / kept the Linux
+///    layout), keep using the legacy path so existing run history stays
+///    visible without manual migration.
+/// 3. Final fallback: `./pitboss-runs` when `HOME` is unset and `dirs`
+///    returns nothing (CI sandboxes without a home directory).
 pub fn runs_base_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/pitboss/runs")
-    } else {
-        PathBuf::from("./pitboss-runs")
+    let canonical = dirs::data_dir().map(|d| d.join("pitboss/runs"));
+    let legacy =
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/pitboss/runs"));
+
+    match (canonical, legacy) {
+        (Some(c), Some(l)) if !c.exists() && l.exists() && c != l => l,
+        (Some(c), _) => c,
+        (None, Some(l)) => l,
+        (None, None) => PathBuf::from("./pitboss-runs"),
     }
 }
 

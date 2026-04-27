@@ -51,6 +51,7 @@ schemars           = "1"
 reqwest            = { workspace = true }
 lru                = { workspace = true }
 glob               = { workspace = true }
+dirs               = { workspace = true }
 base64             = { workspace = true }
 libc               = { workspace = true }
 

@@ -1507,6 +1507,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "dirs 5.0.1",
  "fake-control-client",
  "fake-mcp-client",
  "git2",

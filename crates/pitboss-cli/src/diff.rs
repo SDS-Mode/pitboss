@@ -14,19 +14,16 @@ use serde::Serialize;
 // Public resolver helpers
 // ---------------------------------------------------------------------------
 
-/// Locate a run directory by UUID prefix under `~/.local/share/pitboss/runs/`.
+/// Locate a run directory by UUID prefix under the canonical runs base
+/// (see `crate::runs::runs_base_dir` for resolution rules — Linux uses
+/// `~/.local/share/pitboss/runs`, macOS uses
+/// `~/Library/Application Support/pitboss/runs`, with a back-compat
+/// fallback to the legacy Linux path).
 ///
 /// Returns an error when zero or more than one directory matches the prefix.
 pub fn resolve_run(id_or_prefix: &str) -> Result<PathBuf> {
-    let base = runs_base_dir();
+    let base = crate::runs::runs_base_dir();
     resolve_run_under(&base, id_or_prefix)
-}
-
-fn runs_base_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".local/share/pitboss/runs")
 }
 
 /// Locate a run directory by UUID prefix under an explicit base directory.
