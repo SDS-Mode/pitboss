@@ -10,6 +10,7 @@ pub use run_leases::{LeaseHandle, LeaseRegistry as RunLeaseRegistry};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -188,11 +189,32 @@ fn authorize_write(
 /// lease covers acquire+release. Incremented for both successful and
 /// failed calls (authz/limit errors still count as "tried to use the
 /// store") so operators can see frustration loops in the numbers.
+///
+/// **Bump-on-attempt semantics (#153 L9):** counters are bumped at handler
+/// entry, *before* authz or execution. The TUI value answers "how many
+/// store calls has this actor attempted" — not "how many succeeded" — so
+/// a worker spinning on a Forbidden path or mid-op panic still shows as
+/// active. Mid-handler panics that abort before the op leave the bump in
+/// place by design (one attempt = one bump). Don't restructure to bump
+/// after success; that would make stuck workers invisible in the TUI.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ActivityCounters {
     pub kv_ops: u64,
     pub lease_ops: u64,
 }
+
+/// Initial capacity for `notifier` (kv writes) — historically 256, raised
+/// to 1024 in #153 L2 so a burst on the kv path is less likely to lag a
+/// concurrent `wait()`. The Lagged-recovery path in `wait()` re-reads the
+/// store before re-subscribing, so over-capacity is safe; this just
+/// reduces the rate at which `wait()` falls into the slow path under load.
+const KV_NOTIFIER_CAPACITY: usize = 1024;
+/// Initial capacity for `lease_notifier`, raised from 64 to 256 in
+/// #153 L2 for the same reasons as `KV_NOTIFIER_CAPACITY` — bursts of
+/// `lease_release` shouldn't lag concurrent waiters into a slow-path
+/// retry. The lease-acquire wait branch handles `Lagged` correctly
+/// (consults the map directly) so this is a perf knob, not correctness.
+const LEASE_NOTIFIER_CAPACITY: usize = 256;
 
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
@@ -205,6 +227,16 @@ pub struct SharedStore {
     /// standard RwLock (not the entries lock) so counter bumps don't
     /// contend with reads/writes.
     activity: RwLock<std::collections::HashMap<String, ActivityCounters>>,
+    /// Set true by `start_lease_pruner`; consulted by `lease_acquire`
+    /// when entering the wait branch so we can warn-once if a caller
+    /// would block on TTL expiry without the pruner running. Without the
+    /// pruner, a holder that crashes silently (no `release` call) leaves
+    /// waiters blocked until *their own* deadline rather than the
+    /// holder's. (#153 M1)
+    pruner_started: AtomicBool,
+    /// Logged-once latch for the "lease_acquire wait without pruner"
+    /// warning so we don't spam logs in a tight retry loop.
+    pruner_warning_logged: AtomicBool,
 }
 
 impl SharedStore {
@@ -213,8 +245,8 @@ impl SharedStore {
     }
 
     pub fn with_limits(limits: Limits) -> Self {
-        let (notifier, _) = broadcast::channel(256);
-        let (lease_notifier, _) = broadcast::channel(64);
+        let (notifier, _) = broadcast::channel(KV_NOTIFIER_CAPACITY);
+        let (lease_notifier, _) = broadcast::channel(LEASE_NOTIFIER_CAPACITY);
         Self {
             entries: RwLock::new(HashMap::new()),
             limits,
@@ -223,6 +255,8 @@ impl SharedStore {
             leases: LeaseRegistry::new(),
             lease_notifier,
             activity: RwLock::new(std::collections::HashMap::new()),
+            pruner_started: AtomicBool::new(false),
+            pruner_warning_logged: AtomicBool::new(false),
         }
     }
 
@@ -442,7 +476,15 @@ impl SharedStore {
     ) -> Result<Entry, StoreError> {
         validate_path(path)?;
         let key = PathBuf::from(path);
-        let min = min_version.unwrap_or(1);
+        // #153 L1: `Some(0)` would otherwise match any entry regardless of
+        // staleness (`entry.version >= 0` is always true for present
+        // entries). MCP callers passing `min_version: 0` almost always
+        // mean "I don't care, give me whatever's there or wait for v1" —
+        // identical to `None`. Coerce to 1 to make that intent explicit.
+        let min = match min_version {
+            Some(0) | None => 1,
+            Some(n) => n,
+        };
 
         // Subscribe BEFORE the fast-path check to avoid missing a write
         // that lands between our read and our subscribe.
@@ -466,12 +508,20 @@ impl SharedStore {
                     match res {
                         Err(_elapsed) => return Err(StoreError::Timeout),
                         Ok(Err(broadcast::error::RecvError::Closed)) => return Err(StoreError::Shutdown),
-                        Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                        Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                             // A burst of unrelated writes evicted entries from
-                            // the 256-slot channel. The write that satisfies
-                            // min may have been one of them — re-read the
-                            // store before waiting again, or we'd block until
+                            // the channel. The write that satisfies min may
+                            // have been one of them — re-read the store
+                            // before waiting again, or we'd block until
                             // timeout even when the condition is already met.
+                            // #153 L7: log so operators can correlate the
+                            // perf cliff with channel saturation.
+                            tracing::warn!(
+                                target: "pitboss::shared_store",
+                                path = %key.display(),
+                                skipped = skipped,
+                                "kv-notifier Lagged in wait(); fell back to map re-read"
+                            );
                             if let Some(entry) = self.entries.read().await.get(&key) {
                                 if entry.version >= min {
                                     return Ok(entry.clone());
@@ -513,6 +563,10 @@ impl SharedStore {
     /// but wasteful). 500 ms is quick enough that a waiter's wake-up
     /// latency after a silent holder crash is bounded to a single tick.
     pub fn start_lease_pruner(self: &std::sync::Arc<Self>) {
+        // #153 M1: latch so `lease_acquire` can detect missing-pruner
+        // misconfiguration and warn operators rather than silently
+        // blocking waiters until their own deadline.
+        self.pruner_started.store(true, Ordering::Relaxed);
         let store = std::sync::Arc::clone(self);
         tokio::spawn(async move {
             const TICK: std::time::Duration = std::time::Duration::from_millis(500);
@@ -560,6 +614,22 @@ impl SharedStore {
             });
         };
 
+        // #153 M1: warn-once if the caller is about to block but no
+        // background pruner is running. Without the pruner, a holder
+        // that crashed silently leaves us waiting until our own
+        // deadline rather than the holder's TTL. Logged once per store
+        // so a misconfigured embedder hears about it without flooding.
+        if !self.pruner_started.load(Ordering::Relaxed)
+            && !self.pruner_warning_logged.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                target: "pitboss::shared_store",
+                lease_name = name,
+                "lease_acquire(wait=...) called but start_lease_pruner() was never called; \
+                 silent holder crashes won't wake waiters until their own deadline"
+            );
+        }
+
         // Subscribe BEFORE retrying so we don't miss a release that lands
         // between our first attempt and the subscribe.
         let mut rx = self.lease_notifier.subscribe();
@@ -587,8 +657,51 @@ impl SharedStore {
                         Ok(Err(broadcast::error::RecvError::Closed)) => {
                             return Err(StoreError::Shutdown);
                         }
-                        Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                            // A lease was released (or we missed some notifications) — retry.
+                        Ok(Ok(event_name)) => {
+                            // #153 M2: per-name filter defeats the
+                            // thundering herd. `lease_release` and
+                            // `release_all_for_actor` send the lease
+                            // *name* (#153 M3), so a release of
+                            // unrelated lease "X" no longer wakes every
+                            // waiter on lease "Y" into a wasted retry.
+                            // Eviction events carry the evicted lease's
+                            // name too (see `notify_lease_evictions`).
+                            if event_name != name {
+                                continue;
+                            }
+                            match self.leases.acquire(name, ttl, caller).await {
+                                Ok((lease, evicted)) => {
+                                    self.notify_lease_evictions(&evicted);
+                                    return Ok(AcquireResult {
+                                        acquired: true,
+                                        lease_id: Some(lease.lease_id),
+                                        expires_at: Some(lease.expires_at),
+                                    });
+                                }
+                                Err(StoreError::Conflict) => continue,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                            // #153 L3: Lagged is safe to recover from
+                            // because retry consults the actual map
+                            // state (not the broadcast stream). If our
+                            // target lease was released during the
+                            // skipped window, retry-acquire will see
+                            // the empty slot and succeed; otherwise it
+                            // returns Conflict and we re-subscribe.
+                            // The audit's "may miss" concern is moot
+                            // for that reason — the broadcast is a
+                            // wake-up hint, not the source of truth.
+                            // #153 L7: log so operators can correlate
+                            // perf with channel saturation.
+                            tracing::warn!(
+                                target: "pitboss::shared_store",
+                                lease_name = name,
+                                skipped = skipped,
+                                "lease-notifier Lagged in lease_acquire; \
+                                 retrying acquire (map state is authoritative)"
+                            );
                             match self.leases.acquire(name, ttl, caller).await {
                                 Ok((lease, evicted)) => {
                                     self.notify_lease_evictions(&evicted);
@@ -619,15 +732,29 @@ impl SharedStore {
         lease_id: &str,
         caller: &CallerIdentity,
     ) -> Result<(), StoreError> {
-        let evicted = self.leases.release(lease_id, caller).await?;
+        let (released_name, evicted) = self.leases.release(lease_id, caller).await?;
         self.notify_lease_evictions(&evicted);
-        let _ = self.lease_notifier.send(lease_id.to_string());
+        // #153 M3: send the lease *name* (not the lease_id UUID).
+        // `lease_acquire` filters incoming events by the name it's
+        // waiting on; a UUID would never match and waiters would block
+        // to timeout instead of retrying.
+        let _ = self.lease_notifier.send(released_name);
         Ok(())
     }
 
     /// Release all leases held by `actor_id`. Intended to be called when an
     /// actor's MCP connection drops (lease-on-connection semantics). Wakes
     /// any waiters subscribed via `lease_acquire(wait_secs > 0)`.
+    ///
+    /// **#153 L4 — caller contract (LOAD-BEARING):** this method is
+    /// authorization-free by design — it is intended to be called from
+    /// `mcp/server.rs` connection-cleanup paths where the bridge has
+    /// already verified the dropped session's `actor_id`. Do not call it
+    /// from MCP tool handlers, control-plane ops, or anywhere reachable
+    /// from a worker prompt: a worker could trigger forcible release of
+    /// another worker's leases. The audit recommended adding an auth
+    /// token; that's deferred until we have a second legitimate caller.
+    /// Until then, treat the bridge as the sole caller.
     pub async fn release_all_for_actor(&self, actor_id: &str) {
         let (released, evicted) = self.leases.release_all_for_actor(actor_id).await;
         self.notify_lease_evictions(&evicted);
@@ -640,6 +767,16 @@ impl SharedStore {
     /// are base64-encoded (non-UTF-8 safe). Called at finalize time when
     /// `[run] dump_shared_store = true` is set. Pitboss never reads this
     /// back — it's for post-mortem and debugging only.
+    ///
+    /// **#153 L8 — snapshot consistency:** entries and leases are read
+    /// under separate locks (entries lock released before leases lock is
+    /// acquired). Concurrent writes between the two reads will appear
+    /// in one half of the dump but not the other. Acceptable for
+    /// post-mortem use because the dump fires at finalize time when
+    /// most workers have already terminated, but **do not rely on this
+    /// dump for cross-store invariants** — the entries snapshot may
+    /// reference a lease that the leases snapshot already shows as
+    /// released, or vice versa.
     pub async fn dump_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
         use base64::Engine as _;
 
@@ -1227,6 +1364,133 @@ mod tests {
         let counters = snap.get("worker-A").unwrap();
         assert_eq!(counters.kv_ops, 1);
         assert_eq!(counters.lease_ops, 1);
+    }
+
+    /// #153 L1 regression: `min_version=Some(0)` must be coerced to 1 so
+    /// `wait` doesn't return immediately for any present entry.
+    #[tokio::test]
+    async fn wait_with_min_zero_treats_as_one() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        // Pre-existing entry at version 1 should NOT short-circuit a
+        // `min=Some(0)` waiter looking for v1+. (After coercion to 1
+        // the present entry satisfies the wait, so this should succeed.)
+        s.set("/ref/k", b"v1".to_vec(), "lead").await.unwrap();
+        let entry = s
+            .wait("/ref/k", Duration::from_millis(50), Some(0))
+            .await
+            .unwrap();
+        assert_eq!(entry.version, 1);
+
+        // Empty store + min=Some(0) must wait, not immediately return —
+        // i.e. it behaves like None, not "match anything (including
+        // nothing)".
+        let s2 = SharedStore::new();
+        let err = s2
+            .wait("/ref/missing", Duration::from_millis(50), Some(0))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Timeout));
+    }
+
+    /// #153 M2 + M3 regression: a release of lease "X" must not cause a
+    /// waiter on lease "Y" to wake up and burn a retry. With M3 fix the
+    /// notifier carries names; with M2 fix `lease_acquire` filters by
+    /// name. The proof is that a waiter on "Y" times out cleanly after
+    /// many releases of "X" without spinning.
+    #[tokio::test]
+    async fn lease_acquire_waiter_filters_by_name() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        // Hold "Y" so the waiter must actually wait.
+        let y = s
+            .lease_acquire(
+                "Y",
+                std::time::Duration::from_secs(30),
+                None,
+                &worker("holder-Y"),
+            )
+            .await
+            .unwrap();
+        assert!(y.acquired);
+
+        // Spawn waiter for "Y".
+        let s2 = s.clone();
+        let waiter = tokio::spawn(async move {
+            s2.lease_acquire(
+                "Y",
+                std::time::Duration::from_secs(30),
+                Some(std::time::Duration::from_millis(150)),
+                &worker("waiter"),
+            )
+            .await
+        });
+
+        // Generate noise on unrelated lease "X" — acquire and release
+        // many times. Pre-fix this would wake the waiter on every
+        // release for nothing.
+        for i in 0..10 {
+            let id = format!("noise-{i}");
+            let res = s
+                .lease_acquire("X", std::time::Duration::from_secs(30), None, &worker(&id))
+                .await
+                .unwrap();
+            s.lease_release(&res.lease_id.unwrap(), &worker(&id))
+                .await
+                .unwrap();
+        }
+
+        // Waiter should still be blocked on "Y" and time out cleanly
+        // (acquired=false), not get woken into a retry storm.
+        let res = waiter.await.unwrap().unwrap();
+        assert!(
+            !res.acquired,
+            "waiter should still be waiting on Y after X churn; got {:?}",
+            res
+        );
+    }
+
+    /// #153 M3 regression: `lease_release` must wake a waiter blocked on
+    /// the same lease name. (Pre-fix it sent the lease_id UUID, which
+    /// post-M2 would never match the name filter.)
+    #[tokio::test]
+    async fn lease_release_wakes_same_name_waiter() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        let held = s
+            .lease_acquire(
+                "shared-resource",
+                std::time::Duration::from_secs(30),
+                None,
+                &worker("holder"),
+            )
+            .await
+            .unwrap();
+        let lease_id = held.lease_id.unwrap();
+
+        let s2 = s.clone();
+        let waiter = tokio::spawn(async move {
+            s2.lease_acquire(
+                "shared-resource",
+                std::time::Duration::from_secs(30),
+                Some(std::time::Duration::from_secs(2)),
+                &worker("waiter"),
+            )
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        s.lease_release(&lease_id, &worker("holder")).await.unwrap();
+
+        let res = waiter.await.unwrap().unwrap();
+        assert!(res.acquired, "waiter should have acquired after release");
+    }
+
+    /// #153 M1 regression: pruner-started latch flips on
+    /// `start_lease_pruner`.
+    #[tokio::test]
+    async fn pruner_latch_set_by_start_lease_pruner() {
+        let s = std::sync::Arc::new(SharedStore::new());
+        assert!(!s.pruner_started.load(std::sync::atomic::Ordering::Relaxed));
+        s.start_lease_pruner();
+        assert!(s.pruner_started.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[tokio::test]

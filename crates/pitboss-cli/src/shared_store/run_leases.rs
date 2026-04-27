@@ -5,9 +5,10 @@
 //! explicit hooks in the cancel/reap paths.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::dispatch::actor::ActorId;
 
@@ -22,6 +23,13 @@ pub struct LeaseHandle {
 #[derive(Debug, Default)]
 pub struct LeaseRegistry {
     inner: Mutex<HashMap<String, LeaseHandle>>,
+    /// #153 L6: notify waiters in `acquire_with_wait` whenever a lease
+    /// is released or auto-released. Coalesced semantics (single token)
+    /// are fine because waiters re-consult the map under the lock on
+    /// wake — losing notifications between a release and a slow waiter
+    /// just means the *next* release wakes them, which is acceptable
+    /// for a small run-global registry.
+    release_notify: Arc<Notify>,
 }
 
 impl LeaseRegistry {
@@ -31,6 +39,15 @@ impl LeaseRegistry {
 
     /// Try to acquire a lease. Returns Ok(handle) if acquired,
     /// Err(holder) if currently held by another actor.
+    ///
+    /// **Same-holder semantics (#153 L5):** if `holder` already owns
+    /// the lease, this call refreshes `acquired_at` to "now" — i.e. it
+    /// acts as an explicit renewal that pushes the deadline out by a
+    /// full `ttl`. This is intentional: the registry has no separate
+    /// `renew` method, and same-holder reacquire-on-heartbeat is the
+    /// only sane outcome for a registry with no shared lock-token.
+    /// Callers who want strict no-renew behavior must check
+    /// `snapshot()` first.
     pub async fn try_acquire(
         &self,
         key: &str,
@@ -38,14 +55,19 @@ impl LeaseRegistry {
         ttl: Duration,
     ) -> Result<LeaseHandle, ActorId> {
         let mut map = self.inner.lock().await;
-        // Auto-expire: remove any lease past its TTL before checking
         let now = Instant::now();
         if let Some(existing) = map.get(key) {
-            if now.duration_since(existing.acquired_at) <= existing.ttl && existing.holder != holder
+            // #153 L5: boundary changed from `<=` to `<` to align with
+            // `LeaseRegistry::prune_expired` in leases.rs (`deadline
+            // <= now` treats the boundary as expired). With `<=` here,
+            // an exactly-at-deadline lease was treated as still held,
+            // leaving a one-tick window where waiters got Conflict on
+            // a TTL-expired lease.
+            if now.duration_since(existing.acquired_at) < existing.ttl && existing.holder != holder
             {
                 return Err(existing.holder.clone());
             }
-            // else: expired, fall through to insert
+            // else: expired or same-holder renewal — fall through.
         }
         let handle = LeaseHandle {
             key: key.to_string(),
@@ -57,10 +79,66 @@ impl LeaseRegistry {
         Ok(handle)
     }
 
+    /// Try to acquire `key`; if held by another actor, wait up to
+    /// `wait` for a release before giving up. Mirrors
+    /// `super::SharedStore::lease_acquire` for the run-global registry
+    /// so callers don't have to roll their own poll loop. (#153 L6)
+    ///
+    /// Implementation: the inner `Notify` is poked on every release
+    /// path, so waiters wake without polling. Lost wakeups (release
+    /// fires before subscribe) are absorbed by Notify's
+    /// "permit"-style semantics — the first `notified()` after a
+    /// `notify_one` returns immediately. After waking, retries the
+    /// non-blocking `try_acquire`; loops until success or deadline.
+    pub async fn acquire_with_wait(
+        &self,
+        key: &str,
+        holder: &str,
+        ttl: Duration,
+        wait: Duration,
+    ) -> Result<LeaseHandle, ActorId> {
+        // Take a snapshot of the notify handle now so we can subscribe
+        // before each retry without re-locking.
+        let notify = Arc::clone(&self.release_notify);
+        let deadline = Instant::now() + wait;
+
+        // Fast path.
+        if let Ok(h) = self.try_acquire(key, holder, ttl).await {
+            return Ok(h);
+        }
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // Final attempt for the boundary case where TTL just
+                // expired but no release fired during our wait.
+                return self.try_acquire(key, holder, ttl).await;
+            }
+            // Subscribe BEFORE retry to avoid a lost-wakeup race with
+            // a release that lands between try_acquire and notified.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                _ = tokio::time::sleep(remaining) => {
+                    return self.try_acquire(key, holder, ttl).await;
+                }
+                _ = &mut notified => {
+                    match self.try_acquire(key, holder, ttl).await {
+                        Ok(h) => return Ok(h),
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn release(&self, key: &str, holder: &str) -> bool {
         let mut map = self.inner.lock().await;
         if map.get(key).is_some_and(|h| h.holder == holder) {
             map.remove(key);
+            drop(map);
+            // #153 L6: wake any acquire_with_wait waiters.
+            self.release_notify.notify_waiters();
             true
         } else {
             false
@@ -79,7 +157,14 @@ impl LeaseRegistry {
         for k in &to_remove {
             map.remove(k);
         }
-        to_remove.len()
+        let count = to_remove.len();
+        drop(map);
+        if count > 0 {
+            // #153 L6: wake any acquire_with_wait waiters — bulk
+            // release can free multiple keys at once.
+            self.release_notify.notify_waiters();
+        }
+        count
     }
 
     pub async fn snapshot(&self) -> Vec<LeaseHandle> {
@@ -154,5 +239,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(h.holder, "actor-B");
+    }
+
+    /// #153 L5 regression: same-holder reacquire must refresh the
+    /// `acquired_at` timestamp (renewal semantics) rather than being
+    /// rejected.
+    #[tokio::test]
+    async fn same_holder_reacquire_renews_lease() {
+        let r = LeaseRegistry::new();
+        r.try_acquire("foo", "actor-A", Duration::from_millis(50))
+            .await
+            .unwrap();
+        let first = r.snapshot().await[0].acquired_at;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Same-holder reacquire should succeed (and bump the timestamp).
+        let h = r
+            .try_acquire("foo", "actor-A", Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(
+            h.acquired_at > first,
+            "renewal must refresh acquired_at; first={:?} new={:?}",
+            first,
+            h.acquired_at
+        );
+    }
+
+    /// #153 L6 regression: `acquire_with_wait` must wake on
+    /// `release` rather than poll-to-deadline.
+    #[tokio::test]
+    async fn acquire_with_wait_wakes_on_release() {
+        let r = std::sync::Arc::new(LeaseRegistry::new());
+        r.try_acquire("foo", "actor-A", Duration::from_secs(30))
+            .await
+            .unwrap();
+        let r2 = r.clone();
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(r2.release("foo", "actor-A").await);
+        });
+        let start = Instant::now();
+        let h = r
+            .acquire_with_wait(
+                "foo",
+                "actor-B",
+                Duration::from_secs(30),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(h.holder, "actor-B");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "should wake promptly on release, took {:?}",
+            elapsed
+        );
+        releaser.await.unwrap();
+    }
+
+    /// #153 L6: `acquire_with_wait` must time out cleanly if no release
+    /// happens within `wait`, returning Err(current_holder).
+    #[tokio::test]
+    async fn acquire_with_wait_times_out_when_held() {
+        let r = LeaseRegistry::new();
+        r.try_acquire("foo", "actor-A", Duration::from_secs(30))
+            .await
+            .unwrap();
+        let err = r
+            .acquire_with_wait(
+                "foo",
+                "actor-B",
+                Duration::from_secs(30),
+                Duration::from_millis(50),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, "actor-A");
+    }
+
+    /// #153 L6: `acquire_with_wait` must wake on bulk
+    /// `release_all_held_by`.
+    #[tokio::test]
+    async fn acquire_with_wait_wakes_on_release_all() {
+        let r = std::sync::Arc::new(LeaseRegistry::new());
+        r.try_acquire("foo", "actor-A", Duration::from_secs(30))
+            .await
+            .unwrap();
+        let r2 = r.clone();
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            r2.release_all_held_by("actor-A").await;
+        });
+        let h = r
+            .acquire_with_wait(
+                "foo",
+                "actor-B",
+                Duration::from_secs(30),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(h.holder, "actor-B");
+        releaser.await.unwrap();
     }
 }

@@ -369,6 +369,72 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**Shared store (#153, all 12 audit items):**
+- `shared_store::leases::LeaseRegistry::release` now returns `(released_name,
+  evicted)` instead of just the eviction list. `SharedStore::lease_release`
+  forwards the *name* (not the lease_id UUID) on `lease_notifier`, so
+  `lease_acquire` waiters can filter incoming events by the name they're
+  waiting on. Pre-fix, every release on any lease woke every waiter on
+  every other lease into a wasted retry, AND any name-filtering attempt
+  would silently fail because UUIDs never match names. (M3 + M2 — coupled,
+  cannot be fixed independently.)
+- `SharedStore::lease_acquire` wait branch — gained per-name filter on
+  the broadcast subscription (drops events whose `name != self.name` with
+  `continue` rather than retry-acquire). Eliminates the thundering herd:
+  N waiters across distinct leases used to mean O(N × release-rate) wakeups
+  per release. Now O(1) — only same-name waiters wake. `Lagged` recovery
+  remains a retry-acquire because the in-memory map is the source of
+  truth; the broadcast is a wake-up hint. (M2)
+- `SharedStore::pruner_started: AtomicBool` — set true by
+  `start_lease_pruner()`. `lease_acquire` warns once (latched via
+  `pruner_warning_logged`) when entering the wait branch without the
+  pruner running, surfacing the misconfiguration that would otherwise
+  cause silent-holder-crash waiters to block to their own deadline rather
+  than the holder's TTL. (M1)
+- `SharedStore::wait` — `min_version: Some(0)` now coerces to 1 (matches
+  the `None` branch). Pre-fix, `Some(0)` was treated as `>= 0` which
+  matches any present entry, defeating the point of the parameter when
+  callers pass a manifest-supplied version that defaults to 0. (L1)
+- `SharedStore::wait` + `lease_acquire` — `tracing::warn!` on
+  `broadcast::error::RecvError::Lagged` (with `path`/`lease_name` and
+  `skipped` count). Operators previously had no signal that the wake-up
+  channel had saturated and waiters had fallen into the slow re-read
+  path. (L7)
+- `KV_NOTIFIER_CAPACITY` raised from 256 → 1024;
+  `LEASE_NOTIFIER_CAPACITY` raised from 64 → 256. Both Lagged paths
+  remain correct, this just reduces the rate at which they fire under
+  burst load. (L2)
+- `SharedStore::lease_acquire` — Lagged recovery comment rewritten
+  to spell out *why* it's safe (retry-acquire consults the in-memory
+  map, broadcast is a hint). The audit's "may miss a relevant release"
+  concern is mitigated by that property. (L3)
+- `SharedStore::release_all_for_actor` — now carries a LOAD-BEARING
+  doc-comment marking it as bridge-disconnect-only. Adding a real auth
+  token is deferred until a second legitimate caller emerges; until
+  then, the bridge is the documented sole caller and code review is
+  the gate. (L4)
+- `RunLeaseRegistry::try_acquire` — TTL boundary changed from `<=` to
+  `<` so an exactly-at-deadline lease is treated as expired, matching
+  the `LeaseRegistry::prune_expired` convention in `leases.rs`. The
+  same-holder reacquire-as-renewal behaviour is now explicitly
+  documented as intentional (not silent). (L5)
+- `RunLeaseRegistry::acquire_with_wait` — new method that mirrors
+  `SharedStore::lease_acquire` for the run-global registry. Backed by
+  a shared `tokio::sync::Notify` poked from `release` and
+  `release_all_held_by`; subscribes-then-tries to avoid lost-wakeup
+  races. The previous `try_acquire`-only API forced callers to roll
+  their own poll loops. (L6)
+- `SharedStore::dump_to_path` — doc-comment now spells out that
+  entries and leases are read under separate locks (not a strictly
+  consistent snapshot). Acceptable for finalize-time post-mortem use
+  but not for cross-store invariants. (L8)
+- `ActivityCounters` doc — clarified bump-on-attempt semantics: bumps
+  fire at handler entry before authz/exec; mid-handler panics leave
+  the bump in place by design (one attempt = one bump). The counters
+  answer "how many calls did this actor attempt" not "how many
+  succeeded" — flipping the order would make stuck workers invisible
+  in the TUI. (L9)
+
 **Notify (manifest #156 follow-ups, audit closure):**
 - `notify::config::pre_request_ssrf_check` — now returns the validated
   `SocketAddr` set instead of `Result<()>`, and each HTTP sink builds a

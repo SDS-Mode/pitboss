@@ -76,13 +76,19 @@ impl LeaseRegistry {
         Ok((lease, evicted))
     }
 
-    /// Release a lease by id. Returns the names of any leases evicted by
-    /// TTL during this call so the caller can wake waiters.
+    /// Release a lease by id. Returns `(released_name, evicted_by_ttl)` so
+    /// the caller can lift `released_name` onto `lease_notifier` for waiters.
+    ///
+    /// Returning the *name* (not `lease_id`) is load-bearing for #153 M3:
+    /// `lease_acquire` filters incoming events by the name it's waiting on
+    /// to defeat the thundering herd. Sending a UUID would cause every
+    /// waiter to receive an event that can never match its lease name,
+    /// so they'd block to timeout instead of retrying acquire.
     pub async fn release(
         &self,
         lease_id: &str,
         caller: &CallerIdentity,
-    ) -> Result<Vec<String>, StoreError> {
+    ) -> Result<(String, Vec<String>), StoreError> {
         let mut map = self.inner.lock().await;
         let evicted = Self::prune_expired(&mut map);
         let found = map
@@ -98,7 +104,7 @@ impl LeaseRegistry {
             return Err(StoreError::Forbidden("only the holder can release".into()));
         }
         map.remove(&name);
-        Ok(evicted)
+        Ok((name, evicted))
     }
 
     /// List active leases. Returns (list, evicted-by-ttl-names).
@@ -198,7 +204,8 @@ mod tests {
             .acquire("foo", Duration::from_secs(30), &caller("w1"))
             .await
             .unwrap();
-        reg.release(&lease.lease_id, &caller("w1")).await.unwrap();
+        let (released_name, _) = reg.release(&lease.lease_id, &caller("w1")).await.unwrap();
+        assert_eq!(released_name, "foo");
         reg.acquire("foo", Duration::from_secs(30), &caller("w2"))
             .await
             .unwrap();
