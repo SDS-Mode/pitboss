@@ -135,7 +135,7 @@ pub struct ResolvedManifest {
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_EFFORT: Effort = Effort::High;
 const DEFAULT_TIMEOUT_SECS: u64 = 3600;
-const DEFAULT_MAX_PARALLEL_TASKS: u32 = 4;
+use super::schema::DEFAULT_MAX_PARALLEL_TASKS;
 fn default_tools() -> Vec<String> {
     ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
         .iter()
