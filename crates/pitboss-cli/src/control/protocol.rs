@@ -4,6 +4,34 @@
 //! Client → server messages are `ControlOp`; server → client are `ControlEvent`.
 //! Serialization uses `#[serde(tag = "op")]` / `#[serde(tag = "event")]` so the
 //! discriminator lives in the same object as the payload fields.
+//!
+//! # Wire compatibility convention (read before adding fields)
+//!
+//! TUI clients are not always rebuilt in lock-step with the dispatcher —
+//! a long-running `pitboss dispatch` process may serve a freshly-built
+//! TUI while still being driven by the dispatcher binary that was
+//! current at run start. **Every new field added to an existing
+//! `ControlOp` or `ControlEvent` variant MUST carry one of:**
+//!
+//! - `#[serde(default)]` — the field is optional from the producer side
+//!   and old clients can omit it without parse errors;
+//! - `#[serde(default = "fn")]` — same, with a non-`Default::default`
+//!   fall-back (e.g. for typed enums whose `Default` doesn't match the
+//!   semantic "no value" case);
+//! - or `#[serde(skip_serializing_if = "...")]` paired with one of the
+//!   above so the field is omitted on the wire when at the default,
+//!   keeping old-client JSON byte-identical.
+//!
+//! New variants are always safe to add: serde rejects unknown
+//! discriminators with a typed error the existing dispatch loop
+//! handles. Existing variants are NOT safe to mutate without back-compat
+//! attributes — a missing `#[serde(default)]` on a freshly-required
+//! field will silently break every TUI build older than the dispatcher.
+//!
+//! Existing examples worth mirroring: `kind` on `ApprovalRequest`
+//! (`#[serde(default, skip_serializing_if = "is_default_approval_kind")]`),
+//! `mode` on `PauseWorker` (default `Cancel`), `actor_path` on
+//! `EventEnvelope` (skip-serializing-when-empty).
 
 #![allow(dead_code)] // Wired up by control::server in Task 4+.
 
