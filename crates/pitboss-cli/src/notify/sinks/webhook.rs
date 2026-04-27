@@ -60,19 +60,28 @@ impl NotificationSink for WebhookSink {
             crate::notify::config::pre_request_ssrf_check(&self.url).await?;
         }
 
+        // `.without_url()` strips the request URL from the error chain
+        // before it bubbles up: reqwest's Display impl includes the full
+        // URL by default, which would leak Slack/Discord webhook tokens
+        // (in path or query) into tracing output. See
+        // notify::config::redact_webhook_url for the matching helper used
+        // on string-formatted error messages.
         let response = self
             .http
             .post(&self.url)
             .json(env)
             .timeout(Duration::from_secs(30))
             .send()
-            .await?;
+            .await
+            .map_err(|e| e.without_url())?;
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            status if status.is_client_error() => {
-                Err(response.error_for_status().unwrap_err().into())
-            }
+            status if status.is_client_error() => Err(response
+                .error_for_status()
+                .unwrap_err()
+                .without_url()
+                .into()),
             _ => Err(anyhow::anyhow!(
                 "webhook POST failed with status {}",
                 response.status()
@@ -100,7 +109,11 @@ mod tests {
             .await;
 
         let http = Arc::new(reqwest::Client::new());
-        let sink = WebhookSink::new(0, format!("{}/notify", server_url), http);
+        let sink = WebhookSink::new_trusted(
+            "webhook-test".into(),
+            format!("{}/notify", server_url),
+            http,
+        );
 
         let env = NotificationEnvelope::new(
             "run-1",
@@ -130,7 +143,11 @@ mod tests {
             .await;
 
         let http = Arc::new(reqwest::Client::new());
-        let sink = WebhookSink::new(0, format!("{}/notify", server_url), http);
+        let sink = WebhookSink::new_trusted(
+            "webhook-test".into(),
+            format!("{}/notify", server_url),
+            http,
+        );
 
         let env = NotificationEnvelope::new(
             "run-2",
@@ -160,7 +177,11 @@ mod tests {
             .await;
 
         let http = Arc::new(reqwest::Client::new());
-        let sink = WebhookSink::new(0, format!("{}/notify", server_url), http);
+        let sink = WebhookSink::new_trusted(
+            "webhook-test".into(),
+            format!("{}/notify", server_url),
+            http,
+        );
 
         let env = NotificationEnvelope::new(
             "run-3",

@@ -52,14 +52,23 @@ pub const PARENT_NOTIFY_URL_ENV: &str = "PITBOSS_PARENT_NOTIFY_URL";
 pub const RUN_ID_ENV: &str = "PITBOSS_RUN_ID";
 
 /// Build a webhook sink from `PITBOSS_PARENT_NOTIFY_URL` if set. Returns
-/// `None` when the env var is absent or empty (so a top-level dispatch
-/// without a parent orchestrator pays no overhead). The returned sink
-/// bypasses the per-request SSRF guard — see the module-level comment for
-/// why that's safe.
+/// `None` when the env var is absent, empty, or unparseable as a URL (so
+/// a typo'd `htttp://…` is caught at dispatch start with a warning, not
+/// hours later on the first emit). The returned sink bypasses the
+/// per-request SSRF guard — see the module-level comment for why that's
+/// safe.
 pub fn build_parent_sink(http: &Arc<reqwest::Client>) -> Option<Arc<dyn NotificationSink>> {
     let url = std::env::var(PARENT_NOTIFY_URL_ENV).ok()?;
     let trimmed = url.trim();
     if trimmed.is_empty() {
+        return None;
+    }
+    if let Err(e) = reqwest::Url::parse(trimmed) {
+        tracing::warn!(
+            env_var = PARENT_NOTIFY_URL_ENV,
+            error = %e,
+            "parent-notify URL is unparseable; ignoring"
+        );
         return None;
     }
     Some(Arc::new(WebhookSink::new_trusted(
@@ -189,6 +198,23 @@ mod tests {
         std::env::remove_var(PARENT_NOTIFY_URL_ENV);
         let http = Arc::new(reqwest::Client::new());
         assert!(build_parent_sink(&http).is_none());
+    }
+
+    #[test]
+    fn build_parent_sink_returns_none_when_env_unparseable() {
+        // A typo'd scheme (`htttp://…`) used to silently construct a sink
+        // that failed on first emit. Catch it at dispatch start instead.
+        let _g = lock();
+        // No scheme delimiter at all → reqwest::Url::parse rejects.
+        // (`htttp://…` parses fine: any token is a valid scheme.)
+        std::env::set_var(PARENT_NOTIFY_URL_ENV, "definitely not a url");
+        let http = Arc::new(reqwest::Client::new());
+        let sink = build_parent_sink(&http);
+        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+        assert!(
+            sink.is_none(),
+            "unparseable URL should be rejected at build_parent_sink"
+        );
     }
 
     #[tokio::test]

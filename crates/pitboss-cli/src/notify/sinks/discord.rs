@@ -10,6 +10,7 @@ pub struct DiscordSink {
     id: String,
     url: String,
     http: Arc<reqwest::Client>,
+    bypass_ssrf: bool,
 }
 
 impl DiscordSink {
@@ -19,7 +20,25 @@ impl DiscordSink {
         } else {
             format!("discord:{}", idx)
         };
-        Self { id, url, http }
+        Self {
+            id,
+            url,
+            http,
+            bypass_ssrf: false,
+        }
+    }
+
+    /// Test-only constructor that skips the per-request SSRF guard so a
+    /// `wiremock::MockServer` (which always binds 127.0.0.1) can be used
+    /// as the destination. Production paths must use [`Self::new`].
+    #[cfg(test)]
+    fn new_unchecked(url: String, http: Arc<reqwest::Client>) -> Self {
+        Self {
+            id: "discord".to_string(),
+            url,
+            http,
+            bypass_ssrf: true,
+        }
     }
 
     fn color(sev: Severity) -> u32 {
@@ -168,22 +187,31 @@ impl NotificationSink for DiscordSink {
     }
 
     async fn emit(&self, env: &NotificationEnvelope) -> Result<()> {
-        crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+        if !self.bypass_ssrf {
+            crate::notify::config::pre_request_ssrf_check(&self.url).await?;
+        }
 
         let body = self.build_body(env);
+        // Strip the URL from any reqwest error before it bubbles up — the
+        // path carries the bot token (`/api/webhooks/<id>/<token>`) and
+        // would otherwise land verbatim in tracing output. See
+        // notify::config::redact_webhook_url for the formatted-string variant.
         let response = self
             .http
             .post(&self.url)
             .json(&body)
             .timeout(Duration::from_secs(30))
             .send()
-            .await?;
+            .await
+            .map_err(|e| e.without_url())?;
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            status if status.is_client_error() => {
-                Err(response.error_for_status().unwrap_err().into())
-            }
+            status if status.is_client_error() => Err(response
+                .error_for_status()
+                .unwrap_err()
+                .without_url()
+                .into()),
             _ => Err(anyhow::anyhow!(
                 "discord POST failed with status {}",
                 response.status()
@@ -258,7 +286,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let sink = DiscordSink::new(0, url, Arc::new(reqwest::Client::new()));
+        let sink = DiscordSink::new_unchecked(url, Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
             "run-1",
@@ -287,7 +315,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let sink = DiscordSink::new(0, url, Arc::new(reqwest::Client::new()));
+        let sink = DiscordSink::new_unchecked(url, Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
             "run-1",
@@ -318,7 +346,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let sink = DiscordSink::new(0, url, Arc::new(reqwest::Client::new()));
+        let sink = DiscordSink::new_unchecked(url, Arc::new(reqwest::Client::new()));
 
         let env = NotificationEnvelope::new(
             "run-1",

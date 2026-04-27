@@ -369,6 +369,46 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**Notify (webhook secret hygiene + SSRF blocklist):**
+- `notify::config::redact_webhook_url` (new helper) — strips path, query,
+  and fragment from any webhook URL before it lands in an error message
+  or `tracing` line, preserving only `<scheme>://<host>[:<port>]`. Slack
+  incoming-webhook URLs (`/services/T.../B.../<TOKEN>`), Discord webhook
+  URLs (`/api/webhooks/<id>/<token>`), and any URL with a token in the
+  query string previously appeared verbatim in `validate_webhook_url`,
+  `pre_request_ssrf_check`, and `reqwest::Error` output, exposing the
+  channel's authorisation to journald, log aggregators, and crash
+  reporters on the first failed delivery. All call sites in `config.rs`,
+  `webhook.rs`, `discord.rs`, and `slack.rs` now use the helper, and
+  every `reqwest::Error` propagated from `.send().await` /
+  `.error_for_status()` is filtered through `.without_url()` before
+  bubbling up. Closes #143.
+- `notify::config::pre_request_ssrf_check` — literal-IP fast-path now
+  re-checks `is_disallowed_ip` instead of unconditionally returning Ok.
+  Previously a future caller constructing a `WebhookSink` directly
+  (bypassing manifest validation) would have been able to POST to a
+  private IP. The runtime guard is now the last gate before the network,
+  not a no-op. (Item from #156.)
+- `notify::config::is_disallowed_ip` — adds IPv4 multicast (`224.0.0.0/4`),
+  IPv6 multicast (`ff00::/8`), and IPv6 site-local (`fec0::/10`, RFC 3879
+  deprecated but still routed by Linux) to the SSRF blocklist. (Items
+  from #156.)
+- `notify::sinks::slack::escape_slack_mrkdwn` — adds `&` to the backslash-
+  escape set. Slack mrkdwn HTML-decodes `&amp;` / `&lt;` / `&gt;`, so
+  without escaping `&` an untrusted field containing `&lt;@U123&gt;`
+  would render as `<@U123>` and resolve to a mention, bypassing the
+  existing `<` / `@` / `>` escapes. (Item from #156.)
+- `notify::parent::build_parent_sink` — `PITBOSS_PARENT_NOTIFY_URL` now
+  parses through `reqwest::Url::parse` at sink-build time and emits a
+  `tracing::warn!` instead of silently constructing a sink that fails on
+  first emit. (Item from #156.)
+- `notify::sinks::discord::DiscordSink` /
+  `notify::sinks::slack::SlackSink` — both gain a `bypass_ssrf` field
+  mirroring `WebhookSink`, with a `#[cfg(test)] new_unchecked` constructor
+  that skips the per-request guard so `wiremock::MockServer` (which
+  always binds 127.0.0.1) can still be used in unit tests after the
+  literal-IP fast-path was tightened.
+
 **pitboss-core (child supervision):**
 - `pitboss-core::session::handle` — PID slot now cleared the moment
   `child.wait()` resolves, before the up-to-30 s stream-drain await. The
