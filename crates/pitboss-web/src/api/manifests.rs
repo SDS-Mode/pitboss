@@ -246,10 +246,17 @@ pub async fn dispatch(
     }
 
     let bin = std::env::var("PITBOSS_BIN").unwrap_or_else(|_| "pitboss".to_string());
+    // Forward state.runs_dir() to the dispatcher so the new run lands
+    // where THIS console will read it from. Without this, the dispatcher
+    // falls back to its own default_run_dir() — which can diverge from
+    // the console's --runs-dir override, leaving the SPA staring at a
+    // 404 while the run is happily running somewhere else.
     let output = tokio::process::Command::new(&bin)
         .arg("dispatch")
         .arg(&manifest_path)
         .arg("--background")
+        .arg("--run-dir")
+        .arg(state.runs_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

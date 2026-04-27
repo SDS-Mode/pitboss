@@ -136,7 +136,6 @@ pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
     }
 
     Ok(ResolvedManifest {
-        name: None,
         tasks: resumed_tasks,
         ..base
     })
@@ -372,6 +371,50 @@ mod tests {
             serde_json::to_vec_pretty(&summary).unwrap(),
         )
         .unwrap();
+    }
+
+    /// Regression: `[run].name` from the prior run's `resolved.json`
+    /// must survive resume so the operational console keeps grouping the
+    /// resumed run with the original. A previous version of this code
+    /// explicitly set `name: None` in the struct update before `..base`,
+    /// silently clobbering the inherited value.
+    #[test]
+    fn resume_preserves_run_name_from_prior_resolved_json() {
+        let tmp = TempDir::new().unwrap();
+        // Write a resolved.json with [run].name set.
+        let resolved = serde_json::json!({
+            "name": "nightly-sync",
+            "max_parallel": 1,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": [{
+                "id": "a",
+                "directory": "/tmp",
+                "prompt": "do A",
+                "branch": null,
+                "model": "claude-test",
+                "effort": "high",
+                "tools": [],
+                "timeout_secs": 30,
+                "use_worktree": false,
+                "env": {}
+            }],
+        });
+        std::fs::write(
+            tmp.path().join("resolved.json"),
+            serde_json::to_vec_pretty(&resolved).unwrap(),
+        )
+        .unwrap();
+        write_summary(tmp.path(), &[("a", Some("sess_a"), TaskStatus::Success)]);
+
+        let manifest = build_resume_manifest(tmp.path()).unwrap();
+        assert_eq!(
+            manifest.name.as_deref(),
+            Some("nightly-sync"),
+            "resumed manifest must inherit [run].name from prior resolved.json"
+        );
     }
 
     #[test]

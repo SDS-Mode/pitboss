@@ -18,21 +18,27 @@ const MAX_TEMPLATE_LEN: usize = 500;
 /// Mask runtime tokens in `msg` so semantically-identical messages
 /// produce the same canonical template. Whitespace-tokenises, applies
 /// per-token masks, re-joins with single spaces, and caps at
-/// [`MAX_TEMPLATE_LEN`] characters.
+/// [`MAX_TEMPLATE_LEN`] bytes.
+///
+/// The cap is enforced *before* each push so the next token can't
+/// straddle the boundary mid-codepoint — `String::truncate` panics if
+/// the cut isn't on a UTF-8 char boundary, and failure messages
+/// routinely contain non-ASCII (CJK paths, accented identifiers,
+/// emoji from tool output).
 pub fn canonicalize(msg: &str) -> String {
     let mut out = String::with_capacity(msg.len().min(MAX_TEMPLATE_LEN));
     let mut first = true;
     for tok in msg.split_whitespace() {
+        let sep_len = if first { 0 } else { 1 };
+        let masked = mask_token(tok);
+        if out.len() + sep_len + masked.len() > MAX_TEMPLATE_LEN {
+            break;
+        }
         if !first {
             out.push(' ');
         }
         first = false;
-        let masked = mask_token(tok);
         out.push_str(&masked);
-        if out.len() >= MAX_TEMPLATE_LEN {
-            out.truncate(MAX_TEMPLATE_LEN);
-            break;
-        }
     }
     out
 }
@@ -346,6 +352,42 @@ mod tests {
     fn truncates_overlong_input() {
         let big = "x ".repeat(2000);
         let t = canonicalize(&big);
+        assert!(t.len() <= MAX_TEMPLATE_LEN);
+    }
+
+    /// Regression: a multi-byte UTF-8 sequence straddling
+    /// `MAX_TEMPLATE_LEN` must NOT panic. `String::truncate` panics on
+    /// non-char-boundary cuts, so the cap is checked before each push.
+    /// Worst case is a long ASCII prefix that brings `out.len()` close
+    /// to the cap, then a multi-byte token that would land mid-codepoint
+    /// — that token is now skipped instead of crashing the request.
+    #[test]
+    fn does_not_panic_on_multibyte_utf8_at_boundary() {
+        // 249 × "x " = 498 bytes, then "日" (3 bytes) would push to 501
+        // and previously straddled the truncate at byte 500. Now it's
+        // simply dropped; the (sub-)cap output is preserved.
+        let mut input = String::new();
+        for _ in 0..249 {
+            input.push_str("x ");
+        }
+        input.push('日');
+        let t = canonicalize(&input);
+        assert!(t.len() <= MAX_TEMPLATE_LEN);
+        // Critically: result is a valid Rust String (no half-codepoint).
+        // The .chars() iterator would panic if it weren't.
+        let _: usize = t.chars().count();
+    }
+
+    #[test]
+    fn does_not_panic_on_emoji_tokens_at_boundary() {
+        // 4-byte UTF-8 codepoints (emoji) are the worst case for a
+        // byte-cut to land mid-codepoint.
+        let mut input = String::new();
+        for _ in 0..245 {
+            input.push_str("y ");
+        }
+        input.push('🚀');
+        let t = canonicalize(&input);
         assert!(t.len() <= MAX_TEMPLATE_LEN);
     }
 

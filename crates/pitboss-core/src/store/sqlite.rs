@@ -552,6 +552,12 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
     Ok(RunSummary {
         run_id,
         manifest_path,
+        // TODO: SQLite backend doesn't persist manifest_name yet — schema
+        // has no column, finalize_run doesn't bind it, and this load path
+        // hardcodes None. JsonFileStore (the production path) handles it
+        // via serde. Add an idempotent ALTER TABLE migration matching the
+        // existing migrate_failure_reason / migrate_parent_task_id pattern
+        // when SqliteStore moves out of test-only use.
         manifest_name: None,
         pitboss_version: run.pitboss_version,
         claude_version: run.claude_version,
