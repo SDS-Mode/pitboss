@@ -81,7 +81,24 @@ jobs:
           dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
-          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+          # Strip free-form prose fields (announcement_changelog,
+          # announcement_github_body, announcement_title) before setting the
+          # `manifest` step output. GHA's secret-scanning heuristic
+          # (introduced 2025) flags long prose blobs as "may contain
+          # secret" and skips the output entirely — which makes downstream
+          # `fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix`
+          # gates evaluate to null, silently skipping every build job. The
+          # `announce` job re-derives the prose from a fresh
+          # `dist host --steps=announce` against the file artifact below,
+          # and `publish-homebrew-formula` only consumes structural fields
+          # (`releases[].artifacts`, `app_version`), so stripping prose
+          # is lossless for downstream consumption. Keep the full manifest
+          # available as the `artifacts-plan-dist-manifest` artifact for
+          # any future job that needs it.
+          jq -c \
+            'del(.announcement_changelog) | del(.announcement_github_body) | del(.announcement_title)' \
+            plan-dist-manifest.json > plan-dist-manifest.compact.json
+          echo "manifest=$(cat plan-dist-manifest.compact.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@v7
         with:

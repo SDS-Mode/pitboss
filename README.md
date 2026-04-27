@@ -16,7 +16,8 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.9.0** is the web operational console release. Pitboss now ships a
+**v0.9.1** is the web operational console release (republished from
+v0.9.0 after a release-pipeline fix; no functional changes). Pitboss now ships a
 single-binary HTTP server (`pitboss-web`) with an embedded SvelteKit
 SPA that gives the dispatcher a full browser surface alongside the TUI:
 live SSE event streams from in-flight runs, control writes (cancel /
