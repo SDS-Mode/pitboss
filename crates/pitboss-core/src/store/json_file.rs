@@ -40,7 +40,7 @@ impl SessionStore for JsonFileStore {
         let dir = self.run_dir(meta.run_id);
         fs::create_dir_all(&dir).await?;
         let bytes = serde_json::to_vec_pretty(meta)?;
-        fs::write(self.meta_json(meta.run_id), bytes).await?;
+        crate::atomic_write::write_atomic_async(&self.meta_json(meta.run_id), &bytes).await?;
         OpenOptions::new()
             .create(true)
             .append(true)
@@ -65,7 +65,7 @@ impl SessionStore for JsonFileStore {
     async fn finalize_run(&self, summary: &RunSummary) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec_pretty(summary)?;
         let path = self.summary_json(summary.run_id);
-        fs::write(path, bytes).await?;
+        crate::atomic_write::write_atomic_async(&path, &bytes).await?;
         Ok(())
     }
 

@@ -180,7 +180,8 @@ fn synthesize_summary(run_dir: &Path) -> Result<()> {
     let summary = build_synthesized_summary(run_dir)?;
     let json = serde_json::to_string_pretty(&summary).context("serialize synthesized summary")?;
     let path = run_dir.join("summary.json");
-    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    pitboss_core::atomic_write::write_atomic_sync(&path, json.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

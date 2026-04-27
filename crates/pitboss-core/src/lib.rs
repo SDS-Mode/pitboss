@@ -4,6 +4,7 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
+pub mod atomic_write;
 pub mod error;
 pub mod fmt;
 pub mod parser;
