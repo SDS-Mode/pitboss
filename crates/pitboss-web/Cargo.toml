@@ -41,3 +41,4 @@ toml               = { workspace = true }
 tempfile           = { workspace = true }
 tokio              = { workspace = true }
 serde_json         = { workspace = true }
+tower              = { workspace = true, features = ["util"] }

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use axum::{
-    extract::{Path as AxPath, State},
+    extract::{Path as AxPath, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -94,17 +94,53 @@ pub async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<ManifestE
     Ok(Json(entries))
 }
 
+/// Query knobs for [`read_one`]. `download=1` (or `=true`) forces a
+/// `Content-Disposition: attachment` header so the browser saves the
+/// file instead of rendering it inline. Defaults to false (the editor
+/// route reads the body inline).
+///
+/// Custom deserializer accepts either `1`/`true`/`yes`/`on` so the
+/// query string is friendly to handcrafted curl invocations as well as
+/// the SPA's machine-generated URLs.
+#[derive(Debug, Deserialize, Default)]
+pub struct ReadQuery {
+    #[serde(default, deserialize_with = "truthy")]
+    pub download: bool,
+}
+
+fn truthy<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(matches!(s.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 pub async fn read_one(
     State(state): State<AppState>,
     AxPath(name): AxPath<String>,
+    Query(q): Query<ReadQuery>,
 ) -> ApiResult<Response> {
-    let path = manifest_path(state.manifests_dir(), &name)?;
+    // sanitise once; reuse the safe name for both the path lookup AND
+    // the Content-Disposition filename so the browser can never see an
+    // attacker-controlled string here.
+    let safe = sanitize_manifest_name(&name)?;
+    let path = state.manifests_dir().join(&safe);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/toml; charset=utf-8")
-            .body(axum::body::Body::from(bytes))
-            .expect("toml response")),
+        Ok(bytes) => {
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/toml; charset=utf-8");
+            if q.download {
+                builder = builder.header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{safe}\""),
+                );
+            }
+            Ok(builder
+                .body(axum::body::Body::from(bytes))
+                .expect("toml response"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ApiError::NotFound),
         Err(e) => Err(e.into()),
     }

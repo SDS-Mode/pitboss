@@ -270,6 +270,21 @@ export function readManifest(name: string): Promise<string> {
   return request<string>(`/api/manifests/${enc(name)}`, { accept: 'text' });
 }
 
+/**
+ * URL for downloading a manifest as a `Content-Disposition: attachment`
+ * file. Browsers cannot set Authorization headers on `<a download>` or
+ * `window.location` navigations, so when a token is configured we
+ * fall back to the `?token=` query param the auth middleware accepts
+ * for routes that can't carry headers (the same path the SSE event
+ * stream uses).
+ */
+export function exportManifestUrl(name: string): string {
+  const tok = getToken();
+  const params = new URLSearchParams({ download: '1' });
+  if (tok) params.set('token', tok);
+  return `/api/manifests/${enc(name)}?${params.toString()}`;
+}
+
 export function saveManifest(name: string, contents: string): Promise<{ name: string; bytes: number }> {
   return request<{ name: string; bytes: number }>('/api/manifests', {
     method: 'POST',

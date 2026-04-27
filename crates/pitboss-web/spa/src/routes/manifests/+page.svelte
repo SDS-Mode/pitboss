@@ -1,6 +1,14 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { listManifests, saveManifest, ApiError, type ManifestEntry } from '$lib/api';
+  import {
+    listManifests,
+    saveManifest,
+    validateManifest,
+    exportManifestUrl,
+    ApiError,
+    type ManifestEntry
+  } from '$lib/api';
+  import { isValidFilename } from '$lib/wizard/state';
   import { relativeFromUnix } from '$lib/utils';
   import {
     Card,
@@ -18,11 +26,21 @@
     TableHeader,
     TableRow
   } from '$lib/components/ui/table';
-  import { FileText, Plus, AlertTriangle, RefreshCw } from 'lucide-svelte';
+  import {
+    AlertTriangle,
+    Download,
+    FileText,
+    RefreshCw,
+    Upload,
+    Sparkles
+  } from 'lucide-svelte';
+
+  const MAX_BYTES = 256 * 1024;
 
   let manifests = $state<ManifestEntry[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let importErrors = $state<string[] | null>(null);
 
   async function load() {
     loading = true;
@@ -40,17 +58,48 @@
     load();
   });
 
-  async function createNew() {
-    const name = window.prompt('Name for the new manifest (without .toml)?');
-    if (!name || !name.trim()) return;
-    const stub = `# Pitboss manifest — ${name.trim()}\n\n[run]\nname = "${name.trim()}"\nmax_parallel_tasks = 2\n\n[[task]]\nid = "first"\ndirectory = "."\nprompt = "Replace me with the work for this task."\n`;
-    try {
-      const res = await saveManifest(name.trim(), stub);
-      await goto(`/manifests/${encodeURIComponent(res.name)}`);
-    } catch (e) {
-      const msg = e instanceof ApiError ? `${e.status}: ${e.body || e.message}` : String(e);
-      window.alert(`Failed to create manifest: ${msg}`);
-    }
+  function triggerImport() {
+    importErrors = null;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.toml,text/plain,application/toml';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      if (file.size > MAX_BYTES) {
+        importErrors = [`File too large: ${file.size} bytes (max ${MAX_BYTES}).`];
+        return;
+      }
+      const stem = file.name.replace(/\.toml$/i, '');
+      if (!isValidFilename(stem)) {
+        importErrors = [
+          `Filename "${file.name}" is not allowed. Use letters, digits, dot, dash, underscore (max 64 chars).`
+        ];
+        return;
+      }
+      const contents = await file.text();
+      try {
+        const v = await validateManifest(contents);
+        if (!v.ok) {
+          importErrors = [`Validation failed for ${file.name}:`, ...v.errors];
+          return;
+        }
+        await saveManifest(stem, contents);
+        await load();
+        await goto(`/manifests/${encodeURIComponent(stem)}`);
+      } catch (e) {
+        importErrors = [
+          e instanceof ApiError ? `${e.status}: ${e.body || e.message}` : String(e)
+        ];
+      }
+    };
+    input.click();
+  }
+
+  function exportManifest(name: string) {
+    // Browser handles the download via Content-Disposition. The auth
+    // middleware accepts ?token= as a header fallback (same as SSE).
+    window.location.href = exportManifestUrl(name);
   }
 
   function fmtBytes(n: number): string {
@@ -76,11 +125,29 @@
       <RefreshCw class="mr-2 size-4 {loading ? 'animate-spin' : ''}" />
       Refresh
     </Button>
-    <Button size="sm" onclick={createNew}>
-      <Plus class="mr-1.5 size-4" /> New manifest
+    <Button variant="outline" size="sm" onclick={triggerImport}>
+      <Upload class="mr-2 size-4" /> Import
+    </Button>
+    <Button href="/manifests/new" size="sm">
+      <Sparkles class="mr-2 size-4" /> Guided
     </Button>
   </div>
 </div>
+
+{#if importErrors}
+  <Card class="border-destructive/50 mb-4">
+    <CardContent class="flex items-start gap-3 pt-6">
+      <AlertTriangle class="text-destructive mt-0.5 size-5 shrink-0" />
+      <div class="space-y-1">
+        {#each importErrors as e, i (i)}
+          <p class={i === 0 ? 'text-destructive font-medium text-sm' : 'text-muted-foreground text-xs font-mono'}>
+            {e}
+          </p>
+        {/each}
+      </div>
+    </CardContent>
+  </Card>
+{/if}
 
 {#if error}
   <Card class="border-destructive/50">
@@ -103,12 +170,17 @@
       <div>
         <p class="text-sm font-medium">No manifests yet</p>
         <p class="text-muted-foreground mt-1 text-sm">
-          Create one to start dispatching runs from the console.
+          Build one with the guided wizard or import a TOML file from disk.
         </p>
       </div>
-      <Button size="sm" onclick={createNew}>
-        <Plus class="mr-1.5 size-4" /> New manifest
-      </Button>
+      <div class="flex gap-2">
+        <Button href="/manifests/new" size="sm">
+          <Sparkles class="mr-2 size-4" /> Guided
+        </Button>
+        <Button variant="outline" size="sm" onclick={triggerImport}>
+          <Upload class="mr-2 size-4" /> Import
+        </Button>
+      </div>
     </CardContent>
   </Card>
 {:else}
@@ -125,7 +197,7 @@
           <TableHead>Name</TableHead>
           <TableHead class="w-[12ch] text-right">Size</TableHead>
           <TableHead class="w-[18ch]">Modified</TableHead>
-          <TableHead class="w-[10ch]"></TableHead>
+          <TableHead class="w-[16ch] text-right"></TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -137,12 +209,24 @@
               </a>
             </TableCell>
             <TableCell class="text-right tabular-nums text-xs">{fmtBytes(m.size)}</TableCell>
-            <TableCell class="text-muted-foreground text-xs">{relativeFromUnix(m.mtime_unix)}</TableCell>
-            <TableCell>
+            <TableCell class="text-muted-foreground text-xs">
+              {relativeFromUnix(m.mtime_unix)}
+            </TableCell>
+            <TableCell class="text-right">
               <a
                 href="/manifests/{encodeURIComponent(m.name)}"
-                class="text-primary text-xs hover:underline">Open</a
+                class="text-primary text-xs hover:underline mr-3"
               >
+                Open
+              </a>
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-foreground inline-flex items-center text-xs"
+                onclick={() => exportManifest(m.name)}
+                aria-label="Export {m.name}"
+              >
+                <Download class="mr-1 size-3" /> Export
+              </button>
             </TableCell>
           </TableRow>
         {/each}
