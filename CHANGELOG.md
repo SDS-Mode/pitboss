@@ -9,6 +9,37 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 *(nothing yet)*
 
+## [0.9.1] — 2026-04-27
+
+Republishes the v0.9.0 platform artifacts after a release-pipeline fix.
+v0.9.0's tag and code shipped fine — container images, docs site, and
+Homebrew tap update were unaffected — but the cargo-dist `release.yml`
+plan-step output was rejected by GHA's secret-scanning heuristic
+(introduced 2025), which silently skipped every build matrix job. The
+v0.9.0 GitHub Release was created with only `dist-manifest.json`
+attached, so nothing on the [releases page](https://github.com/SDS-Mode/pitboss/releases)
+was actually installable via the shell installer or direct tarball
+download. **There are no functional changes in v0.9.1 vs v0.9.0** —
+upgrade only if you tried to install v0.9.0 from tarball/installer
+and hit the missing artifacts.
+
+### Fixed
+
+- **`release.yml`: strip free-form prose from `plan` step output.** The
+  cargo-dist plan manifest's `announcement_changelog`,
+  `announcement_github_body`, and `announcement_title` fields are
+  removed from the GHA step output (`needs.plan.outputs.val`) before
+  downstream gates evaluate. The full manifest is preserved as the
+  `artifacts-plan-dist-manifest` artifact for any consumer that needs
+  it, and the `announce` job re-derives prose from a fresh
+  `dist host --steps=announce` call. Stripping is required because
+  GHA's secret-scanner started flagging long prose blobs as "may
+  contain secret" and silently skipping the output, which made
+  `fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix` null
+  and bypassed the build matrix entirely. This is a structural
+  workaround — cargo-dist 0.32+ moves to artifact-based plan
+  distribution and should obsolete it.
+
 ## [0.9.0] — 2026-04-27
 
 The web operational console release. Pitboss now ships a single-binary

@@ -26,6 +26,6 @@ Language models are stochastic. A well-run pit is not.
 
 ## Current version
 
-**v0.9.0** — web operational console. New `pitboss-web` binary (single-binary axum + embedded SvelteKit SPA) gives the dispatcher a full browser surface alongside the TUI: live SSE event streams, control writes (cancel / pause / reprompt / approve), manifest authoring through a 5-step guided wizard with schema-driven hover tooltips, and a cross-run failures dashboard with Drain-lite clustering of error templates. New `[run].name` field surfaces a human-readable label so related runs group together in the console.
+**v0.9.1** — web operational console (republished from v0.9.0 after a release-pipeline fix; no functional changes). New `pitboss-web` binary (single-binary axum + embedded SvelteKit SPA) gives the dispatcher a full browser surface alongside the TUI: live SSE event streams, control writes (cancel / pause / reprompt / approve), manifest authoring through a 5-step guided wizard with schema-driven hover tooltips, and a cross-run failures dashboard with Drain-lite clustering of error templates. New `[run].name` field surfaces a human-readable label so related runs group together in the console.
 
 See [Changelog](./reference/changelog.md) for the full version history.

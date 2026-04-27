@@ -3,7 +3,7 @@
 Capture of deferred work. Items here are scoped but unscheduled — grab
 one when you're ready, or file issues to formalize priority.
 
-**Last refresh: v0.9.0 (2026-04-27).** Everything shipped through v0.9.0
+**Last refresh: v0.9.1 (2026-04-27).** Everything shipped through v0.9.1
 has been removed from this file — check `CHANGELOG.md` for per-version
 history. If you're about to add an item, slot it into one of the tiered
 sections below (biggest effort first).
