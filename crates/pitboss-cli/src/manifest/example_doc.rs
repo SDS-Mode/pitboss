@@ -88,6 +88,10 @@ fn render_placeholder(f: &FieldDescriptor) -> String {
         FormType::EnumSelect => "\"<enum>\"".to_string(),
         FormType::StringList => "[]".to_string(),
         FormType::KeyValueMap => "{ EXAMPLE_KEY = \"value\" }".to_string(),
+        // `FormType` is `#[non_exhaustive]`; a new variant should land
+        // here with an explicit placeholder rather than silently emitting
+        // a generic `<value>` token.
+        _ => format!("\"<{}>\"", f.form_type.as_str()),
     }
 }
 

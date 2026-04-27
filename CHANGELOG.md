@@ -369,6 +369,49 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+**Schema metadata (pitboss-schema + pitboss-schema-derive audit follow-ups):**
+- `pitboss_schema::FormType` — marked `#[non_exhaustive]`, derives
+  `Hash`, `PartialOrd`, `Ord`, and `serde::Serialize` (snake_case names
+  matching `as_str()`). Downstream crates can now key `HashMap`s on
+  `FormType`, sort descriptor lists, and JSON-export descriptors directly.
+  Existing exhaustive `match` arms in `pitboss-cli::manifest::map_doc` /
+  `example_doc` gained explicit `_ =>` fallbacks. (#158)
+- `pitboss_schema::FormType::try_from_str` (new) — strict parser
+  returning `Option<Self>` for non-macro callers; the existing
+  `from_str` keeps its silent fall-back-to-`Text` behaviour for the
+  derive macro's compile-time-validated path. (#158)
+- `pitboss_schema::FieldDescriptor` / `SchemaSection` — derive
+  `serde::Serialize`. n8n form exporters and schema-doc tooling can
+  now emit descriptors directly instead of reconstructing the wire
+  shape. Module-level docs gained an explicit "Generated
+  `field_metadata()` method" section so `cargo doc` users see what
+  the macro emits without digging into `pitboss-schema-derive`. (#158)
+- `pitboss_schema_derive::field_has_serde_default` — re-implemented on
+  top of `parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)`
+  rather than a raw `TokenTree` walk. The previous walker matched any
+  `Ident` named `default` anywhere in the attribute, which would
+  misclassify a sibling directive whose path or value contained the
+  word. The fix only counts `default` when it is the sole segment of a
+  top-level meta path. (#159)
+- `pitboss_schema_derive` — `#[field(...)]` macro now rejects
+  duplicate keys (`label`, `help`, `form_type`, `enum_values`,
+  `required`, `skip`) with a hard compile error instead of silently
+  using the last value. (#159)
+- `pitboss_schema_derive` — generated descriptor entries reference
+  the `FormType` variant directly (`::pitboss_schema::FormType::Path`)
+  instead of going through a runtime `FormType::from_str("path")`
+  lookup. Drift between the macro's known-form-type table and the
+  enum is now a compile error rather than a silent runtime fallback
+  to `Text`. The `KNOWN_FORM_TYPES` table is the single source of
+  truth for both validation and variant mapping. (#159)
+- `pitboss_schema_derive` — generated `field_metadata()` carries
+  `#[allow(dead_code)]` so feature-gated reflection paths in
+  consumer crates don't trip dead-code warnings. (#159)
+- `pitboss_schema_derive` — struct-level errors (non-named-fields,
+  non-struct targets) now use `Span::call_site()` so the diagnostic
+  points at the `#[derive(FieldMetadata)]` invocation rather than
+  the type identifier. (#159)
+
 **CLI (active-run liveness + audit follow-ups):**
 - `runs::resolve_socket_path` — fallback path no longer joins `run_id` a
   second time. The runs-discovery caller already passes the per-run

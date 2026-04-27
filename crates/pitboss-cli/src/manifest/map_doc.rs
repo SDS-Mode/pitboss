@@ -115,6 +115,9 @@ fn format_type_cell(f: &FieldDescriptor) -> String {
         FormType::EnumSelect => "enum".to_string(),
         FormType::StringList => "string list".to_string(),
         FormType::KeyValueMap => "key-value map".to_string(),
+        // FormType is `#[non_exhaustive]` so a future variant added in
+        // `pitboss-schema` doesn't silently break this generator.
+        _ => f.form_type.as_str().to_string(),
     };
     if !f.enum_values.is_empty() {
         let opts = f
