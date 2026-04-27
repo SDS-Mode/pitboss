@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
 
-use rmcp::model::{CallToolRequestParam, CallToolResult};
+use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::ServiceExt;
 
@@ -121,10 +121,12 @@ impl FakeMcpClient {
             }
         }
 
-        let param = CallToolRequestParam {
-            name: name.to_owned().into(),
-            arguments,
-        };
+        // rmcp 1.x marked `CallToolRequestParams` `#[non_exhaustive]` so
+        // direct struct-literal construction is no longer allowed from
+        // outside the crate. Use the public constructor + post-construction
+        // assignment, which still works for non_exhaustive structs.
+        let mut param = CallToolRequestParams::new(name.to_owned());
+        param.arguments = arguments;
         let result: CallToolResult = self
             .inner
             .call_tool(param)

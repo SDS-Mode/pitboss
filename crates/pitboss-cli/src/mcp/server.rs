@@ -326,7 +326,7 @@ impl PitbossHandler {
     ///   rejected by per-tool handlers that require it.
     async fn authenticate_and_rebind(
         &self,
-        request: &mut rmcp::model::CallToolRequestParam,
+        request: &mut rmcp::model::CallToolRequestParams,
     ) -> Result<(), ErrorData> {
         // Reach into params.arguments._meta. If the caller didn't supply
         // arguments at all, there's nothing to authenticate — let the
@@ -976,20 +976,16 @@ impl PitbossHandler {
 
 impl ServerHandler for PitbossHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "pitboss".into(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").into(),
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
-                "Pitboss MCP server: coordinate worker Hobbits via six structured tools.".into(),
-            ),
-            ..Default::default()
-        }
+        // rmcp 1.x marked `ServerInfo` and `Implementation` `#[non_exhaustive]`;
+        // even `..Default::default()` is rejected for non_exhaustive structs
+        // outside their crate. Use the bare Default::default() + field
+        // assignment instead.
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = Implementation::new("pitboss", env!("CARGO_PKG_VERSION"));
+        info.instructions =
+            Some("Pitboss MCP server: coordinate worker Hobbits via six structured tools.".into());
+        info
     }
 
     /// Delegate all tool calls to the rmcp tool router.
@@ -1004,7 +1000,7 @@ impl ServerHandler for PitbossHandler {
     ///   - Filter `list_tools` based on manifest capabilities (below).
     async fn call_tool(
         &self,
-        mut request: rmcp::model::CallToolRequestParam,
+        mut request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         // Phase 2 (#145): authenticate the call against the token table
@@ -1025,7 +1021,7 @@ impl ServerHandler for PitbossHandler {
     /// - `permission_prompt`: hidden unless `permission_routing = "path_b"` (v0.8)
     async fn list_tools(
         &self,
-        _request: Option<rmcp::model::PaginatedRequestParam>,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         use crate::dispatch::depth;
