@@ -962,6 +962,76 @@ impl SessionStore for SqliteStore {
         .await
         .map_err(|e| StoreError::Incomplete(format!("join: {e}")))?
     }
+
+    /// Enumerate runs as `RunMeta` records. Single `SELECT` against
+    /// `runs` ordered by `started_at DESC` — never touches
+    /// `task_records`, so the cost is bounded by run-count regardless
+    /// of how big the per-run task lists are. (#149 L8)
+    async fn iter_runs(&self) -> Result<Vec<RunMeta>, StoreError> {
+        let conn = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            iter_runs_blocking(&guard)
+        })
+        .await
+        .map_err(|e| StoreError::Incomplete(format!("join: {e}")))?
+    }
+}
+
+/// Synchronous worker for `SqliteStore::iter_runs` — runs under
+/// `spawn_blocking` since rusqlite is sync. Skips rows that fail to
+/// parse (timestamp, `Uuid`, `env_json`) rather than aborting the
+/// whole iteration: an operational console listing 200 runs shouldn't
+/// 500 because one row has a malformed `env_json` blob.
+fn iter_runs_blocking(guard: &rusqlite::Connection) -> Result<Vec<RunMeta>, StoreError> {
+    let mut stmt = guard
+        .prepare(
+            "SELECT run_id, manifest_path, pitboss_version, claude_version, \
+                    started_at, env_json \
+             FROM runs ORDER BY started_at DESC",
+        )
+        .map_err(|e| StoreError::from_rusqlite(&e))?;
+    let mapped = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|e| StoreError::from_rusqlite(&e))?;
+    let mut metas: Vec<RunMeta> = Vec::new();
+    for raw in mapped {
+        let Ok((run_id_s, manifest_path, pitboss_version, claude_version, started_at, env_json)) =
+            raw
+        else {
+            continue;
+        };
+        let Ok(run_id) = Uuid::parse_str(&run_id_s) else {
+            continue;
+        };
+        let Ok(started_at) = parse_ts(&started_at) else {
+            continue;
+        };
+        let env = match env_json.as_deref() {
+            Some(s) => serde_json::from_str(s).unwrap_or_default(),
+            None => std::collections::HashMap::new(),
+        };
+        metas.push(RunMeta {
+            run_id,
+            manifest_path: PathBuf::from(manifest_path),
+            pitboss_version,
+            claude_version,
+            started_at,
+            env,
+        });
+    }
+    Ok(metas)
 }
 
 #[cfg(test)]
@@ -1557,5 +1627,75 @@ mod sqlite_tests {
             MIGRATIONS.len(),
             "all migrations back-filled on first open"
         );
+    }
+    /// #149 L8: an empty `runs` table yields an empty inventory.
+    #[tokio::test]
+    async fn iter_runs_empty_db_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let metas = store.iter_runs().await.unwrap();
+        assert!(metas.is_empty());
+    }
+
+    /// #149 L8: `SqliteStore` returns runs newest-first by `started_at`.
+    /// Three runs initialised with deliberately-skewed timestamps so
+    /// the ordering check is independent of insertion order.
+    #[tokio::test]
+    async fn iter_runs_orders_newest_first() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+
+        let mid_id = Uuid::now_v7();
+        let oldest_id = Uuid::now_v7();
+        let newest_id = Uuid::now_v7();
+        let now = Utc::now();
+
+        let mut m_oldest = meta(oldest_id, dir.path());
+        m_oldest.started_at = now - chrono::Duration::hours(2);
+        let mut m_mid = meta(mid_id, dir.path());
+        m_mid.started_at = now - chrono::Duration::minutes(30);
+        let mut m_newest = meta(newest_id, dir.path());
+        m_newest.started_at = now;
+
+        // Insertion order intentionally does not match started_at.
+        store.init_run(&m_mid).await.unwrap();
+        store.init_run(&m_oldest).await.unwrap();
+        store.init_run(&m_newest).await.unwrap();
+
+        let metas = store.iter_runs().await.unwrap();
+        let ids: Vec<Uuid> = metas.iter().map(|m| m.run_id).collect();
+        assert_eq!(
+            ids,
+            vec![newest_id, mid_id, oldest_id],
+            "iter_runs sorts newest-first by started_at"
+        );
+    }
+
+    /// `iter_runs` does not touch the `task_records` table — verified
+    /// by inserting a run with no tasks and checking the metadata
+    /// round-trip while task counts stay at zero. The audit win
+    /// (avoid materialising task lists during enumeration) lives or
+    /// dies on this not pulling in tasks.
+    #[tokio::test]
+    async fn iter_runs_returns_metadata_only() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let run_id = Uuid::now_v7();
+        let mut m = meta(run_id, dir.path());
+        m.env.insert("KEY".into(), "VALUE".into());
+        store.init_run(&m).await.unwrap();
+        // Append a task — iter_runs should still return the meta
+        // without ever reading task_records.
+        store
+            .append_record(run_id, &rec("a", TaskStatus::Success))
+            .await
+            .unwrap();
+
+        let metas = store.iter_runs().await.unwrap();
+        assert_eq!(metas.len(), 1);
+        let got = &metas[0];
+        assert_eq!(got.run_id, run_id);
+        assert_eq!(got.pitboss_version, "0.1.0");
+        assert_eq!(got.env.get("KEY").map(String::as_str), Some("VALUE"));
     }
 }
