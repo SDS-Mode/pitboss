@@ -20,6 +20,8 @@ pub struct SessionHandle {
     stderr_log_path: Option<PathBuf>,
     session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
     pid_slot: Option<Arc<std::sync::atomic::AtomicU32>>,
+    terminate_grace: Duration,
+    stream_drain_timeout: Duration,
 }
 
 impl SessionHandle {
@@ -36,6 +38,8 @@ impl SessionHandle {
             stderr_log_path: None,
             session_id_tx: None,
             pid_slot: None,
+            terminate_grace: super::TERMINATE_GRACE,
+            stream_drain_timeout: super::DEFAULT_STREAM_DRAIN_TIMEOUT,
         }
     }
 
@@ -70,6 +74,31 @@ impl SessionHandle {
         self
     }
 
+    /// Override the SIGTERM-to-SIGKILL grace window. The default is
+    /// `super::TERMINATE_GRACE` (10 s). A non-zero value gives the
+    /// child a chance to flush logs and shutdown cleanly before the
+    /// kernel-enforced kill; zero means kill immediately.
+    ///
+    /// Tests use this to drive the cancel path quickly without
+    /// monkey-patching the global constant.
+    #[must_use]
+    pub fn with_terminate_grace(mut self, d: Duration) -> Self {
+        self.terminate_grace = d;
+        self
+    }
+
+    /// Override the post-exit stdout/stderr drain timeout. The default
+    /// is 30 s. After the child exits, `run_to_completion` waits up to
+    /// this long for the stream-reader task to consume any tail bytes
+    /// the kernel still has buffered. A non-zero value avoids losing
+    /// the final assistant message on slow stdout flushes; zero means
+    /// drop the tail immediately.
+    #[must_use]
+    pub fn with_stream_drain_timeout(mut self, d: Duration) -> Self {
+        self.stream_drain_timeout = d;
+        self
+    }
+
     /// # Panics
     ///
     /// Panics if the spawner does not attach stdout to the child process. This
@@ -77,7 +106,8 @@ impl SessionHandle {
     /// stdout.
     #[allow(clippy::too_many_lines)]
     pub async fn run_to_completion(self, cancel: CancelToken, timeout: Duration) -> SessionOutcome {
-        const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+        let stream_drain_timeout = self.stream_drain_timeout;
+        let terminate_grace = self.terminate_grace;
         let _ = self.task_id; // kept for future logging
         let started_at = Utc::now();
 
@@ -190,13 +220,14 @@ impl SessionHandle {
             }
         };
 
-        // If we need to stop the child, send SIGTERM and wait up to TERMINATE_GRACE.
-        // After grace, send SIGKILL. This wait also serves as the SIGTERM → exit window.
+        // If we need to stop the child, send SIGTERM and wait up to the
+        // builder-configurable terminate grace. After grace, send SIGKILL.
+        // This wait also serves as the SIGTERM → exit window.
         let exit_status = match end_reason {
             EndReason::Exited(s) => s,
             EndReason::Terminated | EndReason::TimedOut => {
                 let _ = child.terminate();
-                match tokio::time::timeout(super::TERMINATE_GRACE, child.wait()).await {
+                match tokio::time::timeout(terminate_grace, child.wait()).await {
                     Ok(Ok(s)) => Some(s),
                     Ok(Err(_)) => None,
                     Err(_) => {
@@ -229,18 +260,18 @@ impl SessionHandle {
         // session id) and misclassify the task as `Failed { "no result
         // event" }`. A multi-second ceiling is kept as a safety net so a
         // hung log writer can't wedge the dispatcher indefinitely.
-        if tokio::time::timeout(STREAM_DRAIN_TIMEOUT, stream_task)
+        if tokio::time::timeout(stream_drain_timeout, stream_task)
             .await
             .is_err()
         {
             tracing::warn!(
                 "stream drain exceeded {}s after child exit; final Event::Result \
                  may be lost",
-                STREAM_DRAIN_TIMEOUT.as_secs()
+                stream_drain_timeout.as_secs()
             );
         }
         if let Some(t) = stderr_task {
-            let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, t).await;
+            let _ = tokio::time::timeout(stream_drain_timeout, t).await;
         }
 
         let exit_code = exit_status
