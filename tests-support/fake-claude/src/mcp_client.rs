@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rmcp::model::{CallToolRequestParam, CallToolResult};
+use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
@@ -110,10 +110,10 @@ impl McpClient {
                 anyhow::bail!("call_tool args must be a JSON object or null, got {other}");
             }
         };
-        let param = CallToolRequestParam {
-            name: name.to_owned().into(),
-            arguments,
-        };
+        // rmcp 1.x marked CallToolRequestParams `#[non_exhaustive]`; use
+        // the constructor + post-construction assignment.
+        let mut param = CallToolRequestParams::new(name.to_owned());
+        param.arguments = arguments;
         let result: CallToolResult = self
             .inner
             .call_tool(param)
