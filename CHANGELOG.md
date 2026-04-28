@@ -21,6 +21,27 @@ This project uses [Semantic Versioning](https://semver.org/).
   now assert the retained-handle path and that the returned `Worktree`
   exposes the same `path` and `name` as the input.
 
+- **`SqliteStore`: migration version table** (#149 L11). Replaced the
+  hand-ordered `migrate_*` call sequence in `SqliteStore::new` with a
+  declarative `MIGRATIONS` registry of `(version, name, apply)`
+  triples and a `run_migrations` runner that creates a
+  `schema_versions(version, name, applied_at)` table and skips any
+  version already recorded. Each migration body remains idempotent
+  (column-presence / object-existence checks before any DDL), so DBs
+  in the field that pre-date the version table back-fill all eight
+  rows on the next open with this code, without re-running a
+  successful change. Adding a migration now means appending one entry
+  to `MIGRATIONS` with the next contiguous version number — never
+  reorder or rewrite an existing entry. New tests:
+  `fresh_db_records_all_migration_versions` (every registered
+  migration is recorded); `reopen_is_idempotent_and_preserves_applied_at`
+  (re-open does not re-apply or update timestamps);
+  `legacy_db_backfills_schema_versions` (a DB with the post-migration
+  schema but no `schema_versions` table back-fills cleanly on first
+  open with the new code). Diagnostic accessor
+  `SqliteStore::current_schema_version()` exposes the highest applied
+  version.
+
 ### Fixed
 
 - **TUI: async git-diff summary on detail-view open** (#154 M3).
