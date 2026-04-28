@@ -38,13 +38,34 @@
 //!
 //! ## Composes with PR #137 lifecycle
 //!
-//! Background dispatch pairs naturally with `[lifecycle].notify` and
-//! `[lifecycle].survive_parent`: orchestrators that detach via
-//! `--background` and want completion notifications declare a webhook in
-//! the manifest, then `RunFinished` lands at the orchestrator's URL when
-//! the detached run finishes. Run-id correlation is automatic — the
-//! orchestrator stored the `run_id` it got back from the parent, and the
-//! webhook payload carries the same id.
+//! `--background` and `[lifecycle].survive_parent` are orthogonal
+//! mechanisms, not alternatives:
+//!
+//! - `--background` is *operational*: a CLI flag the operator sets at
+//!   dispatch time. It actually detaches the process via `setsid()` so
+//!   the dispatcher runs in a new session, decoupled from the parent's
+//!   controlling terminal.
+//! - `[lifecycle].survive_parent` is *declarative*: a manifest field
+//!   that advertises intent to orchestrators via the `RunDispatched`
+//!   event payload, telling them to exclude the run from any
+//!   cancel-tree-walk they perform on shutdown. It does not itself
+//!   detach the process.
+//!
+//! They can be combined: an orchestrator using `--background` with a
+//! manifest that sets `survive_parent = true` gets both — the dispatch
+//! is process-detached AND the orchestrator knows to leave it alone.
+//! Either alone is also valid: `--background` without `survive_parent`
+//! works for orchestrators that don't tree-walk; `survive_parent`
+//! without `--background` works for foreground dispatches whose parent
+//! plans to die voluntarily.
+//!
+//! Background dispatch also pairs naturally with `[lifecycle].notify`:
+//! orchestrators that detach via `--background` and want completion
+//! notifications declare a webhook in the manifest, then `RunFinished`
+//! lands at the orchestrator's URL when the detached run finishes.
+//! Run-id correlation is automatic — the orchestrator stored the
+//! `run_id` it got back from the parent, and the webhook payload
+//! carries the same id.
 //!
 //! ## Why not double-fork
 //!
@@ -100,6 +121,16 @@ pub fn run_background(manifest_path: &Path, run_dir_override: Option<PathBuf>) -
         std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())
     });
 
+    // TOCTOU window (#150 L11): if pitboss is upgraded between this
+    // `current_exe()` read and the child's exec(), the child runs the
+    // NEW binary. In practice the new binary still recognizes
+    // `--internal-run-id` (it's a stable contract) and the older
+    // version's pre-minted run_id format (UUID v7) won't change across
+    // versions, so the worst case is that the child rejects an arg we
+    // added in the meantime — a bounded, recoverable failure logged to
+    // `<run_id>.bg-stderr.log`. Not worth `open()`-then-fexecve to
+    // close because the parent process is also the one that just
+    // started; the binary on disk almost certainly matches.
     let exe = std::env::current_exe().context("locate current pitboss binary")?;
 
     let mut cmd = std::process::Command::new(&exe);
@@ -150,6 +181,16 @@ pub fn run_background(manifest_path: &Path, run_dir_override: Option<PathBuf>) -
     // Drop the Child handle without waiting. On parent exit the child is
     // reparented to PID 1 which auto-reaps it. We keep no reference so
     // the parent can exit immediately after printing the announcement.
+    //
+    // NB: this is `std::process::Child` (line 105 above), whose `Drop`
+    // is a true no-op aside from closing the child's stdio file
+    // descriptors. `tokio::process::Child` would behave differently —
+    // it has a `kill_on_drop` builder (default `false`, but the
+    // existence of the option matters) and runs reaping inside the
+    // tokio runtime's signal handler. We deliberately use the std
+    // variant here so dropping is unambiguously fire-and-forget; this
+    // path runs synchronously before the parent exits and there is no
+    // tokio runtime to coordinate with. (#150 L15)
     drop(child);
 
     let payload = json!({
