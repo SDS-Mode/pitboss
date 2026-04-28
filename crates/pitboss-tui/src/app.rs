@@ -42,6 +42,17 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     let (ctrl_events_tx, ctrl_events_rx) =
         std::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>();
 
+    // Channel for asynchronously-computed git-diff summaries (#154 M3).
+    // `enter_detail_for` spawns a worker thread that shells out to `git
+    // diff --shortstat` and posts the result here; the main loop drains
+    // the receiver each tick into `state.cached_git_diff`. Pre-fix the
+    // shell-out happened inline on the UI thread with a 10ms busy-poll
+    // loop and a 5s timeout — every detail-view open could freeze
+    // input for hundreds of ms (or up to 5s on a contended worktree).
+    let (git_diff_tx, git_diff_rx) =
+        std::sync::mpsc::channel::<(String, crate::state::GitDiffSummary)>();
+    state.git_diff_tx = Some(git_diff_tx);
+
     // Connect to the run's control socket. Extracted into a closure so the
     // same path can be used on both initial startup and when the user
     // switches runs — without a fresh client, control ops after SwitchRun
@@ -262,6 +273,14 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
         // --- Drain any queued control events (non-blocking). ---
         while let Ok(ev) = ctrl_events_rx.try_recv() {
             apply_control_event(&mut state, ev);
+        }
+
+        // --- Drain async git-diff results (non-blocking, #154 M3). ---
+        // Each entry is one detail-view's diff summary that finished on
+        // a worker thread; insert into the cache so the next render
+        // shows the diff line in the metadata pane.
+        while let Ok((task_id, summary)) = git_diff_rx.try_recv() {
+            state.cached_git_diff.insert(task_id, summary);
         }
     }
 

@@ -9,6 +9,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **TUI: async git-diff summary on detail-view open** (#154 M3).
+  `enter_detail_for` previously shelled out to `git diff --shortstat`
+  inline on the UI thread with a 10ms busy-poll loop and a 5s wall-
+  clock timeout — every detail-view open could freeze input for
+  hundreds of ms (or up to 5s on a contended `.git`). The shell-out
+  now runs on a worker thread; the result lands on a new
+  `git_diff_tx` channel and the main event loop drains it into
+  `cached_git_diff` each tick. The diff line in the metadata pane
+  appears one tick (~50 ms) after entering detail rather than
+  blocking the caller. Closes the last open #154 audit item — the
+  issue is now closeable. Pinned by two new state tests:
+  `enter_detail_for_does_not_block_on_diff` (asserts elapsed < 100 ms
+  with a worktree set) and `enter_detail_for_skips_diff_when_no_tx`
+  (asserts no shell-out on the test path with `git_diff_tx = None`).
+
 - **Hierarchical drain: join workers with timeout instead of fixed
   sleep** (#150 M6+M7). Pre-fix, the dispatcher's shutdown path:
   (1) terminated root-layer worker tokens directly, (2) called

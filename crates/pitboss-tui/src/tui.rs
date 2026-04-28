@@ -2306,6 +2306,7 @@ mod tests {
             control_client: None,
             control_connected: false,
             cached_git_diff: std::collections::HashMap::new(),
+            git_diff_tx: None,
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
