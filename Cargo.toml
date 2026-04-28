@@ -50,7 +50,7 @@ tokio-util         = { version = "0.7", features = ["rt"] }
 tokio-stream       = { version = "0.1", features = ["sync"] }
 tui-textarea       = "0.7"
 reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-lru                = "0.12"
+lru                = "0.16"
 wiremock           = "0.6"
 tracing-test       = "0.2"
 glob               = "0.3"
