@@ -128,6 +128,47 @@ aggregator + a new `lib/components/charts/gantt.svelte` shared
 primitive. Estimated: one PR for the Gantt extract, one for the
 compare route.
 
+### Non-Anthropic model support (v1.0 destination)
+
+Today pitboss assumes the `claude` CLI as the worker subprocess and
+prices spend against Anthropic model rates. v1.0 should target
+model-agnostic dispatch: the same manifest, KV, approval, and
+budget flow with workers backed by other providers (OpenAI, Google,
+local OSS endpoints, etc.).
+
+Touches at minimum:
+
+- **Subprocess adapter layer.** `claude` is hardcoded as the worker
+  binary today; v1.0 needs a provider-tagged spawner trait so each
+  manifest task / lead / sub-lead can declare its provider, and the
+  dispatcher selects the right adapter (CLI invocation, SDK call,
+  or HTTP shim) without leaking provider specifics into the rest
+  of the pipeline.
+- **Tool-use translation.** Anthropic, OpenAI, and Gemini have
+  similar-but-not-identical `tools` semantics. Either translate at
+  the dispatcher boundary or scope the tool surface to the
+  intersection — the latter is simpler but forecloses
+  provider-specific tool features.
+- **Pricing registry.** `pitboss-core::pricing` extends to a
+  provider-tagged registry; provider id flows through `TaskRecord`
+  so `summary.json` and the web console's per-run / cross-run
+  aggregators can break spend down per provider.
+- **MCP server.** Anthropic-only today. Mixed runs either gate
+  `pitboss mcp-bridge` to Anthropic workers or ship an OpenAI-style
+  function-calling shim. Per-actor MCP scoping (see Safety section)
+  is the natural seam for this gating.
+- **Failure-classification.** Rate-limit / auth-failure detection
+  in `pitboss-core::failure_classify` is currently keyed on
+  Anthropic error shapes. Each adapter contributes its own
+  classifiers feeding the same `ApiHealth` gate.
+
+**Status:** v1.0 destination — explicitly out of scope for v0.x.
+Flagged here so v0.x design choices weigh whether they foreclose
+the option (e.g. new manifest fields default to Anthropic-shape
+semantics; new MCP tools assume Anthropic stream-json events).
+No concrete blocking demand today; driven by the strategic need
+to keep pitboss useful as the model market diversifies.
+
 ---
 
 ## Ops / infra polish
