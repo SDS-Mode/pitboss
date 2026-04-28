@@ -44,6 +44,8 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use anyhow::{bail, Context, Result};
+
 /// How long a run can sit without a `summary.jsonl` write before the
 /// classifier downgrades it from `Running` (interrupted) to `Stale`.
 /// Pairs with the future `pitboss prune` `--older-than` default.
@@ -129,6 +131,62 @@ pub fn runs_base_dir() -> PathBuf {
         (Some(c), _) => c,
         (None, Some(l)) => l,
         (None, None) => PathBuf::from("./pitboss-runs"),
+    }
+}
+
+/// Resolve a run id (full UUID, exact directory name, or unique prefix) to
+/// an absolute run directory under `base`. Single source of truth for
+/// `pitboss attach`/`status`/`resume`/`diff`; previously every subcommand
+/// inlined a near-identical copy and drifted (exact-match-first only landed
+/// in `diff`, the multi-match diagnostic was missing in some places, etc.).
+///
+/// Resolution order:
+///
+/// 1. **Exact directory match** — `<base>/<id_or_prefix>` exists as a dir.
+///    Avoids spurious "N runs match" errors when one full UUID is itself a
+///    prefix of another.
+/// 2. **Prefix scan** — every directory whose name `starts_with(prefix)`
+///    is collected; success when exactly one matches.
+///
+/// Errors:
+///
+/// * empty prefix → `run id prefix must not be empty`
+/// * unreadable `base` → contextual IO error
+/// * 0 matches → `no run found matching prefix '<p>' in <base>`
+/// * ≥2 matches → `<n> runs match prefix '<p>' — be more specific`
+pub fn resolve_run_dir_by_prefix(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
+    if id_or_prefix.is_empty() {
+        bail!("run id prefix must not be empty");
+    }
+
+    let exact = base.join(id_or_prefix);
+    if exact.is_dir() {
+        return Ok(exact);
+    }
+
+    let entries = std::fs::read_dir(base)
+        .with_context(|| format!("cannot read runs directory {}", base.display()))?;
+
+    let mut matches: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if entry.path().is_dir() && name.starts_with(id_or_prefix) {
+            matches.push(entry.path());
+        }
+    }
+
+    match matches.len() {
+        0 => bail!(
+            "no run found matching prefix '{}' in {}",
+            id_or_prefix,
+            base.display()
+        ),
+        1 => Ok(matches.remove(0)),
+        n => bail!(
+            "{n} runs match prefix '{}' — be more specific",
+            id_or_prefix
+        ),
     }
 }
 
@@ -564,6 +622,57 @@ mod tests {
             RunStatus::Aborted,
             "corrupt summary.json must classify as Aborted, not Running"
         );
+    }
+
+    // ── resolve_run_dir_by_prefix: shared resolver covers attach/status/resume/diff ──
+
+    #[test]
+    fn resolve_run_dir_by_prefix_finds_unique_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("019da1bb-7820-7d73-92ea-146e21f77dd8");
+        fs::create_dir_all(&target).unwrap();
+        let got = resolve_run_dir_by_prefix(tmp.path(), "019da1bb").unwrap();
+        assert_eq!(got, target);
+    }
+
+    #[test]
+    fn resolve_run_dir_by_prefix_prefers_exact_match_over_prefix() {
+        let tmp = TempDir::new().unwrap();
+        // Two dirs where one's full id is a prefix of the other's name.
+        let exact = tmp.path().join("019da1bb");
+        let longer = tmp.path().join("019da1bb-extra");
+        fs::create_dir_all(&exact).unwrap();
+        fs::create_dir_all(&longer).unwrap();
+        let got = resolve_run_dir_by_prefix(tmp.path(), "019da1bb").unwrap();
+        assert_eq!(
+            got, exact,
+            "exact-match-first must beat the prefix scan even when both would match"
+        );
+    }
+
+    #[test]
+    fn resolve_run_dir_by_prefix_errors_on_no_match() {
+        let tmp = TempDir::new().unwrap();
+        let err = resolve_run_dir_by_prefix(tmp.path(), "deadbeef").unwrap_err();
+        assert!(err.to_string().contains("no run found"));
+    }
+
+    #[test]
+    fn resolve_run_dir_by_prefix_errors_on_ambiguous_prefix() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("019da1bb-aaa")).unwrap();
+        fs::create_dir_all(tmp.path().join("019da1bb-bbb")).unwrap();
+        let err = resolve_run_dir_by_prefix(tmp.path(), "019da1bb").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2 runs match"), "got: {msg}");
+        assert!(msg.contains("be more specific"));
+    }
+
+    #[test]
+    fn resolve_run_dir_by_prefix_rejects_empty() {
+        let tmp = TempDir::new().unwrap();
+        let err = resolve_run_dir_by_prefix(tmp.path(), "").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
     }
 
     #[test]
