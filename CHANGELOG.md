@@ -9,6 +9,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`cancel_actor_with_reason` O(N) → O(1) sub-tree-worker routing**
+  (#150). The cancel-with-reason path used to walk every sub-tree's
+  `worker_cancels` map under a held `state.subleads` read lock to
+  find a worker's owning sub-lead — O(N) per cancel call, blocking
+  new sublead registration. Now routes through
+  `state.worker_layer_index` (already populated by
+  `handle_spawn_worker`, mirrors the existing routing in
+  `resolve_layer_for_caller` for KV ops). Same race window as before
+  on the index-set / worker_cancels-set ordering. Fixture-only
+  consequence: tests in `sublead_flows.rs` that bypass
+  `handle_spawn_worker` and inject workers directly into
+  `sub.worker_cancels` now also need to populate
+  `state.worker_layer_index` to match the production invariant —
+  three test cases updated to do so.
+
 - **Consolidate dispatch entry-point boilerplate** (#150 M9). Both
   `runner::execute` (flat) and `hierarchical::run_hierarchical`
   inlined ~50 lines each of identical run-id minting, manifest
