@@ -7,6 +7,22 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`SessionStore::iter_runs`** (#149 L8). New trait method that
+  enumerates runs as `RunMeta` records, newest-first by `started_at`,
+  without ever materialising per-run task lists. Pre-fix the trait
+  exposed only `load_run`, so the only path to a run inventory was to
+  walk the runs directory out-of-band (via
+  `pitboss_cli::runs::collect_run_entries`) or call `load_run` per
+  run-id and pay for the full task-list parse on every entry.
+  Implementations land in both backends: `JsonFileStore` walks the
+  root and parses `meta.json` per subdir (skipping unreadable / missing
+  / malformed entries silently); `SqliteStore` issues a single
+  `SELECT … FROM runs ORDER BY started_at DESC` and never touches
+  `task_records`. Tests cover empty inventory, newest-first ordering,
+  and (for `JsonFileStore`) skipping subdirs without `meta.json`.
+
 ### Changed
 
 - **`WorktreeManager::cleanup` now returns `Option<Worktree>`** (#149 L9).

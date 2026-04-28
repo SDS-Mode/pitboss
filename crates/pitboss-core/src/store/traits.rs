@@ -26,4 +26,19 @@ pub trait SessionStore: Send + Sync + 'static {
     async fn append_record(&self, run_id: Uuid, record: &TaskRecord) -> Result<(), StoreError>;
     async fn finalize_run(&self, summary: &RunSummary) -> Result<(), StoreError>;
     async fn load_run(&self, run_id: Uuid) -> Result<RunSummary, StoreError>;
+
+    /// Enumerate runs as `RunMeta` records, newest-first by
+    /// `started_at`. Unlike calling [`load_run`] per run, this never
+    /// materialises a per-run task list — the caller pays for the
+    /// metadata only. Suitable for run-list dashboards, prune-sweep
+    /// scans, and similar "give me every run id" workflows that
+    /// previously had to walk the filesystem out-of-band. (#149 L8)
+    ///
+    /// Skipped entries (unreadable subdir, malformed `meta.json`,
+    /// row missing required column) are silently dropped rather
+    /// than aborting the whole iteration — operational consoles
+    /// expect partial inventories during a live run.
+    ///
+    /// [`load_run`]: SessionStore::load_run
+    async fn iter_runs(&self) -> Result<Vec<RunMeta>, StoreError>;
 }
