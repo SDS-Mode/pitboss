@@ -132,7 +132,19 @@ impl ControlBridge {
             return Ok(entry.clone());
         }
 
-        let socket_path = self.runs_dir.join(run_id).join("control.sock");
+        // Mirror pitboss_cli::runs::resolve_socket_path: prefer the
+        // XDG_RUNTIME_DIR socket the dispatcher actually publishes to,
+        // and fall back to the in-run-dir path for environments without
+        // an XDG runtime dir (the CLI's `pub`-able resolver should
+        // ultimately replace this duplication — tracked separately).
+        let socket_path = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(|x| {
+                std::path::PathBuf::from(x)
+                    .join("pitboss")
+                    .join(format!("{run_id}.control.sock"))
+            })
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| self.runs_dir.join(run_id).join("control.sock"));
         if !socket_path.exists() {
             return Err(BridgeError::NotFound);
         }

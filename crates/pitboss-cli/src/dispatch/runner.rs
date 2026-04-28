@@ -671,11 +671,20 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__run_lease_release",
 ];
 
-/// Sub-lead tools: all root-lead tools EXCEPT `spawn_sublead` and
-/// `wait_for_sublead`. Depth-2 cap is baked in; sub-leads cannot spawn
-/// further subleads. The actor_role=sublead marker in the MCP bridge invocation
-/// is enforced server-side via list_tools gating, but the CLI allowlist
-/// provides defense-in-depth.
+/// Sub-lead tools: all root-lead tools EXCEPT root-only entries listed in
+/// [`crate::dispatch::depth::ROOT_ONLY_TOOLS`] (currently `spawn_sublead`).
+/// Depth-2 cap is baked in; sub-leads cannot spawn further subleads.
+///
+/// The actor_role=sublead marker in the MCP bridge invocation is enforced
+/// server-side via `list_tools` gating + the per-handler caller check —
+/// both routed through `dispatch::depth`. This CLI allowlist provides
+/// defense-in-depth at the subprocess `--allowedTools` flag level.
+///
+/// **If you add a new root-only tool**, append its bare name to
+/// [`crate::dispatch::depth::ROOT_ONLY_TOOLS`] and ensure it is NOT in this
+/// list. The regression test
+/// `dispatch::depth::tests::sublead_allowlist_excludes_all_root_only_tools`
+/// keeps the two in sync.
 pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
     // Worker orchestration tools (v0.3+).
     "mcp__pitboss__spawn_worker",
