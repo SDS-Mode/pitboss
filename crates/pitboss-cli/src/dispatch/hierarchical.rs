@@ -255,15 +255,14 @@ pub async fn run_hierarchical(
     //     `send_synthetic_reprompt` will find this channel when a worker is
     //     killed with reason and the root layer is the target. The receiving
     //     end is consumed by the kill+resume loop below.
-    let (reprompt_tx, mut reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (reprompt_tx, reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     state.root.set_reprompt_tx(reprompt_tx).await;
 
-    // 3c. Kill+resume loop — identical in structure to spawn_sublead_session.
-    //
-    //     When no reprompts are queued the loop runs exactly once, producing
-    //     identical behaviour to the v0.5 single-shot. The extra state
-    //     (last_session_id, overall_started_at, total_token_usage) adds no
-    //     overhead on the common path.
+    // 3c. Kill+resume loop — shared with spawn_sublead_session via
+    //     `crate::dispatch::kill_resume::run_kill_resume_loop`. The closure
+    //     captures the lead's env / cwd / spawn-args resolution because root
+    //     lead and sub-lead use different builders (`lead_resume_spawn_args`
+    //     vs. `sublead_spawn_args`).
     let mut lead_env = lead.env.clone();
     crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
     let initial_cmd = pitboss_core::process::SpawnCmd {
@@ -273,118 +272,41 @@ pub async fn run_hierarchical(
         env: lead_env,
     };
 
-    state.root.workers.write().await.insert(
-        lead.id.clone(),
-        crate::dispatch::state::WorkerState::Running {
-            started_at: Utc::now(),
-            session_id: None,
+    let kr_result = crate::dispatch::kill_resume::run_kill_resume_loop(
+        state.root.clone(),
+        crate::dispatch::kill_resume::KillResumeArgs {
+            actor_id: lead.id.clone(),
+            initial_cmd,
+            timeout: std::time::Duration::from_secs(lead.timeout_secs),
+            log_path: lead_log_path.clone(),
+            stderr_path: lead_stderr_path.clone(),
         },
-    );
-
-    let overall_started_at = Utc::now();
-    let mut last_session_id: Option<String> = None;
-    let mut total_token_usage = pitboss_core::parser::TokenUsage::default();
-    let mut reprompt_count: u32 = 0;
-    let mut current_cmd = initial_cmd;
-
-    let final_outcome = loop {
-        // Per-iteration session_id capture channel.
-        let (session_id_tx, mut session_id_rx) = tokio::sync::mpsc::channel::<String>(1);
-
-        // Per-iteration cancel token: forwards termination from the run-level
-        // cancel token. This lets operator Ctrl-C still reach the subprocess
-        // while still allowing the reprompt path to kill+restart without
-        // terminating the whole run.
-        let proc_cancel = pitboss_core::session::CancelToken::new();
-        {
-            let run_cancel = cancel.clone();
-            let proc = proc_cancel.clone();
-            tokio::spawn(async move {
-                run_cancel.await_terminate().await;
-                proc.terminate();
-            });
-        }
-
-        let outcome = pitboss_core::session::SessionHandle::new(
-            lead.id.clone(),
-            spawner.clone(),
-            current_cmd.clone(),
-        )
-        .with_log_path(lead_log_path.clone())
-        .with_stderr_log_path(lead_stderr_path.clone())
-        .with_session_id_tx(session_id_tx)
-        .run_to_completion(
-            proc_cancel,
-            std::time::Duration::from_secs(lead.timeout_secs),
-        )
-        .await;
-
-        // Capture session_id from either the mid-run channel or the final result.
-        if let Ok(sid) = session_id_rx.try_recv() {
-            state.root.workers.write().await.insert(
-                lead.id.clone(),
-                crate::dispatch::state::WorkerState::Running {
-                    started_at: overall_started_at,
-                    session_id: Some(sid.clone()),
-                },
+        reprompt_rx,
+        |sid, new_prompt| {
+            let mut resume_env = lead.env.clone();
+            crate::dispatch::runner::apply_pitboss_env_defaults(
+                &mut resume_env,
+                lead.permission_routing,
             );
-            last_session_id = Some(sid);
-        } else if let Some(ref sid) = outcome.claude_session_id {
-            last_session_id = Some(sid.clone());
-        }
-
-        // Accumulate token usage across iterations.
-        total_token_usage.add(&outcome.token_usage);
-
-        // Check for a pending reprompt.
-        let pending_reprompt = reprompt_rx.try_recv().ok();
-        if let Some(new_prompt) = pending_reprompt {
-            if let Some(ref sid) = last_session_id {
-                tracing::info!(
-                    lead_id = %lead.id,
-                    session_id = %sid,
-                    "root-lead kill+resume: new synthetic reprompt received"
-                );
-                reprompt_count += 1;
-                let resume_args = crate::dispatch::runner::lead_resume_spawn_args(
+            pitboss_core::process::SpawnCmd {
+                program: claude_binary.clone(),
+                args: crate::dispatch::runner::lead_resume_spawn_args(
                     lead,
                     &mcp_config_path,
                     sid,
-                    &new_prompt,
-                );
-                let mut resume_env = lead.env.clone();
-                crate::dispatch::runner::apply_pitboss_env_defaults(
-                    &mut resume_env,
-                    lead.permission_routing,
-                );
-                current_cmd = pitboss_core::process::SpawnCmd {
-                    program: claude_binary.clone(),
-                    args: resume_args,
-                    cwd: lead_cwd.clone(),
-                    env: resume_env,
-                };
-                // Reset the workers map entry to Running (session_id TBD).
-                state.root.workers.write().await.insert(
-                    lead.id.clone(),
-                    crate::dispatch::state::WorkerState::Running {
-                        started_at: overall_started_at,
-                        session_id: None,
-                    },
-                );
-                continue;
-            } else {
-                tracing::warn!(
-                    lead_id = %lead.id,
-                    "root-lead kill+resume: reprompt arrived but no session_id captured; \
-                     treating as normal termination"
-                );
-                break outcome;
+                    new_prompt,
+                ),
+                cwd: lead_cwd.clone(),
+                env: resume_env,
             }
-        }
+        },
+    )
+    .await;
 
-        // No pending reprompt — subprocess reached terminal state normally.
-        break outcome;
-    };
+    let final_outcome = kr_result.final_outcome;
+    let overall_started_at = kr_result.overall_started_at;
+    let total_token_usage = kr_result.total_token_usage;
+    let reprompt_count = kr_result.reprompt_count;
 
     // Close the reprompt channel so further sends fail fast.
     state.root.clear_reprompt_tx().await;
