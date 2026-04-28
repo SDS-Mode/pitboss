@@ -368,7 +368,15 @@ impl AppState {
     /// picker isn't open or the click fell on empty space (run list
     /// shorter than the picker area).
     pub fn picker_row_at(&self, col: u16, row: u16) -> Option<usize> {
-        let rects = self.picker_hit_rects.lock().ok()?;
+        // #154 L5: recover from a poisoned Mutex instead of `lock().ok()?`
+        // which silently disabled all picker mouse hit-testing for the
+        // rest of the session. The hit-rect cache is rebuilt every frame
+        // by the renderer, so a poisoned mutex's contents are effectively
+        // discarded on the next paint anyway — recovery is safe.
+        let rects = self
+            .picker_hit_rects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         rects.iter().find_map(|(idx, r)| {
             if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
                 Some(*idx)
@@ -383,7 +391,10 @@ impl AppState {
     /// Returns `None` if no tile matches (click outside the grid) or the
     /// cache is empty (no render has run yet).
     pub fn tile_at(&self, col: u16, row: u16) -> Option<usize> {
-        let rects = self.tile_hit_rects.lock().ok()?;
+        let rects = self
+            .tile_hit_rects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         rects.iter().find_map(|(idx, r)| {
             if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
                 Some(*idx)
