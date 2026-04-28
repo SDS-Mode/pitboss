@@ -426,22 +426,86 @@ pub async fn run_hierarchical(
     // and our internal cleanup termination signal to drain workers.
     let was_interrupted = cancel.is_draining() || cancel.is_terminated();
 
-    // Any in-flight workers get cancelled. `cancel` is the RUN-level token
-    // (observed only by the lead's SessionHandle), so terminating it alone
-    // leaves workers orphaned — their sessions use per-task tokens in
-    // `state.root.worker_cancels`. Cascade to every live worker so their
-    // SessionHandles SIGTERM the child claude processes too. Without this
-    // cascade, `ps` showed live claude workers after the run "finished"
-    // and the summary marked them Cancelled with no actual termination.
+    // Drain in-flight workers across all layers (#150 M6+M7).
+    //
+    // Pre-fix this block was three lines: terminate root workers, terminate
+    // the run cancel, sleep TERMINATE_GRACE. Two problems:
+    //
+    // 1. (M7) The run-cancel terminate fans out to sub-trees via the
+    //    fire-and-forget cascade watchers (`install_cascade_cancel_watcher`,
+    //    `install_sublead_cancel_watcher`). Their `tokio::spawn` is not
+    //    awaited; under load, scheduling latency can extend past the
+    //    sleep deadline and leave sub-tree workers un-signaled while we
+    //    classify them.
+    // 2. (M6) The fixed `tokio::time::sleep(TERMINATE_GRACE)` ran the
+    //    whole window even when workers drained in milliseconds, AND ran
+    //    out at the same instant as each `SessionHandle`'s own
+    //    SIGTERM-grace timeout — so a worker mid-SIGKILL escalation
+    //    could be classified Cancelled while still alive on the host.
+    //
+    // The new shape:
+    //
+    // - **Subscribe first.** `done_rx` is taken before we snapshot or
+    //   trip cancels. Workers send their task_id to `state.root.done_tx`
+    //   on every exit (root layer or sub-tree, see `mcp/tools.rs:704`).
+    //   Subscribing first guarantees we don't miss a fast-completing
+    //   worker that exits between the snapshot and the wait.
+    //
+    // - **Snapshot in_flight set.** Every non-Done worker across the
+    //   root layer and every sub-tree at this instant. Workers that
+    //   transition Done after the snapshot still send a done event we
+    //   simply discard (not in our set).
+    //
+    // - **Synchronous cascade.** `cancel.terminate()` plus the manual
+    //   walks through `cascade_to_subleads` / each sub-layer's
+    //   `cascade_to_workers` / root's `cascade_to_workers` propagate
+    //   the signal through the whole tree without yielding to the
+    //   spawned cascade watchers. By the time we start the wait, every
+    //   in-flight worker's CancelToken has been tripped.
+    //
+    // - **Join-with-timeout.** `await_workers_drained` consumes
+    //   `done_rx` until either every snapshot id signals or the
+    //   deadline fires. Deadline is `TERMINATE_GRACE + 2s` so each
+    //   worker's own SessionHandle SIGTERM→SIGKILL escalation has
+    //   headroom to complete before we move on; workers that don't
+    //   signal within that window are still classified Cancelled below
+    //   but those are now the cases where the underlying child was
+    //   genuinely stuck (the audit's pre-fix concern was real).
+    let mut done_rx = state.root.done_tx.subscribe();
+
+    let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
-        let cancels = state.root.worker_cancels.read().await;
-        for tok in cancels.values() {
-            tok.terminate();
+        let workers = state.root.workers.read().await;
+        for (id, w) in workers.iter() {
+            if id != &lead.id && !matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
+                in_flight.insert(id.clone());
+            }
         }
     }
+    {
+        let subleads = state.subleads.read().await;
+        for sub in subleads.values() {
+            let workers = sub.workers.read().await;
+            for (id, w) in workers.iter() {
+                if !matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
+                    in_flight.insert(id.clone());
+                }
+            }
+        }
+    }
+
     cancel.terminate();
-    // Give them up to TERMINATE_GRACE to drain.
-    tokio::time::sleep(pitboss_core::session::TERMINATE_GRACE).await;
+    state.cascade_to_subleads().await;
+    {
+        let subleads = state.subleads.read().await;
+        for sub in subleads.values() {
+            sub.cascade_to_workers().await;
+        }
+    }
+    state.root.cascade_to_workers().await;
+
+    let drain_deadline = pitboss_core::session::TERMINATE_GRACE + std::time::Duration::from_secs(2);
+    await_workers_drained(&state, in_flight, &mut done_rx, drain_deadline).await;
 
     let worker_records: Vec<pitboss_core::store::TaskRecord> = {
         let workers = state.root.workers.read().await;
@@ -568,6 +632,98 @@ pub async fn run_hierarchical(
 /// stamping every inbound tool call with the caller's identity.
 ///
 /// This avoids relying on a non-standard `transport: { type: "unix", ... }`
+/// Wait for `in_flight` worker task-ids to all signal completion via
+/// `state.root.done_tx`, or until `timeout` elapses (#150 M6).
+///
+/// `done_rx` MUST be subscribed to BEFORE the caller takes the
+/// `in_flight` snapshot and trips any cancel signals — otherwise a
+/// fast-completing worker that exits between snapshot and subscription
+/// would emit its done event into the void and we'd wait the full
+/// timeout. Caller's order: subscribe → snapshot → cancel → call this.
+///
+/// Best-effort. Returns whether all in-flight ids drained within the
+/// budget (for tracing); the caller's classification pass below still
+/// walks the workers map and marks any non-Done worker as Cancelled
+/// regardless. The timeout protects against a worker whose subprocess
+/// is genuinely stuck; in that case we accept that the operator-visible
+/// summary will list it Cancelled while the host process may still be
+/// reaped a few seconds after pitboss exits.
+async fn await_workers_drained(
+    state: &Arc<DispatchState>,
+    mut in_flight: std::collections::HashSet<String>,
+    done_rx: &mut tokio::sync::broadcast::Receiver<String>,
+    timeout: std::time::Duration,
+) -> bool {
+    if in_flight.is_empty() {
+        return true;
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !in_flight.is_empty() {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            tracing::warn!(
+                remaining = in_flight.len(),
+                "worker drain timeout: {} worker(s) did not signal done within {:?}",
+                in_flight.len(),
+                timeout,
+            );
+            return false;
+        }
+        let remaining = deadline - now;
+        match tokio::time::timeout(remaining, done_rx.recv()).await {
+            Err(_) => return false, // outer timeout
+            Ok(Ok(id)) => {
+                in_flight.remove(&id);
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                // Channel closed (shouldn't normally happen — done_tx is
+                // owned by LayerState which outlives this wait). Fall back
+                // to a poll: rescan workers map then break.
+                refresh_in_flight_from_maps(state, &mut in_flight).await;
+                break;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                // Buffer overran — rescan maps to recover the truth.
+                refresh_in_flight_from_maps(state, &mut in_flight).await;
+            }
+        }
+    }
+    in_flight.is_empty()
+}
+
+/// Walk the root workers map plus every sub-tree's workers map and
+/// remove any id that has reached `WorkerState::Done` from `in_flight`.
+/// Used as a recovery path inside `await_workers_drained` when the
+/// `done_tx` broadcast lags or closes — the workers map is the
+/// authoritative source so the wait can pick up where the channel
+/// left off without missing a transition.
+async fn refresh_in_flight_from_maps(
+    state: &Arc<DispatchState>,
+    in_flight: &mut std::collections::HashSet<String>,
+) {
+    let mut done_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let workers = state.root.workers.read().await;
+        for (id, w) in workers.iter() {
+            if matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
+                done_ids.insert(id.clone());
+            }
+        }
+    }
+    {
+        let subleads = state.subleads.read().await;
+        for sub in subleads.values() {
+            let workers = sub.workers.read().await;
+            for (id, w) in workers.iter() {
+                if matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
+                    done_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+    in_flight.retain(|id| !done_ids.contains(id));
+}
+
 /// field that claude's MCP client may not honor. The generated config uses
 /// only the documented `command` + `args` (stdio transport) shape.
 /// Build the `mcpServers` JSON object with the pitboss bridge entry plus any
@@ -756,4 +912,214 @@ pub async fn build_sublead_mcp_config(
                 .await;
     }
     Ok(mcp_config_path)
+}
+
+#[cfg(test)]
+mod await_drained_tests {
+    use super::*;
+    use crate::dispatch::state::{ApprovalPolicy, WorkerState};
+    use crate::manifest::resolve::ResolvedManifest;
+    use crate::manifest::schema::WorktreeCleanup;
+    use pitboss_core::process::TokioSpawner;
+    use pitboss_core::store::JsonFileStore;
+    use pitboss_core::worktree::CleanupPolicy;
+    use std::collections::HashSet;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn mk_state() -> (TempDir, Arc<DispatchState>) {
+        let dir = TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: None,
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+        let wt_mgr = Arc::new(pitboss_core::worktree::WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead-1".into(),
+            spawner,
+            PathBuf::from("/bin/false"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            ApprovalPolicy::AutoApprove,
+            None,
+            Arc::new(crate::shared_store::SharedStore::new()),
+        ));
+        (dir, state)
+    }
+
+    /// Empty `in_flight` set returns true immediately without waiting.
+    #[tokio::test]
+    async fn drain_returns_true_immediately_for_empty_set() {
+        let (_dir, state) = mk_state();
+        let mut rx = state.root.done_tx.subscribe();
+        let in_flight: HashSet<String> = HashSet::new();
+        let start = tokio::time::Instant::now();
+        let drained =
+            await_workers_drained(&state, in_flight, &mut rx, Duration::from_secs(5)).await;
+        assert!(drained);
+        assert!(start.elapsed() < Duration::from_millis(50));
+    }
+
+    /// All ids signaling done before deadline returns true and does NOT
+    /// run the full timeout — proves the wait is event-driven, not a
+    /// fixed sleep.
+    #[tokio::test]
+    async fn drain_returns_true_when_all_workers_signal_before_deadline() {
+        let (_dir, state) = mk_state();
+        let mut rx = state.root.done_tx.subscribe();
+        let in_flight: HashSet<String> = ["w1", "w2", "w3"].into_iter().map(String::from).collect();
+
+        // Spawn a producer that emits done events for each worker.
+        let tx = state.root.done_tx.clone();
+        tokio::spawn(async move {
+            for id in ["w1", "w2", "w3"] {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = tx.send(id.to_string());
+            }
+        });
+
+        let start = tokio::time::Instant::now();
+        let drained =
+            await_workers_drained(&state, in_flight, &mut rx, Duration::from_secs(10)).await;
+        let elapsed = start.elapsed();
+        assert!(drained, "all workers should have drained");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "wait should return promptly after the last done event, took {:?}",
+            elapsed,
+        );
+    }
+
+    /// A worker that never signals done causes the wait to time out
+    /// and return false. Pre-fix this case was a fixed
+    /// `tokio::time::sleep(TERMINATE_GRACE)` that classified the
+    /// stuck worker Cancelled regardless; the new contract returns
+    /// `false` so the caller can log the survivors before classifying.
+    #[tokio::test]
+    async fn drain_returns_false_when_worker_never_signals() {
+        let (_dir, state) = mk_state();
+        let mut rx = state.root.done_tx.subscribe();
+        let in_flight: HashSet<String> = ["never-drains".to_string()].into_iter().collect();
+        let start = tokio::time::Instant::now();
+        let drained =
+            await_workers_drained(&state, in_flight, &mut rx, Duration::from_millis(150)).await;
+        let elapsed = start.elapsed();
+        assert!(!drained, "stuck worker should produce false");
+        assert!(
+            elapsed >= Duration::from_millis(140) && elapsed < Duration::from_millis(400),
+            "wait should fire close to the deadline, took {:?}",
+            elapsed,
+        );
+    }
+
+    /// Done events for ids not in the in_flight set are harmless —
+    /// they're discarded. This pins the "subscribe before snapshot"
+    /// race tolerance: a worker that completes between subscribe and
+    /// snapshot is in the channel buffer but not in the set; the
+    /// loop just drops the event and keeps waiting for the right ids.
+    #[tokio::test]
+    async fn drain_ignores_done_events_for_unknown_ids() {
+        let (_dir, state) = mk_state();
+        let mut rx = state.root.done_tx.subscribe();
+        let in_flight: HashSet<String> = ["target-1".to_string(), "target-2".to_string()]
+            .into_iter()
+            .collect();
+
+        let tx = state.root.done_tx.clone();
+        tokio::spawn(async move {
+            // Emit some unrelated events first.
+            let _ = tx.send("noise-a".to_string());
+            let _ = tx.send("noise-b".to_string());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx.send("target-1".to_string());
+            let _ = tx.send("target-2".to_string());
+        });
+
+        let drained =
+            await_workers_drained(&state, in_flight, &mut rx, Duration::from_secs(2)).await;
+        assert!(drained);
+    }
+
+    /// `refresh_in_flight_from_maps` removes ids whose `WorkerState`
+    /// is `Done` in either the root layer or any sub-tree. This is
+    /// the recovery path the wait loop falls back to when the
+    /// broadcast lags.
+    #[tokio::test]
+    async fn refresh_in_flight_drops_done_ids() {
+        let (_dir, state) = mk_state();
+        // Insert a Done worker on root and a Running worker on root.
+        {
+            let mut workers = state.root.workers.write().await;
+            workers.insert(
+                "done-root".into(),
+                WorkerState::Done(pitboss_core::store::TaskRecord {
+                    task_id: "done-root".into(),
+                    status: pitboss_core::store::TaskStatus::Success,
+                    exit_code: Some(0),
+                    started_at: chrono::Utc::now(),
+                    ended_at: chrono::Utc::now(),
+                    duration_ms: 0,
+                    worktree_path: None,
+                    log_path: PathBuf::from("/dev/null"),
+                    token_usage: Default::default(),
+                    claude_session_id: None,
+                    final_message_preview: None,
+                    final_message: None,
+                    parent_task_id: None,
+                    pause_count: 0,
+                    reprompt_count: 0,
+                    approvals_requested: 0,
+                    approvals_approved: 0,
+                    approvals_rejected: 0,
+                    model: None,
+                    failure_reason: None,
+                }),
+            );
+            workers.insert("running-root".into(), WorkerState::Pending);
+        }
+        let mut in_flight: HashSet<String> = ["done-root", "running-root", "ghost"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        refresh_in_flight_from_maps(&state, &mut in_flight).await;
+        assert!(
+            !in_flight.contains("done-root"),
+            "Done id should be removed"
+        );
+        assert!(
+            in_flight.contains("running-root"),
+            "Running id should remain"
+        );
+        assert!(
+            in_flight.contains("ghost"),
+            "id not in any layer should remain (caller's snapshot)"
+        );
+    }
 }
