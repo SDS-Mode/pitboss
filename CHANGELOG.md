@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP bridge: half-close socket write half on c2s EOF** (#151 L1).
+  Pre-fix, the bare `tokio::select!` in `run_bridge` exited the
+  instant either direction completed — when c2s won (claude closed
+  stdin), the s2c future was dropped mid-write, taking with it any
+  in-flight server→client bytes that had been read off the socket
+  but not yet copied to stdout. Worse, the unix-socket write half
+  was not explicitly shut down, so the server kept its read half
+  open until the bridge process exited; under load this left
+  half-closed sockets and contributed to test flakiness when the
+  bridge restarted mid-test. Now: c2s explicitly calls
+  `AsyncWriteExt::shutdown()` on the socket write half before
+  returning, and the c2s arm of the `select!` awaits s2c with a
+  bounded 5s timeout (`S2C_DRAIN_TIMEOUT`) to drain the remaining
+  server→client bytes to stdout. Pinned by a new regression test
+  `bridge_drains_in_flight_s2c_when_c2s_eofs_first` that drives an
+  IO-generic `run_bridge_io` against a real `UnixStream` pair: a
+  server response is pre-loaded onto the socket, the test's stdin
+  is closed immediately, and the test asserts the response reaches
+  stdout *and* the server side observes EOF on its read half.
+
 ### Added
 
 - **`SessionStore::iter_runs`** (#149 L8). New trait method that

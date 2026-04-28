@@ -14,13 +14,21 @@
 //! no mutation.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::cli::ActorRoleArg;
+
+/// Bounded drain window for server→client responses after the c2s
+/// path has signalled EOF (`sw.shutdown()`). 5s is generous for a
+/// well-behaved MCP server to flush in-flight responses; we cap it
+/// so a buggy server can't keep the bridge subprocess alive
+/// indefinitely.
+const S2C_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 const ALLOWED_ROLES: &[&str] = &["root_lead", "lead", "sublead", "worker"];
 
@@ -121,17 +129,51 @@ pub async fn run_bridge(
     actor_role: ActorRoleArg,
     token: Option<&str>,
 ) -> Result<i32> {
-    let mut stream = UnixStream::connect(socket)
+    let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("connect to pitboss mcp socket at {}", socket.display()))?;
-    let (mut sr, mut sw) = stream.split();
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+    let (sr, sw) = stream.into_split();
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    run_bridge_io(
+        sr,
+        sw,
+        stdin,
+        stdout,
+        actor_id.to_string(),
+        role_str(actor_role).to_string(),
+        token.map(str::to_string),
+    )
+    .await
+}
 
-    let actor_id = actor_id.to_string();
-    let role_s = role_str(actor_role).to_string();
-    let token_s: Option<String> = token.map(|t| t.to_string());
-
+/// IO-generic bridge body. Extracted so tests can drive the c2s/s2c
+/// pair against `tokio::io::duplex` instead of needing real stdio +
+/// a unix socket. Behaviour is identical to the production
+/// `run_bridge` flow against a `UnixStream`. (#151 L1)
+///
+/// Half-close semantics: when c2s observes EOF on stdin (or hits its
+/// per-line cap), it explicitly shuts down the socket write half so
+/// the server sees end-of-input and finishes responding to in-flight
+/// requests. The select! arm that fires on c2s completion then
+/// awaits s2c with a bounded timeout to drain those final responses
+/// to stdout — without that drain, the previous bare select! dropped
+/// in-flight server→client bytes the moment c2s won. (#151 L1)
+async fn run_bridge_io<SR, SW, IN, OUT>(
+    mut sr: SR,
+    mut sw: SW,
+    mut stdin: IN,
+    mut stdout: OUT,
+    actor_id: String,
+    role_s: String,
+    token_s: Option<String>,
+) -> Result<i32>
+where
+    SR: AsyncRead + Unpin,
+    SW: AsyncWrite + Unpin,
+    IN: AsyncRead + Unpin,
+    OUT: AsyncWrite + Unpin,
+{
     // c2s: line-parse, inject _meta on tools/call, forward.
     // Chunked read with an explicit per-line cap so a child that never emits
     // `\n` can't OOM the host. We read straight from stdin — the manual line
@@ -182,6 +224,12 @@ pub async fn run_bridge(
             let _ = sw.write_all(&injected).await;
             let _ = sw.flush().await;
         }
+        // #151 L1: half-close our socket write half so the server
+        // observes end-of-input. Without this the server would keep
+        // its read half open until the bridge process exited, and
+        // the bare select! below dropped any in-flight server→client
+        // responses the instant c2s won.
+        let _ = sw.shutdown().await;
     };
 
     // s2c: byte-level passthrough, no parsing
@@ -203,9 +251,19 @@ pub async fn run_bridge(
         }
     };
 
+    tokio::pin!(c2s);
+    tokio::pin!(s2c);
     tokio::select! {
-        _ = s2c => {}
-        _ = c2s => {}
+        () = &mut c2s => {
+            // c2s shut down sw; drain remaining server→client bytes
+            // until s2c sees EOF (or the bounded timeout fires).
+            let _ = tokio::time::timeout(S2C_DRAIN_TIMEOUT, &mut s2c).await;
+        }
+        () = &mut s2c => {
+            // Server closed the socket — no more responses possible.
+            // Don't bother draining stdin: there's no one to deliver
+            // those bytes to.
+        }
     }
 
     Ok(0)
@@ -369,5 +427,86 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains(r#""_meta""#));
         assert!(!out_str.ends_with('\n'), "must not invent a newline");
+    }
+
+    /// #151 L1 regression: when the c2s side EOFs first, the bridge
+    /// must drain in-flight server→client bytes to stdout instead of
+    /// dropping them. Pre-fix the bare `tokio::select!` exited the
+    /// instant c2s completed, taking s2c down with it mid-write —
+    /// any response queued on the socket but not yet copied to
+    /// stdout was lost.
+    ///
+    /// We drive `run_bridge_io` directly with a real `UnixStream`
+    /// pair (so EOF propagates the way it does in production) and
+    /// `tokio::io::duplex` stand-ins for the bridge's stdio. The
+    /// "server" pre-loads a JSON-RPC response onto the socket and
+    /// then drops its end, so the bridge's s2c side sees the
+    /// response followed by a clean EOF; "stdin" is closed
+    /// immediately so c2s EOFs first.
+    #[tokio::test]
+    async fn bridge_drains_in_flight_s2c_when_c2s_eofs_first() {
+        // Real unix-socket pair so EOF propagates correctly when
+        // the test's "server" side is dropped.
+        let (server_stream, bridge_stream) = UnixStream::pair().unwrap();
+        let (sr, sw) = bridge_stream.into_split();
+        let (mut server_read, mut server_write) = server_stream.into_split();
+
+        // Stdin: writer side closed immediately so the bridge sees
+        // EOF on its first read.
+        let (stdin_writer, stdin_reader) = tokio::io::duplex(64);
+        drop(stdin_writer);
+
+        // Stdout: writer is what the bridge writes through; reader
+        // is the test's view of bytes that landed on stdout.
+        let (stdout_writer, mut stdout_reader) = tokio::io::duplex(8192);
+
+        // Pre-load a "server response" onto the socket. The bridge's
+        // s2c loop should pick this up and forward it to stdout
+        // even though c2s is about to end immediately.
+        let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"ok\"}\n";
+        server_write.write_all(response).await.unwrap();
+        server_write.flush().await.unwrap();
+        // Drop the server's write half *and* the read half so the
+        // bridge's s2c sees EOF after consuming the response. With
+        // the half-close fix in place, the bridge half-closes sw on
+        // c2s EOF — the test asserts that propagates by reading
+        // server_read to EOF below.
+        drop(server_write);
+
+        let bridge = tokio::spawn(async move {
+            run_bridge_io(
+                sr,
+                sw,
+                stdin_reader,
+                stdout_writer,
+                "worker-A".to_string(),
+                "worker".to_string(),
+                None,
+            )
+            .await
+        });
+
+        // Reading server_read to EOF asserts two things at once:
+        // (1) the bridge half-closed sw on c2s EOF (so the server
+        // side sees EOF here at all), and (2) the await terminates
+        // promptly rather than blocking until S2C_DRAIN_TIMEOUT.
+        let mut sink = Vec::new();
+        server_read.read_to_end(&mut sink).await.unwrap();
+        assert!(
+            sink.is_empty(),
+            "server received no client bytes (stdin was empty)"
+        );
+
+        let exit = bridge.await.unwrap().unwrap();
+        assert_eq!(exit, 0);
+
+        // After the bridge returned, stdout_writer was dropped so
+        // the reader can drain to EOF.
+        let mut got = Vec::new();
+        stdout_reader.read_to_end(&mut got).await.unwrap();
+        assert_eq!(
+            got, response,
+            "in-flight server→client response must reach stdout when c2s EOFs first"
+        );
     }
 }
