@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use pitboss_core::parser::TokenUsage;
 use pitboss_core::prices;
 use pitboss_core::store::RunSummary;
@@ -30,37 +30,12 @@ pub fn resolve_run(id_or_prefix: &str) -> Result<PathBuf> {
 ///
 /// Used by `pitboss diff --run-dir <PATH>` to point at an alternate runs
 /// store (mirrors the same flag on `status`/`resume`/`list`/`prune`).
+///
+/// Thin wrapper over [`crate::runs::resolve_run_dir_by_prefix`] — the
+/// canonical exact-match-first + ambiguous-prefix resolver shared by
+/// every subcommand that takes a run id argument.
 pub fn resolve_run_under(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
-    // Exact match first.
-    let exact = base.join(id_or_prefix);
-    if exact.is_dir() {
-        return Ok(exact);
-    }
-
-    // Prefix scan.
-    let entries = std::fs::read_dir(base)
-        .with_context(|| format!("cannot read runs directory {}", base.display()))?;
-
-    let mut matches: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if entry.path().is_dir() && name.starts_with(id_or_prefix) {
-            matches.push(entry.path());
-        }
-    }
-
-    match matches.len() {
-        0 => bail!(
-            "no run found matching prefix '{}' under {}",
-            id_or_prefix,
-            base.display()
-        ),
-        1 => Ok(matches.remove(0)),
-        n => bail!(
-            "{n} runs match prefix '{}' — be more specific",
-            id_or_prefix
-        ),
-    }
+    crate::runs::resolve_run_dir_by_prefix(base, id_or_prefix)
 }
 
 /// Load the `summary.json` for a run directory.

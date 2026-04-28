@@ -270,7 +270,15 @@ impl NotificationRouter {
     /// instead of having to scrape journald.
     pub async fn dispatch(&self, env: NotificationEnvelope) -> Result<()> {
         {
-            let mut cache = self.dedup_cache.lock().unwrap();
+            // Poison-recover instead of `.unwrap()`: the LRU cache is a
+            // dedup *hint*, not an authoritative store. A panic in one
+            // emit holding the lock would otherwise brick every future
+            // notification with `PoisonError`. Recover the inner cache
+            // (worst case: one duplicate emit) and keep going. #187.
+            let mut cache = self
+                .dedup_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if cache.contains(&env.dedup_key) {
                 return Ok(());
             }
@@ -641,5 +649,49 @@ mod tests {
         std::env::set_var(DEDUP_CACHE_SIZE_ENV, "not a number");
         let _ = NotificationRouter::new(vec![]);
         std::env::remove_var(DEDUP_CACHE_SIZE_ENV);
+    }
+
+    /// #187 regression: a poisoned `dedup_cache` mutex must not panic the
+    /// dispatch path. Earlier code used `.unwrap()`, so a panic in any
+    /// code path holding the lock would propagate the `PoisonError` to
+    /// every subsequent `dispatch` call and silently disable all
+    /// notifications. The fix recovers the inner cache (worst case: one
+    /// duplicate emit) and keeps going.
+    #[tokio::test]
+    async fn dispatch_recovers_from_poisoned_dedup_mutex() {
+        use std::sync::Arc;
+        let router = Arc::new(NotificationRouter::new(vec![]));
+
+        // Poison the mutex by panicking while holding the lock. We have
+        // to launch a thread because std::panic in the same task would
+        // unwind into the test runner.
+        let r = Arc::clone(&router);
+        let _ = std::thread::spawn(move || {
+            let _g = r.dedup_cache.lock().unwrap();
+            panic!("synthetic poison");
+        })
+        .join();
+        assert!(
+            router.dedup_cache.is_poisoned(),
+            "test setup: mutex must be poisoned",
+        );
+
+        // Dispatch must still succeed against a poisoned mutex.
+        let env = NotificationEnvelope::new(
+            "r1",
+            Severity::Info,
+            PitbossEvent::RunFinished {
+                run_id: "r1".to_string(),
+                tasks_total: 0,
+                tasks_failed: 0,
+                duration_ms: 0,
+                spent_usd: 0.0,
+            },
+            chrono::Utc::now(),
+        );
+        router
+            .dispatch(env)
+            .await
+            .expect("dispatch must not panic on poisoned dedup mutex");
     }
 }

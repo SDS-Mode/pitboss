@@ -1496,14 +1496,30 @@ pub async fn handle_worker_status(
             rec.final_message_preview.clone(),
         ),
     };
-    let prompt_preview = state
-        .root
-        .worker_prompts
-        .read()
-        .await
-        .get(task_id)
-        .cloned()
-        .unwrap_or_default();
+    // #151 L2: read prompt_preview from the *owning* layer, not just
+    // root. Sub-tree workers' prompts live in their layer's
+    // `worker_prompts`; pre-fix, `handle_worker_status` only checked
+    // root and so returned an empty prompt_preview for every
+    // sub-lead-spawned worker. Falls back to root for compat in case
+    // an older record landed there.
+    let prompt_preview = if let Some(layer) = layer_for_worker(state, task_id).await {
+        layer
+            .worker_prompts
+            .read()
+            .await
+            .get(task_id)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        state
+            .root
+            .worker_prompts
+            .read()
+            .await
+            .get(task_id)
+            .cloned()
+            .unwrap_or_default()
+    };
     Ok(WorkerStatus {
         state: state_str,
         started_at,
@@ -2248,10 +2264,25 @@ pub async fn handle_wait_for_any(
     // workers. Same bug class as commit d134289 (which fixed wait_actor
     // + list_workers + worker_status) but this handler had its own
     // lookup code that was missed by that fix.
+    let mut any_known = false;
     for id in task_ids {
-        if let Some(WorkerState::Done(rec)) = find_worker_across_layers(state, id).await {
-            return Ok((id.clone(), rec));
+        match find_worker_across_layers(state, id).await {
+            Some(WorkerState::Done(rec)) => return Ok((id.clone(), rec)),
+            Some(_) => any_known = true,
+            None => {}
         }
+    }
+    // #151 M1: if every task_id is unknown (typo, evicted, never spawned),
+    // there is no possible source of a `done_tx` event matching them, so
+    // the loop below would block for the full `timeout_secs` (default
+    // 3600s) waking only on unrelated broadcasts. Fail fast with a
+    // diagnostic naming the unknown ids.
+    if !any_known {
+        bail!(
+            "wait_for_any: none of the requested task_ids are known to the dispatcher \
+             (typo, evicted, or never spawned): {}",
+            task_ids.join(", ")
+        );
     }
 
     loop {

@@ -60,12 +60,23 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                         }
                     }
                 });
+                // #154 M1: bound the connect by a short timeout so a
+                // slow dispatcher accept doesn't stall the 50ms input
+                // loop for hundreds of milliseconds. The connect path
+                // is otherwise blocking on the main UI thread because
+                // the rest of `connect_control` synchronously assigns
+                // into `state` before the next render. Worst case the
+                // client comes back as None, the operator sees the
+                // "no control" status, and a future SwitchRun/reset
+                // can rebuild it cheaply — same UX as before for that
+                // case but without the stall.
                 runtime
-                    .block_on(crate::control::ControlClient::connect(
-                        socket_path,
-                        bridge_tx,
+                    .block_on(tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        crate::control::ControlClient::connect(socket_path, bridge_tx),
                     ))
                     .ok()
+                    .and_then(Result::ok)
                     .map(Arc::new)
             }
             Err(_) => None,
@@ -332,19 +343,26 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
                         && mouse.row < r.y + r.height
                 });
             if !on_tab {
-                let task_id = state.completed_hit_rects.lock().ok().and_then(|rects| {
-                    rects.iter().find_map(|&(task_idx, r)| {
-                        if mouse.column >= r.x
-                            && mouse.column < r.x + r.width
-                            && mouse.row >= r.y
-                            && mouse.row < r.y + r.height
-                        {
-                            Some(state.tasks[task_idx].id.clone())
-                        } else {
-                            None
-                        }
-                    })
+                // #154 L5: poison-recover instead of swallowing the
+                // PoisonError — a poisoned mutex would otherwise
+                // permanently disable Completed-tab mouse navigation
+                // for the rest of the session.
+                let rects = state
+                    .completed_hit_rects
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let task_id = rects.iter().find_map(|&(task_idx, r)| {
+                    if mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                    {
+                        Some(state.tasks[task_idx].id.clone())
+                    } else {
+                        None
+                    }
                 });
+                drop(rects);
                 if let Some(task_id) = task_id {
                     state.enter_detail_for(task_id);
                 }
@@ -879,6 +897,17 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
         }
         E::Superseded | E::RunFinished { .. } => {
             state.control_connected = false;
+            // Dismiss any open approval modal — the dispatcher has gone
+            // away or moved on, so an approval submitted now would post
+            // into a disconnected client with no error feedback. Drop
+            // back to Normal mode so the operator sees the run-finished
+            // banner instead of a frozen modal. (#154 M2)
+            if matches!(state.mode, Mode::ApprovalModal { .. }) {
+                tracing::info!(
+                    "approval modal dismissed: control connection ended (Superseded/RunFinished)"
+                );
+                state.mode = Mode::Normal;
+            }
         }
         E::StoreActivity { counters } => {
             // Rebuild the map from scratch each broadcast — the server
@@ -1016,6 +1045,17 @@ fn handle_approval_modal(state: &mut AppState, code: KeyCode, modifiers: KeyModi
     else {
         return Action::Continue;
     };
+    // Global quit shortcut also works inside the approval modal —
+    // pre-fix, `q` was silently swallowed by the sub-mode handlers below
+    // and the operator had to first Esc the modal then `q`. (#154 L6)
+    // We don't intercept `q` while typing in a draft sub-mode (the
+    // operator might want to type "q" into the rejection reason).
+    if matches!(code, KeyCode::Char('q'))
+        && matches!(sub_mode, ApprovalSubMode::Overview)
+        && modifiers.is_empty()
+    {
+        return Action::Quit;
+    }
     let ctx = ApprovalCtx {
         request_id,
         task_id,
@@ -1170,6 +1210,13 @@ fn handle_approval_draft(
 ///   Esc            — cancel without saving.
 fn handle_policy_editor(state: &mut AppState, code: KeyCode) -> Action {
     use pitboss_cli::mcp::policy::{ApprovalAction, ApprovalMatch, ApprovalRule};
+
+    // Global quit shortcut works in the policy editor too — pre-fix,
+    // `q` was silently swallowed by the editor's match below and the
+    // operator had to Esc-out then `q`. (#154 L6)
+    if matches!(code, KeyCode::Char('q')) {
+        return Action::Quit;
+    }
 
     let Mode::PolicyEditor {
         ref mut rules,

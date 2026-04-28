@@ -18,7 +18,7 @@
 //! v0.2.1. The `Connection` is wrapped in `Arc<Mutex<_>>` so the store is
 //! `Send + Sync`. Concurrent writes are serialised at the mutex.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -71,6 +71,7 @@ impl SqliteStore {
         migrate_task_model(&conn)?;
         migrate_failure_reason(&conn)?;
         migrate_final_message(&conn)?;
+        migrate_runs_env(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -176,6 +177,15 @@ fn migrate_final_message(conn: &rusqlite::Connection) -> Result<(), StoreError> 
 }
 
 /// Idempotent migration: add v0.4 counter columns to `task_records` if missing.
+///
+/// Per-column work is delegated to [`add_column_if_missing`] which:
+///   * uses bound parameters for the existence check (no string
+///     interpolation of the column name into the SQL — the parameterised
+///     `pragma_table_info` selector is a load-bearing #149 L10 fix to
+///     remove the only DDL footgun in this file), and
+///   * still has to format the `ADD COLUMN` itself because `SQLite` does
+///     not parameterise DDL — so we vet the column name with
+///     [`assert_safe_ident`] before inlining.
 fn migrate_v04_event_counters(conn: &rusqlite::Connection) -> Result<(), StoreError> {
     for col in [
         "pause_count",
@@ -184,22 +194,112 @@ fn migrate_v04_event_counters(conn: &rusqlite::Connection) -> Result<(), StoreEr
         "approvals_approved",
         "approvals_rejected",
     ] {
-        let has = {
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT 1 FROM pragma_table_info('task_records') WHERE name = '{col}'"
-                ))
-                .map_err(|e| StoreError::Incomplete(format!("migrate v04 prepare: {e}")))?;
-            stmt.exists([])
-                .map_err(|e| StoreError::Incomplete(format!("migrate v04 exists: {e}")))?
-        };
-        if !has {
-            conn.execute(
-                &format!("ALTER TABLE task_records ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"),
-                [],
-            )
-            .map_err(|e| StoreError::Incomplete(format!("migrate v04 alter {col}: {e}")))?;
+        add_column_if_missing(conn, "task_records", col, "INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
+/// Add `column` of `type_clause` to `table` if missing. Single source of
+/// truth for the additive-migration pattern used by `migrate_parent_task_id`,
+/// `migrate_task_model`, etc. — extracted here so `migrate_v04_event_counters`
+/// can iterate over a list of columns without each callsite re-implementing
+/// the pragma check + ALTER pattern. (#149 L10)
+///
+/// Existence check uses a *bound* parameter for the column name; only the
+/// `ADD COLUMN` statement needs the column inlined, and we run the column
+/// through [`assert_safe_ident`] first (no whitespace, no quotes, no
+/// semicolons) so a future caller who passes user input cannot smuggle DDL.
+fn add_column_if_missing(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    type_clause: &str,
+) -> Result<(), StoreError> {
+    assert_safe_ident(table)?;
+    assert_safe_ident(column)?;
+    let has = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+            ))
+            .map_err(|e| {
+                StoreError::Incomplete(format!("migrate {table}.{column} prepare: {e}"))
+            })?;
+        stmt.exists([column])
+            .map_err(|e| StoreError::Incomplete(format!("migrate {table}.{column} exists: {e}")))?
+    };
+    if !has {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {type_clause}"),
+            [],
+        )
+        .map_err(|e| StoreError::Incomplete(format!("migrate {table}.{column} alter: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Reject anything that isn't a SQL-safe bare identifier — letters,
+/// digits, and underscore only, must not start with a digit. Lets us
+/// inline `column` and `table` names into `format!`-built DDL without
+/// risking a future contributor passing a string with `; DROP TABLE …`.
+/// All current callers pass static literals (`"task_records"`,
+/// `"pause_count"`, …), so this is purely a defensive guard against
+/// later refactors. (#149 L10)
+fn assert_safe_ident(s: &str) -> Result<(), StoreError> {
+    if s.is_empty() {
+        return Err(StoreError::Incomplete("empty SQL identifier".into()));
+    }
+    let mut chars = s.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(StoreError::Incomplete(format!(
+            "unsafe SQL identifier (leading char): {s:?}"
+        )));
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Err(StoreError::Incomplete(format!(
+                "unsafe SQL identifier: {s:?}"
+            )));
         }
+    }
+    Ok(())
+}
+
+/// Idempotent migration: add the `env_json` column to `runs` if missing.
+/// Stores `RunMeta.env` as a JSON-encoded TEXT blob so the `SQLite` backend
+/// has parity with the `JsonFileStore` backend (whose `meta.json` already
+/// round-trips the field). Pre-fix, sqlite silently dropped the env on
+/// `init_run` and re-materialised an empty `HashMap` on `load_run`,
+/// hiding any operator-injected env vars when consumers later compared
+/// runs across backends. (#149 M2)
+fn migrate_runs_env(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let runs_exists = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'runs'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate env check: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate env check exists: {e}")))?
+    };
+    if !runs_exists {
+        return Ok(());
+    }
+    let has_col = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('runs') \
+                 WHERE name = 'env_json'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate env_json prepare: {e}")))?;
+        stmt.exists([])
+            .map_err(|e| StoreError::Incomplete(format!("migrate env_json exists: {e}")))?
+    };
+    if !has_col {
+        conn.execute("ALTER TABLE runs ADD COLUMN env_json TEXT NULL", [])
+            .map_err(|e| StoreError::Incomplete(format!("migrate env_json alter: {e}")))?;
     }
     Ok(())
 }
@@ -263,7 +363,8 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             ended_at         TEXT,
             tasks_total      INTEGER,
             tasks_failed     INTEGER,
-            was_interrupted  INTEGER DEFAULT 0
+            was_interrupted  INTEGER DEFAULT 0,
+            env_json         TEXT NULL
         );
         CREATE TABLE IF NOT EXISTS task_records (
             run_id                TEXT NOT NULL,
@@ -573,6 +674,10 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
 
 #[async_trait]
 impl SessionStore for SqliteStore {
+    fn open(path: &Path) -> Result<Box<dyn SessionStore>, StoreError> {
+        Ok(Box::new(SqliteStore::new(path.to_path_buf())?))
+    }
+
     /// Insert a run row.  Uses `INSERT OR REPLACE` so calling `init_run` twice
     /// on the same `run_id` is safe (idempotent).
     async fn init_run(&self, meta: &RunMeta) -> Result<(), StoreError> {
@@ -582,6 +687,17 @@ impl SessionStore for SqliteStore {
         let pitboss_version = meta.pitboss_version.clone();
         let claude_version = meta.claude_version.clone();
         let started_at = meta.started_at.to_rfc3339();
+        // Persist env as JSON for parity with `JsonFileStore` (#149 M2).
+        // Empty maps are stored as `NULL` rather than `"{}"` to keep the
+        // common case (no operator env injection) cheap on disk.
+        let env_json = if meta.env.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&meta.env)
+                    .map_err(|e| StoreError::Incomplete(format!("init_run env: {e}")))?,
+            )
+        };
 
         tokio::task::spawn_blocking(move || {
             let guard = conn
@@ -590,14 +706,15 @@ impl SessionStore for SqliteStore {
             guard
                 .execute(
                     "INSERT OR REPLACE INTO runs \
-                     (run_id, manifest_path, pitboss_version, claude_version, started_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (run_id, manifest_path, pitboss_version, claude_version, started_at, env_json) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
                         run_id,
                         manifest_path,
                         pitboss_version,
                         claude_version,
-                        started_at
+                        started_at,
+                        env_json,
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("init_run insert: {e}")))?;
@@ -1103,5 +1220,103 @@ mod sqlite_tests {
         assert_eq!(back.tasks[0].final_message.as_deref(), Some(full.as_str()));
         // Re-open is a no-op (column now exists).
         let _s2 = SqliteStore::new(db_path).unwrap();
+    }
+
+    /// #149 M2 regression: `RunMeta.env` must round-trip through the
+    /// `SQLite` backend (parity with `JsonFileStore`). We can't directly
+    /// observe via `load_run` because `RunSummary` doesn't expose env —
+    /// instead, look at the raw column.
+    #[tokio::test]
+    async fn sqlite_persists_run_meta_env() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("env.db");
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+        let run_id = Uuid::now_v7();
+        let mut env = HashMap::new();
+        env.insert("PITBOSS_NOTIFY_SLACK_WEBHOOK".to_string(), "x".to_string());
+        env.insert("PITBOSS_RUN_BUDGET_USD".to_string(), "10.50".to_string());
+        let m = RunMeta {
+            run_id,
+            manifest_path: dir.path().join("p.toml"),
+            pitboss_version: "0.9.1".into(),
+            claude_version: None,
+            started_at: Utc::now(),
+            env,
+        };
+        store.init_run(&m).await.unwrap();
+
+        // Open a fresh connection and read the raw env_json column to
+        // assert the persistence is real (and survives a re-open).
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let env_json: Option<String> = conn
+            .query_row(
+                "SELECT env_json FROM runs WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let env_json = env_json.expect("env_json must be persisted, not NULL");
+        let parsed: HashMap<String, String> = serde_json::from_str(&env_json).unwrap();
+        assert_eq!(
+            parsed
+                .get("PITBOSS_NOTIFY_SLACK_WEBHOOK")
+                .map(String::as_str),
+            Some("x")
+        );
+        assert_eq!(
+            parsed.get("PITBOSS_RUN_BUDGET_USD").map(String::as_str),
+            Some("10.50")
+        );
+    }
+
+    /// #149 M2 regression: empty env stays NULL on disk, not `"{}"` —
+    /// avoids a 2-byte-per-row tax on the common case.
+    #[tokio::test]
+    async fn sqlite_persists_empty_env_as_null() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("empty-env.db");
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let env_json: Option<String> = conn
+            .query_row(
+                "SELECT env_json FROM runs WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(env_json.is_none(), "empty env must persist as NULL");
+    }
+
+    /// #149 L10 regression: `assert_safe_ident` rejects anything that
+    /// isn't a bare SQL identifier — this is the gate that lets
+    /// `add_column_if_missing` interpolate column names into DDL safely.
+    #[test]
+    fn assert_safe_ident_accepts_bare_identifiers() {
+        assert!(assert_safe_ident("task_records").is_ok());
+        assert!(assert_safe_ident("env_json").is_ok());
+        assert!(assert_safe_ident("_internal").is_ok());
+        assert!(assert_safe_ident("col42").is_ok());
+    }
+
+    #[test]
+    fn assert_safe_ident_rejects_dangerous_chars() {
+        for bad in &[
+            "",
+            " spaces ",
+            "drop;table",
+            "with-dash",
+            "with.dot",
+            "with\"quote",
+            "1leading_digit",
+            "back`tick",
+            "with'apos",
+        ] {
+            assert!(
+                assert_safe_ident(bad).is_err(),
+                "must reject {bad:?} as unsafe SQL ident"
+            );
+        }
     }
 }

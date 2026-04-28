@@ -76,19 +76,59 @@ pub fn run_background(manifest_path: &Path, run_dir_override: Option<PathBuf>) -
     let run_id_str = run_id.to_string();
     let started_at = Utc::now();
 
+    // Pre-flight: validate the manifest BEFORE forking. A TOML/parse
+    // error surfaces here on the parent's stderr where the operator can
+    // see it, instead of dying silently inside a detached child whose
+    // stderr was previously nulled (#150 M8). The dispatcher will
+    // re-validate inside the child too — this is a fail-fast convenience.
+    crate::manifest::load::load_manifest(manifest_path, None).with_context(|| {
+        format!(
+            "validate manifest before background spawn: {}",
+            manifest_path.display()
+        )
+    })?;
+
+    // Canonicalize paths so the JSON announcement and the child both see
+    // absolute paths regardless of the parent's cwd. Without this, an
+    // orchestrator that captures the announcement and later cd's
+    // somewhere else cannot resolve the manifest path. (#150 M2)
+    let manifest_path_canonical = std::fs::canonicalize(manifest_path)
+        .with_context(|| format!("canonicalize manifest path: {}", manifest_path.display()))?;
+    let run_dir_canonical = run_dir_override.as_ref().map(|d| {
+        // The runs dir might not exist yet; fall back to the original
+        // path if canonicalize fails — the dispatcher creates it.
+        std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())
+    });
+
     let exe = std::env::current_exe().context("locate current pitboss binary")?;
 
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("dispatch")
-        .arg(manifest_path)
+        .arg(&manifest_path_canonical)
         .args(["--internal-run-id", &run_id_str]);
-    if let Some(ref dir) = run_dir_override {
+    if let Some(ref dir) = run_dir_canonical {
         cmd.arg("--run-dir").arg(dir);
     }
 
+    // Capture child stderr to a per-run log file so dispatch failures
+    // produce *some* operator-visible signal — pre-fix, child stderr was
+    // nulled and a panic in startup left zero diagnostic. (#150 M3)
+    //
+    // Logged at `<runs_base>/<run_id>.bg-stderr.log` because the per-run
+    // dir doesn't exist yet (the child mints it). This is a sibling
+    // location operators can find without knowing the run id ahead of
+    // time.
+    let stderr_log_path = stderr_log_path_for(run_dir_canonical.as_deref(), &run_id_str);
+    let stderr_target = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr_target);
 
     // SAFETY: `pre_exec` runs in the forked child between fork() and
     // exec(). `setsid()` is async-signal-safe per POSIX, which is the only
@@ -114,20 +154,60 @@ pub fn run_background(manifest_path: &Path, run_dir_override: Option<PathBuf>) -
 
     let payload = json!({
         "run_id": run_id_str,
-        "manifest_path": manifest_path.to_string_lossy(),
+        "manifest_path": manifest_path_canonical.to_string_lossy(),
         "started_at": started_at.to_rfc3339(),
         "child_pid": child_pid,
+        "bg_stderr_log": stderr_log_path.to_string_lossy(),
     });
-    println!("{payload}");
+    // Use `writeln!` on an explicit stdout handle instead of `println!`:
+    // an orchestrator that closes its end of the pipe before reading the
+    // announcement would otherwise panic the parent with EPIPE — turning
+    // a "child is already running" outcome into a non-zero exit. Swallow
+    // EPIPE quietly; the run id is recoverable via `pitboss list
+    // --active`. (#150 L13)
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = writeln!(out, "{payload}") {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(e).context("write background-dispatch announcement");
+        }
+        tracing::debug!(error = %e, "background announcement: stdout EPIPE; child still running");
+    }
+    let _ = out.flush();
 
     Ok(0)
+}
+
+fn stderr_log_path_for(run_dir_override: Option<&Path>, run_id: &str) -> PathBuf {
+    let base = run_dir_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::runs::runs_base_dir);
+    let _ = std::fs::create_dir_all(&base);
+    base.join(format!("{run_id}.bg-stderr.log"))
 }
 
 /// Parse a `--internal-run-id` argument into a `Uuid`. Used by `main.rs`
 /// when forwarding the value into [`crate::dispatch::run_dispatch_inner`]
 /// or [`crate::dispatch::hierarchical::run_hierarchical`].
+///
+/// Requires UUID v7 specifically — pitboss's run-id discriminator
+/// includes a millisecond-resolution timestamp the dispatcher (and the
+/// run-discovery sort) extract from the leading bytes of v7. Accepting
+/// older UUID versions silently breaks downstream consumers that
+/// assume the v7 layout. (#150 L14)
 pub fn parse_internal_run_id(s: &str) -> Result<Uuid> {
-    Uuid::parse_str(s).with_context(|| format!("--internal-run-id: invalid UUID: {s}"))
+    let parsed =
+        Uuid::parse_str(s).with_context(|| format!("--internal-run-id: invalid UUID: {s}"))?;
+    if parsed.get_version_num() != 7 {
+        anyhow::bail!(
+            "--internal-run-id must be a UUID v7 (got v{}); pitboss \
+             extracts a timestamp discriminator from the leading bytes \
+             of v7 ids and other versions silently break downstream \
+             consumers",
+            parsed.get_version_num()
+        );
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -145,5 +225,32 @@ mod tests {
     fn parse_internal_run_id_rejects_garbage() {
         assert!(parse_internal_run_id("not-a-uuid").is_err());
         assert!(parse_internal_run_id("").is_err());
+    }
+
+    /// #150 L14 regression: non-v7 UUIDs are rejected because pitboss
+    /// extracts a timestamp from v7's leading bytes. Use a v4 string
+    /// literal — the `v4` cargo feature isn't enabled in pitboss-cli
+    /// so we can't `Uuid::new_v4()`, but parsing a v4 string and
+    /// asserting it's not v7 gives the same coverage.
+    #[test]
+    fn parse_internal_run_id_rejects_non_v7_versions() {
+        // RFC 4122 example v4 UUID; version nibble is the leading 4 of
+        // the third group.
+        let v4_str = "550e8400-e29b-41d4-a716-446655440000";
+        let parsed = Uuid::parse_str(v4_str).unwrap();
+        assert_eq!(parsed.get_version_num(), 4, "test fixture must be v4");
+        let err = parse_internal_run_id(v4_str).unwrap_err();
+        assert!(err.to_string().contains("UUID v7"));
+    }
+
+    /// #150 M3 regression: the stderr-log path lands under the runs
+    /// override dir (when supplied) so an orchestrator can find it
+    /// without needing the per-run dispatch dir to exist yet.
+    #[test]
+    fn stderr_log_path_uses_run_dir_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = stderr_log_path_for(Some(tmp.path()), "abc");
+        assert!(p.starts_with(tmp.path()));
+        assert!(p.to_string_lossy().ends_with("abc.bg-stderr.log"));
     }
 }

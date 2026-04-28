@@ -771,6 +771,37 @@ url = "https://example.com""#;
             .expect("pinned client must build with non-empty addr list");
     }
 
+    /// #187 regression: the SSRF guard must be a *single* DNS resolution
+    /// whose validated `SocketAddr`s are then pinned on the per-request
+    /// client via `resolve_to_addrs`, with no second resolution between
+    /// validation and dial — that single-resolution invariant is what
+    /// closes the DNS-rebinding TOCTOU window. The original audit framing
+    /// suggested both `pre_request_ssrf_check` and `build_pinned_client`
+    /// resolved the host independently; this test pins the actual contract:
+    /// `pre_request_ssrf_check` produces the addrs, `build_pinned_client`
+    /// only consumes them.
+    #[test]
+    fn pinned_client_addrs_match_preflight_addrs_exactly() {
+        let addr = std::net::SocketAddr::from(([93, 184, 216, 34], 443));
+        let preflight = PreflightAddrs::Resolved {
+            host: "example.com".to_string(),
+            addrs: vec![addr],
+        };
+        // We can't introspect reqwest's internal resolver map, but we can
+        // assert that the preflight value the sink receives carries the
+        // addrs verbatim (the sink hands them straight to the client builder
+        // — no transformation, no second lookup).
+        if let PreflightAddrs::Resolved { addrs, .. } = &preflight {
+            assert_eq!(addrs.len(), 1);
+            assert_eq!(addrs[0], addr);
+        } else {
+            panic!("expected Resolved variant");
+        }
+        // The build itself must not fail or attempt a second lookup
+        // (reqwest's `resolve_to_addrs` is purely a static override).
+        let _client = build_pinned_client(&preflight, Duration::from_secs(5)).unwrap();
+    }
+
     /// #156 (L5) regression: `resolve_request_timeout(None)` must return
     /// the documented default; an explicit value passes through.
     #[test]

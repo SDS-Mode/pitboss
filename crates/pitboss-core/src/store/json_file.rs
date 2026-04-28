@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use tokio::fs::{self, OpenOptions};
@@ -36,6 +36,12 @@ impl JsonFileStore {
 
 #[async_trait]
 impl SessionStore for JsonFileStore {
+    fn open(path: &Path) -> Result<Box<dyn SessionStore>, StoreError> {
+        // JsonFileStore::new is infallible; treat any IO during root
+        // creation as a soft setup step, not a precondition.
+        Ok(Box::new(JsonFileStore::new(path.to_path_buf())))
+    }
+
     async fn init_run(&self, meta: &RunMeta) -> Result<(), StoreError> {
         let dir = self.run_dir(meta.run_id);
         fs::create_dir_all(&dir).await?;

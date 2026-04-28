@@ -459,10 +459,20 @@ pub async fn run_hierarchical(
         ),
     };
 
-    // Cleanup worktree per policy
+    // Cleanup worktree per policy. Surface the result via tracing
+    // instead of swallowing it with `let _` — pre-fix, a worktree that
+    // failed to clean up (e.g. a still-running worker subprocess holding
+    // an open file inside the lead's tree) left zero diagnostic and the
+    // operator only noticed the leak via `pitboss prune`. (#150 L11)
     if let Some(wt) = lead_worktree_handle {
         let succeeded = matches!(lead_record.status, pitboss_core::store::TaskStatus::Success);
-        let _ = wt_mgr.cleanup(wt, cleanup_policy, succeeded);
+        if let Err(e) = wt_mgr.cleanup(wt, cleanup_policy, succeeded) {
+            tracing::warn!(
+                error = %e,
+                "lead worktree cleanup failed — run `pitboss prune` to clean up \
+                 leftover .worktrees entries"
+            );
+        }
     }
 
     // Persist lead record

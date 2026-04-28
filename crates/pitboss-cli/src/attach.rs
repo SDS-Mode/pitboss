@@ -147,33 +147,10 @@ fn default_runs_dir() -> PathBuf {
 }
 
 /// Resolve a run id (full UUID or unique prefix) to an absolute run
-/// directory. Mirrors the resolver in `main.rs` (used by `resume`)
-/// except the error messages are tailored for `attach`.
+/// directory. Thin wrapper over [`crate::runs::resolve_run_dir_by_prefix`]
+/// kept for source compatibility; all real logic lives in `runs`.
 fn resolve_run_dir(base: &Path, prefix: &str) -> Result<PathBuf> {
-    if prefix.is_empty() {
-        bail!("run id prefix must not be empty");
-    }
-    let entries = std::fs::read_dir(base)
-        .with_context(|| format!("cannot read runs directory {}", base.display()))?;
-
-    let mut matches: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if entry.path().is_dir() && name.starts_with(prefix) {
-            matches.push(entry.path());
-        }
-    }
-
-    match matches.len() {
-        0 => bail!(
-            "no run found matching prefix '{}' in {}",
-            prefix,
-            base.display()
-        ),
-        1 => Ok(matches.remove(0)),
-        n => bail!("{n} runs match prefix '{}' — be more specific", prefix),
-    }
+    crate::runs::resolve_run_dir_by_prefix(base, prefix)
 }
 
 /// When the requested task id doesn't exist under `<run>/tasks/`, print

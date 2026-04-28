@@ -1,12 +1,101 @@
 //! In-memory per-run shared store for hub-mediated coordination between
 //! the lead and workers. See
 //! `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
+//!
+//! ## Two lease registries — and why
+//!
+//! Pitboss operates two lease registries with intentionally different
+//! semantics, and they cannot share an `acquire` API without lossy
+//! shimming:
+//!
+//! | Property             | [`leases::LeaseRegistry`] (per-layer) | [`run_leases::LeaseRegistry`] (run-global) |
+//! |----------------------|----------------------------------------|---------------------------------------------|
+//! | Identity             | `lease_id` (UUID)                     | `(key, holder)` tuple                       |
+//! | Acquire              | non-blocking only (`acquire`)         | blocking variant (`acquire_with_wait`) + non-blocking |
+//! | Same-holder reacquire | rejected with `Conflict`              | refreshes `acquired_at` (renewal semantics) |
+//! | Wakeup mechanism     | `broadcast` of evicted names          | `Arc<Notify>` on the registry               |
+//! | Holder identity      | `CallerIdentity` (worker/lead role)   | `ActorId` (string)                          |
+//!
+//! These differences exist because the per-layer registry is the user-
+//! facing MCP contract (worker `lease_acquire` tool: explicit IDs, no
+//! renewal because the worker is supposed to call `lease_release`
+//! deterministically), and the run-global registry is an internal
+//! coordination primitive (cleanup hook fires on actor termination,
+//! same-holder renewals are how heartbeats stay alive across resume).
+//!
+//! Trying to unify `acquire` across both would either bloat both APIs
+//! with associated types and feature flags or hide the very divergence
+//! that's load-bearing for correctness. Instead the [`LeaseRegistryApi`]
+//! trait below captures *only* the operation that genuinely is shared
+//! — `release_all_for_actor`, the connection-drop / cancel-cascade
+//! cleanup hook — so call sites that only need cleanup can be
+//! parameterized over `&dyn LeaseRegistryApi` and migration between
+//! registries doesn't silently lose semantics. Anything beyond cleanup
+//! must call the registry's concrete API directly.
+//!
+//! Audit ref: #189.
 
 pub mod leases;
 pub mod run_leases;
 pub mod tools;
 pub use leases::{AcquireResult, Lease, LeaseRegistry};
 pub use run_leases::{LeaseHandle, LeaseRegistry as RunLeaseRegistry};
+
+use async_trait::async_trait;
+
+/// Common cleanup surface across pitboss's two lease registries.
+///
+/// Captures the one op that is *semantically identical* in both registries:
+/// release every lease an actor holds, e.g. when its MCP connection drops
+/// or the cancel cascade fires. Deliberately **does not** expose `acquire`,
+/// `release(by id)`, or `list` — those have materially different shapes
+/// in each registry (see module-level table above), and shimming them
+/// across this trait would lose the per-registry semantics this trait
+/// exists to protect against silently switching.
+///
+/// # Why a trait at all
+///
+/// The audit (#189) flagged that moving a lease usage from one registry
+/// to the other (e.g. promoting per-layer → run-global to enable
+/// cross-sub-tree coordination) loses semantics with no compile-time
+/// signal. By having the cleanup hook — and *only* the cleanup hook —
+/// share a trait, a refactor that previously relied on `acquire` of one
+/// registry now has to be re-typed against the new registry's concrete
+/// API; the operator-facing cleanup wiring stays uniform via the trait.
+///
+/// # Why `usize` and not the per-registry detail return
+///
+/// Both registries' real cleanup paths return more than just a count —
+/// `leases::LeaseRegistry::release_all_for_actor` also returns the names
+/// of leases evicted by TTL during the call; `run_leases::LeaseRegistry::
+/// release_all_held_by` returns just the count. The trait shim returns
+/// the count of leases-this-actor-held that were released, which is the
+/// only datum every caller needs for the cleanup hook (logging, metric
+/// emission). Callers needing the eviction-by-TTL list call the per-layer
+/// registry's concrete method directly.
+#[async_trait]
+pub trait LeaseRegistryApi: Send + Sync {
+    /// Release every lease currently held by `actor_id`. Returns the
+    /// number released. Best-effort cleanup hook — the registry must
+    /// never panic on a no-op call (idempotent for unknown actors).
+    async fn release_all_for_actor(&self, actor_id: &str) -> usize;
+}
+
+#[async_trait]
+impl LeaseRegistryApi for leases::LeaseRegistry {
+    async fn release_all_for_actor(&self, actor_id: &str) -> usize {
+        let (released, _evicted_by_ttl) =
+            leases::LeaseRegistry::release_all_for_actor(self, actor_id).await;
+        released.len()
+    }
+}
+
+#[async_trait]
+impl LeaseRegistryApi for run_leases::LeaseRegistry {
+    async fn release_all_for_actor(&self, actor_id: &str) -> usize {
+        self.release_all_held_by(actor_id).await
+    }
+}
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1502,5 +1591,46 @@ mod tests {
         s.note_kv_op("").await;
         s.note_lease_op("").await;
         assert!(s.activity_snapshot().await.is_empty());
+    }
+
+    /// #189 regression: both lease registries implement `LeaseRegistryApi`
+    /// so a cleanup-only call site can be parameterized over the trait
+    /// without leaking either registry's per-impl semantics. If a future
+    /// refactor adds a third registry, the trait forces the cleanup hook
+    /// to be implemented before the new registry can be wired in.
+    #[tokio::test]
+    async fn lease_registry_api_uniform_cleanup_across_both_kinds() {
+        use crate::shared_store::ActorRole;
+        use std::time::Duration;
+
+        async fn cleanup(reg: &dyn LeaseRegistryApi, actor: &str) -> usize {
+            reg.release_all_for_actor(actor).await
+        }
+
+        // Per-layer registry: identity-checked acquire, no renewal.
+        let per_layer = leases::LeaseRegistry::new();
+        let caller = CallerIdentity {
+            id: "actor-A".to_string(),
+            role: ActorRole::Worker,
+        };
+        per_layer
+            .acquire("foo", Duration::from_secs(30), &caller)
+            .await
+            .unwrap();
+        assert_eq!(cleanup(&per_layer, "actor-A").await, 1);
+        assert_eq!(cleanup(&per_layer, "actor-A").await, 0); // idempotent
+
+        // Run-global registry: (key, holder) keyed, with renewal.
+        let run_global = run_leases::LeaseRegistry::new();
+        run_global
+            .try_acquire("bar", "actor-B", Duration::from_secs(30))
+            .await
+            .unwrap();
+        run_global
+            .try_acquire("baz", "actor-B", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(cleanup(&run_global, "actor-B").await, 2);
+        assert_eq!(cleanup(&run_global, "unknown-actor").await, 0); // idempotent
     }
 }

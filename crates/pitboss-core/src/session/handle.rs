@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
 
 use crate::parser::{parse_line_all, Event, TokenUsage};
 use crate::process::{ProcessSpawner, SpawnCmd};
@@ -131,6 +130,11 @@ impl SessionHandle {
         };
 
         // Shared accumulator — stream_loop writes, we read post-session.
+        // `std::sync::Mutex` rather than `tokio::sync::Mutex`: the only
+        // contention model is the stream task writing, then `run_to_completion`
+        // reading after the stream task is fully drained — there is never a
+        // suspension point held across a lock guard, so the async mutex was
+        // overhead with no payoff. (#149 L7)
         let accum = Arc::new(Mutex::new(StreamAccum::default()));
         let accum_stream = accum.clone();
 
@@ -244,7 +248,9 @@ impl SessionHandle {
             .and_then(std::process::ExitStatus::code);
         let ended_at = Utc::now();
 
-        let accum = accum.lock().await;
+        let accum = accum
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saw_result = accum.saw_result;
 
         let final_state = match &end_reason {
@@ -299,6 +305,12 @@ async fn stream_loop(
     accum: Arc<Mutex<StreamAccum>>,
     session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) {
+    // Tracks whether we've already published the session id on the
+    // `session_id_tx` channel — Claude Code emits `system{init}` first
+    // (carries the session_id) and then `result` later (also carries it).
+    // The dispatcher only needs the id once; firing twice would risk a
+    // bounded-channel push back into a now-uninterested consumer.
+    let mut session_id_published = false;
     loop {
         match reader.next_line().await {
             Ok(Some(line)) => {
@@ -320,7 +332,9 @@ async fn stream_loop(
                 for ev in events {
                     match ev {
                         Event::AssistantText { text } => {
-                            let mut a = accum.lock().await;
+                            let mut a = accum
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             // Prefer the longest nontrivial assistant text. Rationale:
                             // claude often appends a short confirmation ("Done.", "OK")
                             // after the real output; taking the last text buries the
@@ -339,21 +353,55 @@ async fn stream_loop(
                                 a.last_text = Some(text);
                             }
                         }
+                        // `system{subtype:"init"}` is the FIRST event of every
+                        // claude session and already carries `session_id` — fire
+                        // the dispatcher's notification now, not 30+ minutes
+                        // later when the run finishes and `Event::Result`
+                        // lands. The audit (#149 M5) flagged that the dispatcher
+                        // was effectively waiting the full session duration for
+                        // a session id it could have had at second one.
+                        Event::System {
+                            subtype: Some(ref st),
+                            session_id: Some(ref sid),
+                        } if st == "init" && !session_id_published => {
+                            if let Some(tx) = &session_id_tx {
+                                if let Err(e) = tx.try_send(sid.clone()) {
+                                    tracing::debug!(
+                                        error = %e,
+                                        session_id = %sid,
+                                        "stream_loop: session_id channel send dropped (init)"
+                                    );
+                                }
+                            }
+                            // Don't stash on `accum.session_id` here — the
+                            // outcome's `claude_session_id` is the one carried
+                            // by `Event::Result` (terminal, post-resume-aware).
+                            // We just need to publish to the dispatcher early.
+                            session_id_published = true;
+                        }
                         Event::Result {
                             session_id: sid,
                             usage: u,
                             ..
                         } => {
-                            let mut a = accum.lock().await;
-                            if let Some(tx) = &session_id_tx {
-                                // Best-effort: if receiver is closed or full, drop the send.
-                                if let Err(e) = tx.try_send(sid.clone()) {
-                                    tracing::debug!(
-                                        error = %e,
-                                        session_id = %sid,
-                                        "stream_loop: session_id channel send dropped"
-                                    );
+                            let mut a = accum
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if !session_id_published {
+                                // Fallback: init didn't carry a session_id (older
+                                // claude builds, or a wire-format change). Fire
+                                // here so the dispatcher's notification still
+                                // happens, just later.
+                                if let Some(tx) = &session_id_tx {
+                                    if let Err(e) = tx.try_send(sid.clone()) {
+                                        tracing::debug!(
+                                            error = %e,
+                                            session_id = %sid,
+                                            "stream_loop: session_id channel send dropped (result)"
+                                        );
+                                    }
                                 }
+                                session_id_published = true;
                             }
                             a.session_id = Some(sid);
                             a.usage.add(&u);
@@ -447,11 +495,64 @@ mod session_id_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// #149 M5 regression: the session id must fire on the *init* event
+    /// (the first event of every session), not on `Event::Result` (the
+    /// last). This test was previously named `session_id_fires_on_init_event`
+    /// but emitted both an init AND a result line — so it passed even
+    /// though the channel only fired on the result line. The dispatcher
+    /// observed full-session-duration latency on session-id notification
+    /// as a result. Asserts here:
+    ///   1. With ONLY an init line, the channel fires.
+    ///   2. With both init and result, only one send happens (no
+    ///      duplicate publish from the result-event fallback path).
     #[tokio::test]
-    async fn session_id_fires_on_init_event() {
+    async fn session_id_fires_on_init_event_alone() {
         let script = FakeScript::new()
-            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-xyz"}"#)
-            .stdout_line(r#"{"type":"result","session_id":"sess-xyz","usage":{"input_tokens":1,"output_tokens":1}}"#)
+            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-init-only"}"#)
+            .stdout_line(r#"{"type":"result","session_id":"sess-init-only","usage":{"input_tokens":1,"output_tokens":1}}"#)
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cmd = crate::process::SpawnCmd {
+            program: std::path::PathBuf::from("fake-claude"),
+            args: vec![],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: std::collections::HashMap::new(),
+        };
+        // Channel of size 1 — a duplicate send from the result-event
+        // fallback would surface as a dropped publish in the tracing
+        // log, and the second `rx.recv()` below would hang.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+        let handle = SessionHandle::new("t", spawner, cmd).with_session_id_tx(tx);
+        let _outcome = handle
+            .run_to_completion(CancelToken::new(), Duration::from_secs(5))
+            .await;
+        let got = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("channel fires before deadline")
+            .expect("sender not dropped");
+        assert_eq!(got, "sess-init-only");
+        // No second send on the same id from the result-event fallback —
+        // sender has been dropped (handle moved into the task), so the
+        // next recv returns None promptly.
+        let next = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        match next {
+            Ok(None) => {} // expected: sender closed without a duplicate.
+            Ok(Some(s)) => panic!("unexpected second publish of session id: {s}"),
+            Err(elapsed) => {
+                panic!("rx hung ({elapsed}); second publish presumably blocked on full channel")
+            }
+        }
+    }
+
+    /// #149 M5 regression: when init does NOT carry a `session_id` (older
+    /// claude builds, or a wire-format change), the result-event fallback
+    /// must still publish so the dispatcher isn't left waiting forever.
+    #[tokio::test]
+    async fn session_id_falls_back_to_result_when_init_missing() {
+        let script = FakeScript::new()
+            // init without session_id (degraded wire format)
+            .stdout_line(r#"{"type":"system","subtype":"init"}"#)
+            .stdout_line(r#"{"type":"result","session_id":"sess-fallback","usage":{"input_tokens":1,"output_tokens":1}}"#)
             .exit_code(0);
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
         let cmd = crate::process::SpawnCmd {
@@ -469,7 +570,7 @@ mod session_id_tests {
             .await
             .expect("channel fires before deadline")
             .expect("sender not dropped");
-        assert_eq!(got, "sess-xyz");
+        assert_eq!(got, "sess-fallback");
     }
 }
 

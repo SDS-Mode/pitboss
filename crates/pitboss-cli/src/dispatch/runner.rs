@@ -385,7 +385,15 @@ pub async fn execute(
             }
             records.lock().await.push(record);
             if failed && halt_on_failure {
-                halt_drained.store(true, Ordering::Relaxed);
+                // `Release` so the load at the `was_interrupted`
+                // computation below establishes a happens-before with
+                // every prior write in this task (record persistence,
+                // table updates) — `Relaxed` previously left the
+                // synchronization implicit and dependent on the
+                // surrounding `cancel.drain()` ordering, which is
+                // fragile under future refactors that move the store
+                // back above the load. (#150 L12)
+                halt_drained.store(true, Ordering::Release);
                 cancel.drain();
             }
         }));
@@ -417,7 +425,7 @@ pub async fn execute(
         tasks_total: records.len(),
         tasks_failed,
         was_interrupted: (cancel.is_draining() || cancel.is_terminated())
-            && !halt_drained.load(Ordering::Relaxed),
+            && !halt_drained.load(Ordering::Acquire),
         tasks: records,
     };
     store.finalize_run(&summary).await?;

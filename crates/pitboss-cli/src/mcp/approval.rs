@@ -161,15 +161,67 @@ impl ApprovalBridge {
                 plan: plan.map(approval_plan_to_wire),
                 kind,
             };
-            // Best-effort send. A full queue drops the event; the bridge
-            // timeout will then expire and the caller sees a timeout —
-            // same end state as a permanently-disconnected TUI (#110).
+            // Best-effort send. A full queue used to silently drop the
+            // event AND leave the bridge entry alive, so the caller
+            // waited the full timeout for an ApprovalRequest the TUI
+            // would never see. Now we evict the bridge entry on
+            // try_send failure and route through the policy's
+            // fallback path (timeout/auto-allow/reject) immediately
+            // — same outcome as a permanently-disconnected TUI but
+            // without the bridge-timeout stall. (#151 M4)
             if let Err(e) = w.sender.try_send(ev) {
                 tracing::warn!(
                     request_id = %request_id,
                     error = %e,
-                    "control writer queue full; TUI will not see ApprovalRequest until reconnect"
+                    "control writer queue full; evicting bridge entry and falling through \
+                     to policy fallback"
                 );
+                // Remove the bridge entry we just inserted so the
+                // responder isn't orphaned.
+                self.state
+                    .root
+                    .approval_bridge
+                    .lock()
+                    .await
+                    .remove(&request_id);
+                drop(writer_guard);
+                // Apply the same fallback that fires on bridge timeout
+                // or no-TUI-attached. We swap to the no-TUI handling
+                // path by returning early through the policy block
+                // below — but `tx` was moved into the bridge entry,
+                // so we need to fabricate a synchronous reply here.
+                return Ok(match self.state.root.approval_policy {
+                    ApprovalPolicy::AutoApprove => ApprovalResponse {
+                        approved: true,
+                        comment: None,
+                        edited_summary: None,
+                        reason: None,
+                        from_ttl: false,
+                    },
+                    ApprovalPolicy::AutoReject => ApprovalResponse {
+                        approved: false,
+                        comment: None,
+                        edited_summary: None,
+                        reason: Some("control writer queue full; auto-rejected".into()),
+                        from_ttl: false,
+                    },
+                    ApprovalPolicy::Block => ApprovalResponse {
+                        // Match block-policy semantics: with no TUI to
+                        // make a decision and the queue full, the only
+                        // safe outcome is rejection. Pre-fix the caller
+                        // would block until bridge timeout for the same
+                        // result.
+                        approved: false,
+                        comment: None,
+                        edited_summary: None,
+                        reason: Some(
+                            "control writer queue full and approval_policy=block — no TUI \
+                             can decide; auto-rejected"
+                                .into(),
+                        ),
+                        from_ttl: false,
+                    },
+                });
             }
             drop(writer_guard);
         } else {

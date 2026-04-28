@@ -516,46 +516,13 @@ fn run_diff(
 
 /// Resolve a run id (full UUID or unique prefix) to an absolute run directory.
 ///
-/// Searches `base_runs_dir` for subdirectory names whose string representation
-/// starts with `run_id_prefix`. Returns an error if zero or more than one match.
+/// Thin wrapper over [`pitboss_cli::runs::resolve_run_dir_by_prefix`] —
+/// kept here so `main.rs` callers don't need to fully-qualify the path.
 fn resolve_run_dir(
     base_runs_dir: &std::path::Path,
     run_id_prefix: &str,
 ) -> Result<std::path::PathBuf> {
-    if run_id_prefix.is_empty() {
-        anyhow::bail!("run id prefix must not be empty");
-    }
-    let entries = match std::fs::read_dir(base_runs_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            anyhow::bail!(
-                "cannot read runs directory {}: {e}",
-                base_runs_dir.display()
-            );
-        }
-    };
-
-    let mut matches: Vec<std::path::PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if entry.path().is_dir() && name_str.starts_with(run_id_prefix) {
-            matches.push(entry.path());
-        }
-    }
-
-    match matches.len() {
-        0 => anyhow::bail!(
-            "no run found matching prefix '{}' in {}",
-            run_id_prefix,
-            base_runs_dir.display()
-        ),
-        1 => Ok(matches.remove(0)),
-        n => anyhow::bail!(
-            "{n} runs match prefix '{}' — be more specific",
-            run_id_prefix
-        ),
-    }
+    pitboss_cli::runs::resolve_run_dir_by_prefix(base_runs_dir, run_id_prefix)
 }
 
 fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>) -> ! {
