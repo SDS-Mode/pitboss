@@ -1385,29 +1385,34 @@ mod tests {
         .unwrap();
 
         let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
-        stream
-            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
-            .await
-            .unwrap();
-        stream
-            .write_all(
-                b"{\"op\":\"approve\",\"request_id\":\"req-1\",\"approved\":true,\"edited_summary\":\"go\"}\n",
-            )
-            .await
-            .unwrap();
-
-        let (r, _w) = stream.split();
+        let (r, mut w) = stream.split();
         let mut lines = BufReader::new(r).lines();
+
+        // Send `hello` and drain BOTH the hello ack AND the bridge-replay
+        // event (#102: server replays live bridge entries on Hello)
+        // *before* sending `approve`. Without this serialization, the
+        // server may process the approve op — which removes the bridge
+        // entry — ahead of the hello-triggered replay enumeration, so the
+        // replay sees an empty map and the ApprovalRequest event never
+        // reaches the wire. CI hit this race on a slower scheduler; local
+        // dev machines reliably win it but the bug is in the test, not in
+        // production.
+        w.write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
         let _hello = lines.next_line().await.unwrap();
-        // #102: server now replays live bridge entries on Hello. The pre-seed
-        // at the top of this test pushes one ApprovalRequest before the
-        // approve ack arrives.
         let replay_line = lines.next_line().await.unwrap().unwrap();
         let replay: ControlEvent = serde_json::from_str(&replay_line).unwrap();
         assert!(matches!(
             replay,
             ControlEvent::ApprovalRequest { ref request_id, .. } if request_id == "req-1"
         ));
+
+        w.write_all(
+            b"{\"op\":\"approve\",\"request_id\":\"req-1\",\"approved\":true,\"edited_summary\":\"go\"}\n",
+        )
+        .await
+        .unwrap();
         let reply_line = lines.next_line().await.unwrap().unwrap();
         let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
         assert!(matches!(
