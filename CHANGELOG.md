@@ -44,6 +44,38 @@ This project uses [Semantic Versioning](https://semver.org/).
   Existing integration coverage in `tests/sublead_flows.rs` and
   `tests/hierarchical_flows.rs` is the regression net.
 
+- **Builder overrides for `TERMINATE_GRACE` / `STREAM_DRAIN_TIMEOUT`**
+  (#149). `SessionHandle` gains `with_terminate_grace(Duration)` and
+  `with_stream_drain_timeout(Duration)` builders. Defaults unchanged
+  (10 s / 30 s, exposed as `pitboss_core::session::TERMINATE_GRACE`
+  and `DEFAULT_STREAM_DRAIN_TIMEOUT`). Tests can drive the cancel /
+  drain windows quickly without monkey-patching globals; future
+  manifest fields could plumb operator-supplied values through the
+  same builders without touching `run_to_completion`.
+
+### Added
+
+- **Resume-failure hint on `FailureReason::Unknown`** (#184). New
+  `pitboss_core::failure_classify::enrich_with_resume_hint(reason,
+  session_id)` augments unhelpful `Unknown` failures from a
+  `--resume`-driven dispatch with an actionable message — names a
+  truncated session id prefix (8 chars, never the full id) and
+  points the operator at "re-run without `--resume` to start fresh,
+  or `pitboss resume <run-id>` against a more recent run." Specific
+  classified reasons (`RateLimit` / `AuthFailure` / `NetworkError` /
+  `ContextExceeded` / `InvalidArgument`) pass through unchanged
+  because their cause is unrelated to the resume. Wired at the three
+  dispatch failure-classification call sites that have a
+  `resume_session_id` in scope: root lead (`hierarchical.rs`), sub-
+  leads (`sublead.rs`), and flat-mode tasks (`runner.rs`). The audit
+  asked for a design call between active validation (ping the API at
+  startup) vs. lazy fail-with-hint; lazy was chosen because pitboss
+  otherwise doesn't talk to the API directly — adding auth plumbing
+  to duplicate what the subprocess already does for a single hint is
+  a poor trade.
+
+### Changed
+
 - **Collapse cancel-cascade watcher tasks; close #100** (#100, PR 100.3).
   `install_sublead_cancel_watcher` and `install_cascade_cancel_watcher`
   used to spawn two tasks each (one for drain, one for terminate); now

@@ -738,7 +738,17 @@ async fn execute_task(
         outcome.exit_code,
         Some(&log_path),
         Some(&stderr_log_path),
-    );
+    )
+    .map(|r| {
+        // #184: enrich Unknown failures with a --resume hint when the
+        // task was started with a resume_session_id. Specific markers
+        // pass through unchanged (their cause is unrelated to resume).
+        if let Some(sid) = task.resume_session_id.as_deref() {
+            pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+        } else {
+            r
+        }
+    });
     TaskRecord {
         task_id: task.id.clone(),
         status,

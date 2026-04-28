@@ -378,7 +378,18 @@ pub async fn run_hierarchical(
             final_outcome.exit_code,
             Some(&lead_log_path),
             Some(&lead_stderr_path),
-        ),
+        )
+        .map(|r| {
+            // #184: when --resume was used and we got an unhelpful
+            // Unknown classification, surface a hint about the session
+            // id potentially being invalid. Specific markers
+            // (RateLimit / AuthFailure / etc.) pass through unchanged.
+            if let Some(sid) = lead.resume_session_id.as_deref() {
+                pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+            } else {
+                r
+            }
+        }),
     };
 
     // Cleanup worktree per policy. Surface the result via tracing

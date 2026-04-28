@@ -12,8 +12,19 @@ pub use handle::SessionHandle;
 pub use outcome::SessionOutcome;
 pub use state::SessionState;
 
-/// Grace window between SIGTERM and SIGKILL during terminate-phase cancellation.
+/// Default grace window between SIGTERM and SIGKILL during terminate-phase
+/// cancellation. Builders can override per-`SessionHandle` via
+/// `SessionHandle::with_terminate_grace`. The constant is the operational
+/// default; tests and tight-loop scenarios typically pass a smaller value.
 pub const TERMINATE_GRACE: Duration = Duration::from_secs(10);
+
+/// Default ceiling on the post-exit stdout/stderr drain in
+/// `run_to_completion`. Builders can override per-`SessionHandle` via
+/// `SessionHandle::with_stream_drain_timeout`. After the child exits, the
+/// stream-reader task drains buffered tail bytes; without this ceiling a
+/// hung log writer could wedge the dispatcher indefinitely. 30 seconds is
+/// generous for kernel-buffered stdout, tight for genuine wedges.
+pub const DEFAULT_STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(all(test, feature = "test-support"))]
 mod happy_path_tests {
@@ -153,6 +164,62 @@ mod cancel_tests {
             .run_to_completion(CancelToken::new(), Duration::from_millis(100))
             .await;
         assert!(matches!(outcome.final_state, SessionState::TimedOut));
+    }
+
+    /// `with_terminate_grace` overrides the SIGTERM→SIGKILL window.
+    /// With a 50 ms grace, a hold-until-signal child that ignores
+    /// SIGTERM (`FakeSpawner` doesn't, but the assertion is on wall-clock
+    /// bound: the whole flow must finish within 1 s, which is well
+    /// under the 10 s default).
+    #[tokio::test]
+    async fn with_terminate_grace_overrides_default() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init"}"#)
+            .hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cancel = CancelToken::new();
+        let c2 = cancel.clone();
+        let started = std::time::Instant::now();
+        let handle_fut = tokio::spawn(async move {
+            SessionHandle::new("t", spawner, cmd())
+                .with_terminate_grace(Duration::from_millis(50))
+                .run_to_completion(c2, Duration::from_secs(60))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.terminate();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), handle_fut)
+            .await
+            .expect("finishes well under default 10s grace + 1s kill")
+            .unwrap();
+        assert!(matches!(outcome.final_state, SessionState::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "with_terminate_grace(50ms) should bound the whole flow under 2s; \
+             elapsed = {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `with_stream_drain_timeout` is wired through. Verified by setting
+    /// a tiny drain ceiling and confirming the run still completes
+    /// (no hangs) when stdout has nothing more to deliver. This is a
+    /// smoke check — the real protection is against a hung log writer,
+    /// which is hard to simulate without a hostile `FakeSpawner`.
+    #[tokio::test]
+    async fn with_stream_drain_timeout_is_threaded_through() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init"}"#)
+            .stdout_line(
+                r#"{"type":"result","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"result":"done","session_id":"s","total_cost_usd":0.0,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+            )
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let outcome = SessionHandle::new("t", spawner, cmd())
+            .with_stream_drain_timeout(Duration::from_millis(100))
+            .run_to_completion(CancelToken::new(), Duration::from_secs(5))
+            .await;
+        assert!(matches!(outcome.final_state, SessionState::Completed));
     }
 }
 
