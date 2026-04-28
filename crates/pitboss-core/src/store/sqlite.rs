@@ -5,13 +5,24 @@
 //!
 //! ## Schema evolution
 //!
-//! The initial schema was introduced in v0.2.1. Additive changes (new
-//! nullable columns) use idempotent migrations inside `SqliteStore::new`
-//! that check `pragma_table_info(...)` and `ALTER TABLE` only when the
-//! column is absent. This keeps old DBs forward-compatible without a
-//! dedicated `schema_versions` table. Non-additive changes (dropped
-//! columns, type changes, non-null constraints on existing columns)
-//! would require a migration versioning scheme.
+//! The initial schema was introduced in v0.2.1. Migrations are declared
+//! in the [`MIGRATIONS`] registry as `(version, name, apply)` triples
+//! and applied in version order on `SqliteStore::new`. A
+//! `schema_versions(version, name, applied_at)` table records which
+//! migrations have run; on each open the runner skips versions already
+//! present.
+//!
+//! Each migration body is still **idempotent** (column-presence /
+//! object-existence checks before any DDL), so legacy DBs that
+//! pre-date the version table back-fill cleanly on first open with
+//! the new code: every migration runs, finds the change already
+//! present, and records itself in `schema_versions`. From then on the
+//! version table is the source of truth.
+//!
+//! Adding a migration: append a new entry to [`MIGRATIONS`] with the
+//! next contiguous version number — never reorder or rewrite an
+//! existing entry, since DBs in the field already record those
+//! versions.
 //!
 //! # Concurrency
 //! `SQLite`'s default journal mode (DELETE) is used; WAL mode is not required for
@@ -59,23 +70,133 @@ impl SqliteStore {
             .map_err(|e| StoreError::Incomplete(format!("pragma journal_mode: {e}")))?;
         conn.pragma_update(None, "busy_timeout", 5000)
             .map_err(|e| StoreError::Incomplete(format!("pragma busy_timeout: {e}")))?;
-        // Migration order matters: rename the legacy `shire_version` column
-        // BEFORE init_schema runs its CREATE TABLE IF NOT EXISTS, otherwise
-        // the pragma check below would still see the old column name for an
-        // existing DB. For a fresh DB init_schema creates the table with the
-        // new column name and the rename is a no-op.
-        migrate_rename_shire_version_to_pitboss_version(&conn)?;
-        init_schema(&conn)?;
-        migrate_parent_task_id(&conn)?;
-        migrate_v04_event_counters(&conn)?;
-        migrate_task_model(&conn)?;
-        migrate_failure_reason(&conn)?;
-        migrate_final_message(&conn)?;
-        migrate_runs_env(&conn)?;
+        run_migrations(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
     }
+
+    /// Highest migration version currently recorded in `schema_versions`,
+    /// or `None` if the table is empty (which only happens on a DB that
+    /// hasn't been opened by `SqliteStore::new` yet — fresh DBs always
+    /// have at least one row by the time `new` returns).
+    ///
+    /// Exposed for diagnostics / tests; not used on the hot path.
+    #[doc(hidden)]
+    pub fn current_schema_version(&self) -> Result<Option<u32>, StoreError> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| StoreError::Incomplete(format!("mutex poisoned: {e}")))?;
+        let v: Option<u32> = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |row| {
+                row.get::<_, Option<u32>>(0)
+            })
+            .map_err(|e| StoreError::Incomplete(format!("read schema_versions: {e}")))?;
+        Ok(v)
+    }
+}
+
+/// Schema migration entry. Versions form a contiguous, append-only
+/// sequence — never reorder or rewrite an existing entry once a build
+/// has shipped, since DBs in the field already record those versions.
+struct Migration {
+    version: u32,
+    name: &'static str,
+    apply: fn(&rusqlite::Connection) -> Result<(), StoreError>,
+}
+
+/// Ordered registry of every schema migration, oldest first.
+///
+/// On `SqliteStore::new` the runner creates `schema_versions` (if
+/// absent) and then walks this slice: for each entry whose version is
+/// not yet recorded, runs `apply`, then records it. Each `apply` is
+/// idempotent — running it on a DB where the change is already present
+/// is a no-op — so legacy DBs (pre-versioning) back-fill the
+/// `schema_versions` rows on the first open with this code.
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "rename_shire_version_to_pitboss_version",
+        apply: migrate_rename_shire_version_to_pitboss_version,
+    },
+    Migration {
+        version: 2,
+        name: "init_schema",
+        apply: init_schema,
+    },
+    Migration {
+        version: 3,
+        name: "parent_task_id",
+        apply: migrate_parent_task_id,
+    },
+    Migration {
+        version: 4,
+        name: "v04_event_counters",
+        apply: migrate_v04_event_counters,
+    },
+    Migration {
+        version: 5,
+        name: "task_model",
+        apply: migrate_task_model,
+    },
+    Migration {
+        version: 6,
+        name: "failure_reason",
+        apply: migrate_failure_reason,
+    },
+    Migration {
+        version: 7,
+        name: "final_message",
+        apply: migrate_final_message,
+    },
+    Migration {
+        version: 8,
+        name: "runs_env_json",
+        apply: migrate_runs_env,
+    },
+];
+
+/// Apply every entry in [`MIGRATIONS`] whose version is not yet
+/// recorded in `schema_versions`. Records the version + name + UTC
+/// applied-at timestamp on success. Migration order matters: the
+/// `shire_version` rename has to run **before** `init_schema` so the
+/// pragma check sees the old column name on a pre-rebrand DB; the
+/// registry ordering bakes that in.
+fn run_migrations(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_versions (
+            version    INTEGER PRIMARY KEY,
+            name       TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );",
+    )
+    .map_err(|e| StoreError::Incomplete(format!("create schema_versions: {e}")))?;
+
+    for m in MIGRATIONS {
+        let already: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
+                rusqlite::params![m.version],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                StoreError::Incomplete(format!("schema_versions check v{}: {e}", m.version))
+            })?;
+        if already > 0 {
+            continue;
+        }
+        (m.apply)(conn)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO schema_versions (version, name, applied_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![m.version, m.name, now],
+        )
+        .map_err(|e| {
+            StoreError::Incomplete(format!("schema_versions insert v{}: {e}", m.version))
+        })?;
+    }
+    Ok(())
 }
 
 /// Idempotent migration: if an older DB lacks `parent_task_id`, add it.
@@ -1318,5 +1439,123 @@ mod sqlite_tests {
                 "must reject {bad:?} as unsafe SQL ident"
             );
         }
+    }
+
+    /// #149 L11: a fresh DB opened by `SqliteStore::new` records every
+    /// migration in `schema_versions` and the highest version equals
+    /// the last entry in the registry.
+    #[test]
+    fn fresh_db_records_all_migration_versions() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+
+        let conn = store.inner.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT version, name FROM schema_versions ORDER BY version")
+            .unwrap();
+        let rows: Vec<(u32, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        drop(stmt);
+        drop(conn);
+
+        let expected: Vec<(u32, String)> = MIGRATIONS
+            .iter()
+            .map(|m| (m.version, m.name.to_string()))
+            .collect();
+        assert_eq!(rows, expected, "every registered migration is recorded");
+
+        let max = store.current_schema_version().unwrap();
+        assert_eq!(max, MIGRATIONS.last().map(|m| m.version));
+    }
+
+    /// #149 L11: re-opening the same DB does not reapply or duplicate
+    /// any migration — `applied_at` for each row is unchanged on
+    /// second open.
+    #[test]
+    fn reopen_is_idempotent_and_preserves_applied_at() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+
+        let first = SqliteStore::new(path.clone()).unwrap();
+        let first_rows: Vec<(u32, String)> = {
+            let conn = first.inner.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT version, applied_at FROM schema_versions ORDER BY version")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        drop(first);
+
+        let second = SqliteStore::new(path).unwrap();
+        let second_rows: Vec<(u32, String)> = {
+            let conn = second.inner.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT version, applied_at FROM schema_versions ORDER BY version")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+
+        assert_eq!(
+            first_rows, second_rows,
+            "applied_at timestamps must not change on re-open"
+        );
+        assert_eq!(first_rows.len(), MIGRATIONS.len());
+    }
+
+    /// #149 L11: a "legacy" DB that pre-dates the version table — i.e.
+    /// has the post-migration schema but no `schema_versions` row —
+    /// gets back-filled on the next `SqliteStore::new`. Simulated by
+    /// running the migration apply functions directly on a raw
+    /// connection (skipping the runner that records them) and then
+    /// dropping/re-opening through `SqliteStore`.
+    #[test]
+    fn legacy_db_backfills_schema_versions() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+
+        // Build a DB the "old way": apply migrations directly without
+        // the schema_versions table.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for m in MIGRATIONS {
+                (m.apply)(&conn).unwrap();
+            }
+            // Ensure schema_versions is genuinely absent so the
+            // back-fill path is what we exercise next.
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='table' AND name='schema_versions'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0, "legacy fixture must not have schema_versions");
+        }
+
+        // Re-open through the production path — runner should
+        // create schema_versions and record every migration as having
+        // been applied.
+        let store = SqliteStore::new(path).unwrap();
+        let conn = store.inner.lock().unwrap();
+        let count: usize = conn
+            .query_row("SELECT COUNT(*) FROM schema_versions", [], |r| {
+                r.get::<_, i64>(0).map(|n| usize::try_from(n).unwrap_or(0))
+            })
+            .unwrap();
+        assert_eq!(
+            count,
+            MIGRATIONS.len(),
+            "all migrations back-filled on first open"
+        );
     }
 }
