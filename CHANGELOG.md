@@ -7,6 +7,20 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`WorktreeManager::cleanup` now returns `Option<Worktree>`** (#149 L9).
+  Previously the method consumed `Worktree` by value and returned
+  `Result<(), WorktreeError>`, so callers using `CleanupPolicy::Never`
+  (or `OnSuccess` with `succeeded == false`) lost the path after the
+  call. The signature is now `Result<Option<Worktree>, WorktreeError>`:
+  `Some(wt)` when the worktree was retained on disk, `None` when it
+  was removed. All in-tree callers (`runner.rs`, `hierarchical.rs`,
+  `mcp/tools.rs`) already discarded the return value via `let _` /
+  `if let Err`, so they continue to compile unchanged. Worktree tests
+  now assert the retained-handle path and that the returned `Worktree`
+  exposes the same `path` and `name` as the input.
+
 ### Fixed
 
 - **TUI: async git-diff summary on detail-view open** (#154 M3).

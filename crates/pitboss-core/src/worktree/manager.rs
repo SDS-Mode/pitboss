@@ -103,20 +103,23 @@ impl WorktreeManager {
         })
     }
 
-    #[allow(clippy::needless_pass_by_value)] // Worktree is consumed intentionally: taking ownership signals the caller has relinquished it.
+    /// Apply `policy` to `wt`. Returns `Ok(Some(wt))` when the worktree was
+    /// retained on disk (so the caller can keep working with the path —
+    /// `CleanupPolicy::Never`, or `CleanupPolicy::OnSuccess` with
+    /// `succeeded == false`); `Ok(None)` when it was removed.
     pub fn cleanup(
         &self,
         wt: Worktree,
         policy: CleanupPolicy,
         succeeded: bool,
-    ) -> Result<(), WorktreeError> {
+    ) -> Result<Option<Worktree>, WorktreeError> {
         let should_remove = match policy {
             CleanupPolicy::Always => true,
             CleanupPolicy::OnSuccess => succeeded,
             CleanupPolicy::Never => false,
         };
         if !should_remove {
-            return Ok(());
+            return Ok(Some(wt));
         }
 
         let repo = Repository::open(&wt.repo_root)?;
@@ -141,7 +144,7 @@ impl WorktreeManager {
         if wt.path.exists() {
             std::fs::remove_dir_all(&wt.path)?;
         }
-        Ok(())
+        Ok(None)
     }
 }
 
