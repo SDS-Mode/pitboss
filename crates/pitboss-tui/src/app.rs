@@ -1301,6 +1301,18 @@ fn send_approve(
     comment: Option<String>,
     edited_summary: Option<String>,
 ) {
+    // #154 L2: gate on dispatch capability BEFORE mutating the list.
+    // Pre-fix, `spawn_control_op` silently no-op'd when the client or
+    // runtime was missing (observe-only mode, or post-disconnect), but
+    // we still removed the approval from the queue. The operator
+    // pressed approve, the actor never received the response, and the
+    // request was unreachable from the TUI — pure data loss. Now we
+    // leave the queue intact in that case so the operator can retry
+    // when the client recovers, or dismiss the modal intentionally
+    // with Esc.
+    if state.control_client.is_none() || state.runtime_handle.is_none() {
+        return;
+    }
     // When rejecting, forward the comment text also via the `reason` field
     // introduced in Task 4.3 so the requesting actor receives the rejection
     // rationale in `ApprovalResponse.reason`.
@@ -1315,11 +1327,19 @@ fn send_approve(
             reason,
         },
     );
-    // Drop from the approval-list queue optimistically — the server will
-    // ack the op before any subsequent ApprovalRequest with the same id
-    // could arrive, so a race that re-inserts a stale entry isn't
-    // reachable. Clamp `selected_idx` so an out-of-range index can't
-    // persist past the removal.
+    apply_approve_to_list(state, request_id);
+}
+
+/// Drop the approval matching `request_id` from the queue and clamp
+/// `selected_idx` to remain in-bounds.
+///
+/// Optimistic — the server acks before any subsequent
+/// `ApprovalRequest` with the same id could arrive, so a race that
+/// re-inserts a stale entry isn't reachable. Split out from
+/// `send_approve` so the list-mutation logic can be unit-tested
+/// directly without needing to stand up a tokio runtime / mock
+/// control client (#154 L2).
+fn apply_approve_to_list(state: &mut AppState, request_id: &str) {
     if let Some(pos) = state
         .approval_list
         .items
@@ -1410,11 +1430,11 @@ mod approval_queue_tests {
     }
 
     #[test]
-    fn send_approve_removes_matching_item_from_list() {
+    fn apply_approve_to_list_removes_matching_item() {
         let mut state = fresh_state();
         apply_control_event(&mut state, mk_approval_event("req-A", "root"));
         apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
-        send_approve(&mut state, "req-A", true, None, None);
+        apply_approve_to_list(&mut state, "req-A");
         assert_eq!(state.approval_list.items.len(), 1);
         assert_eq!(state.approval_list.items[0].id, "req-B");
         // selected_idx must stay in bounds after a removal.
@@ -1422,14 +1442,38 @@ mod approval_queue_tests {
     }
 
     #[test]
-    fn send_approve_clamps_selected_idx_when_last_item_removed() {
+    fn apply_approve_to_list_clamps_selected_idx_when_last_item_removed() {
         let mut state = fresh_state();
         apply_control_event(&mut state, mk_approval_event("req-A", "root"));
         apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
         state.approval_list.selected_idx = 1;
-        send_approve(&mut state, "req-B", false, None, None);
+        apply_approve_to_list(&mut state, "req-B");
         assert_eq!(state.approval_list.items.len(), 1);
         assert_eq!(state.approval_list.selected_idx, 0);
+    }
+
+    #[test]
+    fn send_approve_does_not_mutate_list_without_active_client() {
+        // #154 L2 regression: pre-fix, `send_approve` removed the approval
+        // from the queue even when no control client / runtime was
+        // attached, stranding the request — the operator pressed approve,
+        // the actor never received a response, and the modal was gone
+        // from the TUI. The fix gates list mutation on dispatch
+        // capability so the operator can retry once the client recovers.
+        let mut state = fresh_state();
+        apply_control_event(&mut state, mk_approval_event("req-A", "root"));
+        apply_control_event(&mut state, mk_approval_event("req-B", "sublead-1"));
+        // fresh_state() has no control_client / runtime_handle, matching
+        // the observe-only / disconnected mode this test pins.
+        assert!(state.control_client.is_none());
+        assert!(state.runtime_handle.is_none());
+
+        send_approve(&mut state, "req-A", true, None, None);
+
+        // Both items remain — nothing was stranded.
+        assert_eq!(state.approval_list.items.len(), 2);
+        assert_eq!(state.approval_list.items[0].id, "req-A");
+        assert_eq!(state.approval_list.items[1].id, "req-B");
     }
 
     #[test]
