@@ -126,7 +126,8 @@ mod tests {
         let mgr = WorktreeManager::new();
         let wt = mgr.prepare(repo_dir.path(), "wt-ca", None).unwrap();
         let path = wt.path.clone();
-        mgr.cleanup(wt, CleanupPolicy::Always, true).unwrap();
+        let retained = mgr.cleanup(wt, CleanupPolicy::Always, true).unwrap();
+        assert!(retained.is_none(), "removed worktree returns None");
         assert!(!path.exists());
     }
 
@@ -137,7 +138,8 @@ mod tests {
         let mgr = WorktreeManager::new();
         let wt = mgr.prepare(repo_dir.path(), "wt-cf", None).unwrap();
         let path = wt.path.clone();
-        mgr.cleanup(wt, CleanupPolicy::Always, false).unwrap();
+        let retained = mgr.cleanup(wt, CleanupPolicy::Always, false).unwrap();
+        assert!(retained.is_none());
         assert!(!path.exists());
     }
 
@@ -148,7 +150,12 @@ mod tests {
         let mgr = WorktreeManager::new();
         let wt = mgr.prepare(repo_dir.path(), "wt-os", None).unwrap();
         let path = wt.path.clone();
-        mgr.cleanup(wt, CleanupPolicy::OnSuccess, false).unwrap();
+        let retained = mgr
+            .cleanup(wt, CleanupPolicy::OnSuccess, false)
+            .unwrap()
+            .expect("retained worktree on failure");
+        assert_eq!(retained.path, path, "retained handle exposes the path");
+        assert_eq!(retained.name(), "wt-os");
         assert!(path.exists(), "failed worktree preserved for forensics");
     }
 
@@ -159,7 +166,11 @@ mod tests {
         let mgr = WorktreeManager::new();
         let wt = mgr.prepare(repo_dir.path(), "wt-nev", None).unwrap();
         let path = wt.path.clone();
-        mgr.cleanup(wt, CleanupPolicy::Never, true).unwrap();
+        let retained = mgr
+            .cleanup(wt, CleanupPolicy::Never, true)
+            .unwrap()
+            .expect("Never policy returns the worktree");
+        assert_eq!(retained.path, path);
         assert!(path.exists());
     }
 }
