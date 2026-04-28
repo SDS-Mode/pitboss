@@ -2452,6 +2452,7 @@ mod tests {
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -2921,6 +2922,7 @@ mod tests {
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -3766,6 +3768,7 @@ mod tests {
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -3859,6 +3862,7 @@ mod tests {
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -3960,6 +3964,7 @@ mod tests {
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,

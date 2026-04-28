@@ -6,7 +6,31 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use pitboss_core::store::RunSummary;
 
-use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
+use crate::manifest::error::ManifestError;
+use crate::manifest::resolve::{ResolvedManifest, ResolvedTask, CURRENT_MANIFEST_SCHEMA_VERSION};
+
+/// Read `resolved.json` and parse into a [`ResolvedManifest`], rejecting
+/// snapshots whose `manifest_schema_version` exceeds what this build
+/// supports. Older / unversioned snapshots (`< CURRENT`, including the
+/// pre-v0.9.2 era where the field is absent) are accepted.
+fn read_resolved_manifest(path: &Path) -> Result<ResolvedManifest> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let raw: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {} as JSON", path.display()))?;
+    let snapshot_ver = raw
+        .get("manifest_schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(0u32, |v| u32::try_from(v).unwrap_or(u32::MAX));
+    if snapshot_ver > CURRENT_MANIFEST_SCHEMA_VERSION {
+        return Err(ManifestError::IncompatibleVersion {
+            found: snapshot_ver,
+            supported: CURRENT_MANIFEST_SCHEMA_VERSION,
+        }
+        .into());
+    }
+    serde_json::from_value(raw)
+        .with_context(|| format!("parsing {} as ResolvedManifest", path.display()))
+}
 
 /// Max length for a `claude --resume <id>` value. Real Claude session IDs
 /// are UUIDs (36 chars); we allow a generous upper bound while still refusing
@@ -58,14 +82,13 @@ fn validate_session_id(sid: &str) -> Result<()> {
 pub fn build_resume_manifest(run_dir: &Path) -> Result<ResolvedManifest> {
     // --- load resolved.json ------------------------------------------------
     let resolved_path = run_dir.join("resolved.json");
-    let resolved_bytes = std::fs::read(&resolved_path).with_context(|| {
-        format!(
+    if !resolved_path.exists() {
+        bail!(
             "resolved.json not found at {}; run may predate v0.1.0 or was never started",
             resolved_path.display()
-        )
-    })?;
-    let mut base: ResolvedManifest = serde_json::from_slice(&resolved_bytes)
-        .with_context(|| format!("parsing resolved.json at {}", resolved_path.display()))?;
+        );
+    }
+    let mut base = read_resolved_manifest(&resolved_path)?;
 
     // --- load summary.json -------------------------------------------------
     let summary_path = run_dir.join("summary.json");
@@ -169,10 +192,7 @@ pub fn build_resume_hierarchical(
     run_dir: &Path,
 ) -> Result<(ResolvedManifest, HashMap<String, String>)> {
     let resolved_path = run_dir.join("resolved.json");
-    let bytes = std::fs::read(&resolved_path)
-        .with_context(|| format!("reading {}", resolved_path.display()))?;
-    let mut resolved: ResolvedManifest = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing {}", resolved_path.display()))?;
+    let mut resolved = read_resolved_manifest(&resolved_path)?;
 
     let lead = resolved
         .lead
@@ -551,6 +571,7 @@ mod tests {
 
         // Synthesize resolved.json with a lead.
         let mut resolved = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -661,6 +682,7 @@ mod tests {
 
         // Write a bare-bones resolved.json.
         let resolved = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -774,6 +796,7 @@ mod tests {
         let run_dir = dir.path();
 
         let resolved = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -889,5 +912,58 @@ mod tests {
             sessions.get("sublead-bbb").map(String::as_str),
             Some("sub-sess-bbb")
         );
+    }
+
+    /// `resolved.json` snapshots without `manifest_schema_version`
+    /// (everything written before v0.9.2) must keep deserializing as
+    /// legacy so existing runs remain resumable across the upgrade.
+    #[test]
+    fn read_resolved_manifest_accepts_unversioned_legacy_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("resolved.json");
+        let v = serde_json::json!({
+            "max_parallel_tasks": 1,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": []
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        let m = read_resolved_manifest(&path).expect("legacy snapshot must load");
+        assert_eq!(m.manifest_schema_version, 0);
+    }
+
+    /// A snapshot whose `manifest_schema_version` is greater than this
+    /// build's `CURRENT_MANIFEST_SCHEMA_VERSION` must surface a typed
+    /// `ManifestError::IncompatibleVersion`, not an opaque serde error.
+    /// This is what tells operators "your pitboss is older than the run
+    /// you're trying to resume".
+    #[test]
+    fn read_resolved_manifest_rejects_future_schema_version() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("resolved.json");
+        let future = CURRENT_MANIFEST_SCHEMA_VERSION + 99;
+        let v = serde_json::json!({
+            "manifest_schema_version": future,
+            "max_parallel_tasks": 1,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": []
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+        let err = read_resolved_manifest(&path).unwrap_err();
+        let typed = err
+            .downcast_ref::<ManifestError>()
+            .expect("must surface ManifestError::IncompatibleVersion, not anyhow::Other");
+        match typed {
+            ManifestError::IncompatibleVersion { found, supported } => {
+                assert_eq!(*found, future);
+                assert_eq!(*supported, CURRENT_MANIFEST_SCHEMA_VERSION);
+            }
+        }
     }
 }

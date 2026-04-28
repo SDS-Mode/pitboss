@@ -87,8 +87,36 @@ pub struct ResolvedSubleadDefaults {
     pub read_down: bool,
 }
 
+/// Schema version baked into every `resolved.json` snapshot written by
+/// this build. **Bump on any breaking change** to `ResolvedManifest`,
+/// `ResolvedTask`, or `ResolvedLead` that pre-existing snapshots cannot
+/// faithfully express via `#[serde(alias)]` — e.g. a removed field, a
+/// changed type, or a semantic re-interpretation of an existing value.
+/// Renames that ship with an `alias` are NOT breaking and do NOT require
+/// a bump (they round-trip via the alias).
+///
+/// The resume loader rejects any snapshot with a version greater than
+/// this constant, surfacing a typed
+/// [`ManifestError::IncompatibleVersion`](crate::manifest::error::ManifestError)
+/// instead of an opaque serde failure.
+pub const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// Default for the `manifest_schema_version` field when absent from a
+/// snapshot. v0.9 snapshots predate this field; treating missing as `0`
+/// (legacy) lets them resume on a best-effort basis. New snapshots
+/// always carry [`CURRENT_MANIFEST_SCHEMA_VERSION`].
+fn default_legacy_manifest_schema_version() -> u32 {
+    0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedManifest {
+    /// Discriminator written by [`resolve()`] so [`crate::dispatch::resume`]
+    /// can reject snapshots produced by a newer pitboss whose schema this
+    /// build cannot deserialize. Defaults to `0` for pre-versioning
+    /// snapshots (anything written before v0.9.2).
+    #[serde(default = "default_legacy_manifest_schema_version")]
+    pub manifest_schema_version: u32,
     /// Human-readable label from `[run].name`. Surfaced into `RunSummary`
     /// so the operational console can group related runs without re-reading
     /// `manifest.snapshot.toml` per digest. `None` when the manifest omits
@@ -207,6 +235,7 @@ pub fn resolve(
     };
 
     Ok(ResolvedManifest {
+        manifest_schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
         name: manifest.run.name.clone(),
         max_parallel_tasks,
         halt_on_failure: manifest.run.halt_on_failure,
@@ -832,6 +861,89 @@ category = "tool_use"
         assert!(
             rule.r#match.cost_over.is_none(),
             "match.cost_over should be absent"
+        );
+    }
+
+    /// Every fresh `resolve()` must stamp the snapshot with the current
+    /// schema version so the resume loader can later reject future
+    /// snapshots produced by a newer pitboss with a typed
+    /// `IncompatibleVersion` error rather than an opaque serde failure.
+    #[test]
+    fn resolve_stamps_current_schema_version() {
+        let m = man(r#"
+            [defaults]
+            model = "claude-sonnet-4-6"
+
+            [[task]]
+            id = "t1"
+            directory = "/tmp"
+            prompt = "x"
+            "#);
+        let r = resolve(m, None).unwrap();
+        assert_eq!(
+            r.manifest_schema_version, CURRENT_MANIFEST_SCHEMA_VERSION,
+            "resolve() must stamp manifest_schema_version with CURRENT"
+        );
+    }
+
+    /// Regression test for serde alias coverage on every renamed field
+    /// of `ResolvedManifest` / `ResolvedLead`. If a future rename drops
+    /// the corresponding `#[serde(alias = "<old name>")]`, this test
+    /// fails loudly — the contributor must either restore the alias
+    /// (preferred) or remove the legacy key from the fixture below AND
+    /// bump `CURRENT_MANIFEST_SCHEMA_VERSION` so resume rejects pre-rename
+    /// snapshots with a typed error rather than silently succeeding with
+    /// a default.
+    ///
+    /// Each row in the fixture exercises one historic JSON key. When you
+    /// rename a field, add the old key here.
+    #[test]
+    fn resolved_manifest_accepts_legacy_serde_aliases() {
+        // Pre-v0.9 snapshot using ALL legacy field names. No
+        // `manifest_schema_version` field — defaults to 0 (legacy era).
+        let legacy = serde_json::json!({
+            "max_parallel": 7,                          // → max_parallel_tasks
+            "halt_on_failure": true,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": [],
+            "approval_policy": null,                    // → default_approval_policy
+            "lead": {
+                "id": "root",
+                "directory": "/tmp",
+                "prompt": "go",
+                "branch": null,
+                "model": "claude-sonnet-4-6",
+                "effort": "high",
+                "tools": [],
+                "timeout_secs": 1800,
+                "use_worktree": false,
+                "env": {},
+                "max_workers_across_tree": 12           // → max_total_workers
+            }
+        });
+
+        let r: ResolvedManifest =
+            serde_json::from_value(legacy).expect("legacy snapshot must deserialize via aliases");
+
+        assert_eq!(
+            r.manifest_schema_version, 0,
+            "snapshot without the field must default to 0 (legacy)"
+        );
+        assert_eq!(
+            r.max_parallel_tasks, 7,
+            "alias `max_parallel` must populate max_parallel_tasks"
+        );
+        assert!(
+            r.default_approval_policy.is_none(),
+            "alias `approval_policy` must populate default_approval_policy"
+        );
+        let lead = r.lead.as_ref().expect("lead deserialized");
+        assert_eq!(
+            lead.max_total_workers,
+            Some(12),
+            "alias `max_workers_across_tree` must populate max_total_workers"
         );
     }
 }

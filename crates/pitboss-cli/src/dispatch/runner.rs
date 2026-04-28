@@ -1092,6 +1092,7 @@ mod tests {
 
     fn minimal_manifest() -> ResolvedManifest {
         ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 1,
             halt_on_failure: false,
@@ -1209,6 +1210,7 @@ mod tests {
         let run_dir = TempDir::new().unwrap();
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 2,
             halt_on_failure: false,
@@ -1329,6 +1331,7 @@ mod tests {
         };
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 1, // serialize so ordering is deterministic
             halt_on_failure: true,
@@ -1408,6 +1411,7 @@ mod tests {
         let run_dir = TempDir::new().unwrap();
 
         let resolved = crate::manifest::resolve::ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 1,
             halt_on_failure: false,

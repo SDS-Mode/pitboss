@@ -75,6 +75,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
         name: None,
         max_parallel_tasks: 8,
         halt_on_failure: false,
@@ -1025,6 +1026,7 @@ async fn dogfood_envelope_cap_rejection() {
             sublead_defaults: None,
         };
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 8,
             halt_on_failure: false,
