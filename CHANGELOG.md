@@ -9,6 +9,22 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Manifest snapshot durability — typed schema-version mismatch + alias
+  regression test** (#186). `ResolvedManifest` now carries a
+  `manifest_schema_version: u32` (current = `1`) that's serialized into
+  every `resolved.json` snapshot. The resume loader (`build_resume_manifest`,
+  `build_resume_hierarchical`) refuses to deserialize a snapshot whose
+  version exceeds what this build supports, surfacing a typed
+  `ManifestError::IncompatibleVersion { found, supported }` instead of
+  an opaque serde failure when an older pitboss tries to resume a run
+  produced by a newer one. Pre-versioning snapshots (the v0.9.0/v0.9.1
+  era, where the field is absent) default to `0` and remain resumable
+  on a best-effort basis. Bumps to `CURRENT_MANIFEST_SCHEMA_VERSION` are
+  reserved for breaking changes that `#[serde(alias)]` cannot cover.
+  A new test (`resolved_manifest_accepts_legacy_serde_aliases`) locks
+  in deserialization of every renamed field's pre-v0.9 JSON name —
+  if a future rename drops its alias, the test breaks loudly.
+
 - **Crash-safe writes for `summary.json` and `meta.json`** (#184, #188).
   An interrupt mid-write (`SIGKILL`, OOM, host crash) could previously
   produce a partial or truncated final file. All three call sites now

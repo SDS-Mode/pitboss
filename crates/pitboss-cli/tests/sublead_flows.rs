@@ -43,6 +43,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
         name: None,
         max_parallel_tasks: 8,
         halt_on_failure: false,
@@ -111,6 +112,7 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         sublead_defaults: None,
     };
     let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
         name: None,
         max_parallel_tasks: 8,
         halt_on_failure: false,

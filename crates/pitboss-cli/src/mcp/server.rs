@@ -1349,6 +1349,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -1418,6 +1419,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,
@@ -1563,6 +1565,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,

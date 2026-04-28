@@ -527,6 +527,7 @@ mod tests {
     fn mk_state(budget: Option<f64>, max_workers: Option<u32>) -> Arc<DispatchState> {
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
             name: None,
             max_parallel_tasks: 4,
             halt_on_failure: false,

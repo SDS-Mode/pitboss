@@ -1,3 +1,4 @@
+pub mod error;
 pub mod example_doc;
 pub mod init_template;
 pub mod load;
@@ -6,6 +7,9 @@ pub mod metadata;
 pub mod resolve;
 pub mod schema;
 pub mod validate;
+
+#[allow(unused_imports)]
+pub use error::ManifestError;
 
 #[allow(unused_imports)]
 pub use load::{load_manifest, load_manifest_from_str, load_manifest_skip_dir_check};
