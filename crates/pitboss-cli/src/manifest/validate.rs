@@ -159,6 +159,11 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
 /// SharedPool default). Otherwise a runtime `spawn_sublead` call that omits
 /// those fields will fail with "budget_usd required when read_down=false"
 /// mid-dispatch.
+///
+/// Note: this is a *required-defaults* check, distinct from the depth-2
+/// invariant proper (which lives in [`crate::dispatch::depth`]). It runs
+/// only when sub-lead spawning is *enabled* by the manifest; the depth-2
+/// caller/capability checks fire on every `spawn_sublead` invocation.
 pub fn validate_sublead_defaults_adequate(r: &ResolvedManifest) -> Result<()> {
     let Some(lead) = r.lead.as_ref() else {
         return Ok(());

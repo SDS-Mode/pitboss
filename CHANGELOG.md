@@ -9,6 +9,32 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Web console socket-path resolution.** `ControlBridge::dial` previously
+  hardcoded the socket lookup to `<runs_dir>/<run_id>/control.sock`, but
+  the dispatcher publishes its control socket at
+  `$XDG_RUNTIME_DIR/pitboss/<run_id>.control.sock`. The web console
+  therefore couldn't dial live runs in the standard install layout.
+  Mirrors `pitboss_cli::runs::resolve_socket_path` (XDG-first, in-run-dir
+  fallback). A future refactor should expose the CLI's resolver so both
+  surfaces share it.
+
+- **Consolidated depth-2 invariant enforcement** (#184). Pitboss caps the
+  actor hierarchy at root lead → sub-leads → workers; only the root lead
+  can call `spawn_sublead`. The cap was enforced at four independent
+  sites (CLI `--allowedTools`, MCP `list_tools` filter, manifest
+  capability check, caller-role check) with no shared rule, so adding a
+  new root-only tool risked missing a layer silently. Introduced a new
+  `dispatch::depth` module owning the rules: `ROOT_ONLY_TOOLS` is the
+  single source of truth, with `is_root_only_tool`,
+  `validate_spawn_sublead_caller`, and `validate_spawn_sublead_capability`
+  as the consolidated checks. The MCP `list_tools` filter, the
+  `spawn_sublead` handler's manifest gate, and the role check
+  (`extract_and_check_root_lead`) all route through it. A new regression
+  test (`sublead_allowlist_excludes_all_root_only_tools`) cross-checks
+  that `SUBLEAD_MCP_TOOLS` and the root-only allowlist stay disjoint by
+  construction — a future contributor adding a root-only tool only needs
+  to append to `ROOT_ONLY_TOOLS`; the rest follows automatically.
+
 - **Manifest snapshot durability — typed schema-version mismatch + alias
   regression test** (#186). `ResolvedManifest` now carries a
   `manifest_schema_version: u32` (current = `1`) that's serialized into

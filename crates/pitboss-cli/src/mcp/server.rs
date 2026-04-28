@@ -462,28 +462,15 @@ impl PitbossHandler {
         &self,
         Parameters(req): Parameters<SpawnSubleadRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        use crate::dispatch::depth;
         use crate::dispatch::sublead::{spawn_sublead as do_spawn, SubleadSpawnRequest};
 
-        // Manifest guard: spawn_sublead is only available when allow_subleads=true.
-        // This is the secondary line of defense; the primary gate is list_tools
-        // filtering (spawn_sublead is absent from the toolset when allow_subleads=false).
-        let allow_subleads = self
-            .state
-            .root
-            .manifest
-            .lead
-            .as_ref()
-            .is_some_and(|l| l.allow_subleads);
-        if !allow_subleads {
-            return Err(ErrorData::invalid_request(
-                String::from(
-                    "spawn_sublead requires allow_subleads=true in the manifest [lead] block",
-                ),
-                None,
-            ));
-        }
-
-        // Role check: only root_lead (or "lead" for v0.5 compat) may spawn sub-leads.
+        // Depth-2 invariants are owned by `dispatch::depth`. Two distinct
+        // checks: (1) manifest opt-in (`allow_subleads = true`), the
+        // back-stop for the `list_tools` filter; (2) caller role must be
+        // root_lead — workers and sub-leads cannot spawn sub-leads.
+        depth::validate_spawn_sublead_capability(&self.state.root.manifest)
+            .map_err(|e| ErrorData::invalid_request(e.to_string(), None))?;
         extract_and_check_root_lead(&req.meta)?;
 
         let spawn_req = SubleadSpawnRequest {
@@ -1033,13 +1020,15 @@ impl ServerHandler for PitbossHandler {
 
     /// Return the tool list, conditionally excluding tools based on manifest
     /// configuration:
-    /// - `spawn_sublead`: hidden unless `allow_subleads = true` (v0.6 depth-2 gate)
+    /// - root-only tools (see [`crate::dispatch::depth::ROOT_ONLY_TOOLS`]):
+    ///   hidden unless `allow_subleads = true` (v0.6 depth-2 gate)
     /// - `permission_prompt`: hidden unless `permission_routing = "path_b"` (v0.8)
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParam>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        use crate::dispatch::depth;
         use crate::manifest::schema::PermissionRouting;
         let lead = self.state.root.manifest.lead.as_ref();
         let allow_subleads = lead.is_some_and(|l| l.allow_subleads);
@@ -1049,7 +1038,7 @@ impl ServerHandler for PitbossHandler {
             .tool_router
             .list_all()
             .into_iter()
-            .filter(|t| allow_subleads || t.name != "spawn_sublead")
+            .filter(|t| allow_subleads || !depth::is_root_only_tool(&t.name))
             .filter(|t| path_b || t.name != "permission_prompt")
             .collect();
 
@@ -1112,8 +1101,9 @@ pub(crate) async fn authorize_target(
     }
 }
 
-/// Extract the caller's actor_role from the request's _meta field.
-/// Rejects if _meta is missing or actor_role is not "root_lead" or "lead".
+/// Extract the caller's actor_role from the request's `_meta` field and
+/// route through [`crate::dispatch::depth::validate_spawn_sublead_caller`]
+/// so the depth-2 caller invariant lives in exactly one place.
 fn extract_and_check_root_lead(meta: &Option<CallerMeta>) -> Result<(), ErrorData> {
     let Some(m) = meta else {
         return Err(ErrorData::invalid_request(
@@ -1121,18 +1111,8 @@ fn extract_and_check_root_lead(meta: &Option<CallerMeta>) -> Result<(), ErrorDat
             None,
         ));
     };
-
-    if m.actor_role != "root_lead" && m.actor_role != "lead" {
-        return Err(ErrorData::invalid_request(
-            format!(
-                "spawn_sublead is only available to the root lead (got role: {}; depth-2 invariant: workers and sub-leads cannot spawn sub-leads)",
-                m.actor_role
-            ),
-            None,
-        ));
-    }
-
-    Ok(())
+    crate::dispatch::depth::validate_spawn_sublead_caller(&m.actor_role)
+        .map_err(|e| ErrorData::invalid_request(e.to_string(), None))
 }
 
 /// Extract the caller's actor_id from the request's _meta field.
