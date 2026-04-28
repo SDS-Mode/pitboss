@@ -54,10 +54,30 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    /// Saturating add — clamps at `u64::MAX` instead of overflowing.
+    /// `u64` token totals are practically unreachable in production
+    /// (10^19 tokens is millions of years at typical claude rates),
+    /// but the dispatcher accumulates `total_token_usage` across
+    /// kill+resume iterations of long-running leads with no per-
+    /// iteration cap; the saturation guard makes overflow impossible
+    /// rather than merely improbable. Emits a `tracing::warn!` if any
+    /// field saturates so the rare event is visible. (#185 low)
     pub fn add(&mut self, other: &TokenUsage) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.cache_creation += other.cache_creation;
+        let prev = *self;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
+        let saturated = (self.input == u64::MAX && prev.input != u64::MAX)
+            || (self.output == u64::MAX && prev.output != u64::MAX)
+            || (self.cache_read == u64::MAX && prev.cache_read != u64::MAX)
+            || (self.cache_creation == u64::MAX && prev.cache_creation != u64::MAX);
+        if saturated {
+            tracing::warn!(
+                "TokenUsage::add saturated at u64::MAX — token counter overflow \
+                 should be impossible in practice; check for repeated \
+                 accumulation in a tight loop"
+            );
+        }
     }
 }
