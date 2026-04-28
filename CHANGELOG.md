@@ -9,6 +9,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Notify — write `notifications.jsonl` line before bumping
+  `failed_emits_total`.** `NotificationRouter::dispatch`'s spawned
+  emit-failure path used to increment the counter and then `await` the
+  journal write, so external observers (tests, status APIs) using the
+  counter as a synchronization barrier could read `notifications.jsonl`
+  before the line landed and see ENOENT. Surfaced as flaky CI failures
+  in `router_records_failed_emit_metric_and_journal_line` under
+  slow-FS conditions on GH Actions runners. Swap the order: write the
+  audit-trail line first, then bump the counter. The journal write is
+  bounded and swallows its own errors, so this ordering can't deadlock
+  the spawn.
+
 - **MCP — `wait_for_any` fail-fast on all-unknown task ids,
   approval-queue-full bridge cleanup, sub-tree `worker_prompts` read**
   (#151). `handle_wait_for_any` used to subscribe to `done_tx` and
