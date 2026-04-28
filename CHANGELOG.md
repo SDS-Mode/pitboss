@@ -7,6 +7,23 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI: don't strand approvals when no control client is attached**
+  (#154 L2). `send_approve` previously called `spawn_control_op`
+  (which silently no-op'd when the client or runtime was missing —
+  observe-only mode, or post-disconnect) and then unconditionally
+  removed the approval from the queue. The operator pressed approve,
+  the actor never received the response, and the request was
+  unreachable from the TUI. The function now gates list mutation on
+  `state.control_client.is_some() && state.runtime_handle.is_some()`
+  (matching the conditions `spawn_control_op` already checks
+  internally) — when those aren't satisfied, the queue is left intact
+  so the operator can retry once a client is attached or dismiss
+  intentionally with Esc. The list-mutation logic is split out as
+  `apply_approve_to_list` so it can be unit-tested without standing
+  up a tokio runtime.
+
 ### Changed
 
 - **TUI detail-view scroll: drop dead `DETAIL_VISIBLE_ROWS` constant**
