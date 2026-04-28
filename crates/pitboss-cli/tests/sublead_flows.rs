@@ -954,7 +954,10 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
         .to_string();
 
     // Inject a worker into S1's layer (simulating what S1's Claude session
-    // would do in production via the sub-tree MCP socket).
+    // would do in production via the sub-tree MCP socket). Also populate
+    // `state.worker_layer_index` to match the invariant that
+    // `handle_spawn_worker` maintains — `cancel_actor_with_reason` routes
+    // through the index for O(1) sub-tree-worker lookup (#150 audit fix).
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(s1.as_str()).unwrap();
@@ -967,6 +970,11 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
             .await
             .insert("worker-A".into(), CancelToken::new());
     }
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert("worker-A".into(), Some(s1.clone()));
 
     // Install a capture hook on S1's layer so we can assert on the reprompt.
     let s1_reprompts = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
@@ -1461,7 +1469,10 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
         .expect("response should have sublead_id field")
         .to_string();
 
-    // Inject a worker into S1's layer.
+    // Inject a worker into S1's layer. Also populate
+    // `state.worker_layer_index` to match the production invariant
+    // (`handle_spawn_worker` writes both); `cancel_actor_with_reason`
+    // routes through the index for O(1) sub-tree-worker lookup.
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(s1.as_str()).unwrap();
@@ -1474,6 +1485,11 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
             .await
             .insert("worker-B".into(), CancelToken::new());
     }
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert("worker-B".into(), Some(s1.clone()));
 
     // Manually install a reprompt_tx channel on S1's layer, simulating what
     // spawn_sublead_session does. This exercises the real production path
@@ -1549,7 +1565,10 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
         .expect("response should have sublead_id field")
         .to_string();
 
-    // Inject a worker into S1's layer.
+    // Inject a worker into S1's layer. Also populate
+    // `state.worker_layer_index` to match the production invariant —
+    // `cancel_actor_with_reason` routes through the index for O(1)
+    // sub-tree-worker lookup (#150 audit).
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(s1.as_str()).unwrap();
@@ -1562,6 +1581,11 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
             .await
             .insert("worker-C".into(), CancelToken::new());
     }
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert("worker-C".into(), Some(s1.clone()));
 
     // Simulate S1's lead session having already terminated: set workers[s1] to Done
     // AND drop the reprompt_tx channel (simulating spawn_sublead_session cleanup).
