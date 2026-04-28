@@ -9,6 +9,35 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **TUI detail-view scroll: drop dead `DETAIL_VISIBLE_ROWS` constant**
+  (#154 L4). The hard-coded `DETAIL_VISIBLE_ROWS = 40` was passed
+  through to `detail_scroll_down` / `detail_jump_bottom` /
+  `detail_auto_scroll` but those callees already discarded it as
+  `_visible_rows` — the real viewport height comes from
+  `state.detail_log_viewport`, an atomic the renderer publishes from
+  the actual layout-derived inner height each frame. Removing the
+  constant and the unused parameters makes the dynamic source of
+  truth explicit. Operator-visible: jump-to-bottom and auto-follow
+  now lands at the right row regardless of terminal height —
+  pre-fix they appeared correct because the dynamic viewport was
+  always consulted in practice, but the dead `40` literal in the
+  call chain made it look like a sizing bug.
+
+- **TUI: cancel previous bridge-forwarder on SwitchRun** (#154 L1+L3).
+  Each call to `connect_control` previously spawned a tokio task that
+  forwarded events from the per-run `bridge_rx` onto the shared
+  `ctrl_events_tx`, but the OLD task kept running until its read_loop
+  socket closed naturally. Stale events from the prior run could
+  arrive on `ctrl_events_tx` after the explicit drain that follows
+  `reset_state_for_switch`, including ApprovalRequest events that
+  would open a modal whose request_id the new dispatcher cannot ack
+  (#104). The closure now returns the spawned forwarder's
+  `AbortHandle`; SwitchRun aborts the previous one before
+  reconnecting, which closes the bridge channel, causes the
+  read_loop's `events_tx.send()` to fail, and releases the old
+  socket. The drain remains as a backstop for events queued before
+  the abort takes effect.
+
 - **Document four dispatch low-severity contracts** (#150 L11/L12/L15
   + lifecycle composition). Comment-only changes that close out the
   docs-shaped tail of the #150 audit: (1) `dispatch/background.rs`

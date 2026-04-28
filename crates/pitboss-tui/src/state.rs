@@ -581,7 +581,11 @@ impl AppState {
     /// valid row offset for the current wrapped log and viewport height.
     ///
     /// Disables auto-scroll if the new position is not at the bottom.
-    pub fn detail_scroll_down(&mut self, delta: usize, _visible_rows: usize) {
+    /// The viewport height is read from `detail_log_viewport`, an atomic
+    /// the renderer publishes each frame from the actual layout-derived
+    /// inner height (`render_detail_log` in `tui.rs`). This is the only
+    /// truthful source for "how many rows are visible right now."
+    pub fn detail_scroll_down(&mut self, delta: usize) {
         let total_rows = self
             .detail_log_total_rows
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -661,7 +665,9 @@ impl AppState {
     }
 
     /// Jump to the bottom of the log in `Detail` mode; re-enables auto-scroll.
-    pub fn detail_jump_bottom(&mut self, _visible_rows: usize) {
+    /// Viewport height comes from `detail_log_viewport` — same dynamic
+    /// source as `detail_scroll_down`.
+    pub fn detail_jump_bottom(&mut self) {
         let total_rows = self
             .detail_log_total_rows
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -689,7 +695,7 @@ impl AppState {
     ///
     /// If `at_bottom` is true, advances `scroll` so the last line stays
     /// visible. Does nothing if the user has scrolled up.
-    pub fn detail_auto_scroll(&mut self, _visible_rows: usize) {
+    pub fn detail_auto_scroll(&mut self) {
         let total_rows = self
             .detail_log_total_rows
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -1195,7 +1201,7 @@ mod tests {
             return_to: Box::new(Mode::Normal),
         };
 
-        state.detail_scroll_down(1, 10);
+        state.detail_scroll_down(1);
 
         assert!(
             matches!(&state.mode, Mode::Detail { scroll: 1, .. }),
@@ -1220,7 +1226,7 @@ mod tests {
             return_to: Box::new(Mode::Normal),
         };
 
-        state.detail_scroll_down(5, 10);
+        state.detail_scroll_down(5);
 
         assert!(
             matches!(
@@ -1324,7 +1330,7 @@ mod tests {
             return_to: Box::new(Mode::Normal),
         };
 
-        state.detail_jump_bottom(10);
+        state.detail_jump_bottom();
 
         assert!(
             matches!(
@@ -1366,7 +1372,7 @@ mod tests {
         state
             .detail_log_total_rows
             .store(35, std::sync::atomic::Ordering::Relaxed);
-        state.detail_auto_scroll(10);
+        state.detail_auto_scroll();
 
         if let Mode::Detail { scroll, .. } = &state.mode {
             // scroll == max_scroll = total(35) - viewport(10) = 25.
@@ -1388,7 +1394,7 @@ mod tests {
         };
 
         state.focus_log = (0..35).map(|i| format!("line {i}")).collect();
-        state.detail_auto_scroll(10);
+        state.detail_auto_scroll();
 
         // scroll unchanged
         assert!(
