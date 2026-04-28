@@ -173,6 +173,58 @@ fn match_network(blob: &str) -> Option<FailureReason> {
     }
 }
 
+/// Number of leading characters of a `claude_session_id` to surface in
+/// resume-hint diagnostic messages. Real Claude session ids are UUID-ish
+/// (~36 chars); 8 is enough for an operator to disambiguate which session
+/// failed without leaking the full id into log scrapers / chat dumps.
+pub const RESUME_HINT_SESSION_PREFIX_CHARS: usize = 8;
+
+/// Augment a [`FailureReason`] with a hint about a `--resume`-driven
+/// dispatch when the classification is otherwise unhelpful. Pure
+/// function — caller provides the `resume_session_id` from the spawn
+/// args; `enrich_with_resume_hint` only modifies `Unknown` reasons,
+/// since the specific markers (`RateLimit` / `AuthFailure` / `NetworkError`
+/// / `ContextExceeded` / `InvalidArgument`) are authoritative explanations
+/// that don't get clearer with a resume note.
+///
+/// **Why lazy fail-with-hint, not active validation:** validating the
+/// session id at dispatch start would mean pitboss itself talks to the
+/// Anthropic API (auth plumbing, rate-limit awareness, retry loop), all
+/// duplicating what the claude subprocess does. The subprocess is the
+/// authoritative source for "this session is invalid" — so we wait for
+/// it to fail, then surface a hint that points the operator at the
+/// actionable next step.
+///
+/// Issue #184. Pinned by the `enrich_with_resume_hint_*` tests below.
+#[must_use]
+pub fn enrich_with_resume_hint(
+    reason: crate::store::FailureReason,
+    resume_session_id: &str,
+) -> crate::store::FailureReason {
+    use crate::store::FailureReason;
+    match reason {
+        FailureReason::Unknown { message } => {
+            let prefix: String = resume_session_id
+                .chars()
+                .take(RESUME_HINT_SESSION_PREFIX_CHARS)
+                .collect();
+            FailureReason::Unknown {
+                message: format!(
+                    "subprocess was started with --resume {prefix}…; the \
+                     session id may be invalid (expired, revoked, or never \
+                     existed). Re-run without --resume to start fresh, or \
+                     run `pitboss resume <run-id>` against a more recent \
+                     run. Original excerpt: {message}"
+                ),
+            }
+        }
+        // Specific classified reasons are authoritative — don't second-
+        // guess them. A 401 / rate-limit / network error has the same
+        // diagnosis whether or not --resume was used.
+        other => other,
+    }
+}
+
 #[must_use]
 pub fn excerpt(blob: &str) -> String {
     let trimmed = blob.trim();
@@ -446,5 +498,88 @@ mod tests {
         let ctx = reset_context(blob);
         assert!(ctx.contains("no `resets ` marker"));
         assert!(ctx.contains("rate_limit_exceeded"));
+    }
+
+    // ── enrich_with_resume_hint (#184) ──────────────────────────────────
+
+    #[test]
+    fn enrich_with_resume_hint_augments_unknown() {
+        let r = FailureReason::Unknown {
+            message: "exit 1; <subprocess wrote nothing useful>".into(),
+        };
+        let r = enrich_with_resume_hint(r, "abc12345-deadbeef-cafe-1234-567890abcdef");
+        match r {
+            FailureReason::Unknown { message } => {
+                assert!(
+                    message.contains("--resume abc12345"),
+                    "should mention truncated session id; got: {message}"
+                );
+                assert!(
+                    !message.contains("deadbeef"),
+                    "should NOT leak full session id; got: {message}"
+                );
+                assert!(
+                    message.contains("Re-run without --resume"),
+                    "should give actionable guidance; got: {message}"
+                );
+                assert!(
+                    message.contains("Original excerpt:"),
+                    "should preserve the original message for triage; got: {message}"
+                );
+                assert!(
+                    message.contains("subprocess wrote nothing useful"),
+                    "original excerpt must survive enrichment; got: {message}"
+                );
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enrich_with_resume_hint_passes_through_auth_failure() {
+        // Auth failures have an authoritative explanation; the resume
+        // hint would be a distraction. Pass through unchanged.
+        let r = FailureReason::AuthFailure;
+        assert_eq!(
+            enrich_with_resume_hint(r, "sess_123"),
+            FailureReason::AuthFailure
+        );
+    }
+
+    #[test]
+    fn enrich_with_resume_hint_passes_through_rate_limit() {
+        let r = FailureReason::RateLimit { resets_at: None };
+        assert!(matches!(
+            enrich_with_resume_hint(r, "sess_123"),
+            FailureReason::RateLimit { resets_at: None }
+        ));
+    }
+
+    #[test]
+    fn enrich_with_resume_hint_passes_through_network_error() {
+        let r = FailureReason::NetworkError {
+            message: "connection refused".into(),
+        };
+        match enrich_with_resume_hint(r, "sess_123") {
+            FailureReason::NetworkError { message } => {
+                assert_eq!(message, "connection refused");
+            }
+            other => panic!("expected unchanged NetworkError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enrich_with_resume_hint_handles_short_session_id() {
+        // Shorter than RESUME_HINT_SESSION_PREFIX_CHARS — take the whole id.
+        let r = FailureReason::Unknown {
+            message: "x".into(),
+        };
+        let r = enrich_with_resume_hint(r, "abc");
+        match r {
+            FailureReason::Unknown { message } => {
+                assert!(message.contains("--resume abc…"), "got: {message}");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 }

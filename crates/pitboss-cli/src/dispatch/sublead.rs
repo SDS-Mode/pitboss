@@ -610,6 +610,11 @@ async fn spawn_sublead_session(
     let mcp_config_path_bg = mcp_config_path.clone();
     let operator_env_bg = operator_env;
     let tools_override_bg = tools_override;
+    // Captured for the post-loop failure-reason enrichment (#184): when a
+    // sub-lead is spawned with --resume and exits with an unhelpful
+    // Unknown failure, the operator gets a hint pointing at the session
+    // id rather than a bare excerpt.
+    let resume_session_id_bg = resume_session_id.clone();
 
     tokio::spawn(async move {
         // Run the kill+resume loop via the shared helper. The closure
@@ -765,7 +770,14 @@ async fn spawn_sublead_session(
                 final_outcome.exit_code,
                 Some(&log_path),
                 Some(&stderr_path),
-            ),
+            )
+            .map(|r| {
+                if let Some(sid) = resume_session_id_bg.as_deref() {
+                    pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+                } else {
+                    r
+                }
+            }),
         };
         if let Err(e) = sub_layer_bg
             .store

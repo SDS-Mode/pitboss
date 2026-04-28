@@ -7,7 +7,115 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI: don't strand approvals when no control client is attached**
+  (#154 L2). `send_approve` previously called `spawn_control_op`
+  (which silently no-op'd when the client or runtime was missing —
+  observe-only mode, or post-disconnect) and then unconditionally
+  removed the approval from the queue. The operator pressed approve,
+  the actor never received the response, and the request was
+  unreachable from the TUI. The function now gates list mutation on
+  `state.control_client.is_some() && state.runtime_handle.is_some()`
+  (matching the conditions `spawn_control_op` already checks
+  internally) — when those aren't satisfied, the queue is left intact
+  so the operator can retry once a client is attached or dismiss
+  intentionally with Esc. The list-mutation logic is split out as
+  `apply_approve_to_list` so it can be unit-tested without standing
+  up a tokio runtime.
+
 ### Changed
+
+- **TUI detail-view scroll: drop dead `DETAIL_VISIBLE_ROWS` constant**
+  (#154 L4). The hard-coded `DETAIL_VISIBLE_ROWS = 40` was passed
+  through to `detail_scroll_down` / `detail_jump_bottom` /
+  `detail_auto_scroll` but those callees already discarded it as
+  `_visible_rows` — the real viewport height comes from
+  `state.detail_log_viewport`, an atomic the renderer publishes from
+  the actual layout-derived inner height each frame. Removing the
+  constant and the unused parameters makes the dynamic source of
+  truth explicit. Operator-visible: jump-to-bottom and auto-follow
+  now lands at the right row regardless of terminal height —
+  pre-fix they appeared correct because the dynamic viewport was
+  always consulted in practice, but the dead `40` literal in the
+  call chain made it look like a sizing bug.
+
+- **TUI: cancel previous bridge-forwarder on SwitchRun** (#154 L1+L3).
+  Each call to `connect_control` previously spawned a tokio task that
+  forwarded events from the per-run `bridge_rx` onto the shared
+  `ctrl_events_tx`, but the OLD task kept running until its read_loop
+  socket closed naturally. Stale events from the prior run could
+  arrive on `ctrl_events_tx` after the explicit drain that follows
+  `reset_state_for_switch`, including ApprovalRequest events that
+  would open a modal whose request_id the new dispatcher cannot ack
+  (#104). The closure now returns the spawned forwarder's
+  `AbortHandle`; SwitchRun aborts the previous one before
+  reconnecting, which closes the bridge channel, causes the
+  read_loop's `events_tx.send()` to fail, and releases the old
+  socket. The drain remains as a backstop for events queued before
+  the abort takes effect.
+
+- **Document four dispatch low-severity contracts** (#150 L11/L12/L15
+  + lifecycle composition). Comment-only changes that close out the
+  docs-shaped tail of the #150 audit: (1) `dispatch/background.rs`
+  now spells out that `--background` and `[lifecycle].survive_parent`
+  are orthogonal mechanisms (operational vs declarative), not
+  alternatives, and can compose; (2) the `current_exe()` call in
+  background dispatch now carries a TOCTOU note explaining why
+  pitboss does not `open()`-then-fexecve the binary; (3) `drop(child)`
+  after the detached spawn is annotated to make explicit that the
+  call uses `std::process::Child` (true no-op drop) rather than
+  `tokio::process::Child` (which has `kill_on_drop` semantics);
+  (4) `dispatch/runner.rs` now documents the cancel-honor contract
+  on `execute_task` and the rationale for the post-semaphore re-check
+  in `spawn_task_loop`. No behavioral changes.
+
+- **`cancel_actor_with_reason` O(N) → O(1) sub-tree-worker routing**
+  (#150). The cancel-with-reason path used to walk every sub-tree's
+  `worker_cancels` map under a held `state.subleads` read lock to
+  find a worker's owning sub-lead — O(N) per cancel call, blocking
+  new sublead registration. Now routes through
+  `state.worker_layer_index` (already populated by
+  `handle_spawn_worker`, mirrors the existing routing in
+  `resolve_layer_for_caller` for KV ops). Same race window as before
+  on the index-set / worker_cancels-set ordering. Fixture-only
+  consequence: tests in `sublead_flows.rs` that bypass
+  `handle_spawn_worker` and inject workers directly into
+  `sub.worker_cancels` now also need to populate
+  `state.worker_layer_index` to match the production invariant —
+  three test cases updated to do so.
+
+- **Consolidate dispatch entry-point boilerplate** (#150 M9). Both
+  `runner::execute` (flat) and `hierarchical::run_hierarchical`
+  inlined ~50 lines each of identical run-id minting, manifest
+  snapshot writes, `RunMeta` init, notification-router build, and
+  `RunDispatched` emit. Past drift between the two copies caused
+  subtle differences (`mode` label, `set_run_subdir` binding) that
+  were easy to miss in code review. Centralized in a new
+  `dispatch/entrypoint.rs` module exposing `init_run_state(...)` (now
+  accepts `run_dir_override` so hierarchical can use it too) and
+  `build_notification_router_and_emit_dispatched(..., mode)` (the
+  `mode: &'static str` parameter is the only point of divergence
+  between the two paths). Hierarchical's `[[lead]]` validation now
+  fires BEFORE `init_run_state` writes anything to disk — pre-#150-M9
+  a no-lead manifest left orphan `manifest.snapshot.toml` and
+  `resolved.json` files on disk; now the bail is fully clean.
+
+- **Decompose `runner::execute` into per-phase functions** (#185). The
+  263-line `dispatch/runner.rs::execute` now reads as five sequential
+  phases: `init_run_state` (mint run id, write manifest snapshots, init
+  `RunMeta`), `print_dry_run_plan` (early-return path), `setup_run_harness`
+  (progress table, semaphore, cancel + Ctrl-C watcher, worktree manager,
+  notification router, flat `DispatchState`, control server),
+  `spawn_task_loop` (per-task `tokio::spawn` + await all), and
+  `finalize_run` (build `RunSummary`, persist, fire `RunFinished`,
+  compute exit code). Bridge state lives on a new `RunHarness` struct
+  for the long-lived references (cancel, store, spawner, etc.); the
+  per-phase-only `records` / `halt_drained` Arcs stay outside the
+  harness so `spawn_task_loop` can `Arc::try_unwrap` the records vec
+  without contending with a harness-held strong ref. No external
+  behavior change: existing `dispatch_flows`, `e2e_flows`, and the
+  full workspace test suite stay green.
 
 - **Extract kill+resume helper** (#185). The kill+resume subprocess
   loop in `dispatch/hierarchical.rs` (root lead) and
@@ -27,6 +135,38 @@ This project uses [Semantic Versioning](https://semver.org/).
   sub-lead's MCP session is closed while its subprocess is dead).
   Existing integration coverage in `tests/sublead_flows.rs` and
   `tests/hierarchical_flows.rs` is the regression net.
+
+- **Builder overrides for `TERMINATE_GRACE` / `STREAM_DRAIN_TIMEOUT`**
+  (#149). `SessionHandle` gains `with_terminate_grace(Duration)` and
+  `with_stream_drain_timeout(Duration)` builders. Defaults unchanged
+  (10 s / 30 s, exposed as `pitboss_core::session::TERMINATE_GRACE`
+  and `DEFAULT_STREAM_DRAIN_TIMEOUT`). Tests can drive the cancel /
+  drain windows quickly without monkey-patching globals; future
+  manifest fields could plumb operator-supplied values through the
+  same builders without touching `run_to_completion`.
+
+### Added
+
+- **Resume-failure hint on `FailureReason::Unknown`** (#184). New
+  `pitboss_core::failure_classify::enrich_with_resume_hint(reason,
+  session_id)` augments unhelpful `Unknown` failures from a
+  `--resume`-driven dispatch with an actionable message — names a
+  truncated session id prefix (8 chars, never the full id) and
+  points the operator at "re-run without `--resume` to start fresh,
+  or `pitboss resume <run-id>` against a more recent run." Specific
+  classified reasons (`RateLimit` / `AuthFailure` / `NetworkError` /
+  `ContextExceeded` / `InvalidArgument`) pass through unchanged
+  because their cause is unrelated to the resume. Wired at the three
+  dispatch failure-classification call sites that have a
+  `resume_session_id` in scope: root lead (`hierarchical.rs`), sub-
+  leads (`sublead.rs`), and flat-mode tasks (`runner.rs`). The audit
+  asked for a design call between active validation (ping the API at
+  startup) vs. lazy fail-with-hint; lazy was chosen because pitboss
+  otherwise doesn't talk to the API directly — adding auth plumbing
+  to duplicate what the subprocess already does for a single hint is
+  a poor trade.
+
+### Changed
 
 - **Collapse cancel-cascade watcher tasks; close #100** (#100, PR 100.3).
   `install_sublead_cancel_watcher` and `install_cascade_cancel_watcher`

@@ -157,6 +157,17 @@ pub async fn cancel_actor_with_reason(
 /// root lead — in that case the function still returns `Some(root)`;
 /// `None` is reserved for the root itself, which cannot be cancel-with-
 /// reason'd because there is no parent to receive the reason).
+///
+/// Routing strategy is O(1) at every layer:
+/// 1. Root-layer worker → `state.root.worker_cancels` HashMap.
+/// 2. Sub-lead itself → `state.subleads` HashMap.
+/// 3. Sub-tree worker → `state.worker_layer_index` HashMap to resolve
+///    the owning sublead id, then the sub-tree's own `worker_cancels`.
+///
+/// The previous implementation walked every sub-tree's `worker_cancels`
+/// under a held `state.subleads` read lock — O(N) per cancel call,
+/// blocking new sublead registration. The `worker_layer_index` lookup
+/// mirrors `resolve_layer_for_caller`'s routing for KV ops (#150 audit).
 async fn cancel_and_find_parent(
     state: &Arc<DispatchState>,
     target: &str,
@@ -179,12 +190,22 @@ async fn cancel_and_find_parent(
         return Ok(Some(state.root.clone()));
     }
 
-    // Workers in a sub-tree: parent = that sub-tree's LayerState.
-    for (_sublead_id, sub_layer) in subleads.iter() {
-        let cancels = sub_layer.worker_cancels.read().await;
-        if let Some(tok) = cancels.get(target) {
-            tok.terminate();
-            return Ok(Some(sub_layer.clone()));
+    // Sub-tree workers: route via worker_layer_index for O(1) lookup
+    // instead of scanning every sub-tree's worker_cancels under the
+    // held subleads lock. `worker_layer_index` is populated by
+    // `handle_spawn_worker` immediately before the worker_cancel is
+    // registered, so a successful index hit guarantees the target is
+    // in the named sub-tree (modulo a brief intra-spawn window where
+    // the index is set but worker_cancels insertion hasn't completed —
+    // same race as the prior linear-scan implementation).
+    let layer_idx = state.worker_layer_index.read().await.get(target).cloned();
+    if let Some(Some(sublead_id)) = layer_idx {
+        if let Some(sub_layer) = subleads.get(&sublead_id) {
+            let cancels = sub_layer.worker_cancels.read().await;
+            if let Some(tok) = cancels.get(target) {
+                tok.terminate();
+                return Ok(Some(sub_layer.clone()));
+            }
         }
     }
 

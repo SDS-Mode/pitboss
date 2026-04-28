@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use pitboss_core::process::{ProcessSpawner, TokioSpawner};
 use pitboss_core::session::CancelToken;
-use pitboss_core::store::{JsonFileStore, RunMeta, RunSummary, SessionStore};
+use pitboss_core::store::{JsonFileStore, RunSummary, SessionStore};
 use uuid::Uuid;
 
 use crate::control::{control_socket_path, server::start_control_server};
@@ -38,29 +38,15 @@ pub async fn run_hierarchical(
     // operator has the TUI to approve things).
     crate::dispatch::runner::print_headless_warnings_if_applicable(&resolved);
 
-    // Snapshot the inherited PITBOSS_RUN_ID (the parent orchestrator's run id,
-    // when one exists) BEFORE we overwrite it with our own. See `notify::parent`
-    // for the env-var contract introduced for issue #133.
-    let parent_run_id = crate::notify::parent::parent_run_id();
-    // Honor a pre-minted id from `--background` (issue #133-C); otherwise
-    // mint fresh.
-    let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
-    crate::notify::parent::set_run_id_env(&run_id.to_string());
-
-    let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
-    tokio::fs::create_dir_all(&run_dir).await.ok();
-
-    let run_subdir = run_dir.join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.ok();
-    tokio::fs::write(run_subdir.join("manifest.snapshot.toml"), &manifest_text).await?;
-    if let Ok(b) = serde_json::to_vec_pretty(&resolved) {
-        tokio::fs::write(run_subdir.join("resolved.json"), b).await?;
-    }
-
+    // Validate the manifest has a `[[lead]]` BEFORE writing any on-disk
+    // artifacts. Pre-#150-M9 this check happened after manifest snapshot
+    // writes, so a no-lead bail left orphan files in `run_subdir`. Now
+    // we fail fast with no side effects.
     let lead = resolved
         .lead
         .as_ref()
-        .context("hierarchical mode requires a [[lead]]")?;
+        .context("hierarchical mode requires a [[lead]]")?
+        .clone();
 
     if dry_run {
         println!("DRY-RUN lead: {}", lead.id);
@@ -71,16 +57,38 @@ pub async fn run_hierarchical(
         return Ok(0);
     }
 
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(run_dir.clone()));
-    let meta = RunMeta {
-        run_id,
-        manifest_path: manifest_path.clone(),
-        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version: claude_version.clone(),
-        started_at: Utc::now(),
-        env: Default::default(),
-    };
-    store.init_run(&meta).await.context("init run")?;
+    // Build the store first since `init_run_state` needs it. Hierarchical
+    // resolves its own run_dir from the override (or `resolved.run_dir`)
+    // before constructing the JsonFileStore so the store points at the
+    // right root.
+    let resolved_run_dir = run_dir_override
+        .clone()
+        .unwrap_or_else(|| resolved.run_dir.clone());
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(resolved_run_dir.clone()));
+
+    // Phase 1 (shared with flat mode via dispatch::entrypoint): mint /
+    // honor run_id, snapshot parent run id, write manifest snapshots,
+    // initialise RunMeta. The lead validation above already fired —
+    // a no-lead manifest never reaches this point and never persists
+    // an orphan RunMeta.
+    let init = crate::dispatch::entrypoint::init_run_state(
+        &resolved,
+        &manifest_text,
+        &manifest_path,
+        claude_version.clone(),
+        &store,
+        pre_minted_run_id,
+        run_dir_override,
+    )
+    .await?;
+    // Bind locals from init so the rest of this function (which references
+    // these by short name) doesn't need ~20 inline `init.foo` rewrites.
+    // The `meta` snapshot below is reconstructed from init for the
+    // `RunSummary` build at finalize time — `init.started_at` is the
+    // authoritative dispatch start.
+    let run_id = init.run_id;
+    let run_subdir = init.run_subdir.clone();
+    let run_dir = init.run_dir.clone();
 
     let cancel = CancelToken::new();
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
@@ -102,38 +110,18 @@ pub async fn run_hierarchical(
         }
     };
 
-    // Build notification router from manifest [[notification]] sections AND
-    // the optional `PITBOSS_PARENT_NOTIFY_URL` env var. See notify::parent
-    // for the parent-orchestrator hook contract (issue #133).
-    let http = std::sync::Arc::new(reqwest::Client::new());
-    let notification_router = crate::notify::parent::build_router(&resolved.notifications, &http)?;
-    if let Some(router) = &notification_router {
-        // Bind the run subdir so terminal emit failures land in
-        // <run_subdir>/notifications.jsonl as TaskEvent::NotificationFailed.
-        // Issue #156 (M4).
-        router.set_run_subdir(run_subdir.clone());
-    }
-
-    // Fire RunDispatched up front so a parent orchestrator can register the
-    // run before any tokens spend.
-    if let Some(router) = &notification_router {
-        let env = crate::notify::NotificationEnvelope::new(
-            &run_id.to_string(),
-            crate::notify::Severity::Info,
-            crate::notify::PitbossEvent::RunDispatched {
-                run_id: run_id.to_string(),
-                parent_run_id: parent_run_id.clone(),
-                manifest_path: manifest_path.display().to_string(),
-                mode: "hierarchical".to_string(),
-                survive_parent: resolved
-                    .lifecycle
-                    .as_ref()
-                    .is_some_and(|l| l.survive_parent),
-            },
-            Utc::now(),
-        );
-        let _ = router.dispatch(env).await;
-    }
+    // Phase 2 (shared with flat mode): build notification router and fire
+    // `RunDispatched` with mode = "hierarchical". The shared helper enforces
+    // a single `set_run_subdir` binding + emit-once invariant — past drift
+    // between flat and hierarchical here is what #150 M9 was about.
+    let notification_router =
+        crate::dispatch::entrypoint::build_notification_router_and_emit_dispatched(
+            &resolved,
+            &manifest_path,
+            &init,
+            "hierarchical",
+        )
+        .await?;
 
     // 1. Start the MCP server.
     let socket = socket_path_for_run(run_id, &run_dir);
@@ -267,7 +255,7 @@ pub async fn run_hierarchical(
     crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
-        args: crate::dispatch::runner::lead_spawn_args(lead, &mcp_config_path),
+        args: crate::dispatch::runner::lead_spawn_args(&lead, &mcp_config_path),
         cwd: lead_cwd.clone(),
         env: lead_env,
     };
@@ -291,7 +279,7 @@ pub async fn run_hierarchical(
             pitboss_core::process::SpawnCmd {
                 program: claude_binary.clone(),
                 args: crate::dispatch::runner::lead_resume_spawn_args(
-                    lead,
+                    &lead,
                     &mcp_config_path,
                     sid,
                     new_prompt,
@@ -378,7 +366,18 @@ pub async fn run_hierarchical(
             final_outcome.exit_code,
             Some(&lead_log_path),
             Some(&lead_stderr_path),
-        ),
+        )
+        .map(|r| {
+            // #184: when --resume was used and we got an unhelpful
+            // Unknown classification, surface a hint about the session
+            // id potentially being invalid. Specific markers
+            // (RateLimit / AuthFailure / etc.) pass through unchanged.
+            if let Some(sid) = lead.resume_session_id.as_deref() {
+                pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+            } else {
+                r
+            }
+        }),
     };
 
     // Cleanup worktree per policy. Surface the result via tracing
@@ -512,9 +511,9 @@ pub async fn run_hierarchical(
         manifest_name: resolved.name.clone(),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version,
-        started_at: meta.started_at,
+        started_at: init.started_at,
         ended_at,
-        total_duration_ms: (ended_at - meta.started_at).num_milliseconds(),
+        total_duration_ms: (ended_at - init.started_at).num_milliseconds(),
         tasks_total: all_records.len(),
         tasks_failed,
         was_interrupted,

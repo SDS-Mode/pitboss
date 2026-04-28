@@ -8,9 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use pitboss_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
 use pitboss_core::session::{CancelToken, SessionHandle};
-use pitboss_core::store::{
-    JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus,
-};
+use pitboss_core::store::{JsonFileStore, RunSummary, SessionStore, TaskRecord, TaskStatus};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore};
@@ -199,61 +197,60 @@ pub async fn run_dispatch_inner(
     .await
 }
 
-/// Inner workhorse — takes its dependencies injected for testability.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute(
-    resolved: ResolvedManifest,
-    manifest_text: String,
-    manifest_path: PathBuf,
-    claude_binary: PathBuf,
-    claude_version: Option<String>,
+use crate::dispatch::entrypoint::{
+    build_notification_router_and_emit_dispatched, init_run_state, RunInit,
+};
+
+/// Run-level shared state assembled by `setup_run_harness` and consumed
+/// by `spawn_task_loop` + `finalize_run`. Holds the long-lived references
+/// (cancel, store, shared_store, etc.) — `records` and `halt_drained`
+/// are passed as standalone Arcs so `spawn_task_loop` can consume the
+/// records vector via `Arc::try_unwrap` without contending with a
+/// harness-held strong ref.
+struct RunHarness {
+    cancel: CancelToken,
+    semaphore: Arc<Semaphore>,
+    table: Arc<Mutex<crate::tui_table::ProgressTable>>,
+    wt_mgr: Arc<WorktreeManager>,
+    shared_store: Arc<crate::shared_store::SharedStore>,
+    /// Cloned snapshot of the notification router for the `RunFinished`
+    /// emit at finalize time. The original is moved into `flat_state` so
+    /// the MCP handlers can also reach the router; this clone keeps a
+    /// finalize-side handle alive after that move.
+    notification_router_for_emit: Option<Arc<crate::notify::NotificationRouter>>,
     spawner: Arc<dyn ProcessSpawner>,
     store: Arc<dyn SessionStore>,
-    dry_run: bool,
-    pre_minted_run_id: Option<Uuid>,
-) -> Result<i32> {
-    // Snapshot any `PITBOSS_RUN_ID` already in our env BEFORE we overwrite it
-    // with our own run_id. If we're running under a parent orchestrator (or as
-    // a sub-dispatch the agent triggered from inside a worktree), the prior
-    // value is the parent run id reported on `RunDispatched`. See the
-    // `notify::parent` module for the full env-var contract (issue #133).
-    let parent_run_id = crate::notify::parent::parent_run_id();
-    // Honor a pre-minted id from `--background` (issue #133-C); otherwise
-    // mint fresh as before. Background pre-mints in the parent so it can
-    // announce the id on stdout before the detached child boots.
-    let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
-    crate::notify::parent::set_run_id_env(&run_id.to_string());
+}
 
-    let run_dir = resolved.run_dir.clone();
-    let run_subdir = run_dir.join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.ok();
-    tokio::fs::write(run_subdir.join("manifest.snapshot.toml"), &manifest_text).await?;
-    if let Ok(b) = serde_json::to_vec_pretty(&resolved) {
-        tokio::fs::write(run_subdir.join("resolved.json"), b).await?;
+/// Print the dry-run plan to stdout. Caller checks the `dry_run` flag and
+/// returns `Ok(0)` after this — the caller still wants `init_run_state` to
+/// have written the manifest snapshot to the run subdir, so the dry-run
+/// check happens AFTER init. Pre-existing behavior.
+fn print_dry_run_plan(resolved: &ResolvedManifest, claude_binary: &Path) {
+    for t in &resolved.tasks {
+        println!(
+            "DRY-RUN {}: {} {}",
+            t.id,
+            claude_binary.display(),
+            spawn_args(t).join(" ")
+        );
     }
+}
 
-    let meta = RunMeta {
-        run_id,
-        manifest_path: manifest_path.clone(),
-        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version: claude_version.clone(),
-        started_at: Utc::now(),
-        env: Default::default(),
-    };
-    store.init_run(&meta).await.context("init run")?;
-
-    if dry_run {
-        for t in &resolved.tasks {
-            println!(
-                "DRY-RUN {}: {} {}",
-                t.id,
-                claude_binary.display(),
-                spawn_args(t).join(" ")
-            );
-        }
-        return Ok(0);
-    }
-
+/// Build the run-level shared state that `spawn_task_loop` and
+/// `finalize_run` consume: progress table, semaphore, cancel + Ctrl-C
+/// watcher, worktree manager, records collector, halt-drained flag,
+/// notification router, flat-mode `DispatchState`, and the control
+/// server. Also fires the `RunDispatched` notification before any
+/// tokens spend.
+async fn setup_run_harness(
+    resolved: &ResolvedManifest,
+    manifest_path: &Path,
+    init: &RunInit,
+    spawner: Arc<dyn ProcessSpawner>,
+    store: Arc<dyn SessionStore>,
+    claude_binary: PathBuf,
+) -> Result<RunHarness> {
     let is_tty = atty::is(atty::Stream::Stdout);
     let table = Arc::new(Mutex::new(crate::tui_table::ProgressTable::new(is_tty)));
     for t in &resolved.tasks {
@@ -264,103 +261,121 @@ pub async fn execute(
     let cancel = CancelToken::new();
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
-    let records: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
-    // Tracks whether the cancel drain was triggered by halt_on_failure logic
-    // (not by a user signal), so was_interrupted is not set in that case.
-    let halt_drained: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    // Build notification router from manifest [[notification]] sections AND
-    // the optional `PITBOSS_PARENT_NOTIFY_URL` env var. Returns None when
-    // both sources are empty, so the no-notify common case stays cost-free.
-    let http = std::sync::Arc::new(reqwest::Client::new());
-    let notification_router = crate::notify::parent::build_router(&resolved.notifications, &http)?;
-    if let Some(router) = &notification_router {
-        // Bind the run subdir so terminal emit failures land in
-        // <run_subdir>/notifications.jsonl as TaskEvent::NotificationFailed.
-        // Issue #156 (M4).
-        router.set_run_subdir(run_subdir.clone());
-    }
+    // Build notification router and fire `RunDispatched`. Shared with
+    // hierarchical mode via `dispatch::entrypoint` so the `mode` label and
+    // the `set_run_subdir` binding can't drift between the two paths
+    // (#150 M9).
+    let notification_router =
+        build_notification_router_and_emit_dispatched(resolved, manifest_path, init, "flat")
+            .await?;
 
-    // Fire RunDispatched immediately. The orchestrator wants to register
-    // the run before any tokens are spent — emitting at finalize-time only
-    // (the prior behavior) defeats the point of the hook.
-    if let Some(router) = &notification_router {
-        let env = crate::notify::NotificationEnvelope::new(
-            &run_id.to_string(),
-            crate::notify::Severity::Info,
-            crate::notify::PitbossEvent::RunDispatched {
-                run_id: run_id.to_string(),
-                parent_run_id: parent_run_id.clone(),
-                manifest_path: manifest_path.display().to_string(),
-                mode: "flat".to_string(),
-                survive_parent: resolved
-                    .lifecycle
-                    .as_ref()
-                    .is_some_and(|l| l.survive_parent),
-            },
-            Utc::now(),
-        );
-        let _ = router.dispatch(env).await;
-    }
-
-    // Build a minimal DispatchState so the control server has something to bind
-    // against. Flat mode has no lead and no spawn_worker path, but cancel and
-    // list_workers still apply.
+    // Build a minimal DispatchState so the control server has something to
+    // bind against. Flat mode has no lead and no spawn_worker path, but
+    // cancel and list_workers still apply. The router is cloned: the
+    // original is moved into `flat_state` so MCP handlers can use it; the
+    // clone (`notification_router_for_emit`) is kept on the harness so the
+    // finalize phase can fire `RunFinished` after `flat_state` is no longer
+    // reachable.
     let notification_router_for_emit = notification_router.clone();
     let shared_store = Arc::new(crate::shared_store::SharedStore::new());
     shared_store.start_lease_pruner();
     let flat_state = Arc::new(crate::dispatch::state::DispatchState::new(
-        run_id,
+        init.run_id,
         resolved.clone(),
         store.clone(),
         cancel.clone(),
         "".into(),
         spawner.clone(),
-        claude_binary.clone(),
+        claude_binary,
         wt_mgr.clone(),
         cleanup_policy_from(resolved.worktree_cleanup),
-        run_subdir.clone(),
+        init.run_subdir.clone(),
         resolved.default_approval_policy.unwrap_or_default(),
         notification_router,
         shared_store.clone(),
     ));
-    let control_sock = crate::control::control_socket_path(run_id, &run_dir);
+    let control_sock = crate::control::control_socket_path(init.run_id, &resolved.run_dir);
     let _control = crate::control::server::start_control_server(
         control_sock,
         env!("CARGO_PKG_VERSION").to_string(),
-        run_id.to_string(),
+        init.run_id.to_string(),
         "flat".into(),
         flat_state,
     )
     .await
     .context("start control server")?;
 
+    Ok(RunHarness {
+        cancel,
+        semaphore,
+        table,
+        wt_mgr,
+        shared_store,
+        notification_router_for_emit,
+        spawner,
+        store,
+    })
+}
+
+/// Per-task spawn loop. Acquires a permit, re-checks the cancel gate,
+/// then spawns `execute_task` on a tokio task. Awaits all spawned tasks
+/// before returning the collected `TaskRecord`s. `halt_on_failure` trips
+/// the cancel drain (and the `halt_drained` flag) so subsequent loop
+/// iterations short-circuit on the gate check at the top.
+///
+/// Takes `records` and `halt_drained` as explicit Arcs so this fn can
+/// consume the records vector via `Arc::try_unwrap` after all spawned
+/// tasks drop their clones — keeping these on `RunHarness` would leave a
+/// long-lived strong ref that defeats `try_unwrap`.
+async fn spawn_task_loop(
+    resolved: &ResolvedManifest,
+    claude_binary: &Path,
+    init: &RunInit,
+    harness: &RunHarness,
+    records: Arc<Mutex<Vec<TaskRecord>>>,
+    halt_drained: Arc<AtomicBool>,
+) -> Vec<TaskRecord> {
     let mut handles = Vec::new();
+    let cleanup_policy = match resolved.worktree_cleanup {
+        crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
+        crate::manifest::schema::WorktreeCleanup::OnSuccess => CleanupPolicy::OnSuccess,
+        crate::manifest::schema::WorktreeCleanup::Never => CleanupPolicy::Never,
+    };
 
     for task in resolved.tasks.clone() {
-        if cancel.is_draining() {
+        if harness.cancel.is_draining() {
             break;
         }
-        let permit = semaphore.clone().acquire_owned().await?;
-        // Re-check after potentially blocking on the semaphore.
-        if cancel.is_draining() {
+        let permit = match harness.semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        // Re-check after potentially blocking on the semaphore (#150 L12).
+        // The window between `acquire_owned().await` returning and this
+        // gate is microseconds, but a cancel that fires during the wait
+        // would otherwise still spawn one task per available permit
+        // before the next iteration's top-of-loop gate caught it. The
+        // re-check here closes that window for the loop driver. The
+        // task we're about to spawn (`execute_task` below) is also
+        // contractually required to honor cancel at entry — see the
+        // doc comment on `execute_task` for the in-task gate that
+        // covers any further cancel that fires after this re-check
+        // succeeds but before the spawned task begins running.
+        if harness.cancel.is_draining() {
             break;
         }
-        let spawner = spawner.clone();
-        let store = store.clone();
-        let cancel = cancel.clone();
-        let claude = claude_binary.clone();
+        let spawner = harness.spawner.clone();
+        let store = harness.store.clone();
+        let cancel = harness.cancel.clone();
+        let claude = claude_binary.to_path_buf();
         let records = records.clone();
-        let wt_mgr = wt_mgr.clone();
+        let wt_mgr = harness.wt_mgr.clone();
         let halt_on_failure = resolved.halt_on_failure;
         let run_dir = resolved.run_dir.clone();
-        let cleanup_policy = match resolved.worktree_cleanup {
-            crate::manifest::schema::WorktreeCleanup::Always => CleanupPolicy::Always,
-            crate::manifest::schema::WorktreeCleanup::OnSuccess => CleanupPolicy::OnSuccess,
-            crate::manifest::schema::WorktreeCleanup::Never => CleanupPolicy::Never,
-        };
-        let table = table.clone();
+        let table = harness.table.clone();
         let halt_drained = halt_drained.clone();
+        let run_id = init.run_id;
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
@@ -403,48 +418,65 @@ pub async fn execute(
         let _ = h.await;
     }
 
-    let records = Arc::try_unwrap(records)
-        .map_err(|_| anyhow::anyhow!("records locked"))?
-        .into_inner();
+    // After every spawned task has been awaited, the only remaining strong
+    // ref to `records` is the local Arc. `try_unwrap` succeeds and we move
+    // out the inner Vec without copying.
+    Arc::try_unwrap(records)
+        .map(tokio::sync::Mutex::into_inner)
+        .map_err(|_| anyhow::anyhow!("records arc still has multiple refs after task await"))
+        .expect("all spawned tasks have completed; records arc must be uniquely owned")
+}
+
+/// Build the `RunSummary`, persist it, dump shared-store contents if
+/// requested, fire `RunFinished`, and compute the dispatcher exit code.
+/// Consumes the harness because no further phase needs it.
+async fn finalize_run(
+    resolved: &ResolvedManifest,
+    manifest_path: &Path,
+    claude_version: Option<String>,
+    init: &RunInit,
+    records: Vec<TaskRecord>,
+    halt_drained: &AtomicBool,
+    harness: RunHarness,
+) -> Result<i32> {
     let tasks_failed = records
         .iter()
         .filter(|r| !matches!(r.status, TaskStatus::Success))
         .count();
 
-    let started_at = meta.started_at;
     let ended_at = Utc::now();
     let summary = RunSummary {
-        run_id,
-        manifest_path: manifest_path.clone(),
+        run_id: init.run_id,
+        manifest_path: manifest_path.to_path_buf(),
         manifest_name: resolved.name.clone(),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version: claude_version.clone(),
-        started_at,
+        claude_version,
+        started_at: init.started_at,
         ended_at,
-        total_duration_ms: (ended_at - started_at).num_milliseconds(),
+        total_duration_ms: (ended_at - init.started_at).num_milliseconds(),
         tasks_total: records.len(),
         tasks_failed,
-        was_interrupted: (cancel.is_draining() || cancel.is_terminated())
+        was_interrupted: (harness.cancel.is_draining() || harness.cancel.is_terminated())
             && !halt_drained.load(Ordering::Acquire),
         tasks: records,
     };
-    store.finalize_run(&summary).await?;
+    harness.store.finalize_run(&summary).await?;
 
     // Optional post-mortem dump of shared-store contents.
     if resolved.dump_shared_store {
-        let dump_path = run_subdir.join("shared-store.json");
-        if let Err(e) = shared_store.dump_to_path(&dump_path).await {
+        let dump_path = init.run_subdir.join("shared-store.json");
+        if let Err(e) = harness.shared_store.dump_to_path(&dump_path).await {
             tracing::warn!(?e, "shared-store dump failed");
         }
     }
 
     // Emit RunFinished event if notification router is configured.
-    if let Some(router) = notification_router_for_emit {
+    if let Some(router) = harness.notification_router_for_emit {
         let env = crate::notify::NotificationEnvelope::new(
-            &run_id.to_string(),
+            &init.run_id.to_string(),
             crate::notify::Severity::Info,
             crate::notify::PitbossEvent::RunFinished {
-                run_id: run_id.to_string(),
+                run_id: init.run_id.to_string(),
                 tasks_total: summary.tasks_total,
                 tasks_failed,
                 duration_ms: summary.total_duration_ms as u64,
@@ -455,7 +487,7 @@ pub async fn execute(
         let _ = router.dispatch(env).await;
     }
 
-    let rc = if cancel.is_terminated() {
+    let rc = if harness.cancel.is_terminated() {
         130
     } else if tasks_failed > 0 {
         1
@@ -465,6 +497,90 @@ pub async fn execute(
     Ok(rc)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn execute(
+    resolved: ResolvedManifest,
+    manifest_text: String,
+    manifest_path: PathBuf,
+    claude_binary: PathBuf,
+    claude_version: Option<String>,
+    spawner: Arc<dyn ProcessSpawner>,
+    store: Arc<dyn SessionStore>,
+    dry_run: bool,
+    pre_minted_run_id: Option<Uuid>,
+) -> Result<i32> {
+    // Flat mode has no `run_dir_override` (operators set `run_dir` in
+    // the manifest itself); hierarchical mode passes `Some(...)` when
+    // `--run-dir` was supplied on the CLI.
+    let init = init_run_state(
+        &resolved,
+        &manifest_text,
+        &manifest_path,
+        claude_version.clone(),
+        &store,
+        pre_minted_run_id,
+        None,
+    )
+    .await?;
+
+    if dry_run {
+        print_dry_run_plan(&resolved, &claude_binary);
+        return Ok(0);
+    }
+
+    let harness = setup_run_harness(
+        &resolved,
+        &manifest_path,
+        &init,
+        spawner,
+        store,
+        claude_binary.clone(),
+    )
+    .await?;
+
+    let records_arc: Arc<Mutex<Vec<TaskRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    // Tracks whether the cancel drain was triggered by halt_on_failure logic
+    // (not by a user signal), so was_interrupted is not set in that case.
+    let halt_drained: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    let records = spawn_task_loop(
+        &resolved,
+        &claude_binary,
+        &init,
+        &harness,
+        records_arc,
+        halt_drained.clone(),
+    )
+    .await;
+
+    finalize_run(
+        &resolved,
+        &manifest_path,
+        claude_version,
+        &init,
+        records,
+        &halt_drained,
+        harness,
+    )
+    .await
+}
+
+/// Run a single resolved task to completion or cancellation.
+///
+/// **Cancel contract (#150 L12):** the loop driver in `spawn_task_loop`
+/// re-checks `cancel.is_draining()` after the semaphore acquire but
+/// before calling this function, so by the time we enter we know the
+/// cancel was not tripped at the gate. After that, this function
+/// itself owns the obligation to honor cancel — specifically, the
+/// `spawner.run_to_completion(cancel, ...)` call below races the child
+/// process against `cancel.await_drain()` / `cancel.await_terminate()`,
+/// so a cancel that fires after we enter (but before / during the
+/// child's run) still terminates the task and produces a `Cancelled`
+/// `TaskRecord` rather than blocking on a hung child. Any future code
+/// added between this entry point and `run_to_completion` must NOT
+/// reach a blocking await without consulting `cancel.is_draining()` —
+/// that would re-introduce the gap the loop driver's re-check is
+/// closing on the spawn side.
 #[allow(clippy::too_many_arguments)]
 async fn execute_task(
     task: &ResolvedTask,
@@ -561,7 +677,17 @@ async fn execute_task(
         outcome.exit_code,
         Some(&log_path),
         Some(&stderr_log_path),
-    );
+    )
+    .map(|r| {
+        // #184: enrich Unknown failures with a --resume hint when the
+        // task was started with a resume_session_id. Specific markers
+        // pass through unchanged (their cause is unrelated to resume).
+        if let Some(sid) = task.resume_session_id.as_deref() {
+            pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+        } else {
+            r
+        }
+    });
     TaskRecord {
         task_id: task.id.clone(),
         status,
