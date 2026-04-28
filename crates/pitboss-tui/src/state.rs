@@ -1232,8 +1232,7 @@ mod tests {
         // promptly because the work is on a worker thread.
         assert!(
             elapsed < std::time::Duration::from_millis(100),
-            "enter_detail_for should not block on git shell-out, took {:?}",
-            elapsed
+            "enter_detail_for should not block on git shell-out, took {elapsed:?}"
         );
         // Mode transitioned to Detail synchronously even though the
         // diff is still computing in the background.
@@ -1269,8 +1268,7 @@ mod tests {
         // out to git on the calling thread.
         assert!(
             elapsed < std::time::Duration::from_millis(50),
-            "enter_detail_for with no tx should be fully synchronous, took {:?}",
-            elapsed
+            "enter_detail_for with no tx should be fully synchronous, took {elapsed:?}"
         );
         assert!(matches!(&state.mode, Mode::Detail { .. }));
     }
