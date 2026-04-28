@@ -44,7 +44,7 @@ tempfile           = "3"
 libc               = "0.2"
 ratatui            = "0.30"
 crossterm          = "0.29"
-rusqlite           = { version = "0.32", features = ["bundled"] }
+rusqlite           = { version = "0.39", features = ["bundled"] }
 rmcp               = { version = "0.8", features = ["server", "client", "transport-io", "macros"] }
 tokio-util         = { version = "0.7", features = ["rt"] }
 tokio-stream       = { version = "0.1", features = ["sync"] }
