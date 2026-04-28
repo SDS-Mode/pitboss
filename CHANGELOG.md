@@ -9,6 +9,36 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Hierarchical drain: join workers with timeout instead of fixed
+  sleep** (#150 M6+M7). Pre-fix, the dispatcher's shutdown path:
+  (1) terminated root-layer worker tokens directly, (2) called
+  `cancel.terminate()` and relied on the fire-and-forget cascade
+  watchers (`install_cascade_cancel_watcher`,
+  `install_sublead_cancel_watcher`) to fan out to sub-trees, and
+  (3) ran `tokio::time::sleep(TERMINATE_GRACE)` for a fixed 10s
+  before classifying remaining workers as Cancelled. Two
+  consequences: the `tokio::spawn` watchers' scheduling latency
+  could leave sub-tree workers un-signaled past the sleep deadline
+  (M7), and the fixed sleep raced each worker's own
+  SessionHandle SIGTERM→SIGKILL grace (also `TERMINATE_GRACE`) so
+  workers were classified Cancelled while their wait/reap was still
+  in flight (M6). The shutdown path now subscribes to
+  `state.root.done_tx` first, snapshots the in-flight worker set
+  across all layers, then synchronously cascades cancel through the
+  whole tree (`state.cascade_to_subleads()` + each sub-layer's
+  `cascade_to_workers()` + `state.root.cascade_to_workers()`), and
+  finally awaits done events for the snapshot ids with a deadline
+  of `TERMINATE_GRACE + 2s`. New helper
+  `dispatch::hierarchical::await_workers_drained` owns the
+  event-driven wait; lagged-broadcast recovery falls back to a
+  workers-map rescan via `refresh_in_flight_from_maps`. Workers
+  that drain in milliseconds now exit promptly (operator-visible
+  win); workers that genuinely hang past the deadline still get
+  classified Cancelled but the audit's "alive but called
+  Cancelled" race window is closed. Closes the last open #150
+  audit item — the issue is now closeable. Pinned by 5 unit tests
+  in the new `await_drained_tests` module.
+
 - **TUI: don't strand approvals when no control client is attached**
   (#154 L2). `send_approve` previously called `spawn_control_op`
   (which silently no-op'd when the client or runtime was missing —
