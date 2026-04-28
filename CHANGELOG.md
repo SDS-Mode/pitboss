@@ -7,7 +7,18 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-*(nothing yet)*
+### Fixed
+
+- **Crash-safe writes for `summary.json` and `meta.json`** (#184, #188).
+  An interrupt mid-write (`SIGKILL`, OOM, host crash) could previously
+  produce a partial or truncated final file. All three call sites now
+  use a new `pitboss_core::atomic_write` helper that writes to a
+  sibling `.tmp`, `fsync`s, and atomically `rename`s onto the
+  destination. Callers affected: `JsonFileStore::finalize_run` and
+  `JsonFileStore::init_run` in `pitboss-core`, and
+  `pitboss prune --apply --synthesize`'s `synthesize_summary` in
+  `pitboss-cli`. The destination either reflects the prior contents or
+  the full new contents, never a half-flushed mix.
 
 ## [0.9.1] — 2026-04-27
 
