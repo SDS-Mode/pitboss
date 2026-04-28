@@ -410,7 +410,9 @@ mod tests {
             FailureReason::RateLimit { resets_at: None } => {}
             other => panic!("expected RateLimit with no timestamp, got {other:?}"),
         }
-        assert!(logs_contain("rate-limit detected but reset_at parse failed"));
+        assert!(logs_contain(
+            "rate-limit detected but reset_at parse failed"
+        ));
         assert!(logs_contain("default_backoff_secs"));
         assert!(logs_contain("WHAT-IS-THIS-NONSENSE"));
     }
@@ -423,7 +425,9 @@ mod tests {
     fn rate_limit_without_resets_marker_emits_warn_with_tail_excerpt() {
         let blob = "...some output...\nrate_limit_exceeded (no timestamp here)";
         let _ = classify(blob);
-        assert!(logs_contain("rate-limit detected but reset_at parse failed"));
+        assert!(logs_contain(
+            "rate-limit detected but reset_at parse failed"
+        ));
         assert!(logs_contain("no `resets ` marker"));
     }
 
