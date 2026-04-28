@@ -238,11 +238,24 @@ pub struct AppState {
     /// Whether the control socket is currently connected. Mirrored from the
     /// client; used for the status-bar indicator.
     pub control_connected: bool,
-    /// Cached `git diff --stat` summary for a task's worktree, keyed by
-    /// `task_id`. Populated on `enter_detail` (synchronous shell-out) and
-    /// reused until the user exits detail mode. `None` for tasks whose
-    /// worktree path is unknown or whose diff couldn't be computed.
+    /// Cached `git diff --shortstat` summary for a task's worktree,
+    /// keyed by `task_id`. Populated asynchronously: `enter_detail_for`
+    /// spawns a worker thread that shells out to `git`, computes the
+    /// summary, and posts the result via `git_diff_tx`. The main event
+    /// loop drains the receiver each tick and inserts entries here, so
+    /// the diff lands one tick (~50 ms) after entering detail rather
+    /// than blocking input. Reused until the user exits detail mode.
+    /// `None` for tasks whose worktree path is unknown or whose diff
+    /// couldn't be computed (#154 M3).
     pub cached_git_diff: std::collections::HashMap<String, GitDiffSummary>,
+    /// Sender for asynchronously-computed `GitDiffSummary` results.
+    /// Set by `app::run` after channel construction; `None` in unit
+    /// tests where no event loop is draining the receiver. When `None`,
+    /// `enter_detail_for` skips the diff compute entirely (the renderer
+    /// shows "no diff" rather than blocking on the shell-out — matches
+    /// the operator-visible behavior of the slow path's pre-render
+    /// state). (#154 M3)
+    pub git_diff_tx: Option<std::sync::mpsc::Sender<(String, GitDiffSummary)>>,
     /// Height of the detail-view log pane (inner rows), set by the render
     /// pass via interior mutability. Read by the scroll handlers so they
     /// know the real `max_scroll = total_rows - viewport` without having
@@ -344,6 +357,7 @@ impl AppState {
             control_client: None,
             control_connected: false,
             cached_git_diff: std::collections::HashMap::new(),
+            git_diff_tx: None,
             detail_log_viewport: std::sync::atomic::AtomicUsize::new(0),
             detail_log_total_rows: std::sync::atomic::AtomicUsize::new(0),
             runtime_handle: None,
@@ -545,11 +559,31 @@ impl AppState {
         // `worktree.path` sidecar (written by the dispatcher at spawn
         // time) and for completed tiles via TaskRecord.worktree_path —
         // so this diff runs for both live and settled workers.
-        if let Some(tile) = self.tasks.iter().find(|t| t.id == task_id) {
+        //
+        // Spawn the diff compute on a background thread (#154 M3). The
+        // main event loop polls input every 50ms and `compute_git_diff_summary`
+        // shells out to `git diff` with a 5s timeout — running it inline
+        // froze input handling for the worst-case duration. Now we kick
+        // off a thread, return immediately, and the result lands on
+        // `git_diff_tx` for the main loop to drain into `cached_git_diff`.
+        // The first render after entering detail shows the metadata pane
+        // without a diff line; the next render after the thread completes
+        // (typically <100ms on a clean worktree) fills it in.
+        if let (Some(tile), Some(tx)) = (
+            self.tasks.iter().find(|t| t.id == task_id),
+            self.git_diff_tx.as_ref(),
+        ) {
             if let Some(worktree) = tile.worktree_path.as_deref() {
-                if let Some(summary) = compute_git_diff_summary(worktree) {
-                    self.cached_git_diff.insert(task_id.clone(), summary);
-                }
+                let worktree = worktree.to_path_buf();
+                let task_id = task_id.clone();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    if let Some(summary) = compute_git_diff_summary(&worktree) {
+                        // Receiver dropped (TUI exiting): silently
+                        // discard the result.
+                        let _ = tx.send((task_id, summary));
+                    }
+                });
             }
         }
         let return_to = if matches!(self.mode, Mode::Completed { .. }) {
@@ -857,9 +891,12 @@ impl AppState {
 /// or the command exceeds the wall-clock timeout.
 ///
 /// Blocks the caller until git returns or `GIT_DIFF_TIMEOUT` elapses.
-/// Callers that run this on the event loop should wrap it in a background
-/// thread (see `AppState` for the polling pattern) — without that, a
-/// slow or contended `.git` freezes input handling.
+/// **Always call this from a worker thread, not the UI thread.**
+/// `enter_detail_for` does the right thing — it spawns a thread that
+/// runs this and posts the result via `git_diff_tx` for the main loop
+/// to drain. Pre-#154-M3 the shell-out ran inline on the UI thread
+/// with a 10ms busy-poll loop and could freeze input for up to 5s on
+/// a contended worktree.
 ///
 /// `--no-optional-locks` avoids taking the index lock, so a concurrent
 /// `git commit` / `gc` can't contend with the TUI's read.
@@ -1169,6 +1206,71 @@ mod tests {
 
         // scroll must be unchanged
         assert!(matches!(&state.mode, Mode::Detail { scroll: 5, .. }));
+    }
+
+    /// `enter_detail_for` returns immediately even when a worktree path
+    /// is set: the diff compute is dispatched to a worker thread via
+    /// `git_diff_tx`, never blocking the caller. Pins the #154 M3 fix.
+    #[test]
+    fn enter_detail_for_does_not_block_on_diff() {
+        use std::path::PathBuf;
+        let mut state = make_state_with_tile("task-001");
+        // Point the tile at a real git worktree so the spawned thread
+        // has work to do (it'll succeed or time out, doesn't matter
+        // for this test — we're only asserting the caller returns
+        // promptly).
+        state.tasks[0].worktree_path = Some(PathBuf::from("/"));
+        let (tx, rx) = std::sync::mpsc::channel::<(String, GitDiffSummary)>();
+        state.git_diff_tx = Some(tx);
+
+        let start = std::time::Instant::now();
+        state.enter_detail_for("task-001".into());
+        let elapsed = start.elapsed();
+
+        // The shell-out has a 5s timeout. Pre-#154-M3 enter_detail_for
+        // could block the caller for up to that 5s; now it returns
+        // promptly because the work is on a worker thread.
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "enter_detail_for should not block on git shell-out, took {elapsed:?}"
+        );
+        // Mode transitioned to Detail synchronously even though the
+        // diff is still computing in the background.
+        assert!(
+            matches!(&state.mode, Mode::Detail { task_id, .. } if task_id == "task-001"),
+            "mode should transition to Detail immediately, got {:?}",
+            state.mode
+        );
+
+        // Receiver stays alive — drop only after assertion above so
+        // the worker thread can post without "channel closed".
+        drop(rx);
+    }
+
+    /// When `git_diff_tx` is `None` (no event loop draining results),
+    /// `enter_detail_for` does NOT spawn a worker thread. Pins the
+    /// observe-only / test path: no orphaned threads after the function
+    /// returns.
+    #[test]
+    fn enter_detail_for_skips_diff_when_no_tx() {
+        use std::path::PathBuf;
+        let mut state = make_state_with_tile("task-001");
+        state.tasks[0].worktree_path = Some(PathBuf::from("/"));
+        // git_diff_tx left as None — fresh state default.
+        assert!(state.git_diff_tx.is_none());
+
+        let start = std::time::Instant::now();
+        state.enter_detail_for("task-001".into());
+        let elapsed = start.elapsed();
+
+        // Without a sender, the function still does the mode
+        // transition synchronously — and importantly does NOT shell
+        // out to git on the calling thread.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "enter_detail_for with no tx should be fully synchronous, took {elapsed:?}"
+        );
+        assert!(matches!(&state.mode, Mode::Detail { .. }));
     }
 
     #[test]
