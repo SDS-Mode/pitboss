@@ -67,7 +67,23 @@ fn send_group_signal(pid: u32, sig: libc::c_int, name: &'static str) -> Result<(
 ///   1st SIGINT within window → drain
 ///   2nd SIGINT within window → terminate
 /// After the window, re-armed: a single later SIGINT is treated as a fresh first.
+///
+/// **Idempotent.** Calling more than once in the same process is a no-op
+/// after the first install — pitboss has two callsites today (flat-mode
+/// and hierarchical entry points) and a future third callsite would
+/// otherwise spawn a duplicate watcher per Ctrl-C. (#150 L15)
 pub fn install_ctrl_c_watcher(cancel: CancelToken) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        // Watcher already running. Don't spawn a duplicate — it would
+        // doubly drain/terminate on each SIGINT, race the original on
+        // re-arm, and turn the documented "second SIGINT within 5s →
+        // terminate" contract into "first SIGINT terminates" (because
+        // each watcher consumes one keystroke).
+        tracing::debug!("install_ctrl_c_watcher: already installed; skipping duplicate");
+        return;
+    }
     tokio::spawn(async move {
         loop {
             if tokio::signal::ctrl_c().await.is_err() {
