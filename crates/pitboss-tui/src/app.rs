@@ -46,20 +46,32 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     // same path can be used on both initial startup and when the user
     // switches runs — without a fresh client, control ops after SwitchRun
     // would still target the old run's socket.
-    let connect_control = |state: &mut AppState| {
+    //
+    // Returns the `AbortHandle` of the bridge-forwarder task this call
+    // spawned. The caller stores it in `forwarder_abort` and aborts the
+    // *previous* one before re-calling on SwitchRun. Without that abort,
+    // the prior run's read_loop kept its `bridge_tx` alive (the read_loop
+    // owns a clone), the prior forwarder kept reading the prior
+    // `bridge_rx`, and stale events from the old socket continued
+    // arriving on the shared `ctrl_events_tx` — including ApprovalRequest
+    // events that would open a modal whose request_id the new
+    // dispatcher cannot ack (#104, #154 L1+L3).
+    let connect_control = |state: &mut AppState| -> Option<tokio::task::AbortHandle> {
+        let mut forwarder_abort: Option<tokio::task::AbortHandle> = None;
         let client = match uuid::Uuid::parse_str(&state.run_id) {
             Ok(uuid) => {
                 let socket_path = pitboss_cli::control::control_socket_path(uuid, &state.run_dir);
                 let (bridge_tx, mut bridge_rx) =
                     tokio::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>(64);
                 let forward_tx = ctrl_events_tx.clone();
-                runtime.spawn(async move {
+                let handle = runtime.spawn(async move {
                     while let Some(ev) = bridge_rx.recv().await {
                         if forward_tx.send(ev).is_err() {
                             break;
                         }
                     }
                 });
+                forwarder_abort = Some(handle.abort_handle());
                 // #154 M1: bound the connect by a short timeout so a
                 // slow dispatcher accept doesn't stall the 50ms input
                 // loop for hundreds of milliseconds. The connect path
@@ -84,9 +96,10 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
         state.control_connected = client.as_ref().is_some_and(|c| c.is_connected());
         state.control_client = client;
         state.runtime_handle = Some(runtime.handle().clone());
+        forwarder_abort
     };
 
-    connect_control(&mut state);
+    let mut forwarder_abort = connect_control(&mut state);
     // `ctrl_events_tx` and `runtime` are both held by `connect_control`
     // (the closure clones the sender and spawns tasks on the runtime). They
     // have to stay alive for the full event loop so a SwitchRun can rebuild
@@ -131,22 +144,31 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
                             reset_state_for_switch(&mut state, run_dir, run_id);
-                            // Drain in-flight events from the old run's socket
-                            // reader before connecting to the new run. The old
-                            // read_loop keeps running until its Unix socket
-                            // closes and still forwards through the shared
-                            // ctrl_events_tx. Without this drain, stale events
-                            // (including ApprovalRequest) can arrive after
-                            // reset_state_for_switch cleared the approval list,
-                            // pass the de-dup guard as "new", and open a modal
-                            // whose request_id the new dispatcher cannot ack
-                            // (#104).
+                            // Cancel the previous run's bridge-forwarder
+                            // task (#154 L1+L3). Aborting drops its
+                            // `bridge_rx`; the dispatcher-side read_loop
+                            // then sees its `events_tx.send()` fail and
+                            // exits, releasing the old socket. After this
+                            // abort, no further old-run events can reach
+                            // `ctrl_events_tx`. The drain below still
+                            // catches anything already queued.
+                            if let Some(h) = forwarder_abort.take() {
+                                h.abort();
+                            }
+                            // Drain in-flight events from the old run's
+                            // socket reader. Pre-#154 fix this drain was
+                            // the *only* defense; stale events arriving
+                            // after the drain (and before the old socket
+                            // closed naturally) could still open modals
+                            // whose request_id the new dispatcher cannot
+                            // ack (#104). Combined with the abort above
+                            // it is now a belt-and-suspenders backstop.
                             while ctrl_events_rx.try_recv().is_ok() {}
                             // Rebuild the control client against the new run's
                             // socket; without this, post-switch control ops
                             // (cancel/pause/approve/reprompt) keep targeting
                             // the previous run.
-                            connect_control(&mut state);
+                            forwarder_abort = connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
                             continue;
@@ -184,8 +206,11 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                             snapshot_rx = new_rx;
                             focus_tx = new_tx;
                             reset_state_for_switch(&mut state, run_dir, run_id);
+                            if let Some(h) = forwarder_abort.take() {
+                                h.abort(); // #154 L1+L3
+                            }
                             while ctrl_events_rx.try_recv().is_ok() {} // #104
-                            connect_control(&mut state);
+                            forwarder_abort = connect_control(&mut state);
                             let _ = focus_tx.send(String::new());
                             dirty = true;
                             continue;
@@ -225,7 +250,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
             // If we're in snap-in mode and at the bottom, keep the view
             // scrolled to the last line as new log lines arrive.
             if matches!(state.mode, Mode::Detail { .. }) {
-                state.detail_auto_scroll(DETAIL_VISIBLE_ROWS);
+                state.detail_auto_scroll();
             }
             // Notify watcher of current focus after snapshot (may have changed
             // via ensure_active_focus or Completed→Normal fallback).
@@ -295,15 +320,6 @@ fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String
     }
 }
 
-/// The visible height used for snap-in scroll calculations.
-///
-/// We can't query the terminal size from the key handler, so we use a
-/// representative constant. The real render uses `area.height`, but
-/// scroll clamping is soft (extra scroll just shows blank) so this is fine
-/// for the handler. The render pass also calls `detail_auto_scroll` with the
-/// real `visible_rows`.
-const DETAIL_VISIBLE_ROWS: usize = 40;
-
 /// Handle a single mouse event. Returns the same [`Action`] type as
 /// `handle_key` so the event-loop's existing `SwitchRun` dispatch can
 /// handle picker-click → open-run in one place.
@@ -318,7 +334,7 @@ fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Ac
             state.detail_scroll_up(5);
         }
         (Mode::Detail { .. }, MouseEventKind::ScrollDown) => {
-            state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS);
+            state.detail_scroll_down(5);
         }
         // Right-click inside Detail view exits to the return_to mode.
         (Mode::Detail { .. }, MouseEventKind::Down(MouseButton::Right)) => {
@@ -623,7 +639,7 @@ fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -
         KeyCode::Char('q') => return Action::Quit,
 
         // Scroll down one line.
-        KeyCode::Char('j') | KeyCode::Down => state.detail_scroll_down(1, DETAIL_VISIBLE_ROWS),
+        KeyCode::Char('j') | KeyCode::Down => state.detail_scroll_down(1),
 
         // Scroll up one line.
         KeyCode::Char('k') | KeyCode::Up => state.detail_scroll_up(1),
@@ -631,14 +647,14 @@ fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -
         // Medium-speed scroll: 5 lines. Sits between single-line j/k and
         // half-page Ctrl-D/U. Shift-variants of the vim keys keep muscle
         // memory intact for users who live on j/k=1.
-        KeyCode::Char('J') => state.detail_scroll_down(5, DETAIL_VISIBLE_ROWS),
+        KeyCode::Char('J') => state.detail_scroll_down(5),
         KeyCode::Char('K') => state.detail_scroll_up(5),
 
         // Page down (Ctrl-D or PageDown).
         KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-            state.detail_scroll_down(10, DETAIL_VISIBLE_ROWS);
+            state.detail_scroll_down(10);
         }
-        KeyCode::PageDown => state.detail_scroll_down(10, DETAIL_VISIBLE_ROWS),
+        KeyCode::PageDown => state.detail_scroll_down(10),
 
         // Page up (Ctrl-U or PageUp).
         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -647,7 +663,7 @@ fn handle_detail(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -
         KeyCode::PageUp => state.detail_scroll_up(10),
 
         // Jump to bottom, re-enable auto-scroll.
-        KeyCode::Char('G') => state.detail_jump_bottom(DETAIL_VISIBLE_ROWS),
+        KeyCode::Char('G') => state.detail_jump_bottom(),
 
         // Jump to top, disable auto-scroll.
         KeyCode::Char('g') => state.detail_jump_top(),
