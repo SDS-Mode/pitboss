@@ -351,7 +351,17 @@ async fn spawn_task_loop(
             Ok(p) => p,
             Err(_) => break,
         };
-        // Re-check after potentially blocking on the semaphore.
+        // Re-check after potentially blocking on the semaphore (#150 L12).
+        // The window between `acquire_owned().await` returning and this
+        // gate is microseconds, but a cancel that fires during the wait
+        // would otherwise still spawn one task per available permit
+        // before the next iteration's top-of-loop gate caught it. The
+        // re-check here closes that window for the loop driver. The
+        // task we're about to spawn (`execute_task` below) is also
+        // contractually required to honor cancel at entry — see the
+        // doc comment on `execute_task` for the in-task gate that
+        // covers any further cancel that fires after this re-check
+        // succeeds but before the spawned task begins running.
         if harness.cancel.is_draining() {
             break;
         }
@@ -555,6 +565,22 @@ pub async fn execute(
     .await
 }
 
+/// Run a single resolved task to completion or cancellation.
+///
+/// **Cancel contract (#150 L12):** the loop driver in `spawn_task_loop`
+/// re-checks `cancel.is_draining()` after the semaphore acquire but
+/// before calling this function, so by the time we enter we know the
+/// cancel was not tripped at the gate. After that, this function
+/// itself owns the obligation to honor cancel — specifically, the
+/// `spawner.run_to_completion(cancel, ...)` call below races the child
+/// process against `cancel.await_drain()` / `cancel.await_terminate()`,
+/// so a cancel that fires after we enter (but before / during the
+/// child's run) still terminates the task and produces a `Cancelled`
+/// `TaskRecord` rather than blocking on a hung child. Any future code
+/// added between this entry point and `run_to_completion` must NOT
+/// reach a blocking await without consulting `cancel.is_draining()` —
+/// that would re-introduce the gap the loop driver's re-check is
+/// closing on the spawn side.
 #[allow(clippy::too_many_arguments)]
 async fn execute_task(
     task: &ResolvedTask,

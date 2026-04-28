@@ -9,6 +9,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Document four dispatch low-severity contracts** (#150 L11/L12/L15
+  + lifecycle composition). Comment-only changes that close out the
+  docs-shaped tail of the #150 audit: (1) `dispatch/background.rs`
+  now spells out that `--background` and `[lifecycle].survive_parent`
+  are orthogonal mechanisms (operational vs declarative), not
+  alternatives, and can compose; (2) the `current_exe()` call in
+  background dispatch now carries a TOCTOU note explaining why
+  pitboss does not `open()`-then-fexecve the binary; (3) `drop(child)`
+  after the detached spawn is annotated to make explicit that the
+  call uses `std::process::Child` (true no-op drop) rather than
+  `tokio::process::Child` (which has `kill_on_drop` semantics);
+  (4) `dispatch/runner.rs` now documents the cancel-honor contract
+  on `execute_task` and the rationale for the post-semaphore re-check
+  in `spawn_task_loop`. No behavioral changes.
+
 - **`cancel_actor_with_reason` O(N) → O(1) sub-tree-worker routing**
   (#150). The cancel-with-reason path used to walk every sub-tree's
   `worker_cancels` map under a held `state.subleads` read lock to
