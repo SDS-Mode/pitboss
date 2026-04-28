@@ -8,9 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use pitboss_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
 use pitboss_core::session::{CancelToken, SessionHandle};
-use pitboss_core::store::{
-    JsonFileStore, RunMeta, RunSummary, SessionStore, TaskRecord, TaskStatus,
-};
+use pitboss_core::store::{JsonFileStore, RunSummary, SessionStore, TaskRecord, TaskStatus};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore};
@@ -199,21 +197,9 @@ pub async fn run_dispatch_inner(
     .await
 }
 
-/// Inner workhorse — takes its dependencies injected for testability.
-#[allow(clippy::too_many_arguments)]
-/// Output of `init_run_state`: identifiers and paths shared across the
-/// remaining phases. Carries the `started_at` timestamp captured at the
-/// moment of `RunMeta` construction so the finalize phase can compute an
-/// authoritative `RunSummary.total_duration_ms`.
-struct RunInit {
-    run_id: Uuid,
-    run_subdir: PathBuf,
-    /// `PITBOSS_RUN_ID` from the inherited env at dispatch start, snapshotted
-    /// before we overwrite it. `None` when this dispatch isn't running under
-    /// a parent orchestrator. Surfaced on the `RunDispatched` notification.
-    parent_run_id: Option<String>,
-    started_at: chrono::DateTime<Utc>,
-}
+use crate::dispatch::entrypoint::{
+    build_notification_router_and_emit_dispatched, init_run_state, RunInit,
+};
 
 /// Run-level shared state assembled by `setup_run_harness` and consumed
 /// by `spawn_task_loop` + `finalize_run`. Holds the long-lived references
@@ -234,57 +220,6 @@ struct RunHarness {
     notification_router_for_emit: Option<Arc<crate::notify::NotificationRouter>>,
     spawner: Arc<dyn ProcessSpawner>,
     store: Arc<dyn SessionStore>,
-}
-
-/// Mint / honor the run id, write the per-run subdir + snapshot files, and
-/// initialise `RunMeta` in the store. Also snapshots the parent run id
-/// from the inherited env BEFORE overwriting it for the lifetime of this
-/// dispatch (so `RunDispatched` can carry the parent context).
-async fn init_run_state(
-    resolved: &ResolvedManifest,
-    manifest_text: &str,
-    manifest_path: &Path,
-    claude_version: Option<String>,
-    store: &Arc<dyn SessionStore>,
-    pre_minted_run_id: Option<Uuid>,
-) -> Result<RunInit> {
-    // Snapshot any `PITBOSS_RUN_ID` already in our env BEFORE we overwrite it
-    // with our own run_id. If we're running under a parent orchestrator (or as
-    // a sub-dispatch the agent triggered from inside a worktree), the prior
-    // value is the parent run id reported on `RunDispatched`. See the
-    // `notify::parent` module for the full env-var contract (issue #133).
-    let parent_run_id = crate::notify::parent::parent_run_id();
-    // Honor a pre-minted id from `--background` (issue #133-C); otherwise
-    // mint fresh as before. Background pre-mints in the parent so it can
-    // announce the id on stdout before the detached child boots.
-    let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
-    crate::notify::parent::set_run_id_env(&run_id.to_string());
-
-    let run_dir = resolved.run_dir.clone();
-    let run_subdir = run_dir.join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.ok();
-    tokio::fs::write(run_subdir.join("manifest.snapshot.toml"), manifest_text).await?;
-    if let Ok(b) = serde_json::to_vec_pretty(resolved) {
-        tokio::fs::write(run_subdir.join("resolved.json"), b).await?;
-    }
-
-    let started_at = Utc::now();
-    let meta = RunMeta {
-        run_id,
-        manifest_path: manifest_path.to_path_buf(),
-        pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version,
-        started_at,
-        env: Default::default(),
-    };
-    store.init_run(&meta).await.context("init run")?;
-
-    Ok(RunInit {
-        run_id,
-        run_subdir,
-        parent_run_id,
-        started_at,
-    })
 }
 
 /// Print the dry-run plan to stdout. Caller checks the `dry_run` flag and
@@ -327,39 +262,13 @@ async fn setup_run_harness(
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
 
-    // Build notification router from manifest [[notification]] sections AND
-    // the optional `PITBOSS_PARENT_NOTIFY_URL` env var. Returns None when
-    // both sources are empty, so the no-notify common case stays cost-free.
-    let http = std::sync::Arc::new(reqwest::Client::new());
-    let notification_router = crate::notify::parent::build_router(&resolved.notifications, &http)?;
-    if let Some(router) = &notification_router {
-        // Bind the run subdir so terminal emit failures land in
-        // <run_subdir>/notifications.jsonl as TaskEvent::NotificationFailed.
-        // Issue #156 (M4).
-        router.set_run_subdir(init.run_subdir.clone());
-    }
-
-    // Fire RunDispatched immediately. The orchestrator wants to register
-    // the run before any tokens are spent — emitting at finalize-time only
-    // (the prior behavior) defeats the point of the hook.
-    if let Some(router) = &notification_router {
-        let env = crate::notify::NotificationEnvelope::new(
-            &init.run_id.to_string(),
-            crate::notify::Severity::Info,
-            crate::notify::PitbossEvent::RunDispatched {
-                run_id: init.run_id.to_string(),
-                parent_run_id: init.parent_run_id.clone(),
-                manifest_path: manifest_path.display().to_string(),
-                mode: "flat".to_string(),
-                survive_parent: resolved
-                    .lifecycle
-                    .as_ref()
-                    .is_some_and(|l| l.survive_parent),
-            },
-            Utc::now(),
-        );
-        let _ = router.dispatch(env).await;
-    }
+    // Build notification router and fire `RunDispatched`. Shared with
+    // hierarchical mode via `dispatch::entrypoint` so the `mode` label and
+    // the `set_run_subdir` binding can't drift between the two paths
+    // (#150 M9).
+    let notification_router =
+        build_notification_router_and_emit_dispatched(resolved, manifest_path, init, "flat")
+            .await?;
 
     // Build a minimal DispatchState so the control server has something to
     // bind against. Flat mode has no lead and no spawn_worker path, but
@@ -590,6 +499,9 @@ pub async fn execute(
     dry_run: bool,
     pre_minted_run_id: Option<Uuid>,
 ) -> Result<i32> {
+    // Flat mode has no `run_dir_override` (operators set `run_dir` in
+    // the manifest itself); hierarchical mode passes `Some(...)` when
+    // `--run-dir` was supplied on the CLI.
     let init = init_run_state(
         &resolved,
         &manifest_text,
@@ -597,6 +509,7 @@ pub async fn execute(
         claude_version.clone(),
         &store,
         pre_minted_run_id,
+        None,
     )
     .await?;
 

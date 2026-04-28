@@ -9,6 +9,22 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Consolidate dispatch entry-point boilerplate** (#150 M9). Both
+  `runner::execute` (flat) and `hierarchical::run_hierarchical`
+  inlined ~50 lines each of identical run-id minting, manifest
+  snapshot writes, `RunMeta` init, notification-router build, and
+  `RunDispatched` emit. Past drift between the two copies caused
+  subtle differences (`mode` label, `set_run_subdir` binding) that
+  were easy to miss in code review. Centralized in a new
+  `dispatch/entrypoint.rs` module exposing `init_run_state(...)` (now
+  accepts `run_dir_override` so hierarchical can use it too) and
+  `build_notification_router_and_emit_dispatched(..., mode)` (the
+  `mode: &'static str` parameter is the only point of divergence
+  between the two paths). Hierarchical's `[[lead]]` validation now
+  fires BEFORE `init_run_state` writes anything to disk — pre-#150-M9
+  a no-lead manifest left orphan `manifest.snapshot.toml` and
+  `resolved.json` files on disk; now the bail is fully clean.
+
 - **Decompose `runner::execute` into per-phase functions** (#185). The
   263-line `dispatch/runner.rs::execute` now reads as five sequential
   phases: `init_run_state` (mint run id, write manifest snapshots, init
