@@ -301,10 +301,21 @@ impl NotificationRouter {
                         error = %e,
                         "notification emit failed after retries"
                     );
-                    counter.fetch_add(1, Ordering::Relaxed);
+                    // Write the audit-trail line BEFORE bumping the counter.
+                    // External observers (tests, status APIs) treat
+                    // `failed_emits_total` as a synchronization barrier — a
+                    // post-bump read of `notifications.jsonl` must see the
+                    // line. With the previous order the counter could
+                    // increment while the journal write was still in flight,
+                    // producing flaky reads in
+                    // `router_records_failed_emit_metric_and_journal_line`
+                    // under slow-FS conditions on CI. The journal write is
+                    // bounded and swallows its own errors, so this ordering
+                    // can't deadlock the spawn.
                     if let Some(subdir) = run_subdir.as_ref() {
                         record_notification_failure(subdir, &sink, &env, &e).await;
                     }
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             });
         }
