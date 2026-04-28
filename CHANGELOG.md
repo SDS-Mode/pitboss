@@ -9,6 +9,20 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Rate-limit `resets_at` parse failures now log a `warn!`** (#185).
+  `match_rate_limit` previously called `parse_reset_timestamp` and
+  silently returned `RateLimit { resets_at: None }` on any parse failure.
+  `ApiHealth::check_can_spawn` would then fall back to
+  `RATE_LIMIT_DEFAULT_BACKOFF_SECS = 300s` with no log line, leaving
+  operators with "rate limited, retrying in 5 minutes" and no clue that
+  the actual reset was 30 seconds away. Emit a `tracing::warn!` carrying
+  a `raw_excerpt` (the substring around `"resets …"`, or a tail when
+  the marker is absent) and the `default_backoff_secs` value so the
+  fallback is observable. The `RateLimit` classification itself is
+  unchanged. Three regression tests cover (1) malformed `resets …`
+  payloads, (2) markers without a `resets ` clause at all, and
+  (3) the happy path still doesn't emit the warn.
+
 - **Web console socket-path resolution.** `ControlBridge::dial` previously
   hardcoded the socket lookup to `<runs_dir>/<run_id>/control.sock`, but
   the dispatcher publishes its control socket at

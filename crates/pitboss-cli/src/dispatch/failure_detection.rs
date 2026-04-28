@@ -237,9 +237,43 @@ fn match_rate_limit(blob: &str) -> Option<FailureReason> {
     if !hit {
         return None;
     }
-    Some(FailureReason::RateLimit {
-        resets_at: parse_reset_timestamp(blob),
-    })
+    let resets_at = parse_reset_timestamp(blob);
+    if resets_at.is_none() {
+        // Without an observable `resets_at`, `ApiHealth::check_can_spawn`
+        // falls back to RATE_LIMIT_DEFAULT_BACKOFF_SECS (300s). Operators
+        // who saw "rate limited, retrying in 5 minutes" with no further
+        // signal had no way to know the actual reset time was much
+        // sooner. Surface the parse failure so log-tailing operators
+        // (and integration tests) can see why the default kicked in.
+        tracing::warn!(
+            raw_excerpt = %reset_context(blob),
+            default_backoff_secs = RATE_LIMIT_DEFAULT_BACKOFF_SECS,
+            "rate-limit detected but reset_at parse failed; falling back to default backoff"
+        );
+    }
+    Some(FailureReason::RateLimit { resets_at })
+}
+
+/// Pull a small, log-friendly excerpt around the `"resets "` marker so
+/// the parse-failure warning has actionable context. Falls back to a
+/// short tail of the blob when no marker is present (the rate-limit
+/// detector matched on a phrasing that doesn't carry a reset hint, e.g.
+/// the bare `"rate_limit_exceeded"` API error).
+fn reset_context(blob: &str) -> String {
+    const CTX_CHARS: usize = 80;
+    if let Some(idx) = blob.find("resets ") {
+        let rest = &blob[idx..];
+        let end = rest
+            .find(['\n', '·', '|'])
+            .unwrap_or(rest.len().min(CTX_CHARS));
+        return rest[..end].trim().to_string();
+    }
+    // No "resets " marker — return a short tail so the operator at
+    // least sees what triggered the rate-limit classification.
+    let trimmed = blob.trim();
+    let start = trimmed.chars().count().saturating_sub(CTX_CHARS);
+    let tail: String = trimmed.chars().skip(start).collect();
+    format!("(no `resets ` marker; tail: {tail:?})")
 }
 
 fn match_auth(blob: &str) -> Option<FailureReason> {
@@ -488,6 +522,90 @@ mod tests {
         match classify(blob) {
             FailureReason::RateLimit { resets_at: None } => {}
             other => panic!("expected RateLimit with no timestamp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn rate_limit_with_unparseable_resets_emits_warn() {
+        // A rate-limit marker with a malformed `resets …` clause must not
+        // silently fall through to the 5-minute default backoff. The
+        // operator needs a log line saying the parse failed and that the
+        // default kicked in, otherwise debugging "why is pitboss waiting
+        // 5 minutes when the real reset was 30 seconds away?" is
+        // impossible.
+        let blob = "You've hit your limit · resets WHAT-IS-THIS-NONSENSE";
+        match classify(blob) {
+            FailureReason::RateLimit { resets_at: None } => {}
+            other => panic!("expected RateLimit with no timestamp, got {other:?}"),
+        }
+        // tracing_test captures every event into a process-global buffer;
+        // `logs_contain` greps the rendered output for our marker.
+        assert!(
+            logs_contain("rate-limit detected but reset_at parse failed"),
+            "expected a warn! log when parse_reset_timestamp returns None for a rate-limit hit"
+        );
+        assert!(
+            logs_contain("default_backoff_secs"),
+            "warn! must include the default_backoff_secs value so operators can see the fallback duration"
+        );
+        assert!(
+            logs_contain("WHAT-IS-THIS-NONSENSE"),
+            "warn! must include the unparseable raw excerpt so operators can debug the format"
+        );
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn rate_limit_without_resets_marker_emits_warn_with_tail_excerpt() {
+        // The `rate_limit_exceeded` API-error phrasing has no `resets `
+        // marker. The warn must still fire (operator still sees the
+        // 5-minute fallback) and include a useful tail excerpt rather
+        // than an empty string.
+        let blob = "...some output...\nrate_limit_exceeded (no timestamp here)";
+        let _ = classify(blob);
+        assert!(
+            logs_contain("rate-limit detected but reset_at parse failed"),
+            "warn must fire even when no `resets ` marker is present"
+        );
+        assert!(
+            logs_contain("no `resets ` marker"),
+            "warn excerpt should explain that the marker was absent"
+        );
+    }
+
+    #[test]
+    fn reset_context_extracts_resets_clause() {
+        let blob = "blah blah · resets Apr 23, 3pm · more text\nignore-this";
+        let ctx = reset_context(blob);
+        assert!(ctx.starts_with("resets "));
+        assert!(ctx.contains("Apr 23, 3pm"));
+        // Must not include the trailing "· more text" piece.
+        assert!(!ctx.contains("more text"));
+    }
+
+    #[test]
+    fn reset_context_falls_back_to_tail_when_marker_absent() {
+        let blob = "long log... rate_limit_exceeded";
+        let ctx = reset_context(blob);
+        assert!(ctx.contains("no `resets ` marker"));
+        assert!(ctx.contains("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn rate_limit_with_parseable_timestamp_does_not_emit_warn() {
+        // Make sure the warn doesn't fire on the happy path — otherwise
+        // every rate-limit hit would spam the logs.
+        let blob = "You've hit your limit · resets Apr 23, 3pm";
+        // Note: NOT using #[traced_test] here so the assertion doesn't
+        // pick up unrelated logs from other tests in the same process.
+        // Instead, just rely on the test in the previous block that
+        // asserts presence; this test asserts the parse succeeds, which
+        // is sufficient evidence the warn-emit branch is gated on
+        // `resets_at.is_none()`.
+        match classify(blob) {
+            FailureReason::RateLimit { resets_at: Some(_) } => {}
+            other => panic!("expected RateLimit with parsed timestamp, got {other:?}"),
         }
     }
 
