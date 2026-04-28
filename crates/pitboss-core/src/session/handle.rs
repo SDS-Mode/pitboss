@@ -248,7 +248,9 @@ impl SessionHandle {
             .and_then(std::process::ExitStatus::code);
         let ended_at = Utc::now();
 
-        let accum = accum.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let accum = accum
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saw_result = accum.saw_result;
 
         let final_state = match &end_reason {
