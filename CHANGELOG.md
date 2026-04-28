@@ -9,6 +9,22 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Decompose `runner::execute` into per-phase functions** (#185). The
+  263-line `dispatch/runner.rs::execute` now reads as five sequential
+  phases: `init_run_state` (mint run id, write manifest snapshots, init
+  `RunMeta`), `print_dry_run_plan` (early-return path), `setup_run_harness`
+  (progress table, semaphore, cancel + Ctrl-C watcher, worktree manager,
+  notification router, flat `DispatchState`, control server),
+  `spawn_task_loop` (per-task `tokio::spawn` + await all), and
+  `finalize_run` (build `RunSummary`, persist, fire `RunFinished`,
+  compute exit code). Bridge state lives on a new `RunHarness` struct
+  for the long-lived references (cancel, store, spawner, etc.); the
+  per-phase-only `records` / `halt_drained` Arcs stay outside the
+  harness so `spawn_task_loop` can `Arc::try_unwrap` the records vec
+  without contending with a harness-held strong ref. No external
+  behavior change: existing `dispatch_flows`, `e2e_flows`, and the
+  full workspace test suite stay green.
+
 - **Extract kill+resume helper** (#185). The kill+resume subprocess
   loop in `dispatch/hierarchical.rs` (root lead) and
   `dispatch/sublead.rs` (`spawn_sublead_session` background task) was
