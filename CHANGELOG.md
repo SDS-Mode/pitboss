@@ -9,6 +9,180 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **MCP — `wait_for_any` fail-fast on all-unknown task ids,
+  approval-queue-full bridge cleanup, sub-tree `worker_prompts` read**
+  (#151). `handle_wait_for_any` used to subscribe to `done_tx` and
+  block for the full `timeout_secs` (default 3600s) when every passed
+  `task_id` was unknown — typo, evicted, never spawned — waking only
+  on unrelated broadcasts; now scans every layer first and fails fast
+  with a diagnostic naming the unknown ids when none resolve.
+  `request_approval` used to log a warning and silently leave the
+  bridge entry alive when the control writer's send queue was full,
+  so the caller blocked the full bridge timeout for an event the TUI
+  would never see; now evicts the bridge entry on `try_send` failure
+  and routes through the policy fallback (`AutoApprove` → approved,
+  `AutoReject`/`Block` → rejected with diagnostic). And
+  `handle_worker_status` used to read `prompt_preview` only from
+  `state.root.worker_prompts`, so sub-lead-spawned workers (whose
+  prompts live in their layer's prompts map) returned an empty
+  preview — fixed by routing through `layer_for_worker(state,
+  task_id)` with a root fallback.
+
+- **TUI — `connect_control` 200 ms timeout, `ApprovalModal` dismissal
+  on disconnect, `q`→Quit in modal modes, mouse hit-rect poison
+  recovery** (#154). The blocking
+  `runtime.block_on(ControlClient::connect(...))` on the main UI
+  thread used to stall the 50 ms input loop on a slow dispatcher
+  accept; now wrapped in `tokio::time::timeout(200ms, ...)` — worst
+  case the client comes back as `None` and the operator sees the
+  "no control" status, same UX as before but bounded.
+  `Superseded`/`RunFinished` now drop back to `Mode::Normal` if a
+  modal is open so the operator isn't stranded submitting approvals
+  into a disconnected client. `q` now respects the global Quit
+  shortcut in `ApprovalModal::Overview` and `PolicyEditor` (the
+  draft-typing sub-modes still consume `q` so it can appear in
+  rejection reasons). And the picker / tile / Completed-tab mouse
+  hit-test now poison-recovers via
+  `lock().unwrap_or_else(PoisonError::into_inner)` instead of
+  `lock().ok()?`, so a single panic doesn't permanently disable
+  mouse navigation for the session — the cache is rebuilt every
+  frame so recovery is safe.
+
+- **Background dispatch hardening — pre-flight manifest validation,
+  path canonicalization, captured stderr, EPIPE-safe announcement,
+  strict UUID v7** (#150). `pitboss dispatch --background` used to
+  detach without parsing the manifest and silently nulled the child's
+  stderr, so a TOML syntax error or panic in startup left zero
+  diagnostic; now validates the manifest on the parent before
+  spawning, canonicalizes `manifest_path` and `--run-dir` so the
+  JSON announcement is self-contained, and redirects child stderr
+  to `<runs_base>/<run_id>.bg-stderr.log` (returned in the
+  announcement under `bg_stderr_log`). The announcement uses
+  `writeln!` on a locked stdout instead of `println!` — an
+  orchestrator that closes its end of the pipe before reading
+  the announcement no longer panics the parent with EPIPE.
+  `parse_internal_run_id` rejects non-v7 UUIDs (pitboss extracts a
+  millisecond timestamp from v7's leading bytes; a v4 silently
+  broke every consumer that relied on that). Plus
+  `install_ctrl_c_watcher` is now idempotent via a static
+  `AtomicBool`, and `halt_drained` switched from
+  `Ordering::Relaxed` to `Release`/`Acquire` to make the
+  store/load synchronization explicit. Lead worktree cleanup
+  failures now log at `warn` with a pointer to `pitboss prune`
+  instead of being swallowed with `let _ =`.
+
+- **`pitboss-core` session — fire `session_id` on `init` event, not
+  on terminal `Result`; switch `accum` to `std::sync::Mutex`**
+  (#149 M5/L7). The dispatcher's `session_id_tx` channel notified
+  on the terminal `Event::Result` instead of the `system{init}`
+  event Claude Code emits at second one, so the dispatcher waited
+  the full run duration (30+ minutes for long leads) for a session
+  id it could have had immediately. Added an `Option<String>
+  session_id` field to `Event::System` and the parser populates it;
+  the stream loop fires the channel on init, with the result-event
+  path kept as a fallback for older claude builds that don't carry
+  session_id on init. The previous test
+  (`session_id_fires_on_init_event`) was misleading — emitted both
+  an init AND a result line, so the channel firing on result
+  satisfied the assertion even though init was ignored; replaced
+  with two tests (init-only, result-fallback). The `accum`
+  accumulator switched from `tokio::sync::Mutex` to
+  `std::sync::Mutex` because no suspension point is held across
+  the lock; lock-acquire now poison-recovers via
+  `PoisonError::into_inner`.
+
+- **`pitboss-core` store — env persistence parity, typed error
+  variants, DDL identifier hardening** (#149 M2/L9/L10).
+  `RunMeta.env` HashMap was silently dropped on the `SQLite`
+  backend (no `env` column) while `JsonFileStore` round-tripped it
+  through `meta.json`; added an `env_json TEXT NULL` column and a
+  `migrate_runs_env` migration with an empty-NULL optimization for
+  the common case. `StoreError` gained typed `Busy`, `Schema`, and
+  `Sqlite` variants alongside the existing catch-all `Incomplete`,
+  with a `from_rusqlite(&err)` classifier that maps
+  `SQLITE_BUSY`/`SQLITE_LOCKED` to `Busy`, schema-mismatch error
+  text to `Schema`, and the rest to `Sqlite` — callers can now
+  distinguish retryable from operator-action-required from generic
+  storage errors without parsing strings. The
+  `migrate_v04_event_counters` DDL `format!`-interpolation pattern
+  was lifted into `add_column_if_missing(table, column,
+  type_clause)` which uses a *bound* parameter for the existence
+  check and runs the column/table identifier through
+  `assert_safe_ident` before inlining into the `ALTER TABLE` —
+  closes the only DDL footgun in the file.
+
+- **`pitboss-core::failure_classify` module + libgit2 worktree
+  cache + `SessionStore::open`** (#188). Moved `classify`,
+  `match_*`, `parse_reset_timestamp` / `parse_12h_time` /
+  `month_from_abbrev`, and `excerpt` from
+  `pitboss-cli::dispatch::failure_detection` into a new
+  `pitboss_core::failure_classify` module so downstream consumers
+  (the `pitboss-web` console, future external integrations) can
+  classify a log blob without depending on the CLI crate;
+  `FailureReason` already lived here, the constructor now lives
+  next to it. The rate-limit warn-on-parse-failure behavior added
+  in #194 moved with it. The `prepare` branch-conflict pre-check
+  used to call `Repository::open(wt.path())` per existing worktree,
+  dominating prepare time on operators with heavy worktree usage;
+  the new `head_branch_for_worktree` reads the worktree's
+  plain-text HEAD file (`<repo>/.git/worktrees/<name>/HEAD`)
+  directly, with `head_branch_via_open` as a fallback for
+  detached-HEAD or unusual layouts. Added
+  `SessionStore::open(path: &Path) -> Result<Box<dyn SessionStore>,
+  StoreError>` so callers can uniformly construct either backend
+  through the trait — pre-fix `SqliteStore::new` was fallible and
+  `JsonFileStore::new` was infallible.
+
+- **`TokenUsage::add` saturating semantics** (#185 low). Switched
+  from unchecked `+=` to `saturating_add` and emits a
+  `tracing::warn!` if any field saturates at `u64::MAX`.
+  Practically unreachable, but the dispatcher accumulates
+  `total_token_usage` across kill+resume iterations of long-running
+  leads with no per-iteration cap; the saturation guard makes
+  overflow impossible rather than merely improbable.
+
+- **`shared_store::LeaseRegistryApi` trait for the cleanup hook**
+  (#189). Pitboss has two lease registries with deliberately
+  divergent semantics — `leases::LeaseRegistry` (per-KvStore-layer,
+  MCP-tool-mediated, `lease_id`-keyed, no same-holder renewal) and
+  `run_leases::LeaseRegistry` (run-global, `(key, holder)`-keyed,
+  with same-holder renewal and blocking `acquire_with_wait`).
+  Migrating a usage between them used to lose semantics silently
+  with no compile-time signal. The new `LeaseRegistryApi` trait
+  covers *only* the operation that *is* identical in both — the
+  cleanup hook fired on MCP connection drop and cancel cascade —
+  so call sites that only need cleanup can be parameterized over
+  `&dyn LeaseRegistryApi` and a future third registry must
+  implement cleanup before being wireable.
+
+- **Notify — poison-recover dedup mutex; document SSRF TOCTOU
+  mitigation** (#187). The `dedup_cache: Mutex<LruCache<...>>` in
+  `NotificationRouter::dispatch` used `.lock().unwrap()`; a panic
+  in any code path holding the guard would propagate `PoisonError`
+  to every subsequent dispatch and silently disable all
+  notifications — fixed by recovering the inner cache on poison
+  (worst case: one duplicate emit). The original audit also
+  flagged a DNS-rebinding TOCTOU between `pre_request_ssrf_check`
+  and `build_pinned_client`, but inspection of current code shows
+  the mitigation is already in place: `pre_request_ssrf_check`
+  performs a *single* DNS resolution and returns the validated
+  `Vec<SocketAddr>`, which the sink hands to
+  `reqwest::ClientBuilder::resolve_to_addrs` (a static override,
+  not a second lookup). Added a regression test
+  (`pinned_client_addrs_match_preflight_addrs_exactly`) that locks
+  in the single-resolution invariant.
+
+- **CLI — consolidated run-id prefix resolver** (#184). `pitboss
+  attach`, `status`, `resume`, and `diff` each carried a
+  near-identical `resolve_run_dir` / `resolve_run_under`
+  implementation, and the four had drifted: only `diff` did
+  exact-match-first, and the ambiguous-prefix diagnostic wording
+  differed across copies. Lifted a single
+  `runs::resolve_run_dir_by_prefix(base, id_or_prefix)`: exact-
+  directory match first, then prefix scan, with the canonical
+  "`{n}` runs match prefix '...' — be more specific" diagnostic.
+  All four call sites delegate.
+
 - **Rate-limit `resets_at` parse failures now log a `warn!`** (#185).
   `match_rate_limit` previously called `parse_reset_timestamp` and
   silently returned `RateLimit { resets_at: None }` on any parse failure.
