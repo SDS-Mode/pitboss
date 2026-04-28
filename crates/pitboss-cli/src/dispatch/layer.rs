@@ -390,6 +390,39 @@ impl LayerState {
         let spent = *self.spent_usd.lock().await;
         Some((budget - spent).max(0.0))
     }
+
+    /// Register a worker's `CancelToken` under `task_id` and immediately
+    /// propagate any in-flight drain/terminate state from this layer's
+    /// `cancel` to the worker's token. Centralizes the previously-inlined
+    /// pattern at `mcp/tools.rs` (insert into `worker_cancels`, then
+    /// check `target_layer.cancel.is_terminated()` / `is_draining()`).
+    ///
+    /// The eager propagation is what closes the post-register cascade
+    /// gap (#99): the per-sublead watcher (`install_sublead_cancel_watcher`)
+    /// is fire-once, so a worker registered after the watcher has fired
+    /// would otherwise miss the cancel signal. Pinned by the integration
+    /// tests in `tests/cancel_cascade_flows.rs`.
+    pub async fn register_worker_cancel(&self, task_id: String, token: CancelToken) {
+        self.worker_cancels
+            .write()
+            .await
+            .insert(task_id, token.clone());
+        self.cancel.cascade_to(&token);
+    }
+
+    /// Walk every registered `worker_cancels` entry and cascade this
+    /// layer's current cancel state to it via `CancelToken::cascade_to`.
+    /// Used by the per-sublead watcher tasks installed by
+    /// `install_sublead_cancel_watcher` — both the drain and terminate
+    /// watchers funnel through this method so the cascade rule
+    /// (terminate dominates drain) is encoded in exactly one place.
+    pub async fn cascade_to_workers(&self) {
+        let workers = self.worker_cancels.read().await;
+        for (worker_id, tok) in workers.iter() {
+            tracing::debug!(worker_id = %worker_id, "cascading cancel state to sub-tree worker");
+            self.cancel.cascade_to(tok);
+        }
+    }
 }
 
 #[cfg(test)]

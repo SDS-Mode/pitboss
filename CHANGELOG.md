@@ -7,6 +7,24 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Centralize cancel-cascade primitive** (#100, PR 100.2). Adds
+  `CancelToken::cascade_to(&CancelToken)` in `pitboss-core` (terminate
+  dominates drain) and threads it through four new methods —
+  `LayerState::register_worker_cancel`, `LayerState::cascade_to_workers`,
+  `DispatchState::register_sublead`, `DispatchState::cascade_to_subleads`.
+  The previously-inlined cascade patterns at `mcp/tools.rs:506-521`
+  (worker registration eager check) and `dispatch/sublead.rs:340-383`
+  (sub-lead spawn insert + watcher install + eager check) now route
+  through these helpers, and the fire-once watcher tasks in
+  `dispatch/signals.rs` funnel through `cascade_to_workers` /
+  `cascade_to_subleads` so the terminate-dominates-drain rule lives in
+  exactly one place. No external behavior change: PR 100.1's
+  `cancel_cascade_flows` integration tests and the existing
+  `signals::tests::sublead_watcher_*` unit tests pin the contract;
+  4 new unit tests on `CancelToken::cascade_to` lock the primitive.
+
 ### Tests
 
 - **Pin late-registration cancel-cascade contract** (#100, PR 100.1).

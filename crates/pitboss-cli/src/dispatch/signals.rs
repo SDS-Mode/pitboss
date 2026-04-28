@@ -196,34 +196,30 @@ async fn cancel_and_find_parent(
 /// Spawns two background tasks that mirror the per-layer variant of the root
 /// cascade watcher:
 ///
-/// * **drain watcher**: fires when `sub_layer.cancel` is drained → drains
-///   every worker cancel token registered on that layer at that moment.
+/// * **drain watcher**: fires when `sub_layer.cancel` is drained →
+///   `cascade_to_workers` walks `worker_cancels` and propagates this layer's
+///   current cancel state to each.
 /// * **terminate watcher**: fires when `sub_layer.cancel` is terminated →
-///   terminates every worker cancel token registered on that layer.
+///   same `cascade_to_workers` call.
 ///
-/// Call exactly once at sub-lead spawn time (see `spawn_sublead`).  The root
-/// cascade watcher (`install_cascade_cancel_watcher`) only needs to signal
-/// `sub_layer.cancel`; this function handles the worker cascade so
-/// `DispatchState` never touches `sub_layer.worker_cancels` directly.
+/// Both watchers funnel through `LayerState::cascade_to_workers` so the
+/// terminate-dominates-drain rule lives in exactly one place
+/// (`CancelToken::cascade_to`).  Call exactly once at sub-lead spawn time
+/// (see `DispatchState::register_sublead`).  The root cascade watcher
+/// (`install_cascade_cancel_watcher`) only needs to signal `sub_layer.cancel`;
+/// this function handles the worker cascade so `DispatchState` never touches
+/// `sub_layer.worker_cancels` directly.
 pub fn install_sublead_cancel_watcher(sub_layer: Arc<crate::dispatch::layer::LayerState>) {
     let layer_drain = sub_layer.clone();
     tokio::spawn(async move {
         layer_drain.cancel.await_drain().await;
-        let worker_cancels = layer_drain.worker_cancels.read().await;
-        for (worker_id, tok) in worker_cancels.iter() {
-            tracing::debug!(worker_id = %worker_id, "cascading drain to sub-tree worker");
-            tok.drain();
-        }
+        layer_drain.cascade_to_workers().await;
     });
 
     let layer_term = sub_layer;
     tokio::spawn(async move {
         layer_term.cancel.await_terminate().await;
-        let worker_cancels = layer_term.worker_cancels.read().await;
-        for (worker_id, tok) in worker_cancels.iter() {
-            tracing::debug!(worker_id = %worker_id, "cascading terminate to sub-tree worker");
-            tok.terminate();
-        }
+        layer_term.cascade_to_workers().await;
     });
 }
 
@@ -242,25 +238,15 @@ pub fn install_sublead_cancel_watcher(sub_layer: Arc<crate::dispatch::layer::Lay
 /// fire — re-installing after the cascade has fired will not catch sub-trees
 /// registered post-cascade. For that, see the spawn-time check in `spawn_sublead`.
 pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
-    let root_cancel_drain = state.root.cancel.clone();
     let state_drain = state.clone();
     tokio::spawn(async move {
-        root_cancel_drain.await_drain().await;
-        let subleads = state_drain.subleads.read().await;
-        for (sublead_id, sub_layer) in subleads.iter() {
-            tracing::info!(sublead_id = %sublead_id, "cascading drain to sub-tree");
-            sub_layer.cancel.drain();
-        }
+        state_drain.root.cancel.await_drain().await;
+        state_drain.cascade_to_subleads().await;
     });
 
-    let root_cancel_term = state.root.cancel.clone();
     tokio::spawn(async move {
-        root_cancel_term.await_terminate().await;
-        let subleads = state.subleads.read().await;
-        for (sublead_id, sub_layer) in subleads.iter() {
-            tracing::info!(sublead_id = %sublead_id, "cascading terminate to sub-tree");
-            sub_layer.cancel.terminate();
-        }
+        state.root.cancel.await_terminate().await;
+        state.cascade_to_subleads().await;
     });
 }
 

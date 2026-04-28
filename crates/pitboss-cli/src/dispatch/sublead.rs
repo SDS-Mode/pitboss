@@ -337,17 +337,15 @@ pub async fn spawn_sublead(
             reserved_amount,
         ));
 
-        // 8. Register sub-tree LayerState on root DispatchState.
+        // 8. Register sub-tree LayerState on root DispatchState. Inserts into
+        // `state.subleads`, installs the per-sublead cancel-cascade watcher,
+        // AND eagerly propagates any in-flight root drain/terminate signal
+        // to `sub_layer.cancel`.  Centralizing these three coupled steps in
+        // `DispatchState::register_sublead` keeps the post-#99 contract from
+        // drifting; pinned by `tests/cancel_cascade_flows.rs`.
         state
-            .subleads
-            .write()
-            .await
-            .insert(sublead_id.clone(), sub_layer.clone());
-
-        // Install the per-sublead cancel cascade watcher so that draining /
-        // terminating sub_layer.cancel propagates to its workers without the
-        // root cascade watcher needing to reach into worker_cancels directly.
-        crate::dispatch::signals::install_sublead_cancel_watcher(sub_layer.clone());
+            .register_sublead(sublead_id.clone(), sub_layer.clone())
+            .await;
 
         // Emit SubleadSpawned lifecycle event to the control plane.
         {
@@ -369,17 +367,6 @@ pub async fn spawn_sublead(
                 },
             };
             state.root.broadcast_control_event(ev).await;
-        }
-
-        // I-1: If root has entered cascade-drain or cascade-terminate phase AFTER this
-        // read-lock snapshot, immediately propagate to the new sub-tree so it doesn't
-        // miss the cascade-watcher snapshot (which only fires once per run).
-        if state.root.cancel.is_terminated() {
-            sub_layer.cancel.terminate();
-            tracing::info!(sublead_id = %sublead_id, "spawned during cascade terminate; immediate cascade applied");
-        } else if state.root.cancel.is_draining() {
-            sub_layer.cancel.drain();
-            tracing::info!(sublead_id = %sublead_id, "spawned during cascade drain; immediate cascade applied");
         }
 
         // 9. Spawn the sub-lead's Claude session (wired in Task 2.3).
