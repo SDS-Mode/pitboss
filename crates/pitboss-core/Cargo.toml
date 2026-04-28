@@ -27,5 +27,6 @@ rusqlite    = { workspace = true }
 
 [dev-dependencies]
 pitboss-core = { path = ".", features = ["test-support"] }
-tempfile    = { workspace = true }
-tokio       = { workspace = true, features = ["test-util"] }
+tempfile     = { workspace = true }
+tokio        = { workspace = true, features = ["test-util"] }
+tracing-test = { workspace = true }

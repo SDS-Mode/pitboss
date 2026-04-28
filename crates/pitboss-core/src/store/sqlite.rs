@@ -18,7 +18,7 @@
 //! v0.2.1. The `Connection` is wrapped in `Arc<Mutex<_>>` so the store is
 //! `Send + Sync`. Concurrent writes are serialised at the mutex.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -674,6 +674,10 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
 
 #[async_trait]
 impl SessionStore for SqliteStore {
+    fn open(path: &Path) -> Result<Box<dyn SessionStore>, StoreError> {
+        Ok(Box::new(SqliteStore::new(path.to_path_buf())?))
+    }
+
     /// Insert a run row.  Uses `INSERT OR REPLACE` so calling `init_run` twice
     /// on the same `run_id` is safe (idempotent).
     async fn init_run(&self, meta: &RunMeta) -> Result<(), StoreError> {

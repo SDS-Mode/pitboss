@@ -6,6 +6,7 @@
 
 pub mod atomic_write;
 pub mod error;
+pub mod failure_classify;
 pub mod fmt;
 pub mod parser;
 pub mod prices;
