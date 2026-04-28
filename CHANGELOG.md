@@ -7,6 +7,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Tests
+
+- **Pin late-registration cancel-cascade contract** (#100, PR 100.1).
+  Adds `tests/cancel_cascade_flows.rs` covering the eager-propagation
+  paths at `mcp/tools.rs:506-521` (worker registration in a drained
+  sub-tree) and `dispatch/sublead.rs:374-383` (sub-lead spawned after
+  root drain or terminate). Locks the contract before the per-sub-tree
+  runner refactor (PR 100.2) so the cleanup cannot regress the
+  post-#99 behavior. Also pins the production reaping path:
+  terminating a sub-tree removes the sub-lead from `state.subleads`,
+  so subsequent `spawn_worker` calls fail with "unknown sublead_id"
+  rather than reaching the eager-cascade block — flagging the
+  worker-eager-terminate branch as defensive coverage for an
+  intra-handler race not observable through the external MCP API.
+
 ### Fixed
 
 - **MCP — `wait_for_any` fail-fast on all-unknown task ids,
