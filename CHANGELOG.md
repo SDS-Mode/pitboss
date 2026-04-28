@@ -9,6 +9,17 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Collapse cancel-cascade watcher tasks; close #100** (#100, PR 100.3).
+  `install_sublead_cancel_watcher` and `install_cascade_cancel_watcher`
+  used to spawn two tasks each (one for drain, one for terminate); now
+  a single `tokio::select!`-based task per watcher waits for the first
+  signal, cascades, and — if the first signal was drain — waits for the
+  follow-up terminate to upgrade drained actors to terminated. Halves
+  the watcher task count and makes the lifecycle visible in one place.
+  New `sublead_watcher_upgrades_drained_workers_to_terminated` unit
+  test pins the upgrade path. ROADMAP entry for #100 updated to
+  reflect that all four audit concerns landed across 100.1–100.3.
+
 - **Centralize cancel-cascade primitive** (#100, PR 100.2). Adds
   `CancelToken::cascade_to(&CancelToken)` in `pitboss-core` (terminate
   dominates drain) and threads it through four new methods —

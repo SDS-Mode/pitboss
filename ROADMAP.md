@@ -445,17 +445,26 @@ gates it with a validation error. Three tracked bugs block stabilization:
 **Status:** work-in-progress on `feat/path-b-permission-routing`.
 Landing all three unblocks removal of the validate-time gate.
 
-### Phase 4 per-sub-tree runners (#100)
+### Phase 4 per-sub-tree runners (#100) — closed
 
-The watcher cascades cancel tokens directly across sub-tree boundaries
-rather than going through a per-sub-tree runner that owns its workers'
-cancellation. Watchers are fire-once, so workers registered after the
-cascade fires can be orphaned. Also: `terminate()` does not cascade to
-sub-tree workers (only `drain()` does).
+Originally tracked four concerns: (1) fire-once watchers miss
+late-registered actors; (2) the root watcher reaches into sub-tree
+`worker_cancels` directly (ownership inversion); (3) `terminate()` does
+not cascade symmetrically with `drain()`; (4) the spawn-time mitigation
+is a band-aid on (1).
 
-**Status:** tracked in #100 with a detailed architecture memo. Tactical
-mitigation (post-register cascade check at worker-registration time) was
-already applied (#99, closed).
+**Status:** closed across PRs 100.1–100.3. (1) and (4) are fixed by
+making the eager registration cascade a documented part of the
+contract, not a band-aid (`LayerState::register_worker_cancel`,
+`DispatchState::register_sublead`, pinned by
+`tests/cancel_cascade_flows.rs`). (2) is fixed because the watchers now
+fan out via `LayerState::cascade_to_workers` /
+`DispatchState::cascade_to_subleads` — no watcher reaches across layer
+boundaries. (3) is fixed because both watchers funnel through
+`CancelToken::cascade_to`, which encodes terminate-dominates-drain in
+one place. The "per-sub-tree runner" abstraction itself was not built;
+the audit's correctness goals were met without introducing a new
+runner type.
 
 ### TUI approval replay on run-switch (#95)
 
