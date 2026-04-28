@@ -46,7 +46,14 @@ pub fn parse_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
                 .get("subtype")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            Ok(vec![Event::System { subtype }])
+            let session_id = value
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            Ok(vec![Event::System {
+                subtype,
+                session_id,
+            }])
         }
         Some("assistant") => parse_assistant(&value, raw),
         Some("user") => parse_user(&value, raw).map(|e| vec![e]),
@@ -210,7 +217,8 @@ mod tests {
         assert_eq!(
             ev,
             Event::System {
-                subtype: Some("init".into())
+                subtype: Some("init".into()),
+                session_id: Some("s1".into()),
             }
         );
     }
@@ -219,7 +227,13 @@ mod tests {
     fn parses_system_without_subtype() {
         let line = br#"{"type":"system"}"#;
         let ev = parse_line(line).unwrap();
-        assert_eq!(ev, Event::System { subtype: None });
+        assert_eq!(
+            ev,
+            Event::System {
+                subtype: None,
+                session_id: None,
+            }
+        );
     }
 
     #[test]
@@ -403,7 +417,8 @@ mod tests {
         assert_eq!(
             ev,
             Event::System {
-                subtype: Some("init".into())
+                subtype: Some("init".into()),
+                session_id: None,
             }
         );
     }

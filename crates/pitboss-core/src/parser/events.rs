@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 pub enum Event {
     System {
         subtype: Option<String>,
+        /// Populated when the system event carries a `session_id` field —
+        /// notably the `subtype:"init"` event Claude Code emits at the start
+        /// of every session, well before any `Result` event lands. Lets the
+        /// dispatcher publish the resumable session id immediately on init
+        /// rather than blocking the full run duration waiting for the
+        /// terminal `Event::Result` to fire its `session_id_tx`. (#149 M5)
+        session_id: Option<String>,
     },
     AssistantText {
         text: String,
