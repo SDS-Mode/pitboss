@@ -9,6 +9,25 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Extract kill+resume helper** (#185). The kill+resume subprocess
+  loop in `dispatch/hierarchical.rs` (root lead) and
+  `dispatch/sublead.rs` (`spawn_sublead_session` background task) was
+  duplicated — `hierarchical.rs:261`'s own doc-comment said
+  "identical in structure to spawn_sublead_session", and the audit
+  flagged the drift between the two paths as a footgun. Centralized
+  in a new `dispatch/kill_resume.rs` module exposing
+  `run_kill_resume_loop(layer, args, reprompt_rx, build_resume_cmd)`.
+  Each call site keeps ownership of its own resume-args / env / cwd
+  resolution via the closure (root lead and sub-lead use different
+  spawn-args builders); the helper owns the loop, per-iteration cancel
+  forwarder, session_id capture, workers-map updates, and reprompt-
+  driven `--resume` rebuild. Sub-lead cost accumulation moved from
+  per-iteration to once-after-loop (no observable change since no
+  worker spawn into the sub-tree can occur between iterations — the
+  sub-lead's MCP session is closed while its subprocess is dead).
+  Existing integration coverage in `tests/sublead_flows.rs` and
+  `tests/hierarchical_flows.rs` is the regression net.
+
 - **Collapse cancel-cascade watcher tasks; close #100** (#100, PR 100.3).
   `install_sublead_cancel_watcher` and `install_cascade_cancel_watcher`
   used to spawn two tasks each (one for drain, one for terminate); now

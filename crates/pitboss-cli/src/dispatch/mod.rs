@@ -5,6 +5,7 @@ pub mod depth;
 pub mod events;
 pub mod failure_detection;
 pub mod hierarchical;
+pub mod kill_resume;
 pub mod layer;
 pub mod probe;
 pub mod resume;
