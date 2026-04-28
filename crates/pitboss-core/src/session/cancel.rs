@@ -59,6 +59,24 @@ impl CancelToken {
             }
         }
     }
+
+    /// Propagate this token's in-flight cancel state to `child`. If this
+    /// token is terminated, terminate `child`. Otherwise if this token is
+    /// draining, drain `child`. No-op if neither.
+    ///
+    /// Terminate dominates drain — when both are set on the parent, the
+    /// child receives terminate so the more permissive signal is never
+    /// applied while the stricter one is in flight. This matches the
+    /// semantics used by the eager-propagation paths in
+    /// `pitboss-cli::dispatch` (sub-lead spawn after root cancel; worker
+    /// registration in a cancelled sub-tree).
+    pub fn cascade_to(&self, child: &CancelToken) {
+        if self.is_terminated() {
+            child.terminate();
+        } else if self.is_draining() {
+            child.drain();
+        }
+    }
 }
 
 impl Default for CancelToken {
@@ -92,5 +110,51 @@ mod tests {
         t.terminate();
         assert!(t.is_terminated());
         assert!(!t.is_draining());
+    }
+
+    #[test]
+    fn cascade_to_pristine_parent_is_noop() {
+        let parent = CancelToken::new();
+        let child = CancelToken::new();
+        parent.cascade_to(&child);
+        assert!(!child.is_draining());
+        assert!(!child.is_terminated());
+    }
+
+    #[test]
+    fn cascade_to_drains_child_when_parent_drained() {
+        let parent = CancelToken::new();
+        let child = CancelToken::new();
+        parent.drain();
+        parent.cascade_to(&child);
+        assert!(child.is_draining());
+        assert!(!child.is_terminated());
+    }
+
+    #[test]
+    fn cascade_to_terminates_child_when_parent_terminated() {
+        let parent = CancelToken::new();
+        let child = CancelToken::new();
+        parent.terminate();
+        parent.cascade_to(&child);
+        assert!(child.is_terminated());
+        // Whether `is_draining` is also true depends on whether
+        // terminate implicitly sets drain; we deliberately only assert
+        // terminate here because that's the dominant signal.
+    }
+
+    #[test]
+    fn cascade_to_terminate_dominates_drain() {
+        let parent = CancelToken::new();
+        let child = CancelToken::new();
+        parent.drain();
+        parent.terminate();
+        parent.cascade_to(&child);
+        assert!(child.is_terminated());
+        // Crucially, drain is NOT applied to the child when terminate
+        // is also set on the parent — the stricter signal wins, so we
+        // never tell the child "you may finish current work" while the
+        // parent has already said "stop now".
+        assert!(!child.is_draining());
     }
 }

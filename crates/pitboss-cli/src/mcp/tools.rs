@@ -496,29 +496,16 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), layer_index_value);
 
+    // Register the worker's CancelToken on the target layer. This both
+    // inserts into `worker_cancels` and eagerly propagates any in-flight
+    // drain/terminate state from `target_layer.cancel` to the new token —
+    // the post-#99 cascade gap fix lives inside `register_worker_cancel`
+    // so the watcher / registration paths share one cascade rule
+    // (terminate dominates drain). Pinned by `tests/cancel_cascade_flows.rs`.
     let worker_cancel = pitboss_core::session::CancelToken::new();
     target_layer
-        .worker_cancels
-        .write()
-        .await
-        .insert(task_id.clone(), worker_cancel);
-
-    // Plug the post-register cascade gap (#99): `install_sublead_cancel_watcher`
-    // is fire-once — it snapshots `worker_cancels`, propagates, then exits. A
-    // worker registered after the watcher has already fired never receives the
-    // signal. Check the target layer's cancel state now and propagate eagerly
-    // before the background task starts. `is_terminated` is checked first
-    // since terminate subsumes drain.
-    {
-        let cancels = target_layer.worker_cancels.read().await;
-        if let Some(w) = cancels.get(&task_id) {
-            if target_layer.cancel.is_terminated() {
-                w.terminate();
-            } else if target_layer.cancel.is_draining() {
-                w.drain();
-            }
-        }
-    }
+        .register_worker_cancel(task_id.clone(), worker_cancel)
+        .await;
 
     // Record the prompt preview before spawning the background task.
     let prompt_preview: String = args.prompt.chars().take(80).collect();

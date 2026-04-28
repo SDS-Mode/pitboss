@@ -423,6 +423,40 @@ impl DispatchState {
         }
     }
 
+    /// Register a freshly-built sub-tree `LayerState` under `sublead_id`.
+    /// Performs three coupled side-effects atomically (from the caller's
+    /// perspective): (1) inserts the layer into `self.subleads`,
+    /// (2) installs the per-sublead cancel-cascade watcher, and
+    /// (3) propagates any in-flight drain/terminate state from
+    /// `self.root.cancel` to the new sub-layer's cancel.
+    ///
+    /// Centralizes the previously-inlined sequence at
+    /// `dispatch/sublead.rs:340-383` so the watcher install + eager
+    /// cascade can never drift out of order.  Pinned by the integration
+    /// tests in `tests/cancel_cascade_flows.rs`.
+    pub async fn register_sublead(&self, sublead_id: String, sub_layer: Arc<LayerState>) {
+        self.subleads
+            .write()
+            .await
+            .insert(sublead_id, sub_layer.clone());
+        crate::dispatch::signals::install_sublead_cancel_watcher(sub_layer.clone());
+        self.root.cancel.cascade_to(&sub_layer.cancel);
+    }
+
+    /// Walk every registered sub-tree layer and cascade the root's
+    /// current cancel state to it via `CancelToken::cascade_to`.  Used
+    /// by the root cascade-watcher tasks installed by
+    /// `install_cascade_cancel_watcher` — both the drain and terminate
+    /// watchers funnel through this method so the cascade rule
+    /// (terminate dominates drain) is encoded in exactly one place.
+    pub async fn cascade_to_subleads(&self) {
+        let subleads = self.subleads.read().await;
+        for (sublead_id, sub_layer) in subleads.iter() {
+            tracing::info!(sublead_id = %sublead_id, "cascading cancel state to sub-tree");
+            self.root.cancel.cascade_to(&sub_layer.cancel);
+        }
+    }
+
     /// Mint a fresh authentication token bound to the (actor_id, role)
     /// pair. The token is later embedded into the actor's
     /// mcp-config.json (consumed by `pitboss mcp-bridge --token <hex>`)
