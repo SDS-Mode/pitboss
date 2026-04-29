@@ -7,6 +7,43 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (breaking, pre-v1)
+
+- **`default_approval_policy = "auto_approve"` / `"auto_reject"` is
+  now unconditional** — pre-fix it only fired when no TUI/web console
+  was attached. A connected console silently bypassed the policy and
+  routed every `request_approval` / `propose_plan` call to the
+  operator anyway. That made the field mean two different things
+  depending on whether someone happened to be watching, which was the
+  worst kind of bug class. Reported via the smoke-test post-run
+  zero-error scan: every sublead's auto-approved propose_plan call
+  popped up in the web console for manual click.
+
+  **New semantics:**
+  - `auto_approve` — short-circuits inside the dispatcher, regardless
+    of whether a TUI is attached. Operator UI is never paged.
+  - `auto_reject` — same, with rejection. Comment text is now
+    `"auto-rejected by default_approval_policy"` (was
+    `"no operator available"` on the no-TUI path).
+  - `block` (default) — unchanged: route to TUI if attached, else
+    queue for next connect.
+
+  **Migration:** operators who relied on the old "auto_approve only
+  when headless" behavior should leave `default_approval_policy` at
+  the default `block` and add an `[[approval_policy]]` rule like
+  `match.actor = "*"` / `action = "auto_approve"` to express the
+  fallback declaratively. (`[[approval_policy]]` rules already
+  short-circuit before the TUI hop, so this gives the same headless
+  behavior without the surprise when a console connects.)
+
+  Pinned by 2 new regression tests
+  (`auto_approve_short_circuits_with_tui_attached`,
+  `auto_reject_short_circuits_with_tui_attached`) that simulate a
+  connected control writer and verify no `ApprovalRequest` event is
+  ever sent. Schema field doc on `default_approval_policy` and the
+  module-level rustdoc on `mcp::approval` updated to spell out the
+  three resolution paths in order.
+
 ### Changed
 
 - **Failure classifier: schema-first matching against Anthropic API

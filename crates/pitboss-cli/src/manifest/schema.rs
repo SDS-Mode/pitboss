@@ -359,14 +359,31 @@ pub struct RunConfig {
         help = "Write a JSONL event stream alongside summary.jsonl."
     )]
     pub emit_event_stream: bool,
-    /// Default approval-policy action when no TUI is attached and no
-    /// `[[approval_policy]]` rule matches. Renamed from `approval_policy`
-    /// in v0.9 to disambiguate from the rules array. One of:
-    /// `"block"` (default), `"auto_approve"`, `"auto_reject"`.
+    /// Default approval-policy action applied to every approval request
+    /// that no `[[approval_policy]]` rule matches. Renamed from
+    /// `approval_policy` in v0.9 to disambiguate from the rules array.
+    /// One of:
+    /// - `"block"` (default): if a TUI/web console is attached, route
+    ///   the request to the operator; otherwise queue until one
+    ///   connects.
+    /// - `"auto_approve"`: unconditionally auto-approve. Operator UI is
+    ///   never paged; the response is synthesized inside the dispatcher.
+    /// - `"auto_reject"`: unconditionally auto-reject. Same UI behavior.
+    ///
+    /// Pre-v0.9.2 these only applied "when no TUI is attached" — a
+    /// connected console silently bypassed `auto_approve` /
+    /// `auto_reject` and routed to the operator anyway. That meant the
+    /// field's effective behavior depended on whether someone happened
+    /// to be watching, which was the worst kind of bug class. Now both
+    /// `auto_*` actions short-circuit unconditionally; only `block`
+    /// routes through the TUI. Operators who want manual review with a
+    /// "headless = approve" fallback should leave this at `block` and
+    /// add a `[[approval_policy]]` rule for the auto-approve case
+    /// (rules already short-circuit before the TUI hop).
     #[serde(default)]
     #[field(
         label = "Default approval policy",
-        help = "Default action for request_approval / propose_plan when no TUI is attached and no rule matches.",
+        help = "Default action for request_approval / propose_plan when no rule matches. `auto_approve`/`auto_reject` are unconditional; `block` routes to the operator if attached, else queues.",
         enum_values = ["block", "auto_approve", "auto_reject"]
     )]
     pub default_approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
