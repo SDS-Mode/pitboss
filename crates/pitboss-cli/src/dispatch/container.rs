@@ -51,6 +51,19 @@ pub fn run_container_dispatch(
             manifest_path.display()
         );
     }
+    // #266: surface the silent slow-path fallback. When extra_apt is
+    // declared but no derived image exists, dispatch is correct but
+    // slower than the operator likely intends. A single stderr warning
+    // points at the fix (`pitboss container-build`) without changing
+    // behavior.
+    if let Some(msg) = super::container_build::derived_fallback_warning(
+        container,
+        derived.as_deref(),
+        use_derived,
+        manifest_path,
+    ) {
+        eprintln!("{msg}");
+    }
     let derived_image_override = if use_derived {
         derived.as_deref()
     } else {
