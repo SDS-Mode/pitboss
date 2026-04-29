@@ -83,12 +83,31 @@ pub struct ContainerConfig {
     )]
     pub runtime: Option<String>,
     /// Extra args inserted verbatim before the image name in the `run` call.
+    /// This is the escape hatch for any `podman run` / `docker run` flag —
+    /// networking (`--network=...`, `--dns=...`, `--add-host=...`),
+    /// capabilities (`--cap-add=NET_ADMIN`), security (`--security-opt=...`),
+    /// resources (`--memory=4g`, `--cpus=2`), and so on.
     #[serde(default)]
     #[field(
         label = "Extra args",
-        help = "Args inserted verbatim before the image name in the run invocation."
+        help = "Verbatim podman/docker run flags. Use for networking, capabilities, DNS, resources, etc. Example: [\"--network=corp-fw\", \"--dns=10.0.0.53\", \"--cap-add=NET_ADMIN\"]."
     )]
     pub extra_args: Vec<String>,
+    /// Apt packages installed inside the container at run start, before
+    /// `pitboss dispatch` runs. Useful for adding small tools (mdbook, jq,
+    /// pandoc) without rebuilding the base image. Each dispatch pays the
+    /// install cost; for a faster cached path see the future
+    /// `pitboss container-build` subcommand.
+    ///
+    /// Names are passed verbatim to `apt-get install -y --no-install-recommends`,
+    /// so each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*` — anything else
+    /// is rejected at dispatch time to keep the joined command shell-safe.
+    #[serde(default)]
+    #[field(
+        label = "Extra apt packages",
+        help = "Debian/Ubuntu packages installed inside the container before pitboss dispatch starts. Adds 30–90s spin-up per dispatch. Example: [\"mdbook\", \"jq\"]."
+    )]
+    pub extra_apt: Vec<String>,
     /// Host→container bind mounts (besides the auto-injected `~/.claude` and run_dir).
     #[serde(default, rename = "mount")]
     #[field(skip)]

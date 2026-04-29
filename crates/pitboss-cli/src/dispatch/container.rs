@@ -161,17 +161,71 @@ fn build_run_args(
     // ── Extra operator args ───────────────────────────────────────────────────
     args.extend(container.extra_args.clone());
 
+    // ── extra_apt: validate + override user to root for the apt step ─────────
+    // apt-get needs root. When `extra_apt` is non-empty we override `-u` to
+    // 0:0 here (last `-u` wins) and rewrite the entrypoint below into a
+    // shell that installs the packages, then `exec runuser -u pitboss --
+    // pitboss dispatch …` so the long-lived process drops to UID 1000
+    // before workers spawn. Tini stays as PID 1, so signal forwarding to
+    // the post-exec pitboss is preserved.
+    //
+    // Package names are joined verbatim into a shell command, so we
+    // require each entry to match `[a-zA-Z0-9][a-zA-Z0-9.+-]*` and reject
+    // anything else at dispatch time.
+    let bootstrap_apt = !container.extra_apt.is_empty();
+    if bootstrap_apt {
+        for pkg in &container.extra_apt {
+            if !is_valid_apt_pkg(pkg) {
+                bail!(
+                    "[container].extra_apt: invalid package name {pkg:?} \
+                     (allowed: ASCII alphanumeric, `.`, `+`, `-`; must start \
+                     with alphanumeric)"
+                );
+            }
+        }
+        args.push("-u".into());
+        args.push("0:0".into());
+    }
+
     // ── Image + pitboss command ───────────────────────────────────────────────
     let image = container
         .image
         .clone()
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     args.push(image);
-    args.push("pitboss".into());
-    args.push("dispatch".into());
-    args.push("/run/pitboss.toml".into());
+
+    if bootstrap_apt {
+        let pkg_list = container.extra_apt.join(" ");
+        let cmd = format!(
+            "apt-get update && \
+             apt-get install -y --no-install-recommends {pkg_list} && \
+             exec runuser -u pitboss -- pitboss dispatch /run/pitboss.toml"
+        );
+        args.push("sh".into());
+        args.push("-c".into());
+        args.push(cmd);
+    } else {
+        args.push("pitboss".into());
+        args.push("dispatch".into());
+        args.push("/run/pitboss.toml".into());
+    }
 
     Ok(args)
+}
+
+/// Validate a debian/ubuntu package name for shell-safe interpolation
+/// into `apt-get install -y …`. Restrictive on purpose: must begin with
+/// an ASCII alphanumeric and contain only `[a-zA-Z0-9.+-]` thereafter.
+///
+/// Re-used by `manifest::validate` so `pitboss validate` rejects bad names
+/// in the same shape as dispatch.
+pub(crate) fn is_valid_apt_pkg(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
 }
 
 /// Detect the container runtime to use, in priority order:
@@ -330,6 +384,7 @@ mod tests {
             image: None,
             runtime: None,
             extra_args: vec![],
+            extra_apt: vec![],
             mounts,
             workdir: None,
         }
@@ -562,6 +617,128 @@ prompt = "hi"
         assert!(
             joined.contains("/tmp/my-runs"),
             "run_dir override in mounts: {joined}"
+        );
+    }
+
+    #[test]
+    fn empty_extra_apt_keeps_direct_pitboss_entrypoint() {
+        // Sanity: with no extra_apt the entrypoint args are still the bare
+        // `pitboss dispatch /run/pitboss.toml` triplet — no shell wrap.
+        let cfg = make_config(vec![]);
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None).unwrap();
+        assert!(
+            !args.iter().any(|a| a == "sh"),
+            "no sh wrapper expected: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "0:0"),
+            "no root override expected: {args:?}"
+        );
+        let dispatch_pos = args
+            .iter()
+            .position(|a| a == "dispatch")
+            .expect("dispatch present");
+        assert_eq!(args[dispatch_pos - 1], "pitboss", "args: {args:?}");
+        assert_eq!(
+            args[dispatch_pos + 1],
+            "/run/pitboss.toml",
+            "args: {args:?}"
+        );
+    }
+
+    #[test]
+    fn extra_apt_wraps_entrypoint_with_apt_install_and_runuser() {
+        let cfg = ContainerConfig {
+            extra_apt: vec!["mdbook".into(), "jq".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None).unwrap();
+
+        // -u 0:0 must appear (so apt-get can run as root).
+        let u_pos = args
+            .windows(2)
+            .position(|w| w[0] == "-u" && w[1] == "0:0")
+            .expect("expected -u 0:0 override: {args:?}");
+
+        // …and must come AFTER any earlier -u from the existing user-alignment
+        // logic, so it wins as the last -u in argv.
+        let last_u = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "-u")
+            .map(|(i, _)| i)
+            .next_back()
+            .expect("at least one -u");
+        assert_eq!(last_u, u_pos, "extra_apt -u 0:0 must be the last -u");
+
+        // The image should be followed by `sh -c <cmd>`, not pitboss directly.
+        let img_pos = args.iter().position(|a| a == DEFAULT_IMAGE).expect("image");
+        assert_eq!(args[img_pos + 1], "sh", "wrapped entrypoint: {args:?}");
+        assert_eq!(args[img_pos + 2], "-c", "wrapped entrypoint: {args:?}");
+
+        let cmd = &args[img_pos + 3];
+        assert!(
+            cmd.contains("apt-get update"),
+            "apt-get update missing: {cmd}"
+        );
+        assert!(
+            cmd.contains("apt-get install -y --no-install-recommends mdbook jq"),
+            "apt install line missing or mis-shaped: {cmd}"
+        );
+        assert!(
+            cmd.contains("exec runuser -u pitboss -- pitboss dispatch /run/pitboss.toml"),
+            "runuser drop missing: {cmd}"
+        );
+    }
+
+    #[test]
+    fn extra_apt_rejects_shell_metacharacters() {
+        // Anything outside [a-zA-Z0-9][a-zA-Z0-9.+-]* must fail validation
+        // before any shell command is constructed.
+        for bad in [
+            "mdbook;rm -rf /",
+            "$(curl evil)",
+            "pkg name",
+            "--flag",
+            ".bad",
+        ] {
+            let cfg = ContainerConfig {
+                extra_apt: vec![bad.into()],
+                ..ContainerConfig::default()
+            };
+            let result = build_run_args("podman", &cfg, &temp_manifest(), None);
+            assert!(
+                result.is_err(),
+                "expected rejection for {bad:?}, got: {result:?}"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("extra_apt"),
+                "error should mention extra_apt: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_apt_accepts_realistic_package_names() {
+        // Names with `.`, `+`, `-` and digits are common in the apt index
+        // (libssl3, g++-12, python3.11) — make sure validation lets them through.
+        let cfg = ContainerConfig {
+            extra_apt: vec![
+                "libssl3".into(),
+                "g++-12".into(),
+                "python3.11".into(),
+                "pandoc".into(),
+            ],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None)
+            .expect("realistic package names should validate");
+        let img_pos = args.iter().position(|a| a == DEFAULT_IMAGE).expect("image");
+        let cmd = &args[img_pos + 3];
+        assert!(
+            cmd.contains("libssl3 g++-12 python3.11 pandoc"),
+            "expected joined package list, got: {cmd}"
         );
     }
 }

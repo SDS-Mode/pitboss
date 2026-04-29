@@ -260,7 +260,8 @@ The `[container]` section enables `pitboss container-dispatch`, which assembles 
 |---|---|---|---|
 | `image` | string | `ghcr.io/sds-mode/pitboss-with-claude:latest` | Container image to run. |
 | `runtime` | `"docker"` \| `"podman"` \| `"auto"` | `"auto"` | Runtime selector. `"auto"` prefers podman when available. |
-| `extra_args` | array of string | `[]` | Inserted verbatim before the image name in the assembled `run` invocation. |
+| `extra_args` | array of string | `[]` | Verbatim flags for `podman run` / `docker run`. The escape hatch for any container-runtime concern: networking (`--network=corp-fw`, `--dns=10.0.0.53`, `--add-host=svc:1.2.3.4`), capabilities (`--cap-add=NET_ADMIN`), security (`--security-opt=…`), resource limits (`--memory=4g`, `--cpus=2`). |
+| `extra_apt` | array of string | `[]` | Debian/Ubuntu packages installed inside the container before `pitboss dispatch` starts. Adds 30–90 s spin-up per dispatch (no caching yet — see roadmap). Each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*`; rejected at validate time otherwise. |
 | `workdir` | string | first mount's container path, else `/home/pitboss` | Working directory inside the container. |
 
 #### `[[container.mount]]`
