@@ -261,7 +261,7 @@ The `[container]` section enables `pitboss container-dispatch`, which assembles 
 | `image` | string | `ghcr.io/sds-mode/pitboss-with-claude:latest` | Container image to run. |
 | `runtime` | `"docker"` \| `"podman"` \| `"auto"` | `"auto"` | Runtime selector. `"auto"` prefers podman when available. |
 | `extra_args` | array of string | `[]` | Verbatim flags for `podman run` / `docker run`. The escape hatch for any container-runtime concern: networking (`--network=corp-fw`, `--dns=10.0.0.53`, `--add-host=svc:1.2.3.4`), capabilities (`--cap-add=NET_ADMIN`), security (`--security-opt=…`), resource limits (`--memory=4g`, `--cpus=2`). |
-| `extra_apt` | array of string | `[]` | Debian/Ubuntu packages installed inside the container before `pitboss dispatch` starts. Adds 30–90 s spin-up per dispatch (no caching yet — see roadmap). Each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*`; rejected at validate time otherwise. |
+| `extra_apt` | array of string | `[]` | Debian/Ubuntu packages installed inside the container. Two paths: by default they are installed at dispatch start (~30–90 s per run); after `pitboss container-build`, they are baked into a derived image and dispatch picks up the cached tag automatically. Each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*`; rejected at validate time otherwise. |
 | `workdir` | string | first mount's container path, else `/home/pitboss` | Working directory inside the container. |
 
 #### `[[container.mount]]`
@@ -273,6 +273,30 @@ The `[container]` section enables `pitboss container-dispatch`, which assembles 
 | `readonly` | no | Default `false`. |
 
 Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
+
+#### `[[container.copy]]`
+
+Files baked into a derived image at `pitboss container-build` time. Unlike `[[container.mount]]`, these are layered into the image — they're available even when no host bind mount is in place, and they require a build step before `container-dispatch` will run.
+
+| Key | Required? | Notes |
+|---|---|---|
+| `host` | yes | Absolute host path or tilde-prefixed (`~/...`). May be a file or directory. Read at build time only — edits to the host file invalidate the derived tag and force a rebuild. |
+| `container` | yes | Absolute path inside the container. |
+
+Declaring `[[container.copy]]` makes a `pitboss container-build <manifest>` call **mandatory** before `pitboss container-dispatch` will run — the dispatcher refuses to fall back to the stock image because the COPY contents would be missing.
+
+#### `pitboss container-build` (v0.9.2+)
+
+Synthesizes a thin Dockerfile from `[container]` and builds a derived image tagged deterministically as `pitboss-derived-<sha>:local`. The `<sha>` hashes the base image, sorted `extra_apt`, and sorted `[[container.copy]]` entries (host file CONTENTS, not paths). Idempotent: re-running with the same inputs is a no-op once the tag exists. `--no-cache` forces a rebuild.
+
+```bash
+pitboss container-build pitboss.toml             # build (or skip if cached)
+pitboss container-build pitboss.toml --no-cache  # force rebuild
+pitboss container-build pitboss.toml --print-dockerfile  # preview
+pitboss container-build pitboss.toml --dry-run   # print podman/docker invocation
+```
+
+`pitboss container-dispatch` automatically picks up the derived tag when `extra_apt` or `copy` is non-empty and the tag exists locally — no explicit wiring needed in the manifest. Stale derived tags from prior builds remain in the local image store; prune them with the runtime's standard tooling (`podman image prune`, etc.) — a pitboss-aware sweeper is tracked in the roadmap.
 
 ### `[[mcp_server]]` (v0.9+)
 

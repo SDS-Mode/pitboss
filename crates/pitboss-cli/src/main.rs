@@ -105,6 +105,21 @@ fn main() -> Result<()> {
         } => {
             run_container_dispatch(&manifest, run_dir, dry_run, runtime.as_deref());
         }
+        Command::ContainerBuild {
+            manifest,
+            runtime,
+            no_cache,
+            print_dockerfile,
+            dry_run,
+        } => {
+            std::process::exit(run_container_build(
+                &manifest,
+                runtime,
+                no_cache,
+                print_dockerfile,
+                dry_run,
+            ));
+        }
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();
@@ -410,6 +425,47 @@ fn run_dispatch(
         }
     });
     std::process::exit(code);
+}
+
+fn run_container_build(
+    manifest: &std::path::Path,
+    runtime: Option<String>,
+    no_cache: bool,
+    print_dockerfile: bool,
+    dry_run: bool,
+) -> i32 {
+    let env_mp = parse_env_max_parallel();
+    let resolved = match manifest::load_manifest_skip_dir_check(manifest, env_mp) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("validation failed: {e:#}");
+            return 2;
+        }
+    };
+    let container = match resolved.container {
+        Some(ref c) => c,
+        None => {
+            eprintln!(
+                "pitboss container-build: manifest has no [container] section.\n\
+                 Add a [container] block (with extra_apt and/or [[container.copy]]) \
+                 to use container-build."
+            );
+            return 2;
+        }
+    };
+    let opts = dispatch::container_build::BuildOptions {
+        no_cache,
+        print_dockerfile,
+        dry_run,
+        runtime_override: runtime,
+    };
+    match dispatch::container_build::run_container_build(container, &opts) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("container-build: {e:#}");
+            1
+        }
+    }
 }
 
 fn run_container_dispatch(

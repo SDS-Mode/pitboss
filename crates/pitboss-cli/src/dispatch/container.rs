@@ -33,7 +33,37 @@ pub fn run_container_dispatch(
         .canonicalize()
         .with_context(|| format!("canonicalizing manifest path {}", manifest_path.display()))?;
 
-    let args = build_run_args(&runtime, container, &manifest_abs, run_dir_override)?;
+    // Phase 2: when the manifest declares derived-image inputs, prefer
+    // the locally-built derived tag if it exists. `[[container.copy]]`
+    // is hard-required (the COPY contents only exist in the baked
+    // image) — error loudly when it's missing rather than silently
+    // falling back to a stock-image dispatch.
+    let derived = super::container_build::derived_image_tag(container)?;
+    let use_derived = match derived.as_ref() {
+        Some(tag) => super::container_build::image_exists(&runtime, tag)?,
+        None => false,
+    };
+    if !container.copy.is_empty() && !use_derived {
+        bail!(
+            "[[container.copy]] requires a built derived image. Run \
+             `pitboss container-build {}` first to bake the COPY contents \
+             into pitboss-derived-…:local.",
+            manifest_path.display()
+        );
+    }
+    let derived_image_override = if use_derived {
+        derived.as_deref()
+    } else {
+        None
+    };
+
+    let args = build_run_args(
+        &runtime,
+        container,
+        &manifest_abs,
+        run_dir_override,
+        derived_image_override,
+    )?;
 
     if dry_run {
         // Print the full command the operator would run so they can inspect it.
@@ -51,11 +81,17 @@ pub fn run_container_dispatch(
 }
 
 /// Build the full argument list for `<runtime> run …`.
+///
+/// `derived_image_override` is `Some(tag)` when `container-dispatch`
+/// resolved a built derived image (apt + COPY already baked in). When
+/// set, the Phase-1 apt-at-spin-up wrap is skipped — the work is
+/// already in the image.
 fn build_run_args(
     runtime: &str,
     container: &ContainerConfig,
     manifest_abs: &Path,
     run_dir_override: Option<PathBuf>,
+    derived_image_override: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
 
@@ -162,17 +198,22 @@ fn build_run_args(
     args.extend(container.extra_args.clone());
 
     // ── extra_apt: validate + override user to root for the apt step ─────────
-    // apt-get needs root. When `extra_apt` is non-empty we override `-u` to
-    // 0:0 here (last `-u` wins) and rewrite the entrypoint below into a
-    // shell that installs the packages, then `exec runuser -u pitboss --
-    // pitboss dispatch …` so the long-lived process drops to UID 1000
-    // before workers spawn. Tini stays as PID 1, so signal forwarding to
-    // the post-exec pitboss is preserved.
+    // apt-get needs root. When `extra_apt` is non-empty AND no derived
+    // image is available, we override `-u` to 0:0 here (last `-u` wins)
+    // and rewrite the entrypoint below into a shell that installs the
+    // packages, then `exec runuser -u pitboss -- pitboss dispatch …` so
+    // the long-lived process drops to UID 1000 before workers spawn.
+    // Tini stays as PID 1, so signal forwarding to the post-exec pitboss
+    // is preserved.
+    //
+    // When a derived image is in play (Phase 2 / `pitboss container-build`),
+    // apt is already baked into the image and this whole wrap is skipped —
+    // dispatch runs as the canonical pitboss user from the start.
     //
     // Package names are joined verbatim into a shell command, so we
     // require each entry to match `[a-zA-Z0-9][a-zA-Z0-9.+-]*` and reject
     // anything else at dispatch time.
-    let bootstrap_apt = !container.extra_apt.is_empty();
+    let bootstrap_apt = !container.extra_apt.is_empty() && derived_image_override.is_none();
     if bootstrap_apt {
         for pkg in &container.extra_apt {
             if !is_valid_apt_pkg(pkg) {
@@ -188,9 +229,12 @@ fn build_run_args(
     }
 
     // ── Image + pitboss command ───────────────────────────────────────────────
-    let image = container
-        .image
-        .clone()
+    // Derived image (built by `container-build`) wins over manifest
+    // `image` when present — the manifest's `image` field is the BASE
+    // for derivation, not the runtime image.
+    let image = derived_image_override
+        .map(String::from)
+        .or_else(|| container.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     args.push(image);
 
@@ -233,7 +277,10 @@ pub(crate) fn is_valid_apt_pkg(s: &str) -> bool {
 ///   2. `container.runtime` from the manifest
 ///   3. `PITBOSS_CONTAINER_RUNTIME` env var
 ///   4. Auto-detect: prefer `podman`, fall back to `docker`
-fn detect_runtime(
+///
+/// Re-used by `dispatch/container_build` so both subcommands see the
+/// same runtime selection rules.
+pub(crate) fn detect_runtime(
     runtime_override: Option<&str>,
     manifest_runtime: Option<&str>,
 ) -> Result<String> {
@@ -386,6 +433,7 @@ mod tests {
             extra_args: vec![],
             extra_apt: vec![],
             mounts,
+            copy: vec![],
             workdir: None,
         }
     }
@@ -417,7 +465,7 @@ prompt = "hi"
         let cfg = make_config(vec![]);
         let manifest = temp_manifest();
         // Build args without calling exec.
-        let args = build_run_args("podman", &cfg, &manifest, None).unwrap();
+        let args = build_run_args("podman", &cfg, &manifest, None, None).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("pitboss"), "should call pitboss: {joined}");
         assert!(
@@ -433,7 +481,7 @@ prompt = "hi"
     #[test]
     fn default_image_used_when_none_specified() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains(DEFAULT_IMAGE),
@@ -447,7 +495,7 @@ prompt = "hi"
             image: Some("my-org/pitboss:latest".into()),
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("my-org/pitboss:latest"),
@@ -469,7 +517,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/home/alice/project:/project:rw,z"),
@@ -487,7 +535,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("/ref:/ref:ro,z"), "readonly flag: {joined}");
     }
@@ -495,7 +543,7 @@ prompt = "hi"
     #[test]
     fn auto_inject_claude_when_not_in_mounts() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/home/pitboss/.claude"),
@@ -513,7 +561,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         // Count -v args that mount to /home/pitboss/.claude — should be exactly 1
         // (the declared mount). The -w workdir may also reference the path but is
         // not a duplicate mount injection.
@@ -537,7 +585,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         // -w should be followed by /project
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(args[w_pos + 1], "/project", "workdir: {args:?}");
@@ -546,7 +594,7 @@ prompt = "hi"
     #[test]
     fn workdir_falls_back_to_home_pitboss_when_no_mounts() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(
             args[w_pos + 1],
@@ -566,7 +614,7 @@ prompt = "hi"
             workdir: Some(PathBuf::from("/project/sub")),
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(
             args[w_pos + 1],
@@ -581,7 +629,7 @@ prompt = "hi"
             extra_args: vec!["--network=host".into(), "--cap-drop=ALL".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let net_pos = args
             .iter()
             .position(|a| a == "--network=host")
@@ -612,7 +660,8 @@ prompt = "hi"
     fn run_dir_mount_uses_override() {
         let custom = PathBuf::from("/tmp/my-runs");
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), Some(custom.clone())).unwrap();
+        let args =
+            build_run_args("docker", &cfg, &temp_manifest(), Some(custom.clone()), None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/tmp/my-runs"),
@@ -625,7 +674,7 @@ prompt = "hi"
         // Sanity: with no extra_apt the entrypoint args are still the bare
         // `pitboss dispatch /run/pitboss.toml` triplet — no shell wrap.
         let cfg = make_config(vec![]);
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
         assert!(
             !args.iter().any(|a| a == "sh"),
             "no sh wrapper expected: {args:?}"
@@ -652,7 +701,7 @@ prompt = "hi"
             extra_apt: vec!["mdbook".into(), "jq".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
 
         // -u 0:0 must appear (so apt-get can run as root).
         let u_pos = args
@@ -706,7 +755,7 @@ prompt = "hi"
                 extra_apt: vec![bad.into()],
                 ..ContainerConfig::default()
             };
-            let result = build_run_args("podman", &cfg, &temp_manifest(), None);
+            let result = build_run_args("podman", &cfg, &temp_manifest(), None, None);
             assert!(
                 result.is_err(),
                 "expected rejection for {bad:?}, got: {result:?}"
@@ -717,6 +766,68 @@ prompt = "hi"
                 "error should mention extra_apt: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn derived_image_override_wins_over_manifest_image() {
+        // When `container-dispatch` resolves a built derived tag, it
+        // takes precedence over the operator's [container].image — the
+        // manifest image is the base for derivation, not the runtime.
+        let cfg = ContainerConfig {
+            image: Some("base/image:1".into()),
+            extra_apt: vec!["mdbook".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args(
+            "podman",
+            &cfg,
+            &temp_manifest(),
+            None,
+            Some("pitboss-derived-abc123:local"),
+        )
+        .unwrap();
+        assert!(
+            args.iter().any(|a| a == "pitboss-derived-abc123:local"),
+            "derived tag must appear: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "base/image:1"),
+            "base image must NOT appear at runtime: {args:?}"
+        );
+    }
+
+    #[test]
+    fn derived_image_override_skips_entrypoint_apt_wrap() {
+        // With a derived image, apt is already installed at build time —
+        // the spin-up shell wrap and -u 0:0 root override should both be
+        // suppressed so dispatch runs as pitboss with bare entrypoint.
+        let cfg = ContainerConfig {
+            extra_apt: vec!["mdbook".into(), "jq".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args(
+            "podman",
+            &cfg,
+            &temp_manifest(),
+            None,
+            Some("pitboss-derived-deadbeef:local"),
+        )
+        .unwrap();
+        assert!(
+            !args.iter().any(|a| a == "0:0"),
+            "no root override expected when derived image is used: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "sh"),
+            "no shell wrap expected when derived image is used: {args:?}"
+        );
+        // Bare pitboss/dispatch entrypoint should be present instead.
+        let dispatch_pos = args
+            .iter()
+            .position(|a| a == "dispatch")
+            .expect("dispatch arg present");
+        assert_eq!(args[dispatch_pos - 1], "pitboss");
+        assert_eq!(args[dispatch_pos + 1], "/run/pitboss.toml");
     }
 
     #[test]
@@ -732,7 +843,7 @@ prompt = "hi"
             ],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None)
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None)
             .expect("realistic package names should validate");
         let img_pos = args.iter().position(|a| a == DEFAULT_IMAGE).expect("image");
         let cmd = &args[img_pos + 3];
