@@ -450,17 +450,31 @@ async fn thaw_if_frozen(layer: &Arc<crate::dispatch::layer::LayerState>, task_id
     }
 }
 
-/// Append every worker in `layer` to `out` as a
-/// `WorkerSnapshotEntry`. Used by `ListWorkers` to aggregate root +
-/// sub-lead workers into a single snapshot. Pre-fix this lived inline
-/// in the handler and only ever ran against `state.root`. (#152 M2)
+/// Append every worker in `layer` to `out` as a `WorkerSnapshotEntry`.
+/// Used by `ListWorkers` to aggregate root + sub-lead workers into a
+/// single snapshot. Pre-fix this lived inline in the handler and only
+/// ever ran against `state.root`. (#152 M2)
+///
+/// `lead_parent` is the parent of the *layer's own lead actor* — the
+/// actor whose `task_id == layer.lead_id`. For the root layer that's
+/// `None` (the root lead has no parent); for a sub-lead's layer that's
+/// `Some(root_lead_id)`. `lead_parent` exists because
+/// `run_kill_resume_loop` inserts the layer's owning actor into
+/// `layer.workers` as a `Running` entry, and pre-fix every entry in a
+/// sub-lead's layer was tagged with `parent_task_id = sublead_id` —
+/// making the sub-lead its own parent on the wire.
+///
+/// Children of the layer's lead (workers spawned via `spawn_worker`)
+/// keep `parent_task_id = layer.lead_id`, which matches what the
+/// dispatcher writes into their `TaskRecord` at finalize.
 async fn collect_layer_workers(
     layer: &Arc<crate::dispatch::layer::LayerState>,
-    parent_task_id: Option<String>,
+    lead_parent: Option<String>,
     out: &mut Vec<crate::control::protocol::WorkerSnapshotEntry>,
 ) {
     let workers = layer.workers.read().await;
     let prompts = layer.worker_prompts.read().await;
+    let layer_lead_id = layer.lead_id.as_str();
     for (id, w) in workers.iter() {
         let (state_str, started_at, session_id) = match w {
             crate::dispatch::state::WorkerState::Pending => ("pending".to_string(), None, None),
@@ -505,12 +519,20 @@ async fn collect_layer_workers(
                 rec.claude_session_id.clone(),
             ),
         };
+        // Distinguish the layer's owning actor (its lead) from children
+        // spawned within the layer. The lead's parent is the layer's
+        // parent (caller-supplied); children's parent is the lead.
+        let entry_parent = if id == layer_lead_id {
+            lead_parent.clone()
+        } else {
+            Some(layer_lead_id.to_string())
+        };
         out.push(crate::control::protocol::WorkerSnapshotEntry {
             task_id: id.clone(),
             state: state_str,
             prompt_preview: prompts.get(id).cloned().unwrap_or_default(),
             started_at,
-            parent_task_id: parent_task_id.clone(),
+            parent_task_id: entry_parent,
             session_id,
         });
     }
@@ -1086,20 +1108,41 @@ async fn dispatch_op(
             }
         }
         ControlOp::ListWorkers => {
-            // #152 M2: aggregate root-layer workers AND each sub-lead's
-            // workers. Pre-fix only emitted root.workers, so a TUI
-            // attached to a hierarchical run with sub-leads saw an
-            // incomplete tree (sub-lead-owned workers were invisible).
+            // Aggregate every layer the run has touched: root + every
+            // currently-registered sub-lead + every sub-lead that has
+            // already terminated. Pre-fix this iterated only
+            // `state.subleads`, but `dispatch/sublead.rs` removes each
+            // sub-lead from that map when it exits — so a snapshot
+            // taken late in a run with short-lived sub-trees lost the
+            // entire sub-tree (sub-lead row + all sub-tree workers)
+            // before the operator could see it.
             //
-            // `parent_task_id` is set to the sub-lead's id for
-            // sub-lead-owned workers (and `None` for root-owned), so the
-            // TUI can render the tree shape correctly. Pre-fix it was
-            // hard-coded to `None` for everything.
+            // `parent_task_id` plumbing (collect_layer_workers's
+            // `lead_parent` arg) lets the layer's owning actor (the
+            // lead) carry the right parent — `None` for the root, the
+            // root lead's id for sub-leads — instead of being tagged
+            // with the same id as its children. Pre-fix the sub-lead
+            // showed itself as its own parent on the wire.
             let mut entries: Vec<crate::control::protocol::WorkerSnapshotEntry> = Vec::new();
             collect_layer_workers(&state.root, None, &mut entries).await;
-            let subleads = state.subleads.read().await;
-            for (sublead_id, layer) in subleads.iter() {
-                collect_layer_workers(layer, Some(sublead_id.clone()), &mut entries).await;
+            let root_lead_id = state.root.lead_id.clone();
+            let live_subleads = state.subleads.read().await;
+            let mut seen_layer_leads: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for (_sublead_id, layer) in live_subleads.iter() {
+                seen_layer_leads.insert(layer.lead_id.clone());
+                collect_layer_workers(layer, Some(root_lead_id.clone()), &mut entries).await;
+            }
+            drop(live_subleads);
+            // Layers held only via `terminated_subleads` survive sub-lead
+            // de-registration. Iterating them here keeps the snapshot
+            // covering every actor that's ever existed in this run.
+            let term_subleads = state.terminated_sublead_layers.read().await;
+            for layer in term_subleads.iter() {
+                if seen_layer_leads.contains(&layer.lead_id) {
+                    continue;
+                }
+                collect_layer_workers(layer, Some(root_lead_id.clone()), &mut entries).await;
             }
             ControlEvent::WorkersSnapshot { workers: entries }
         }
@@ -2168,10 +2211,277 @@ mod tests {
             ControlEvent::WorkersSnapshot { mut workers } => {
                 workers.sort_by(|a, b| a.task_id.cmp(&b.task_id));
                 assert_eq!(workers.len(), 2, "must include root + sub-lead workers");
+                // Root-spawned worker now reports `parent_task_id = "lead"`
+                // (the root lead's id) — matches what spawn.rs writes
+                // into the worker's TaskRecord. Pre-fix it was None,
+                // which is what `collect_layer_workers` had been
+                // hard-coding for every entry in the root layer
+                // regardless of whether the entry was the lead itself
+                // or a child.
                 let root_entry = workers.iter().find(|e| e.task_id == "root-w").unwrap();
-                assert!(root_entry.parent_task_id.is_none());
+                assert_eq!(root_entry.parent_task_id.as_deref(), Some("lead"));
                 let sub_entry = workers.iter().find(|e| e.task_id == "sub-w").unwrap();
                 assert_eq!(sub_entry.parent_task_id.as_deref(), Some("sublead-A"));
+            }
+            other => panic!("expected WorkersSnapshot, got {other:?}"),
+        }
+        drop(handle);
+    }
+
+    /// Regression: a sub-lead's own row in `WorkersSnapshot` must
+    /// carry `parent_task_id = root_lead_id`, not `parent_task_id =
+    /// sublead_id`. Pre-fix, `collect_layer_workers` tagged every
+    /// entry from a sub-lead's layer with the same id, so the
+    /// sub-lead became its own parent on the wire and the SPA tile
+    /// grid nested it under itself.
+    #[tokio::test]
+    async fn list_workers_sublead_self_row_parents_to_root_lead() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        let sub_manifest = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::Never,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(50.0),
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        let sub_layer = std::sync::Arc::new(LayerState::new(
+            run_id,
+            sub_manifest,
+            state.root.store.clone(),
+            CancelToken::new(),
+            "sublead-S".into(),
+            state.root.spawner.clone(),
+            PathBuf::from("/bin/true"),
+            state.root.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            dir.path().join(run_id.to_string()),
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+        // The sub-lead inserts itself into its own layer.workers via
+        // run_kill_resume_loop in production. Mirror that here.
+        sub_layer.workers.write().await.insert(
+            "sublead-S".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sub-sess".into()),
+            },
+        );
+        sub_layer.workers.write().await.insert(
+            "sub-tree-w".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: None,
+            },
+        );
+        state
+            .subleads
+            .write()
+            .await
+            .insert("sublead-S".into(), sub_layer);
+
+        let sock = dir.path().join("list-sublead-self.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"list_workers\"}\n")
+            .await
+            .unwrap();
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        match reply {
+            ControlEvent::WorkersSnapshot { workers } => {
+                let sublead_row = workers
+                    .iter()
+                    .find(|e| e.task_id == "sublead-S")
+                    .expect("sublead row missing");
+                assert_eq!(
+                    sublead_row.parent_task_id.as_deref(),
+                    Some("lead"),
+                    "sublead's own row must parent to root lead, not itself"
+                );
+                let worker_row = workers
+                    .iter()
+                    .find(|e| e.task_id == "sub-tree-w")
+                    .expect("sub-tree worker row missing");
+                assert_eq!(
+                    worker_row.parent_task_id.as_deref(),
+                    Some("sublead-S"),
+                    "sub-tree worker still parents to its sublead"
+                );
+            }
+            other => panic!("expected WorkersSnapshot, got {other:?}"),
+        }
+        drop(handle);
+    }
+
+    /// Regression: a sub-tree's actors must remain visible in
+    /// `WorkersSnapshot` after the sub-lead has terminated and been
+    /// moved out of `state.subleads`. Pre-fix the layer was dropped
+    /// at `subleads.remove`, so a snapshot taken late in a run with
+    /// short-lived sub-trees lost both the sub-lead row and every
+    /// sub-tree worker — the operator was left looking at just the
+    /// root lead.
+    #[tokio::test]
+    async fn list_workers_includes_terminated_subleads() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        let sub_manifest = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::Never,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(50.0),
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        let sub_layer = std::sync::Arc::new(LayerState::new(
+            run_id,
+            sub_manifest,
+            state.root.store.clone(),
+            CancelToken::new(),
+            "sublead-T".into(),
+            state.root.spawner.clone(),
+            PathBuf::from("/bin/true"),
+            state.root.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            dir.path().join(run_id.to_string()),
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+        // Pretend this sub-tree already finished: a Done worker entry
+        // and a Running sublead-self entry. NOTE we put the layer
+        // directly into `terminated_sublead_layers` (skipping the live
+        // `subleads` map) to model post-`reconcile_terminated_sublead`
+        // state.
+        sub_layer.workers.write().await.insert(
+            "sublead-T".into(),
+            crate::dispatch::state::WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: Some("sub-sess".into()),
+            },
+        );
+        sub_layer.workers.write().await.insert(
+            "sub-w".into(),
+            crate::dispatch::state::WorkerState::Done(pitboss_core::store::TaskRecord {
+                task_id: "sub-w".into(),
+                status: pitboss_core::store::TaskStatus::Success,
+                exit_code: Some(0),
+                started_at: chrono::Utc::now(),
+                ended_at: chrono::Utc::now(),
+                duration_ms: 1234,
+                worktree_path: None,
+                log_path: PathBuf::from("/dev/null"),
+                token_usage: Default::default(),
+                claude_session_id: None,
+                final_message_preview: None,
+                final_message: None,
+                parent_task_id: Some("sublead-T".into()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
+                model: None,
+                failure_reason: None,
+            }),
+        );
+        state
+            .terminated_sublead_layers
+            .write()
+            .await
+            .push(sub_layer);
+
+        let sock = dir.path().join("list-terminated.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"list_workers\"}\n")
+            .await
+            .unwrap();
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        match reply {
+            ControlEvent::WorkersSnapshot { workers } => {
+                let ids: Vec<&str> = workers.iter().map(|e| e.task_id.as_str()).collect();
+                assert!(
+                    ids.contains(&"sublead-T"),
+                    "terminated sublead must still appear: {ids:?}"
+                );
+                assert!(
+                    ids.contains(&"sub-w"),
+                    "sub-tree worker of terminated sublead must still appear: {ids:?}"
+                );
+                let sub_w = workers.iter().find(|e| e.task_id == "sub-w").unwrap();
+                assert_eq!(sub_w.state, "done_success");
+                assert_eq!(sub_w.parent_task_id.as_deref(), Some("sublead-T"));
             }
             other => panic!("expected WorkersSnapshot, got {other:?}"),
         }

@@ -9,6 +9,40 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`WorkersSnapshot` now produces correct `parent_task_id` and keeps
+  every actor visible after sub-leads exit.** Two long-standing bugs
+  in `crates/pitboss-cli/src/control/server.rs::collect_layer_workers`
+  that the SPA's #238 patch papered over but the wire format still got
+  wrong (TUI / future consumers saw the same garbage):
+
+  - Every entry from a sub-lead's layer was tagged with
+    `parent_task_id = sublead_id`, *including* the sub-lead's own
+    row that `run_kill_resume_loop` inserts into `layer.workers`.
+    The sub-lead became its own parent on the wire. Fix: pass the
+    layer's `lead_id` and a separate `lead_parent` arg into
+    `collect_layer_workers`; entries whose id matches the layer's
+    own `lead_id` use `lead_parent` (root lead's id for sub-leads,
+    `None` for root), everything else parents to `layer.lead_id`.
+    Side-effect: root-spawned workers now correctly report
+    `parent_task_id = root_lead_id` instead of `None`, matching
+    what `spawn.rs` writes into their `TaskRecord`.
+
+  - `dispatch/sublead.rs::reconcile_terminated_sublead` removed the
+    sub-lead from `state.subleads` and let the `LayerState` drop, so
+    a `ListWorkers` taken late in a run with short-lived sub-trees
+    silently lost both the sub-lead row and every sub-tree worker —
+    the operator was left looking at just the root lead. Fix: new
+    `state.terminated_sublead_layers: RwLock<Vec<Arc<LayerState>>>`
+    that the reconcile path pushes into; `ListWorkers` now iterates
+    `subleads` ∪ `terminated_sublead_layers` (deduped by `lead_id`).
+
+  Pinned by 2 new tests in `control::server::tests`:
+  `list_workers_sublead_self_row_parents_to_root_lead` and
+  `list_workers_includes_terminated_subleads`. The existing
+  `list_workers_aggregates_root_and_sublead_workers` was asserting
+  the broken behavior (`root_entry.parent_task_id.is_none()`);
+  updated to assert `Some("lead")` to match the corrected wire.
+
 - **Run-detail Tokens card and Workers panel now show real data
   (and the broken Cost card is gone).** Three data-flow bugs that all
   surfaced together once the polling fix landed:
