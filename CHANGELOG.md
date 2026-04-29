@@ -5,6 +5,13 @@ All notable changes to Pitboss are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
+CHANGELOG entries from v0.9.2 onward are generated from commit messages
+by [`git-cliff`](https://git-cliff.org/) at release time. **Do not
+hand-edit this file in feature PRs** — your PR title (the squash-merge
+commit subject) IS the changelog line. See `RELEASE.md` for the release
+flow and `cliff.toml` for the format. The `[Unreleased]` section below
+is the last hand-curated section and will roll into v0.9.2.
+
 ## [Unreleased]
 
 ### Added
