@@ -57,15 +57,34 @@ release time. The `include_str!` in `crates/pitboss-cli/src/agents_md.rs`
 bakes this file into the binary at compile time, so the version baked in
 matches the version in the frontmatter.
 
-### 3. CHANGELOG.md — promote `[Unreleased]` to the new version
+### 3. CHANGELOG.md — generate the release section with `git-cliff`
 
-Replace `## [Unreleased]` with:
+CHANGELOG entries from v0.9.2 onward are generated from commit messages
+by [`git-cliff`](https://git-cliff.org/) (see #242 for adoption rationale).
+**Do not hand-edit `CHANGELOG.md` in feature PRs** — every PR's commit
+subject IS the changelog line, and cliff turns those into Keep-a-Changelog
+sections at release time.
+
+Install once:
+
+```bash
+cargo install git-cliff --locked
+```
+
+Generate the section for this release:
+
+```bash
+git cliff --tag vX.Y.Z -o CHANGELOG.md
+```
+
+Cliff regenerates the file from `cliff.toml` + git history. The header
+(everything above the first `##` heading) is preserved across
+regenerations; everything below is rewritten.
+
+After generation, **add the headline paragraph** by hand at the top of
+the new `## [X.Y.Z]` section:
 
 ```markdown
-## [Unreleased]
-
-*(nothing yet)*
-
 ## [X.Y.Z] — YYYY-MM-DD
 
 [One-paragraph headline summarizing the release — tagline + the 2-3
@@ -77,21 +96,27 @@ Highlights:
 - **[fix]** — one-sentence pitch if it closes a notable gap.
 
 ### Added
-[... existing Unreleased Added items, unchanged ...]
+[cliff-generated]
 
 ### Changed
-[... existing Unreleased Changed items, unchanged ...]
+[cliff-generated]
 
 ### Fixed
-[... existing Unreleased Fixed items, unchanged ...]
-
-### Docs
-[... existing Unreleased Docs items, unchanged ...]
+[cliff-generated]
 ```
 
-The `### Added`/`### Changed`/`### Fixed`/`### Docs` subsections move
-verbatim from what was under `[Unreleased]`. Don't re-edit them — they
-were written during the feature commits and reflect shipped behavior.
+Per-entry prose embellishment is allowed — cliff produces the bullet
+list with PR links; if a particularly significant entry warrants a
+multi-paragraph "Why:" / "Fix:" expansion, add it under the relevant
+bullet. The next `git cliff` regeneration will overwrite it, so plan
+to commit the embellishment alongside the version cut.
+
+If you want a preview before committing:
+
+```bash
+git cliff --unreleased            # what would land in [Unreleased]
+git cliff --tag vX.Y.Z --strip header  # what cliff would emit for this tag
+```
 
 ### 4. README.md — replace the version-highlight paragraph
 
