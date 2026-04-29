@@ -55,6 +55,37 @@ This project uses [Semantic Versioning](https://semver.org/).
   cancel token unblocks the per-connection `select!`) and that
   the socket file is removed.
 
+### Changed
+
+- **`mcp::tools` split into per-feature submodules** (#151 L6, pure
+  refactor — no behavior change). The single `mcp/tools.rs` had
+  grown to 4301 lines covering tool arg structs, handlers, budget
+  logic, spawn/cancel/approval/wait paths, and tests in one
+  module — well past reviewable size. Now split into
+  `crates/pitboss-cli/src/mcp/tools/`:
+  - `spawn.rs` — `handle_spawn_worker`, `spawn_resume_worker`,
+    `worker_spawn_args`, the budget reservation helpers,
+    `initial_estimate_for`, `PITBOSS_WORKER_MCP_TOOLS`.
+  - `lifecycle.rs` — `handle_list_workers`, `handle_worker_status`,
+    `handle_cancel_worker`, `handle_pause_worker`,
+    `handle_continue_worker`, `handle_reprompt_worker`.
+  - `approval.rs` — `handle_request_approval`, `handle_propose_plan`,
+    `handle_permission_prompt`, the `PermissionPromptArgs` /
+    `PermissionPromptResponse` types.
+  - `wait.rs` — `handle_wait_for_worker`, `handle_wait_for_actor`,
+    `handle_wait_for_any` (sharing the internal
+    `wait_for_actor_internal` engine).
+  - `tests.rs` — all 50+ unit tests, kept in one file so the
+    shared `test_state` / `completing_test_state` /
+    `mk_plan_state` / `register_test_sublead` / `index_worker`
+    builders aren't duplicated across submodules.
+  `tools.rs` itself is now the parent module: arg/result struct
+  definitions (used as the public surface by `mcp::server`) and
+  the cross-module helpers `find_worker_across_layers` /
+  `layer_for_worker`. External callers continue to use
+  `crate::mcp::tools::*` — `pub use` re-exports preserve every
+  previously-public handler and type.
+
 ### Documentation
 
 - **MCP module: rustdoc cleanup for `McpServer` + sparse tool
