@@ -42,9 +42,14 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
 }
 
 /// Reject manifest-level container misconfigurations that would otherwise
-/// only surface at dispatch time. Today this is just the shell-safety check
-/// on `[container].extra_apt` package names — kept here so `pitboss validate`
-/// catches bad names symmetrically with `pitboss container-dispatch`.
+/// only surface at dispatch / build time. Covers:
+/// - `[container].extra_apt` package names must be shell-safe.
+/// - `[[container.copy]].container` must be an absolute path (Dockerfile
+///   `COPY <src> <dest>` rejects relative dests when WORKDIR is unset for
+///   the FROM line, and we want the schema to be unambiguous).
+/// - `[[container.copy]].host` should be an absolute path or a tilde-
+///   prefixed path; relative host paths can't be resolved without a
+///   manifest-relative anchor that pitboss doesn't currently track.
 fn validate_container(r: &ResolvedManifest) -> Result<()> {
     let Some(container) = &r.container else {
         return Ok(());
@@ -55,6 +60,25 @@ fn validate_container(r: &ResolvedManifest) -> Result<()> {
                 "[container].extra_apt: invalid package name {pkg:?} \
                  (allowed: ASCII alphanumeric, `.`, `+`, `-`; must start \
                  with alphanumeric)"
+            );
+        }
+    }
+    for spec in &container.copy {
+        if !spec.container.is_absolute() {
+            bail!(
+                "[[container.copy]].container must be an absolute path, got {:?}",
+                spec.container
+            );
+        }
+        // Host path: accept tilde-prefixed paths (expanded at build time)
+        // OR absolute paths. Reject relative paths since there is no
+        // canonical anchor (the manifest may live anywhere).
+        let host_str = spec.host.to_string_lossy();
+        let is_tilde = host_str.starts_with('~');
+        if !spec.host.is_absolute() && !is_tilde {
+            bail!(
+                "[[container.copy]].host must be an absolute or tilde-prefixed path, got {:?}",
+                spec.host
             );
         }
     }
@@ -1252,5 +1276,60 @@ mod tests {
             ..ContainerConfig::default()
         });
         validate(&m).expect("realistic apt package names must validate");
+    }
+
+    #[test]
+    fn copy_relative_container_path_fails_validate() {
+        use super::super::schema::{ContainerConfig, CopySpec};
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            copy: vec![CopySpec {
+                host: PathBuf::from("/abs/script.py"),
+                container: PathBuf::from("relative/path"),
+            }],
+            ..ContainerConfig::default()
+        });
+        let err = validate(&m).expect_err("relative container path must fail");
+        assert!(
+            err.to_string()
+                .contains("container must be an absolute path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn copy_relative_host_path_fails_validate() {
+        use super::super::schema::{ContainerConfig, CopySpec};
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            copy: vec![CopySpec {
+                host: PathBuf::from("./script.py"),
+                container: PathBuf::from("/opt/script.py"),
+            }],
+            ..ContainerConfig::default()
+        });
+        let err = validate(&m).expect_err("relative host path must fail");
+        assert!(
+            err.to_string()
+                .contains("host must be an absolute or tilde-prefixed path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn copy_tilde_host_and_absolute_container_pass_validate() {
+        use super::super::schema::{ContainerConfig, CopySpec};
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            copy: vec![CopySpec {
+                host: PathBuf::from("~/scripts/install.sh"),
+                container: PathBuf::from("/opt/install.sh"),
+            }],
+            ..ContainerConfig::default()
+        });
+        validate(&m).expect("tilde host + absolute container must validate");
     }
 }
