@@ -9,6 +9,44 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Run-detail Tokens card and Workers panel now show real data
+  (and the broken Cost card is gone).** Three data-flow bugs that all
+  surfaced together once the polling fix landed:
+
+  - **Tokens always 0**: the SPA summed `usage.input_tokens` /
+    `output_tokens`, but TaskRecord uses `usage.input` / `output` —
+    so the field never resolved. Also read from `taskList`
+    (populated only post-finalize) instead of `tasksToRender`,
+    which means even after the fix it wouldn't update during a
+    live run. Both fixed; the Tokens card now ticks up as actors
+    finish.
+
+  - **Cost card always $0.00**: read a `cost_usd` field that has
+    never existed on TaskRecord — there is no per-task cost data
+    anywhere in the run artifacts. Replaced the card with
+    "Runtime", which we DO have data for (live-ticking elapsed
+    time during the run, frozen `total_duration_ms` after).
+    Per-row Cost column in the Tasks tab replaced with Tokens.
+
+  - **Workers panel goes empty after subleads exit**: the
+    dispatcher's `WorkersSnapshot` only includes actors in active
+    layers. When a sublead terminates, `state.subleads.remove()`
+    fires, and the entire sub-tree (sublead + sub-tree workers)
+    disappears from the snapshot. Late in a run with short-lived
+    sub-trees, the operator was left looking at just the root lead.
+    Plus a related dispatcher bug: a sublead's own snapshot entry
+    has `parent_task_id = self.id` (because `collect_layer_workers`
+    tags every entry with the sublead_id arg, including the
+    sublead's own row).
+
+    Fixed in the SPA by union-ing the live `WorkersSnapshot` with
+    entries synthesized from `summary.jsonl` for any task_id not
+    in the live list. summary.jsonl is append-only and carries
+    every actor this run has ever spawned with the correct
+    `parent_task_id`. Live rows whose `parent_task_id == task_id`
+    get patched to `undefined` so the sublead nests at root level
+    instead of under itself.
+
 - **Run-detail view now updates task counts, costs, tokens, and worker
   list while a run is in progress.** Pre-fix, the page fetched
   `summary.jsonl` once at mount and never re-read it, so the per-task

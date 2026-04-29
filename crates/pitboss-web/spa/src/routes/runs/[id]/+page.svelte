@@ -76,16 +76,44 @@
     (summary?.tasks as Array<Record<string, any>> | undefined) ?? []
   );
 
-  const totalCost = $derived(
-    taskList.reduce((sum, t) => sum + (typeof t.cost_usd === 'number' ? t.cost_usd : 0), 0)
-  );
-  const totalTokens = $derived(
-    taskList.reduce((sum, t) => {
+  // Total tokens = sum of input + output across every actor we have
+  // a TaskRecord for. Reads from `tasksToRender` (defined below) so it
+  // works during in-progress runs (which only have liveTasks) AND
+  // post-finalize runs (which have summary.tasks). The pre-fix code
+  // read `usage.input_tokens` / `output_tokens` — those keys don't
+  // exist on TaskRecord (which uses `input` / `output`), so the card
+  // always rendered 0 regardless of run state.
+  const totalTokens = $derived.by(() => {
+    let sum = 0;
+    for (const t of tasksToRender) {
       const usage = t.token_usage as Record<string, number> | undefined;
-      if (!usage) return sum;
-      return sum + (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
-    }, 0)
-  );
+      if (!usage) continue;
+      sum += (usage.input ?? 0) + (usage.output ?? 0);
+    }
+    return sum;
+  });
+  // Run wall-clock duration. Pre-fix the fourth card was "Total cost",
+  // which read a `cost_usd` field that has never existed on TaskRecord
+  // — so it always displayed $0.00. Replaced with elapsed runtime,
+  // which is something we actually have data for. Live ticks against
+  // `nowMs` (1 s cadence) while the run is in progress; freezes at
+  // `total_duration_ms` once the summary lands.
+  let nowMs = $state(Date.now());
+  $effect(() => {
+    if (!inProgress) return;
+    const h = setInterval(() => (nowMs = Date.now()), 1000);
+    return () => clearInterval(h);
+  });
+  const runtimeMs = $derived.by(() => {
+    if (summary && typeof summary.total_duration_ms === 'number') {
+      return summary.total_duration_ms;
+    }
+    const startStr = (summary?.started_at ?? stub?.started_at) as string | undefined;
+    if (!startStr) return null;
+    const startMs = Date.parse(startStr);
+    if (!Number.isFinite(startMs)) return null;
+    return Math.max(0, nowMs - startMs);
+  });
 
   // Parsed JSONL of in-progress task records — lets the Tasks tab show
   // partial state while the run hasn't finalized.
@@ -106,6 +134,57 @@
   );
 
   const tasksToRender = $derived(taskList.length > 0 ? taskList : liveTasks);
+
+  /**
+   * Unified worker tile list. The dispatcher's `WorkersSnapshot` only
+   * includes actors in active layers — once a sublead terminates,
+   * `state.subleads.remove(sublead_id)` fires, taking the sublead AND
+   * its sub-tree workers out of the snapshot. Late in a run with
+   * short-lived sub-trees, the operator was left with just the root
+   * lead in the Workers card.
+   *
+   * Fix: take the live `workers` list as authoritative for state
+   * (running/paused/frozen — those need real-time wire data), then
+   * union in entries from `liveTasks` (summary.jsonl) for any task_id
+   * not in the live snapshot. summary.jsonl is append-only so it has
+   * every actor that's ever been spawned in this run, with correct
+   * `parent_task_id` (which the dispatcher's snapshot also gets wrong
+   * for the sublead's own row — collect_layer_workers tags every
+   * entry with `Some(sublead_id)`, so the sublead becomes its own
+   * parent on the wire).
+   */
+  const allWorkers = $derived.by<WorkerEntry[]>(() => {
+    const liveById = new Map(workers.map((w) => [w.task_id, w]));
+    const merged: WorkerEntry[] = workers.map((w) => {
+      // Patch the sublead-is-its-own-parent dispatcher bug: if a sublead
+      // entry's parent_task_id equals its own task_id, drop it; the
+      // JSONL fallback (added below for not-in-live ids) carries the
+      // correct value, but for live entries we just zero it out so the
+      // tile groups under "root" instead of nesting under itself.
+      if (w.parent_task_id && w.parent_task_id === w.task_id) {
+        return { ...w, parent_task_id: undefined };
+      }
+      return w;
+    });
+    for (const t of liveTasks) {
+      const id = t.task_id as string | undefined;
+      if (!id || liveById.has(id)) continue;
+      const status = ((t.status as string | undefined) ?? 'unknown').toLowerCase();
+      // Map TaskStatus → tile color buckets used by RunTileGrid.tileColor.
+      // Anything not running/paused/frozen renders as terminal.
+      const stateStr =
+        status === 'success' ? 'completed' : status === 'failed' ? 'failed' : status;
+      merged.push({
+        task_id: id,
+        state: stateStr,
+        prompt_preview: (t.final_message_preview as string | undefined) ?? '',
+        started_at: t.started_at as string | undefined,
+        parent_task_id: (t.parent_task_id as string | null | undefined) ?? undefined,
+        session_id: (t.claude_session_id as string | null | undefined) ?? undefined
+      });
+    }
+    return merged;
+  });
 
   // ---- Phase 2: live control events (SSE) -----------------------------
   // The dispatcher's per-run control socket is bridged to /api/runs/:id/events
@@ -418,11 +497,6 @@
     if (runId) load();
   });
 
-  function fmtCost(v?: number): string {
-    if (typeof v !== 'number') return '—';
-    return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
-  }
-
   function fmtDuration(ms?: number): string {
     if (typeof ms !== 'number' || ms <= 0) return '—';
     const s = Math.floor(ms / 1000);
@@ -513,8 +587,8 @@
     </Card>
     <Card>
       <CardHeader class="pb-2">
-        <CardDescription>Total cost</CardDescription>
-        <CardTitle class="text-2xl tabular-nums">{fmtCost(totalCost)}</CardTitle>
+        <CardDescription>Runtime</CardDescription>
+        <CardTitle class="text-2xl tabular-nums">{fmtDuration(runtimeMs ?? undefined)}</CardTitle>
       </CardHeader>
     </Card>
     <Card>
@@ -610,7 +684,7 @@
           <CardHeader class="pb-3">
             <CardTitle class="text-base">
               Workers
-              <Badge variant="outline" class="ml-2 text-xs">{workers.length}</Badge>
+              <Badge variant="outline" class="ml-2 text-xs">{allWorkers.length}</Badge>
               {#if Object.keys(subleads).length > 0}
                 <Badge variant="outline" class="ml-1 text-xs">
                   {Object.keys(subleads).length} sublead{Object.keys(subleads).length === 1 ? '' : 's'}
@@ -618,12 +692,12 @@
               {/if}
             </CardTitle>
             <CardDescription class="text-xs">
-              Tile grid built from `WorkersSnapshot` + `StoreActivity` + `WorkerFailed` +
-              `SubleadSpawned`. Children nest under their parent.
+              Live state from `WorkersSnapshot`; terminated actors filled in from `summary.jsonl`
+              so sub-tree workers stay visible after their sublead exits.
             </CardDescription>
           </CardHeader>
           <CardContent class="pt-0">
-            {#if workers.length === 0}
+            {#if allWorkers.length === 0}
               <p class="text-muted-foreground py-4 text-center text-xs">
                 {sseStatus === 'open'
                   ? 'No workers reported yet.'
@@ -631,7 +705,7 @@
               </p>
             {:else}
               <RunTileGrid
-                {workers}
+                workers={allWorkers}
                 {storeActivity}
                 {failures}
                 {subleads}
@@ -697,7 +771,7 @@
             </CardDescription>
           </CardHeader>
           <CardContent class="pt-0">
-            <RunGraph {workers} {storeActivity} {failures} {subleads} />
+            <RunGraph workers={allWorkers} {storeActivity} {failures} {subleads} />
           </CardContent>
         </Card>
       </TabsContent>
@@ -716,7 +790,7 @@
                 <TableHead>Task</TableHead>
                 <TableHead class="w-[10ch]">Status</TableHead>
                 <TableHead>Model</TableHead>
-                <TableHead class="w-[10ch] text-right">Cost</TableHead>
+                <TableHead class="w-[12ch] text-right">Tokens</TableHead>
                 <TableHead class="w-[10ch] text-right">Duration</TableHead>
                 <TableHead class="w-[8ch]">Log</TableHead>
               </TableRow>
@@ -744,7 +818,12 @@
                     </Badge>
                   </TableCell>
                   <TableCell class="text-muted-foreground text-xs">{t.model ?? '—'}</TableCell>
-                  <TableCell class="text-right tabular-nums">{fmtCost(t.cost_usd)}</TableCell>
+                  <TableCell class="text-right tabular-nums text-xs">
+                    {#if t.token_usage}
+                      {(((t.token_usage as Record<string, number>).input ?? 0) +
+                        ((t.token_usage as Record<string, number>).output ?? 0)).toLocaleString()}
+                    {:else}—{/if}
+                  </TableCell>
                   <TableCell class="text-right tabular-nums">{fmtDuration(t.duration_ms)}</TableCell
                   >
                   <TableCell>
