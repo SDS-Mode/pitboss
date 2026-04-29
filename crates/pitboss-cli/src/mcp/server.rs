@@ -231,6 +231,28 @@ fn can_read_peer_slot(layer: &LayerState, caller_id: &str, target_id: &str) -> b
     caller_id == target_id || caller_id == layer.lead_id
 }
 
+/// Run-scoped MCP server bound to a per-run unix socket.
+///
+/// Public surface (the only entry points callers should use):
+/// - [`McpServer::start`] — bind the socket, spawn the accept loop,
+///   return the handle. Async; takes a `PathBuf` socket path and
+///   the dispatcher's `Arc<DispatchState>`.
+/// - [`McpServer::socket_path`] — borrow the path the listener is
+///   bound to; useful for writing each actor's `mcp-config.json`.
+/// - [`Drop`] — synchronous teardown. Signals the accept loop to
+///   exit, fires `CancellationToken::cancel()` so per-connection
+///   tasks unblock immediately, aborts the loop's join handle, and
+///   removes the socket file. There is intentionally **no** async
+///   `shutdown()` method today — `Drop` cannot await
+///   `tracker.wait()`, so per-connection cleanup tasks may still be
+///   draining when `Drop` returns. Tracked as `#151` M2; the
+///   diagnostic accessor here is just the cancel token, no public
+///   `await` surface.
+///
+/// Constructed once per dispatcher run; the handle is dropped when
+/// the dispatcher exits (clean or otherwise). Handlers are routed
+/// through [`PitbossHandler`] via the rmcp `#[tool_router]` macro
+/// — see the impl block below for the tool catalogue.
 pub struct McpServer {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -443,7 +465,9 @@ impl PitbossHandler {
 
 #[tool_router]
 impl PitbossHandler {
-    #[tool(description = "Spawn a worker Hobbit. Returns {task_id, worktree_path}.")]
+    #[tool(
+        description = "Spawn a worker Hobbit to do a focused subtask in parallel. Use when you have a unit of work that benefits from a fresh Claude session, an isolated working directory, or its own approval/budget envelope. Returns {task_id, worktree_path?} — keep task_id for follow-up tools (worker_status, wait_for_worker, cancel_worker, reprompt_worker). Cost: spawns one Claude subprocess plus its bridge process and reserves budget against your layer's max_workers and budget_usd; the call returns as soon as the subprocess is launched (it does NOT wait for the worker to finish — use wait_for_worker for that). Caller role must be lead or root_lead; workers cannot spawn anything."
+    )]
     async fn spawn_worker(
         &self,
         Parameters(args): Parameters<SpawnWorkerArgs>,
@@ -494,7 +518,9 @@ impl PitbossHandler {
         }
     }
 
-    #[tool(description = "Non-blocking status poll for a worker. Returns state + partial data.")]
+    #[tool(
+        description = "Non-blocking status poll for a worker. Use when you want a quick visibility check (current state, in-flight token usage, last assistant text preview) without blocking — ideal for scheduling decisions, progress reporting back to the operator, or branching on whether a worker is still Running. For a blocking wait until the worker terminates use wait_for_worker (cheaper than spinning on this) or wait_for_any. Returns {state, usage, last_text_preview?} where state is one of Queued/Running/Paused/Frozen/Done/Failed/Cancelled. Cost: zero — reads in-memory state, no IO."
+    )]
     async fn worker_status(
         &self,
         Parameters(args): Parameters<TaskIdArgs>,
@@ -618,7 +644,7 @@ impl PitbossHandler {
     }
 
     #[tool(
-        description = "Request operator approval before proceeding. Blocks until operator responds or timeout."
+        description = "Request operator approval for a single in-flight action before proceeding. Use when the next step is irreversible, high-impact, or outside the worker's standing authorisation (writing to a sensitive path, running a destructive command, sending external traffic). For pre-flight approval of a whole execution plan use propose_plan instead — that is the gate for entire plans, this is the gate for individual actions. Cost: blocks the caller until one of three things happens — (1) the TUI operator answers, (2) a policy rule auto-resolves the request (auto_approve / auto_reject / cost_over), or (3) the per-request ttl_secs expires and the configured ApprovalFallback fires. Plan accordingly: if the operator is offline and no policy matches, this can block up to ttl_secs. Returns {approved, comment?, reason?, from_ttl?}."
     )]
     async fn request_approval(
         &self,
@@ -1252,6 +1278,12 @@ impl McpServer {
         })
     }
 
+    /// The unix socket the accept loop is listening on.
+    ///
+    /// Used by the dispatcher to write each actor's
+    /// `mcp-config.json` so the bridge subprocess knows where to
+    /// connect. Callers must not assume the file exists outside of
+    /// this server's lifetime — `Drop` removes the socket file.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
