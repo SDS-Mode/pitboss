@@ -7,6 +7,40 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Failure classifier: schema-first matching against Anthropic API
+  error envelopes** (#185 medium). Pre-fix
+  `pitboss_core::failure_classify::classify` walked the worker's
+  log blob with `str::contains()` substring matchers
+  (`"rate_limit_exceeded"`, `"authentication_error"`,
+  `"invalid_request_error"`, etc.) — brittle to incidental string
+  formatting changes from the upstream Claude CLI. Now a two-stage
+  matcher: stage 1 walks the blob line-by-line, attempts to parse
+  each line as a stream-JSON event, and looks for the public
+  Anthropic API error envelope shape (`{"error":{"type":…,
+  "message":…}}`, optionally nested under `result` for SDK
+  streaming responses); recognized `error.type` strings
+  (`rate_limit_exceeded`, `overloaded_error`,
+  `authentication_error`, `invalid_request_error`) map directly
+  to `FailureReason`. The API error-type contract is far more
+  stable than scanning prose, so when present these are
+  authoritative. Stage 2 keeps the existing substring matchers
+  unchanged for non-JSON content (CLI banners like `"You've hit
+  your limit · resets Apr 23, 3pm"` and shell-level errors like
+  `getaddrinfo ENOTFOUND`). The "auth wins over rate-limit when
+  both markers coexist" priority rule applies at both stages.
+  `InvalidArgument` excerpts now carry the API-supplied
+  `error.message` directly when available, more useful than the
+  whole-blob excerpt the substring path produced. Pinned by 8 new
+  regression tests covering the `result.error` envelope, the
+  `overloaded_error` alias, in-message `resets …` timestamp
+  extraction, mixed-stdout interleaving, the auth-banner override
+  of a rate-limit JSON event, the `prompt is too long`
+  ContextExceeded disambiguation, unknown-error-type fallthrough,
+  and the CLI-banner-only path. All 21 pre-existing classifier
+  tests still pass.
+
 ### Fixed
 
 - **MCP policy: `cost_over` rules now fire for `propose_plan` and
