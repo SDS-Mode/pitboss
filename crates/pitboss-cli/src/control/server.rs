@@ -1138,15 +1138,7 @@ async fn dispatch_op(
                     },
                 )
                 .await;
-                {
-                    let mut guard = state.root.worker_counters.write().await;
-                    let entry = guard.entry(caller_id).or_default();
-                    if approved {
-                        entry.approvals_approved += 1;
-                    } else {
-                        entry.approvals_rejected += 1;
-                    }
-                }
+                crate::mcp::approval::record_approval_outcome(state, &caller_id, approved).await;
                 ControlEvent::OpAcked {
                     op: "approve".into(),
                     task_id: None,
