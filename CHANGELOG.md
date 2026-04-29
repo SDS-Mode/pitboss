@@ -7,6 +7,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-task and run-total cost estimates on the run-detail page.**
+  TaskRecord doesn't carry a `cost_usd` field — neither the dispatcher
+  nor the budget reconciliation path persists per-task cost. Rather
+  than schema-bumping, the SPA now computes cost client-side via a new
+  `$lib/prices.ts` helper that mirrors `pitboss_core::prices` (3-line
+  price table keyed on the `opus`/`sonnet`/`haiku` family substring).
+  The "Runtime" card briefly introduced by #238 moves into the
+  meta-header line; "Cost (est.)" reclaims the fourth card slot, and
+  the per-row Cost column comes back to the Tasks tab alongside the
+  Tokens column. When at least one task's model isn't in the price
+  table the run-total returns null (rendered as "—") rather than a
+  partial-but-misleading dollar figure.
+
 ### Changed
 
 - **`manifest_name` in `summary.json` falls back to the manifest filename
