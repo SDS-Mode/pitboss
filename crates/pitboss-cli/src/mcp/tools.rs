@@ -293,6 +293,14 @@ pub struct ProposePlanArgs {
     /// `lead_timeout_secs`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional cost estimate (USD) hint for policy matching. When
+    /// provided, the policy matcher can evaluate `match.cost_over`
+    /// rules against this value — e.g. an operator can declare
+    /// `cost_over = 5.0 → block` to escalate any plan whose total
+    /// estimated cost exceeds $5. Falls through to `None` matching
+    /// when omitted, matching the pre-#151-M5 behavior. (#151 M5)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimate: Option<f64>,
     /// Caller identity injected by mcp-bridge. Used to build the correct
     /// actor_path for policy matching (sub-lead vs root-lead).
     #[serde(rename = "_meta", default, skip_serializing)]
@@ -1973,7 +1981,11 @@ pub async fn handle_propose_plan(
     {
         let matcher_guard = state.root.policy_matcher.lock().await;
         if let Some(matcher) = matcher_guard.as_ref() {
-            match matcher.evaluate(&pending, None, None) {
+            // #151 M5: forward the caller-supplied cost estimate (if any)
+            // so cost_over rules can fire on plan-level approvals. Pre-fix
+            // this was hard-coded to None and cost_over rules silently
+            // never matched for propose_plan.
+            match matcher.evaluate(&pending, None, args.cost_estimate) {
                 Some(ApprovalAction::AutoApprove) => {
                     tracing::info!(
                         actor = %pending.requesting_actor_id,
@@ -2311,6 +2323,15 @@ pub struct PermissionPromptArgs {
     /// operator in the approval modal for context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_input: Option<serde_json::Value>,
+    /// Optional cost estimate (USD) hint for policy matching. When
+    /// provided, the policy matcher can evaluate `match.cost_over`
+    /// rules against this value — e.g. for tools whose cost varies
+    /// by input size, the gating side can supply an estimate so an
+    /// operator-declared `cost_over` rule fires for expensive
+    /// permission requests. Falls through to `None` matching when
+    /// omitted, matching the pre-#151-M5 behavior. (#151 M5)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimate: Option<f64>,
     /// Caller identity injected by mcp-bridge.
     #[serde(rename = "_meta", default, skip_serializing)]
     #[schemars(skip)]
@@ -2355,7 +2376,11 @@ pub async fn handle_permission_prompt(
     {
         let matcher_guard = state.root.policy_matcher.lock().await;
         if let Some(matcher) = matcher_guard.as_ref() {
-            match matcher.evaluate(&pending, Some(&args.tool_name), None) {
+            // #151 M5: forward the caller-supplied cost estimate (if any)
+            // so cost_over rules can fire on permission_prompt. Pre-fix
+            // this was hard-coded to None and cost_over rules silently
+            // never matched for permission_prompt.
+            match matcher.evaluate(&pending, Some(&args.tool_name), args.cost_estimate) {
                 Some(crate::mcp::policy::ApprovalAction::AutoApprove) => {
                     return Ok(PermissionPromptResponse {
                         decision: "allow".into(),
@@ -3928,6 +3953,7 @@ mod tests {
             PermissionPromptArgs {
                 tool_name: "Bash".into(),
                 tool_input: None,
+                cost_estimate: None,
                 meta: None,
             },
         )
@@ -4112,6 +4138,139 @@ mod tests {
             .root
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// #151 M5 regression: a `cost_over` rule fires for `propose_plan`
+    /// when the caller passes an explicit `cost_estimate` that exceeds
+    /// the threshold. Pre-fix the matcher invocation hard-coded
+    /// `cost = None`, so even `cost_over = 0.0` rules silently never
+    /// matched for plan-level approvals.
+    #[tokio::test]
+    async fn propose_plan_cost_over_rule_auto_rejects_when_estimate_exceeds() {
+        use crate::mcp::policy::{ApprovalAction, ApprovalRule, PolicyMatcher};
+
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::Block, true).await;
+        // Operator-declared rule: any plan whose cost > $5 is auto-rejected.
+        state
+            .root
+            .set_policy_matcher(PolicyMatcher::new(vec![ApprovalRule {
+                r#match: crate::mcp::policy::ApprovalMatch {
+                    cost_over: Some(5.0),
+                    ..Default::default()
+                },
+                action: ApprovalAction::AutoReject,
+            }]))
+            .await;
+
+        // Above threshold → auto-reject fires.
+        let resp = handle_propose_plan(
+            &state,
+            ProposePlanArgs {
+                plan: ApprovalPlan {
+                    summary: "expensive plan".into(),
+                    ..Default::default()
+                },
+                timeout_secs: Some(2),
+                cost_estimate: Some(10.0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !resp.approved,
+            "cost_estimate=10 over threshold=5 must auto-reject"
+        );
+        assert!(
+            !state
+                .root
+                .plan_approved
+                .load(std::sync::atomic::Ordering::Acquire),
+            "rejected plan must not flip plan_approved"
+        );
+    }
+
+    /// #151 M5 regression: a `cost_over` rule does NOT fire for
+    /// `propose_plan` when the caller's `cost_estimate` is at or below
+    /// the threshold. Cheap plans must still flow through the normal
+    /// approval path.
+    #[tokio::test]
+    async fn propose_plan_cost_over_rule_does_not_fire_below_threshold() {
+        use crate::mcp::policy::{ApprovalAction, ApprovalRule, PolicyMatcher};
+
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, true).await;
+        state
+            .root
+            .set_policy_matcher(PolicyMatcher::new(vec![ApprovalRule {
+                r#match: crate::mcp::policy::ApprovalMatch {
+                    cost_over: Some(5.0),
+                    ..Default::default()
+                },
+                action: ApprovalAction::AutoReject,
+            }]))
+            .await;
+
+        // Below threshold → rule does not match; falls through to
+        // the bridge which auto-approves under the AutoApprove policy.
+        let resp = handle_propose_plan(
+            &state,
+            ProposePlanArgs {
+                plan: ApprovalPlan {
+                    summary: "cheap plan".into(),
+                    ..Default::default()
+                },
+                timeout_secs: Some(2),
+                cost_estimate: Some(0.50),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            resp.approved,
+            "cost_estimate=0.50 below threshold=5 must fall through to AutoApprove"
+        );
+    }
+
+    /// #151 M5 regression: a `cost_over` rule fires for
+    /// `permission_prompt` when the caller passes an explicit
+    /// `cost_estimate` that exceeds the threshold. Returns Claude
+    /// Code's deny gate response.
+    #[tokio::test]
+    async fn permission_prompt_cost_over_rule_denies_when_estimate_exceeds() {
+        use crate::mcp::policy::{ApprovalAction, ApprovalRule, PolicyMatcher};
+
+        // Default Block policy so the matcher's verdict is the only
+        // path to a fast resolve — no AutoApprove fallback to mask a
+        // missed cost_over evaluation.
+        let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::Block, false).await;
+        state
+            .root
+            .set_policy_matcher(PolicyMatcher::new(vec![ApprovalRule {
+                r#match: crate::mcp::policy::ApprovalMatch {
+                    cost_over: Some(2.0),
+                    ..Default::default()
+                },
+                action: ApprovalAction::AutoReject,
+            }]))
+            .await;
+
+        let resp = handle_permission_prompt(
+            &state,
+            PermissionPromptArgs {
+                tool_name: "Bash".into(),
+                tool_input: None,
+                cost_estimate: Some(7.5),
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resp.decision, "deny",
+            "cost_estimate=7.5 over threshold=2 must yield deny"
+        );
+        assert!(resp.behavior.is_none(), "deny carries no behavior field");
     }
 
     #[tokio::test]

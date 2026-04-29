@@ -94,9 +94,14 @@ fn rule_matches(
             _ => return false,
         }
     }
-    // TODO(Phase 4.x): emit ApprovalCategory::Cost approvals so cost_over
-    // rules can fire in practice. Until then, cost_over rules only match when
-    // the caller passes an explicit cost_estimate hint via RequestApprovalArgs.
+    // `cost_over` rules fire whenever the caller provides an explicit
+    // `cost_estimate` hint — which is now plumbed through all three
+    // approval entry points: `RequestApprovalArgs`, `ProposePlanArgs`,
+    // and `PermissionPromptArgs`. Callers that omit it continue to fall
+    // through to `None` matching (rule does not match). Future work:
+    // automatic cost estimation that emits `ApprovalCategory::Cost`
+    // approvals server-side so rules can fire without caller hints.
+    // (#151 M5)
     if let Some(threshold) = m.cost_over {
         match cost {
             Some(actual) if actual > threshold => {}
