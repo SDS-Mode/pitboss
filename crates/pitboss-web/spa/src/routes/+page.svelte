@@ -245,7 +245,9 @@
             </TableRow>
             {#if expanded[g.manifest_name]}
               {#each g.runs as r (r.run_id)}
-                <TableRow class="bg-muted/20">
+                <TableRow
+                  class="bg-muted/20 {r.status === 'aborted' ? 'opacity-60 italic' : ''}"
+                >
                   <TableCell class="pl-10">
                     <a href="/runs/{r.run_id}" class="block">
                       <code class="text-xs">{r.run_id.slice(0, 18)}…</code>
@@ -295,7 +297,11 @@
           </TableRow>
         {:else}
           {#each runs as r (r.run_id)}
-            <TableRow class="hover:bg-muted/50 cursor-pointer">
+            <TableRow
+              class="hover:bg-muted/50 cursor-pointer {r.status === 'aborted'
+                ? 'opacity-60 italic'
+                : ''}"
+            >
               <TableCell>
                 <a href="/runs/{r.run_id}" class="block">
                   <code class="text-xs font-medium tracking-tight">{r.run_id.slice(0, 18)}…</code>

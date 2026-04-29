@@ -7,6 +7,34 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`manifest_name` in `summary.json` falls back to the manifest filename
+  stem when `[run].name` is omitted** (#227). Pre-fix, `manifest_name`
+  was set directly from `resolved.name` in both finalize paths;
+  manifests without an explicit `[run].name` landed `null` in the
+  finalized summary, which in turn split the UI: the runs list
+  synthesized `<unnamed>`, the insights aggregator independently
+  re-derived from the manifest filename, and the run-detail card
+  (`GET /api/runs/{id}`) showed `null`. Three different surfaces would
+  show three different names for the same run.
+
+  **Fix:** new `dispatch::summary::resolve_manifest_display_name`
+  helper that prefers the declared name, falls back to the filename
+  stem, and trims whitespace either way. Both `runner.rs::finalize_run`
+  and `hierarchical.rs`'s finalize phase route through it so all
+  surfaces agree. Pinned by 6 unit tests covering the declared/empty/
+  filename/no-stem/no-extension/whitespace cases.
+
+- **Aborted runs in the runs list are dimmed (italic + 60% opacity)**
+  (#229). Pre-fix, an aborted run with `tasks_total: 0` was visually
+  indistinguishable from a completed run except for the small status
+  pill, making the list noisy when scanning. Both the flat and the
+  manifest-grouped views in `routes/+page.svelte` now apply
+  `opacity-60 italic` to rows where `status === 'aborted'`. Default
+  visible (no filter), so the operator still sees them — they just
+  don't compete visually with completed runs.
+
 ### Fixed
 
 - **Run-detail Tokens card and Workers panel now show real data

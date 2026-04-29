@@ -448,7 +448,10 @@ async fn finalize_run(
     let summary = RunSummary {
         run_id: init.run_id,
         manifest_path: manifest_path.to_path_buf(),
-        manifest_name: resolved.name.clone(),
+        manifest_name: crate::dispatch::summary::resolve_manifest_display_name(
+            resolved.name.as_deref(),
+            manifest_path,
+        ),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
         claude_version,
         started_at: init.started_at,
