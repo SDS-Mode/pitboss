@@ -43,6 +43,7 @@ env = { EXAMPLE_KEY = "value" }
 image = "<value>"
 runtime = "docker"
 extra_args = []
+extra_apt = []
 workdir = "/path/to/value"
 
 [[container.mount]]

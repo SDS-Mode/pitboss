@@ -25,6 +25,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         crate::notify::config::validate(cfg)?;
     }
     validate_lifecycle(resolved)?;
+    validate_container(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -36,6 +37,26 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         }
         validate_branch_conflicts(resolved)?;
         validate_ranges(resolved)?;
+    }
+    Ok(())
+}
+
+/// Reject manifest-level container misconfigurations that would otherwise
+/// only surface at dispatch time. Today this is just the shell-safety check
+/// on `[container].extra_apt` package names — kept here so `pitboss validate`
+/// catches bad names symmetrically with `pitboss container-dispatch`.
+fn validate_container(r: &ResolvedManifest) -> Result<()> {
+    let Some(container) = &r.container else {
+        return Ok(());
+    };
+    for pkg in &container.extra_apt {
+        if !crate::dispatch::container::is_valid_apt_pkg(pkg) {
+            bail!(
+                "[container].extra_apt: invalid package name {pkg:?} \
+                 (allowed: ASCII alphanumeric, `.`, `+`, `-`; must start \
+                 with alphanumeric)"
+            );
+        }
     }
     Ok(())
 }
@@ -1199,5 +1220,37 @@ mod tests {
         let src = r#"catagory = "tool_use""#;
         let err: Result<super::super::schema::ApprovalMatchSpec, _> = toml::from_str(src);
         assert!(err.is_err(), "unknown field 'catagory' must be rejected");
+    }
+
+    #[test]
+    fn extra_apt_invalid_package_name_fails_validate() {
+        // pitboss validate must reject the same names that build_run_args
+        // rejects — operators expect schema-level validation to be
+        // authoritative, not deferred to dispatch.
+        use super::super::schema::ContainerConfig;
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            extra_apt: vec!["mdbook;rm -rf /".into()],
+            ..ContainerConfig::default()
+        });
+        let err = validate(&m).expect_err("invalid extra_apt name must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("extra_apt"),
+            "error must reference extra_apt: {msg}"
+        );
+    }
+
+    #[test]
+    fn extra_apt_valid_package_names_pass_validate() {
+        use super::super::schema::ContainerConfig;
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            extra_apt: vec!["mdbook".into(), "g++-12".into(), "python3.11".into()],
+            ..ContainerConfig::default()
+        });
+        validate(&m).expect("realistic apt package names must validate");
     }
 }
