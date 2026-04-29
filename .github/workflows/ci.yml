@@ -10,14 +10,20 @@
 #
 #   test ──────────────────────────────────────────────── always
 #   check-paths ────────────────────────────────────────── always
-#   build (matrix x4) ── needs [test, check-paths] ─────── code changed + test passed
+#   build (matrix x4) ── needs [test, check-paths] ─────── push always; PRs only when code changed
 #   merge (matrix x2) ── needs [build] ─────────────────── push/tag only
 #   smoke-test ───────── needs [merge] ──────────────────── push/tag only
 #
 # Triggers:
-#   push to main   -> test + (if code changed) build -> merge -> smoke-test
-#   push tag v*    -> test + build -> merge -> smoke-test
-#   pull_request   -> test + (if code changed AND test passed) build
+#   push to main   -> test + build -> merge -> smoke-test (always; rolls :main + :latest + :main-<sha>)
+#   push tag v*    -> test + build -> merge -> smoke-test (release tags: :0.9.1, :0.9, :0)
+#   pull_request   -> test + (if code changed AND test passed) build (no push)
+#
+# Note on docs-only commits: pushes to main always rebuild the image so
+# the rolling :main tag stays current with HEAD. README/CHANGELOG-only
+# *PRs* still skip CI via the pull_request paths-ignore, but the squash
+# commit on main rebuilds the image regardless. See #258 for the
+# motivation (avoid stealth-staleness in published images).
 
 name: CI
 
@@ -25,9 +31,6 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    paths-ignore:
-      - 'CHANGELOG.md'
-      - 'README.md'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -267,14 +270,22 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
+          # Tag scheme (#258):
+          #   release tag push v0.9.1   → :0.9.1, :0.9, :0
+          #   main push                 → :main, :main-<short-sha>, :latest
+          #   PR (no push happens here, but if it did) → :pr-<n>
+          # `:latest` strictly tracks main HEAD; release-tag pushes do not
+          # set it, so operators wanting fixes-since-last-release use :main
+          # or :latest. Operators wanting a fixed snapshot pin :0.9.1 or
+          # :main-<sha>.
           tags: |
             type=ref,event=branch
             type=ref,event=pr
+            type=sha,prefix=main-,format=short,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
