@@ -886,6 +886,17 @@ pub async fn reconcile_terminated_sublead(
         // Already reconciled or never existed.
         return Ok(());
     };
+    // Keep the layer reachable for the rest of the run so `ListWorkers`
+    // can still surface the sub-tree's actors after the sub-lead exits.
+    // Pre-fix the layer was dropped here as soon as `subleads.remove`
+    // returned and the binding fell out of scope, so a TUI/console
+    // querying mid-run after the sub-tree finished saw an incomplete
+    // worker tree.
+    state
+        .terminated_sublead_layers
+        .write()
+        .await
+        .push(sub_layer.clone());
 
     let actual_spend = *sub_layer.spent_usd.lock().await;
     let original_reservation_usd = sub_layer.original_reservation_usd.unwrap_or(0.0);
