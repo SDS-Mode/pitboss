@@ -476,7 +476,10 @@ async fn auto_reject_policy_responds_without_tui() {
         .await
         .unwrap();
     assert!(!resp.approved);
-    assert_eq!(resp.comment.as_deref(), Some("no operator available"));
+    assert_eq!(
+        resp.comment.as_deref(),
+        Some("auto-rejected by default_approval_policy")
+    );
 }
 
 #[tokio::test]

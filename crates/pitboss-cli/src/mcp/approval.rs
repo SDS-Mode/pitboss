@@ -1,6 +1,20 @@
 //! Approval bridge: wires an in-dispatcher MCP `request_approval` call to
-//! either (a) a connected TUI via the control socket, or (b) an auto-resolve
-//! per `ApprovalPolicy` when no TUI is attached.
+//! one of three resolution paths, in order:
+//!
+//!   1. **Operator-declared `[[approval_policy]]` rule match** —
+//!      handled by callers (`handle_request_approval` etc.) before
+//!      they reach the bridge; rules with `auto_approve` / `auto_reject`
+//!      / `block` actions short-circuit unconditionally.
+//!   2. **Manifest `default_approval_policy`** (`ApprovalPolicy`) —
+//!      `AutoApprove` and `AutoReject` short-circuit unconditionally
+//!      from inside `request()` regardless of whether a TUI/web
+//!      console is attached. Pre-v0.9.2 these only fired when no TUI
+//!      was connected; a connected console silently bypassed the
+//!      policy. The current behavior matches what the field name
+//!      implies — a *policy*, not a headless fallback.
+//!   3. **`Block` policy** (the default) — if a TUI is attached the
+//!      request is routed to it via the control socket; if no TUI
+//!      is attached the request is queued for the next connect.
 
 #![allow(dead_code)]
 
@@ -133,6 +147,58 @@ impl ApprovalBridge {
 
         let (tx, rx) = oneshot::channel::<ApprovalResponse>();
 
+        // Unconditional policy short-circuit. Pre-fix `default_approval_policy`
+        // only applied when no TUI was attached: a connected web console or
+        // pitboss-tui silently bypassed `auto_approve` / `auto_reject` and
+        // routed every approval to the operator. That made the field mean
+        // two different things depending on whether someone happened to be
+        // watching. Now `auto_approve` / `auto_reject` are always honored;
+        // `block` retains the legacy "ask operator if attached, else queue"
+        // path. Operators who want manual review with a fallback should use
+        // `[[approval_policy]]` rules (which already short-circuit) and
+        // leave `default_approval_policy` at its default of `block`.
+        match self.state.root.approval_policy {
+            ApprovalPolicy::AutoApprove => {
+                let _ = tx.send(ApprovalResponse {
+                    approved: true,
+                    comment: None,
+                    edited_summary: None,
+                    reason: None,
+                    from_ttl: false,
+                });
+                self.state
+                    .root
+                    .worker_counters
+                    .write()
+                    .await
+                    .entry(task_id_for_counter.clone())
+                    .or_default()
+                    .approvals_requested += 1;
+                return rx.await.map_err(|_| ApprovalError::Cancelled);
+            }
+            ApprovalPolicy::AutoReject => {
+                let _ = tx.send(ApprovalResponse {
+                    approved: false,
+                    comment: Some("auto-rejected by default_approval_policy".into()),
+                    edited_summary: None,
+                    reason: None,
+                    from_ttl: false,
+                });
+                self.state
+                    .root
+                    .worker_counters
+                    .write()
+                    .await
+                    .entry(task_id_for_counter.clone())
+                    .or_default()
+                    .approvals_requested += 1;
+                return rx.await.map_err(|_| ApprovalError::Cancelled);
+            }
+            ApprovalPolicy::Block => {
+                // Fall through to TUI/queue routing below.
+            }
+        }
+
         // Hold the control_writer lock across the `bridge.insert` and the
         // `w.send(ev)`. A previous version released the writer lock between
         // the "is it present?" check and the insert, so a TUI that
@@ -185,104 +251,60 @@ impl ApprovalBridge {
                     .await
                     .remove(&request_id);
                 drop(writer_guard);
-                // Apply the same fallback that fires on bridge timeout
-                // or no-TUI-attached. We swap to the no-TUI handling
-                // path by returning early through the policy block
-                // below — but `tx` was moved into the bridge entry,
-                // so we need to fabricate a synchronous reply here.
-                return Ok(match self.state.root.approval_policy {
-                    ApprovalPolicy::AutoApprove => ApprovalResponse {
-                        approved: true,
-                        comment: None,
-                        edited_summary: None,
-                        reason: None,
-                        from_ttl: false,
-                    },
-                    ApprovalPolicy::AutoReject => ApprovalResponse {
-                        approved: false,
-                        comment: None,
-                        edited_summary: None,
-                        reason: Some("control writer queue full; auto-rejected".into()),
-                        from_ttl: false,
-                    },
-                    ApprovalPolicy::Block => ApprovalResponse {
-                        // Match block-policy semantics: with no TUI to
-                        // make a decision and the queue full, the only
-                        // safe outcome is rejection. Pre-fix the caller
-                        // would block until bridge timeout for the same
-                        // result.
-                        approved: false,
-                        comment: None,
-                        edited_summary: None,
-                        reason: Some(
-                            "control writer queue full and approval_policy=block — no TUI \
-                             can decide; auto-rejected"
-                                .into(),
-                        ),
-                        from_ttl: false,
-                    },
+                // Block policy + queue full + no TUI can decide → safe
+                // rejection. (AutoApprove / AutoReject already
+                // short-circuited at the top of `request`, so policy is
+                // guaranteed to be Block here.) Pre-fix the caller would
+                // block until bridge timeout for the same outcome.
+                return Ok(ApprovalResponse {
+                    approved: false,
+                    comment: None,
+                    edited_summary: None,
+                    reason: Some(
+                        "control writer queue full and approval_policy=block — no TUI \
+                         can decide; auto-rejected"
+                            .into(),
+                    ),
+                    from_ttl: false,
                 });
             }
             drop(writer_guard);
         } else {
             drop(writer_guard);
-            // No TUI attached: policy decides.
-            match self.state.root.approval_policy {
-                ApprovalPolicy::AutoApprove => {
-                    let _ = tx.send(ApprovalResponse {
-                        approved: true,
-                        comment: None,
-                        edited_summary: None,
-                        reason: None,
-                        from_ttl: false,
-                    });
-                }
-                ApprovalPolicy::AutoReject => {
-                    let _ = tx.send(ApprovalResponse {
-                        approved: false,
-                        comment: Some("no operator available".into()),
-                        edited_summary: None,
-                        reason: None,
-                        from_ttl: false,
-                    });
-                }
-                ApprovalPolicy::Block => {
-                    // Queue; drain when a TUI connects (see control/server.rs).
-                    // Pass ttl_secs + fallback from the request so the TTL watcher
-                    // can expire and fire a from_ttl=true response before the
-                    // bridge timeout fires (which would return a generic error).
-                    self.state
-                        .root
-                        .approval_queue
-                        .lock()
-                        .await
-                        .push_back(QueuedApproval {
-                            request_id: request_id.clone(),
-                            task_id: task_id.clone(),
-                            summary: summary.clone(),
-                            plan,
-                            kind,
-                            responder: tx,
-                            ttl_secs,
-                            fallback,
-                            created_at: chrono::Utc::now(),
-                        });
+            // No TUI attached and policy is `Block`: queue the request and
+            // drain when a TUI connects (see control/server.rs). AutoApprove
+            // / AutoReject already short-circuited above, so this branch is
+            // reachable only under `block`.
+            self.state
+                .root
+                .approval_queue
+                .lock()
+                .await
+                .push_back(QueuedApproval {
+                    request_id: request_id.clone(),
+                    task_id: task_id.clone(),
+                    summary: summary.clone(),
+                    plan,
+                    kind,
+                    responder: tx,
+                    ttl_secs,
+                    fallback,
+                    created_at: chrono::Utc::now(),
+                });
 
-                    // Fire approval_pending notification
-                    if let Some(router) = self.state.root.notification_router.clone() {
-                        let envelope = crate::notify::NotificationEnvelope::new(
-                            &self.state.root.run_id.to_string(),
-                            crate::notify::Severity::Warning,
-                            crate::notify::PitbossEvent::ApprovalPending {
-                                request_id: request_id.clone(),
-                                task_id: task_id.clone(),
-                                summary: summary.clone(),
-                            },
-                            chrono::Utc::now(),
-                        );
-                        let _ = router.dispatch(envelope).await;
-                    }
-                }
+            // Fire approval_pending notification.
+            if let Some(router) = self.state.root.notification_router.clone() {
+                let envelope = crate::notify::NotificationEnvelope::new(
+                    &self.state.root.run_id.to_string(),
+                    crate::notify::Severity::Warning,
+                    crate::notify::PitbossEvent::ApprovalPending {
+                        request_id: request_id.clone(),
+                        task_id: task_id.clone(),
+                        summary: summary.clone(),
+                    },
+                    chrono::Utc::now(),
+                );
+                let _ = router.dispatch(envelope).await;
             }
         }
 
@@ -474,7 +496,90 @@ mod tests {
             .await
             .unwrap();
         assert!(!resp.approved);
-        assert_eq!(resp.comment.as_deref(), Some("no operator available"));
+        assert_eq!(
+            resp.comment.as_deref(),
+            Some("auto-rejected by default_approval_policy")
+        );
+    }
+
+    /// Regression for the v0.9.2 semantic change: `auto_approve` MUST
+    /// short-circuit even when a TUI/web console is attached. Pre-fix
+    /// the bridge routed every approval to the operator whenever the
+    /// control writer was connected, silently bypassing the policy.
+    #[tokio::test]
+    async fn auto_approve_short_circuits_with_tui_attached() {
+        use crate::control::protocol::ControlEvent;
+        use tokio::sync::mpsc;
+
+        let state = mk_state(ApprovalPolicy::AutoApprove).await;
+        // Simulate a connected TUI by registering a control writer.
+        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: Uuid::now_v7(),
+            sender: tx,
+        });
+
+        let bridge = ApprovalBridge::new(state);
+        let resp = bridge
+            .request(
+                "lead".into(),
+                "spawn 2".into(),
+                None,
+                crate::control::protocol::ApprovalKind::Action,
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.approved,
+            "auto_approve must short-circuit unconditionally"
+        );
+        // The TUI must NOT have received an ApprovalRequest event — that
+        // was the pre-fix bug, where a connected console silently overrode
+        // the policy.
+        assert!(
+            rx.try_recv().is_err(),
+            "auto_approve must not route the request to the TUI"
+        );
+    }
+
+    /// Regression for the v0.9.2 semantic change: `auto_reject` MUST
+    /// short-circuit even when a TUI/web console is attached.
+    #[tokio::test]
+    async fn auto_reject_short_circuits_with_tui_attached() {
+        use crate::control::protocol::ControlEvent;
+        use tokio::sync::mpsc;
+
+        let state = mk_state(ApprovalPolicy::AutoReject).await;
+        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: Uuid::now_v7(),
+            sender: tx,
+        });
+
+        let bridge = ApprovalBridge::new(state);
+        let resp = bridge
+            .request(
+                "lead".into(),
+                "spawn 2".into(),
+                None,
+                crate::control::protocol::ApprovalKind::Action,
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !resp.approved,
+            "auto_reject must short-circuit unconditionally"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "auto_reject must not route the request to the TUI"
+        );
     }
 
     #[tokio::test]
