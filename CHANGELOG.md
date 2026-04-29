@@ -7,6 +7,29 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP policy: `cost_over` rules now fire for `propose_plan` and
+  `permission_prompt`** (#151 M5). Pre-fix both call sites
+  hard-coded `cost = None` when invoking the policy matcher, so
+  any operator-declared `cost_over = X → action` rule silently
+  never matched for plan-level approvals or per-tool permission
+  gates — only `request_approval` (which already had a
+  `cost_estimate` field) could trigger them. Now: `ProposePlanArgs`
+  and `PermissionPromptArgs` each carry an optional
+  `cost_estimate: Option<f64>` field that the gating side can
+  populate (e.g. plan total or tool-input-derived heuristic), and
+  both `handle_propose_plan` and `handle_permission_prompt` thread
+  it into the matcher. Callers that omit it fall through to `None`
+  matching exactly as before — backward-compatible by default.
+  Updated the policy.rs comment to reflect the new coverage and
+  retain the future-work note (server-side cost estimation that
+  emits `ApprovalCategory::Cost` approvals so rules fire without
+  caller hints). Three new tests:
+  `propose_plan_cost_over_rule_auto_rejects_when_estimate_exceeds`,
+  `propose_plan_cost_over_rule_does_not_fire_below_threshold`,
+  `permission_prompt_cost_over_rule_denies_when_estimate_exceeds`.
+
 ### Added
 
 - **`McpServer::shutdown` — async, deterministic teardown** (#151 M2).
