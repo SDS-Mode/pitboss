@@ -2,6 +2,7 @@ pub mod actor;
 pub mod background;
 pub mod container;
 pub mod container_build;
+pub mod container_prune;
 pub mod depth;
 pub mod entrypoint;
 pub mod events;
