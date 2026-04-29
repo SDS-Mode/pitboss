@@ -7,6 +7,52 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hierarchical run finalize: `summary.json` now includes every actor
+  across all layers** (#221). Pre-fix, `dispatch/hierarchical.rs`'s
+  finalize phase built `summary.json`'s `tasks` array by walking
+  `state.root.workers` only — sub-tree workers live in their sub-lead's
+  `LayerState.workers`, not root, so a 5-actor smoke run (lead + 2
+  sub-leads + 2 workers) produced `tasks_total: 1` and a `tasks` array
+  with only the lead. Every operational console surface — runs index,
+  run detail page, insights/runs digest, insights dashboard rollups —
+  saw "1 task, 0 failed" for a hierarchical run that had 5 actors. Same
+  bug class as #146 (mutating handlers had to scan all layers via
+  `find_worker_across_layers` / `layer_for_worker`; finalize was
+  missed).
+
+  **Fix:** read `summary.jsonl` as the source of truth for the actor
+  list. `summary.jsonl` is appended to incrementally by every actor at
+  exit time — the lead's record is appended at line ~400 of finalize;
+  every sub-lead's record is appended by `dispatch/sublead.rs` at
+  sub-lead exit; every Done worker's record is appended by
+  `mcp/tools/spawn.rs::run_worker`. Reading the JSONL captures every
+  layer for free. The synthesise-Cancelled-for-in-flight-workers loop
+  now walks root + every sub-lead's `LayerState.workers` (was: root
+  only) and skips any task_id already present in the JSONL to avoid
+  clobbering a Done record that landed in a tight race window.
+
+  Extracted `read_summary_jsonl_records` as a private helper, pinned
+  by 4 new regression tests:
+  - `read_summary_jsonl_aggregates_lead_subleads_and_workers` —
+    asserts a 5-line JSONL parses into 5 `TaskRecord`s in append
+    order, with all task_ids present in the returned id-set.
+  - `read_summary_jsonl_skips_unparseable_lines` — mid-write
+    truncation lines and empty lines don't break aggregation.
+  - `read_summary_jsonl_empty_file_returns_empty` — finalize on an
+    empty JSONL is non-fatal.
+  - `read_summary_jsonl_missing_file_errors` — finalize callers
+    always have the file because the lead's record was appended a
+    few hundred lines above; a missing file is a real error.
+
+  Cascade impact (also fixed by this PR):
+  - Run detail page now shows full hierarchy.
+  - Insights dashboard `tasks_total` / `tasks_failed` rollup is
+    correct (#226 closes transitively).
+  - The new `GET /api/runs/{id}/tasks/{task_id}` endpoint (#225)
+    has accurate data to read from now.
+
 ### Changed (breaking, pre-v1)
 
 - **`default_approval_policy = "auto_approve"` / `"auto_reject"` is

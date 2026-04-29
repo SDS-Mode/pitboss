@@ -17,6 +17,59 @@ use crate::dispatch::state::DispatchState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::{socket_path_for_run, McpServer};
 
+/// Read `summary.jsonl` and return `(records, ids)` where `records` is the
+/// list of every successfully-parsed [`TaskRecord`] in append order and
+/// `ids` is the set of task_ids present.
+///
+/// `summary.jsonl` is the source of truth for the run's actor lifecycle:
+/// the lead, every sub-lead, and every Done worker (root or sub-tree)
+/// have appended a `TaskRecord` here by the time finalize runs. The
+/// finalize phase reads this file rather than walking
+/// `state.root.workers` (which only sees the root layer — pre-#221 bug)
+/// to assemble the canonical `summary.json` aggregate.
+///
+/// Unparseable lines are logged and skipped (mid-write truncation in
+/// in-progress reads, or future format skew). Returns an io error if
+/// the file is missing — finalize callers always have the file because
+/// the lead's record was appended a few hundred lines above.
+async fn read_summary_jsonl_records(
+    path: &std::path::Path,
+) -> Result<(
+    Vec<pitboss_core::store::TaskRecord>,
+    std::collections::HashSet<String>,
+)> {
+    let bytes = tokio::fs::read(path).await.with_context(|| {
+        format!(
+            "read summary.jsonl for finalize aggregation: {}",
+            path.display()
+        )
+    })?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| anyhow::anyhow!("summary.jsonl is not utf-8: {e}"))?;
+    let mut records: Vec<pitboss_core::store::TaskRecord> = Vec::new();
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<pitboss_core::store::TaskRecord>(trimmed) {
+            Ok(rec) => {
+                ids.insert(rec.task_id.clone());
+                records.push(rec);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    line = trimmed,
+                    "summary.jsonl: skipping unparseable line in finalize aggregation"
+                );
+            }
+        }
+    }
+    Ok((records, ids))
+}
+
 // `sublead_sessions`: prior sub-lead session IDs from `subleads.jsonl`,
 // read by `build_resume_hierarchical`. Empty for fresh dispatches. When
 // non-empty, seeded into the root shared store at `/resume/subleads` so the
@@ -507,59 +560,108 @@ pub async fn run_hierarchical(
     let drain_deadline = pitboss_core::session::TERMINATE_GRACE + std::time::Duration::from_secs(2);
     await_workers_drained(&state, in_flight, &mut done_rx, drain_deadline).await;
 
-    let worker_records: Vec<pitboss_core::store::TaskRecord> = {
+    // Aggregate the run's TaskRecords from `summary.jsonl`, which is the
+    // source of truth: it carries the lead (appended above), every
+    // sub-lead's `TaskRecord` (appended at sub-lead exit by
+    // `dispatch::sublead`), and every Done worker's record (appended at
+    // worker exit by `mcp::tools::spawn::run_worker`). Pre-#221, finalize
+    // built `summary.json` from `state.root.workers` only — sub-tree
+    // workers live in their sub-lead's `LayerState`, not root, so a
+    // 5-actor smoke run produced `tasks_total: 1` in the operational
+    // console. Reading the JSONL captures every layer for free.
+    let (mut all_records, mut existing_ids) =
+        read_summary_jsonl_records(&run_subdir.join("summary.jsonl")).await?;
+
+    // Synthesise Cancelled `TaskRecord`s for every still-in-flight worker
+    // across **every layer** (root + each sub-tree). A worker that
+    // hasn't appended its own Done record by drain-deadline time gets a
+    // synthetic Cancelled so the aggregate has an entry for every actor
+    // we know spawned. Filter on `existing_ids` so we don't clobber a
+    // worker that DID complete cleanly between the drain wait and our
+    // re-read (the JSONL append in `run_worker` happens before the
+    // workers-map transitions to `Done`, so a small race window exists
+    // where the file has the real Done record but our in-memory scan
+    // would still see the worker as Running).
+    let now = Utc::now();
+    let mut cancelled_records: Vec<pitboss_core::store::TaskRecord> = Vec::new();
+    let make_cancelled =
+        |id: &str, parent_id: &str, model: Option<String>| pitboss_core::store::TaskRecord {
+            task_id: id.to_string(),
+            status: pitboss_core::store::TaskStatus::Cancelled,
+            exit_code: None,
+            started_at: now,
+            ended_at: now,
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
+            token_usage: Default::default(),
+            claude_session_id: None,
+            final_message_preview: Some("cancelled when lead exited".into()),
+            final_message: None,
+            parent_task_id: Some(parent_id.to_string()),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model,
+            failure_reason: None,
+        };
+    {
         let workers = state.root.workers.read().await;
         let worker_models = state.root.worker_models.read().await;
-        workers
-            .iter()
-            .filter(|(id, _)| *id != &lead.id) // don't double-count the lead
-            .map(|(id, w)| match w {
-                crate::dispatch::state::WorkerState::Done(rec) => rec.clone(),
-                crate::dispatch::state::WorkerState::Pending
-                | crate::dispatch::state::WorkerState::Running { .. }
-                | crate::dispatch::state::WorkerState::Paused { .. }
-                | crate::dispatch::state::WorkerState::Frozen { .. } => {
-                    let now = Utc::now();
-                    pitboss_core::store::TaskRecord {
-                        task_id: id.clone(),
-                        status: pitboss_core::store::TaskStatus::Cancelled,
-                        exit_code: None,
-                        started_at: now,
-                        ended_at: now,
-                        duration_ms: 0,
-                        worktree_path: None,
-                        log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
-                        token_usage: Default::default(),
-                        claude_session_id: None,
-                        final_message_preview: Some("cancelled when lead exited".into()),
-                        final_message: None,
-                        parent_task_id: Some(lead.id.clone()),
-                        pause_count: 0,
-                        reprompt_count: 0,
-                        approvals_requested: 0,
-                        approvals_approved: 0,
-                        approvals_rejected: 0,
-                        model: worker_models.get(id).cloned(),
-                        failure_reason: None,
-                    }
+        for (id, w) in workers.iter() {
+            if id == &lead.id || existing_ids.contains(id) {
+                continue;
+            }
+            if !matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
+                cancelled_records.push(make_cancelled(
+                    id,
+                    &lead.id,
+                    worker_models.get(id).cloned(),
+                ));
+            }
+        }
+    }
+    {
+        let subleads = state.subleads.read().await;
+        for (sublead_id, sub) in subleads.iter() {
+            let workers = sub.workers.read().await;
+            let worker_models = sub.worker_models.read().await;
+            for (id, w) in workers.iter() {
+                // Sub-lead layers register the sub-lead itself as a
+                // "worker" entry (the claude subprocess). Filter by the
+                // layer's lead_id so we don't double-emit a Cancelled
+                // record for a sub-lead — its own TaskRecord was
+                // already appended at sub-lead exit time.
+                if id == &sub.lead_id || existing_ids.contains(id) {
+                    continue;
                 }
-            })
-            .collect()
-    };
-
-    for rec in &worker_records {
-        store.append_record(run_id, rec).await?;
+                if !matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
+                    cancelled_records.push(make_cancelled(
+                        id,
+                        sublead_id,
+                        worker_models.get(id).cloned(),
+                    ));
+                }
+            }
+        }
     }
 
-    // Assemble final summary with lead + workers.
-    let mut all_records = vec![lead_record.clone()];
-    all_records.extend(worker_records);
+    for rec in &cancelled_records {
+        store.append_record(run_id, rec).await?;
+        existing_ids.insert(rec.task_id.clone());
+        all_records.push(rec.clone());
+    }
 
     // Workers cancelled because the lead finished cleanly are not failures.
     let lead_succeeded = matches!(lead_record.status, pitboss_core::store::TaskStatus::Success);
     let tasks_failed = all_records
         .iter()
         .filter(|r| {
+            if r.task_id == lead.id {
+                return !matches!(r.status, pitboss_core::store::TaskStatus::Success);
+            }
             if lead_succeeded && matches!(r.status, pitboss_core::store::TaskStatus::Cancelled) {
                 false
             } else {
@@ -1129,6 +1231,133 @@ mod await_drained_tests {
         assert!(
             in_flight.contains("ghost"),
             "id not in any layer should remain (caller's snapshot)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod summary_jsonl_aggregation_tests {
+    use super::*;
+    use pitboss_core::store::{TaskRecord, TaskStatus};
+    use tempfile::TempDir;
+
+    fn rec(task_id: &str, parent: Option<&str>, status: TaskStatus) -> TaskRecord {
+        TaskRecord {
+            task_id: task_id.into(),
+            status,
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 1,
+            worktree_path: None,
+            log_path: PathBuf::from("/dev/null"),
+            token_usage: Default::default(),
+            claude_session_id: None,
+            final_message_preview: None,
+            final_message: None,
+            parent_task_id: parent.map(String::from),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+            failure_reason: None,
+        }
+    }
+
+    /// #221 regression: a hierarchical run's `summary.jsonl` carries the
+    /// lead, every sub-lead, and every Done worker (root or sub-tree)
+    /// across all layers. `read_summary_jsonl_records` must aggregate
+    /// every parseable line in append order so the finalize phase can
+    /// build a `summary.json` with the full hierarchy.
+    #[tokio::test]
+    async fn read_summary_jsonl_aggregates_lead_subleads_and_workers() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("summary.jsonl");
+        // Append order mirrors what production writes:
+        // worker exits → sub-lead exits → lead exits.
+        let lines = [
+            rec("worker-1", Some("sublead-A"), TaskStatus::Success),
+            rec("sublead-A", Some("smoke-lead"), TaskStatus::Success),
+            rec("worker-2", Some("sublead-B"), TaskStatus::Success),
+            rec("sublead-B", Some("smoke-lead"), TaskStatus::Success),
+            rec("smoke-lead", None, TaskStatus::Success),
+        ];
+        let payload: String = lines
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
+        tokio::fs::write(&path, payload).await.unwrap();
+
+        let (records, ids) = read_summary_jsonl_records(&path).await.unwrap();
+        assert_eq!(records.len(), 5, "all 5 actors present");
+        assert_eq!(ids.len(), 5);
+        for actor in [
+            "smoke-lead",
+            "sublead-A",
+            "sublead-B",
+            "worker-1",
+            "worker-2",
+        ] {
+            assert!(ids.contains(actor), "missing actor {actor}");
+        }
+        // First-seen order is preserved (matters when callers want a
+        // chronological / append-order rendering).
+        assert_eq!(records[0].task_id, "worker-1");
+        assert_eq!(records[4].task_id, "smoke-lead");
+    }
+
+    /// Unparseable lines (mid-write truncation, future format skew)
+    /// are skipped; the surrounding records still land.
+    #[tokio::test]
+    async fn read_summary_jsonl_skips_unparseable_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("summary.jsonl");
+        let mut payload = String::new();
+        payload.push_str(&format!(
+            "{}\n",
+            serde_json::to_string(&rec("a", None, TaskStatus::Success)).unwrap()
+        ));
+        payload.push_str("{\"task_id\":\"truncated\",\"sta\n"); // mid-write
+        payload.push('\n'); // empty line
+        payload.push_str("not even json\n");
+        payload.push_str(&format!(
+            "{}\n",
+            serde_json::to_string(&rec("b", None, TaskStatus::Failed)).unwrap()
+        ));
+        tokio::fs::write(&path, payload).await.unwrap();
+
+        let (records, ids) = read_summary_jsonl_records(&path).await.unwrap();
+        assert_eq!(records.len(), 2, "two valid records survive");
+        assert_eq!(records[0].task_id, "a");
+        assert_eq!(records[1].task_id, "b");
+        assert_eq!(ids.len(), 2);
+    }
+
+    /// Empty file (race: read before any record was appended) returns
+    /// an empty aggregate without erroring.
+    #[tokio::test]
+    async fn read_summary_jsonl_empty_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("summary.jsonl");
+        tokio::fs::write(&path, "").await.unwrap();
+        let (records, ids) = read_summary_jsonl_records(&path).await.unwrap();
+        assert!(records.is_empty());
+        assert!(ids.is_empty());
+    }
+
+    /// Missing file is an error — finalize callers always have the
+    /// file because the lead's record was appended a few hundred
+    /// lines above the read site.
+    #[tokio::test]
+    async fn read_summary_jsonl_missing_file_errors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nope.jsonl");
+        let err = read_summary_jsonl_records(&path).await.unwrap_err();
+        assert!(
+            err.to_string().contains("read summary.jsonl"),
+            "context attached: {err}"
         );
     }
 }
