@@ -126,6 +126,22 @@ abstract is the spec.
   shipped) — `Stale` is what `prune` matches on by default.
   **Status:** scoped. **Tracking:** none yet.
 
+- **Warn when `extra_apt`-only manifest's derived image is missing.**
+  Today `container-dispatch` silently falls through to the Phase 1
+  apt-at-spin-up path when the derived tag was deleted. Emit a single
+  stderr warning so the operator knows the cached fast-path was
+  bypassed and can re-run `container-build`.
+  **Status:** scoped. **Tracking:** #266.
+
+- **`pitboss container-prune` for stale derived images.** Clean up
+  `pitboss-derived-<sha>:local` tags that no in-use manifest still
+  references. Mirrors the existing `pitboss prune` shape for run
+  dirs; helps active operators iterating on `[[container.copy]]`
+  contents avoid linear image-list growth.
+  **Status:** scoped — open question on reference-set policy
+  (manifest list vs. glob vs. keep-recent-N).
+  **Tracking:** #267.
+
 - **systemd unit for long-lived dispatcher mode.** Run `pitboss
   dispatch` as a service rather than a one-shot, with restart
   semantics and journaled logs. **Status:** scoped. **Tracking:**
