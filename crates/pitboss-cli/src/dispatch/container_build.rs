@@ -281,6 +281,43 @@ fn expand_tilde(p: &Path) -> PathBuf {
     }
 }
 
+/// Decide whether to surface a "derived image not built; using
+/// slow-path apt install" warning to the operator.
+///
+/// Returns `Some(message)` when the operator declared `extra_apt`
+/// inputs that warrant a derived image (so a `container-build` would
+/// have helped) but no such image exists locally — `container-dispatch`
+/// will fall through to the Phase 1 apt-at-spin-up path. The
+/// `[[container.copy]]` case is excluded because the dispatcher already
+/// hard-errors there (the COPY contents would be missing — see
+/// `dispatch/container.rs:run_container_dispatch`).
+///
+/// Returns `None` when no warning is needed: the derived image is
+/// already in use, no derived inputs were declared, or the copy-set
+/// hard-error path will fire instead.
+pub(crate) fn derived_fallback_warning(
+    container: &ContainerConfig,
+    derived_tag: Option<&str>,
+    use_derived: bool,
+    manifest_path: &Path,
+) -> Option<String> {
+    if use_derived {
+        return None;
+    }
+    if container.extra_apt.is_empty() {
+        return None;
+    }
+    if !container.copy.is_empty() {
+        return None;
+    }
+    let tag = derived_tag?;
+    Some(format!(
+        "warning: derived image {tag} not found locally; falling back to apt-at-spin-up.\n\
+         Re-run `pitboss container-build {}` to restore the cached fast-path.",
+        manifest_path.display()
+    ))
+}
+
 /// Check whether `tag` exists in the runtime's local image store.
 /// Returns Ok(true) when the image is present, Ok(false) when absent,
 /// and Err only on runtime invocation failures.
@@ -518,6 +555,89 @@ mod tests {
             df.trim_end().ends_with("USER pitboss"),
             "must drop privs at end: {df}"
         );
+    }
+
+    #[test]
+    fn fallback_warning_emits_when_extra_apt_set_and_image_missing() {
+        let c = ContainerConfig {
+            extra_apt: vec!["mdbook".into()],
+            ..cfg()
+        };
+        let manifest = PathBuf::from("/tmp/manifest.toml");
+        let out =
+            derived_fallback_warning(&c, Some("pitboss-derived-abc123:local"), false, &manifest);
+        let msg = out.expect("warning should fire");
+        assert!(
+            msg.contains("pitboss-derived-abc123:local"),
+            "missing tag: {msg}"
+        );
+        assert!(
+            msg.contains("apt-at-spin-up"),
+            "missing fallback hint: {msg}"
+        );
+        assert!(
+            msg.contains("pitboss container-build /tmp/manifest.toml"),
+            "missing rebuild hint with manifest path: {msg}"
+        );
+    }
+
+    #[test]
+    fn fallback_warning_suppressed_when_derived_image_in_use() {
+        let c = ContainerConfig {
+            extra_apt: vec!["mdbook".into()],
+            ..cfg()
+        };
+        let out = derived_fallback_warning(
+            &c,
+            Some("pitboss-derived-abc123:local"),
+            true, // built image is in use; no fallback in effect
+            &PathBuf::from("/tmp/manifest.toml"),
+        );
+        assert!(out.is_none(), "no warning when derived image is used");
+    }
+
+    #[test]
+    fn fallback_warning_suppressed_when_no_extra_apt() {
+        // Operator declared no derived inputs — there's no slow-path
+        // they're missing out on. Stay quiet.
+        let c = ContainerConfig::default();
+        let out = derived_fallback_warning(&c, None, false, &PathBuf::from("/tmp/manifest.toml"));
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn fallback_warning_suppressed_when_copy_set() {
+        // The dispatcher already hard-errors when copy is set without
+        // a built image — we'd be redundantly warning about a path
+        // that's about to bail.
+        let c = ContainerConfig {
+            extra_apt: vec!["mdbook".into()],
+            copy: vec![CopySpec {
+                host: PathBuf::from("/host/x"),
+                container: PathBuf::from("/opt/x"),
+            }],
+            ..cfg()
+        };
+        let out = derived_fallback_warning(
+            &c,
+            Some("pitboss-derived-abc123:local"),
+            false,
+            &PathBuf::from("/tmp/manifest.toml"),
+        );
+        assert!(out.is_none(), "copy-set is the hard-error path, not warn");
+    }
+
+    #[test]
+    fn fallback_warning_suppressed_when_derived_tag_is_none() {
+        // Defensive: if no tag was computed (shouldn't happen given
+        // extra_apt is non-empty, but the type permits it), stay quiet
+        // rather than emit an empty-tag warning.
+        let c = ContainerConfig {
+            extra_apt: vec!["mdbook".into()],
+            ..cfg()
+        };
+        let out = derived_fallback_warning(&c, None, false, &PathBuf::from("/tmp/manifest.toml"));
+        assert!(out.is_none());
     }
 
     #[test]
