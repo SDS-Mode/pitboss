@@ -20,6 +20,7 @@
     ApiError
   } from '$lib/api';
   import { formatUnixSeconds, relativeFromUnix } from '$lib/utils';
+  import { costUsd, fmtCost } from '$lib/prices';
   import StatusBadge from '$lib/components/status-badge.svelte';
   import ApprovalModal, { type ApprovalRequest } from '$lib/components/approval-modal.svelte';
   import PolicyEditor from '$lib/components/policy-editor.svelte';
@@ -95,6 +96,27 @@
       sum += (usage.input ?? 0) + (usage.output ?? 0);
     }
     return sum;
+  });
+  // Estimated USD cost summed across every task we have a model + usage
+  // for. Computed locally via $lib/prices (mirrors pitboss_core::prices)
+  // since neither summary.json nor TaskRecord carries a per-task
+  // cost_usd field. Returns null when at least one task contributed but
+  // the model wasn't in the price table — the operator should know we
+  // couldn't price it rather than seeing a partial total. Returns 0
+  // when no tasks have data yet (fresh run).
+  const totalCost = $derived.by<number | null>(() => {
+    let sum = 0;
+    let priced = false;
+    for (const t of tasksToRender) {
+      const usage = t.token_usage as Record<string, number> | undefined;
+      const model = t.model as string | undefined;
+      if (!usage || !model) continue;
+      const c = costUsd(model, usage);
+      if (c === null) return null; // unknown model — refuse to fake a partial total
+      sum += c;
+      priced = true;
+    }
+    return priced ? sum : 0;
   });
   // Run wall-clock duration. Pre-fix the fourth card was "Total cost",
   // which read a `cost_usd` field that has never existed on TaskRecord
@@ -635,6 +657,9 @@
         {#if summary?.ended_at}
           · Ended {summary.ended_at}
         {/if}
+        {#if runtimeMs !== null}
+          · Runtime <span class="tabular-nums">{fmtDuration(runtimeMs)}</span>
+        {/if}
       </p>
     </div>
     <div class="flex items-center gap-2">
@@ -666,8 +691,8 @@
     </Card>
     <Card>
       <CardHeader class="pb-2">
-        <CardDescription>Runtime</CardDescription>
-        <CardTitle class="text-2xl tabular-nums">{fmtDuration(runtimeMs ?? undefined)}</CardTitle>
+        <CardDescription>Cost (est.)</CardDescription>
+        <CardTitle class="text-2xl tabular-nums">{fmtCost(totalCost)}</CardTitle>
       </CardHeader>
     </Card>
     <Card>
@@ -916,6 +941,7 @@
                 <TableHead class="w-[10ch]">Status</TableHead>
                 <TableHead>Model</TableHead>
                 <TableHead class="w-[12ch] text-right">Tokens</TableHead>
+                <TableHead class="w-[10ch] text-right">Cost (est.)</TableHead>
                 <TableHead class="w-[10ch] text-right">Duration</TableHead>
                 <TableHead class="w-[8ch]">Log</TableHead>
               </TableRow>
@@ -948,6 +974,14 @@
                       {(((t.token_usage as Record<string, number>).input ?? 0) +
                         ((t.token_usage as Record<string, number>).output ?? 0)).toLocaleString()}
                     {:else}—{/if}
+                  </TableCell>
+                  <TableCell class="text-right tabular-nums text-xs">
+                    {fmtCost(
+                      costUsd(
+                        t.model as string | undefined,
+                        t.token_usage as Record<string, number> | undefined
+                      )
+                    )}
                   </TableCell>
                   <TableCell class="text-right tabular-nums">{fmtDuration(t.duration_ms)}</TableCell
                   >
