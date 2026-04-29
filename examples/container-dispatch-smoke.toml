@@ -23,7 +23,8 @@
 workdir = "/project"
 
 [[container.mount]]
-host      = "/run/media/system/Dos/Projects/agentshire"
+# Edit `host` to point at your local checkout of this repo before running.
+host      = "/path/to/agentshire"
 container = "/project"
 readonly  = true
 

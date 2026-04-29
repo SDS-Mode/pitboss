@@ -55,7 +55,7 @@ max_workers = 5
 budget_usd = 100.00
 lead_timeout_secs = 3600
 id = "ketchup-p0-coordinator"
-directory = "/run/media/system/Dos/Projects/ketchup"
+directory = "/path/to/ketchup"
 branch = "demo/ketchup-p0-lead"
 # Opus for the coordinator: it needs to synthesize a plan summary from a
 # multi-file spec, route 5 worker prompts correctly, and compose a
