@@ -9,6 +9,26 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`pitboss-web stop` subcommand** for graceful shutdown of the web
+  console. The `serve` path now writes a PID file at
+  `$XDG_RUNTIME_DIR/pitboss/pitboss-web.pid` (falls back to
+  `dirs::cache_dir()` then `/tmp`); `stop` reads it, sends SIGTERM,
+  and polls until the process exits (default 10s timeout, override
+  with `--timeout-secs`). The serve path also installs a graceful-
+  shutdown future so SIGTERM / Ctrl-C drain in-flight requests
+  before returning.
+
+  Backward-compatible CLI: `pitboss-web --port 7077 …` still works
+  without the explicit `serve` subcommand. New `pitboss-web serve`
+  is an alias for callers that prefer explicit subcommands.
+
+  Side benefits: a second `pitboss-web` against a live PID file is
+  rejected with a friendly `pitboss-web already running with pid …`
+  error instead of port-bind racing; stale PID files (process gone
+  but file remained) are auto-cleaned on next start. Pinned by 5
+  unit tests in `pidfile::tests` covering self-PID liveness,
+  garbage-PID handling, and the EPERM-classifies-as-alive branch.
+
 - **`GET /api/runs/{run_id}/tasks/{task_id}` — single-task metadata
   endpoint** (#225). Returns the full `TaskRecord` JSON for one actor
   by reading `summary.jsonl` line-by-line, so leads / sub-leads / sub-tree

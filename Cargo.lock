@@ -1985,6 +1985,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "futures-util",
+ "libc",
  "lru 0.16.4",
  "mime_guess",
  "pitboss-cli",
