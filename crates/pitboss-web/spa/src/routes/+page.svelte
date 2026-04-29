@@ -51,7 +51,26 @@
     }
   }
 
-  onMount(load);
+  // Poll every 3 s, but only when the tab is visible — keeps a tab
+  // left open all day from burning cycles. Matches the run-detail
+  // page's polling cadence. visibilitychange fires an immediate
+  // refresh when the operator comes back to the tab so they don't
+  // see stale data while the next interval lands.
+  onMount(() => {
+    void load();
+    const POLL_MS = 3000;
+    const handle = setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, POLL_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(handle);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  });
 
   // Facet counts derived from the filtered run set so the operator
   // sees how their filter narrows things.
