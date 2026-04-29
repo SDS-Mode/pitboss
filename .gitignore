@@ -60,3 +60,14 @@ NOTES-*.md
 /test_move
 /test_move3
 /test_move5
+
+# Local smoke-test target symlinks — operators wire these to their own
+# project checkouts (see CONTRIBUTING.md). Anchored to the repo root so
+# we don't accidentally suppress similarly-named files inside crates/.
+/pitboss_proj
+/angrylarry
+
+# Personal scratch — keep at the repo root so an editor save / Claude
+# session doesn't accidentally promote them to a commit.
+/work.md
+/CLAUDE.md
