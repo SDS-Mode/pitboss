@@ -1134,6 +1134,7 @@ async fn expire_layer_approvals(
         state
             .record_last_approval_response(&entry.task_id, approved, true)
             .await;
+        crate::mcp::approval::record_approval_outcome(state, &entry.task_id, approved).await;
         let _ = entry.responder.send(response);
     }
 
@@ -1182,6 +1183,7 @@ async fn expire_layer_approvals(
             state
                 .record_last_approval_response(&entry.task_id, approved, true)
                 .await;
+            crate::mcp::approval::record_approval_outcome(state, &entry.task_id, approved).await;
             let _ = entry.responder.send(response);
         }
     }

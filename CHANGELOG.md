@@ -9,6 +9,35 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Approval counters now bump for every resolution path, not just
+  operator responses** (#224). Pre-fix, `worker_counters.approvals_approved`
+  / `approvals_rejected` were only bumped inside `ApprovalBridge::respond`
+  and the operator-driven path in `control/server.rs`. Every other
+  resolution path — `default_approval_policy = auto_approve` /
+  `auto_reject` short-circuits, `[[approval_policy]]` rule
+  `auto_approve` / `auto_reject` short-circuits in
+  `mcp/tools/approval.rs::handle_request_approval` and
+  `handle_propose_plan`, TTL fallbacks fired by
+  `runner.rs::install_approval_ttl_watcher` (both queue and bridge
+  scans), and the queue-full safe-rejection path in
+  `ApprovalBridge::request` — synthesized the response inline without
+  touching the counters. After PR #220 made `auto_approve`
+  short-circuit unconditionally, every smoke run exhibited the
+  resulting off-by-one (1 requested, 0 approved/rejected) on the
+  lead's `TaskRecord`. The matcher-rule paths additionally never
+  bumped `approvals_requested` either, so policy-resolved approvals
+  showed `(0, 0, 0)` end-to-end.
+
+  **Fix:** lifted counter bookkeeping into two helpers in
+  `mcp/approval.rs` — `bump_approval_requested` and
+  `record_approval_outcome` — and called them from every resolution
+  path. The existing `respond()` and `control/server.rs` paths were
+  refactored to use the helper. Pinned by 4 new tests in
+  `mcp::approval::tests` (`auto_approve_bumps_requested_and_approved`,
+  `auto_reject_bumps_requested_and_rejected`,
+  `queue_full_safe_rejection_bumps_requested_and_rejected`,
+  `respond_path_bumps_approved`).
+
 - **Hierarchical run finalize: `summary.json` now includes every actor
   across all layers** (#221). Pre-fix, `dispatch/hierarchical.rs`'s
   finalize phase built `summary.json`'s `tasks` array by walking

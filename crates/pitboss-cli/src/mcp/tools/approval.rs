@@ -122,6 +122,17 @@ pub async fn handle_request_approval(
                     state
                         .record_last_approval_response(&pending.requesting_actor_id, true, false)
                         .await;
+                    crate::mcp::approval::bump_approval_requested(
+                        state,
+                        &pending.requesting_actor_id,
+                    )
+                    .await;
+                    crate::mcp::approval::record_approval_outcome(
+                        state,
+                        &pending.requesting_actor_id,
+                        true,
+                    )
+                    .await;
                     return Ok(ApprovalToolResponse {
                         approved: true,
                         comment: Some("auto-approved by policy".into()),
@@ -137,6 +148,17 @@ pub async fn handle_request_approval(
                     state
                         .record_last_approval_response(&pending.requesting_actor_id, false, false)
                         .await;
+                    crate::mcp::approval::bump_approval_requested(
+                        state,
+                        &pending.requesting_actor_id,
+                    )
+                    .await;
+                    crate::mcp::approval::record_approval_outcome(
+                        state,
+                        &pending.requesting_actor_id,
+                        false,
+                    )
+                    .await;
                     return Ok(ApprovalToolResponse {
                         approved: false,
                         comment: Some("auto-rejected by policy".into()),
@@ -277,6 +299,17 @@ pub async fn handle_propose_plan(
                     state
                         .record_last_approval_response(&pending.requesting_actor_id, true, false)
                         .await;
+                    crate::mcp::approval::bump_approval_requested(
+                        state,
+                        &pending.requesting_actor_id,
+                    )
+                    .await;
+                    crate::mcp::approval::record_approval_outcome(
+                        state,
+                        &pending.requesting_actor_id,
+                        true,
+                    )
+                    .await;
                     return Ok(ApprovalToolResponse {
                         approved: true,
                         comment: Some("auto-approved by policy".into()),
@@ -292,6 +325,17 @@ pub async fn handle_propose_plan(
                     state
                         .record_last_approval_response(&pending.requesting_actor_id, false, false)
                         .await;
+                    crate::mcp::approval::bump_approval_requested(
+                        state,
+                        &pending.requesting_actor_id,
+                    )
+                    .await;
+                    crate::mcp::approval::record_approval_outcome(
+                        state,
+                        &pending.requesting_actor_id,
+                        false,
+                    )
+                    .await;
                     return Ok(ApprovalToolResponse {
                         approved: false,
                         comment: Some("auto-rejected by policy".into()),

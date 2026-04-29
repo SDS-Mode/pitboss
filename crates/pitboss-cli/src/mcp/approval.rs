@@ -72,6 +72,38 @@ pub struct ApprovalBridge {
     state: Arc<DispatchState>,
 }
 
+/// Bump `approvals_requested` for the given caller. Called once per
+/// approval, regardless of which resolution path it takes.
+pub(crate) async fn bump_approval_requested(state: &Arc<DispatchState>, caller_id: &str) {
+    state
+        .root
+        .worker_counters
+        .write()
+        .await
+        .entry(caller_id.to_string())
+        .or_default()
+        .approvals_requested += 1;
+}
+
+/// Bump `approvals_approved` or `approvals_rejected` for the given caller
+/// based on outcome. Called from every resolution path so counter state
+/// stays consistent regardless of whether the response came from an
+/// operator, a policy short-circuit, a TTL fallback, or a queue-full
+/// safe rejection.
+pub(crate) async fn record_approval_outcome(
+    state: &Arc<DispatchState>,
+    caller_id: &str,
+    approved: bool,
+) {
+    let mut guard = state.root.worker_counters.write().await;
+    let entry = guard.entry(caller_id.to_string()).or_default();
+    if approved {
+        entry.approvals_approved += 1;
+    } else {
+        entry.approvals_rejected += 1;
+    }
+}
+
 /// Convert the MCP-tool-layer `ApprovalPlan` into the control-protocol
 /// wire shape. Field layout is identical; the duplication exists so
 /// `control::protocol` stays independent of `mcp::tools`.
@@ -166,14 +198,8 @@ impl ApprovalBridge {
                     reason: None,
                     from_ttl: false,
                 });
-                self.state
-                    .root
-                    .worker_counters
-                    .write()
-                    .await
-                    .entry(task_id_for_counter.clone())
-                    .or_default()
-                    .approvals_requested += 1;
+                bump_approval_requested(&self.state, &task_id_for_counter).await;
+                record_approval_outcome(&self.state, &task_id_for_counter, true).await;
                 return rx.await.map_err(|_| ApprovalError::Cancelled);
             }
             ApprovalPolicy::AutoReject => {
@@ -184,14 +210,8 @@ impl ApprovalBridge {
                     reason: None,
                     from_ttl: false,
                 });
-                self.state
-                    .root
-                    .worker_counters
-                    .write()
-                    .await
-                    .entry(task_id_for_counter.clone())
-                    .or_default()
-                    .approvals_requested += 1;
+                bump_approval_requested(&self.state, &task_id_for_counter).await;
+                record_approval_outcome(&self.state, &task_id_for_counter, false).await;
                 return rx.await.map_err(|_| ApprovalError::Cancelled);
             }
             ApprovalPolicy::Block => {
@@ -256,6 +276,8 @@ impl ApprovalBridge {
                 // short-circuited at the top of `request`, so policy is
                 // guaranteed to be Block here.) Pre-fix the caller would
                 // block until bridge timeout for the same outcome.
+                bump_approval_requested(&self.state, &task_id_for_counter).await;
+                record_approval_outcome(&self.state, &task_id_for_counter, false).await;
                 return Ok(ApprovalResponse {
                     approved: false,
                     comment: None,
@@ -308,19 +330,11 @@ impl ApprovalBridge {
             }
         }
 
-        // task_id may have been moved into the ControlEvent or QueuedApproval
-        // above; use the request_id as the lookup key is not right — we need
-        // the caller id. Both branches clone task_id before consuming it, so
-        // we capture a clone here at the top of the function instead.
-        // (The clone is taken at function entry via task_id_for_counter below.)
-        self.state
-            .root
-            .worker_counters
-            .write()
-            .await
-            .entry(task_id_for_counter.clone())
-            .or_default()
-            .approvals_requested += 1;
+        // task_id was moved into the ControlEvent or QueuedApproval above;
+        // task_id_for_counter was cloned at function entry for this purpose.
+        // approved/rejected gets bumped later by either control/server.rs
+        // (operator response) or runner.rs (TTL fallback).
+        bump_approval_requested(&self.state, &task_id_for_counter).await;
 
         // When a per-request TTL is set, the TTL watcher fires the response
         // with from_ttl=true before the bridge timeout. Add 60 s of buffer so
@@ -387,15 +401,7 @@ impl ApprovalBridge {
             .responder
             .send(resp)
             .map_err(|_| ApprovalError::Cancelled)?;
-        {
-            let mut guard = self.state.root.worker_counters.write().await;
-            let entry = guard.entry(caller_id).or_default();
-            if approved {
-                entry.approvals_approved += 1;
-            } else {
-                entry.approvals_rejected += 1;
-            }
-        }
+        record_approval_outcome(&self.state, &caller_id, approved).await;
         Ok(())
     }
 }
@@ -580,6 +586,151 @@ mod tests {
             rx.try_recv().is_err(),
             "auto_reject must not route the request to the TUI"
         );
+    }
+
+    /// Regression for #224: every approval-resolution path must bump the
+    /// caller's approval counters consistently. Pre-fix, only the operator
+    /// response path bumped `approvals_approved`/`approvals_rejected`; every
+    /// short-circuit path silently left them at zero.
+    async fn counters_for(state: &Arc<DispatchState>, caller: &str) -> (u32, u32, u32) {
+        let guard = state.root.worker_counters.read().await;
+        let c = guard.get(caller).cloned().unwrap_or_default();
+        (
+            c.approvals_requested,
+            c.approvals_approved,
+            c.approvals_rejected,
+        )
+    }
+
+    #[tokio::test]
+    async fn auto_approve_bumps_requested_and_approved() {
+        let state = mk_state(ApprovalPolicy::AutoApprove).await;
+        let bridge = ApprovalBridge::new(Arc::clone(&state));
+        let _ = bridge
+            .request(
+                "lead".into(),
+                "summary".into(),
+                None,
+                crate::control::protocol::ApprovalKind::Action,
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(counters_for(&state, "lead").await, (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn auto_reject_bumps_requested_and_rejected() {
+        let state = mk_state(ApprovalPolicy::AutoReject).await;
+        let bridge = ApprovalBridge::new(Arc::clone(&state));
+        let _ = bridge
+            .request(
+                "lead".into(),
+                "summary".into(),
+                None,
+                crate::control::protocol::ApprovalKind::Action,
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(counters_for(&state, "lead").await, (1, 0, 1));
+    }
+
+    /// Block policy + connected control writer with a full queue → bridge
+    /// auto-rejects. Both `requested` and `rejected` must bump.
+    #[tokio::test]
+    async fn queue_full_safe_rejection_bumps_requested_and_rejected() {
+        use crate::control::protocol::ControlEvent;
+        use tokio::sync::mpsc;
+
+        let state = mk_state(ApprovalPolicy::Block).await;
+        // Capacity-1 channel filled to force `try_send` to fail. We must not
+        // drain the receiver — the bridge's send needs to fail synchronously.
+        let (tx, _rx) = mpsc::channel::<ControlEvent>(1);
+        // Pre-fill with one event so the bridge's try_send is guaranteed to fail.
+        tx.try_send(ControlEvent::OpAcked {
+            op: "noop".into(),
+            task_id: None,
+        })
+        .unwrap();
+        *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: Uuid::now_v7(),
+            sender: tx,
+        });
+
+        let bridge = ApprovalBridge::new(Arc::clone(&state));
+        let resp = bridge
+            .request(
+                "lead".into(),
+                "summary".into(),
+                None,
+                crate::control::protocol::ApprovalKind::Action,
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!resp.approved);
+        assert_eq!(counters_for(&state, "lead").await, (1, 0, 1));
+    }
+
+    /// Operator-driven respond path: `request` bumps `requested`, `respond`
+    /// bumps `approved` or `rejected`. Together they yield (1, 1, 0) or (1, 0, 1).
+    #[tokio::test]
+    async fn respond_path_bumps_approved() {
+        use crate::control::protocol::ControlEvent;
+        use tokio::sync::mpsc;
+
+        let state = mk_state(ApprovalPolicy::Block).await;
+        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: Uuid::now_v7(),
+            sender: tx,
+        });
+
+        let bridge = Arc::new(ApprovalBridge::new(Arc::clone(&state)));
+        let bridge_for_request = Arc::clone(&bridge);
+        let request_handle = tokio::spawn(async move {
+            bridge_for_request
+                .request(
+                    "lead".into(),
+                    "summary".into(),
+                    None,
+                    crate::control::protocol::ApprovalKind::Action,
+                    Duration::from_secs(2),
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        // Wait for the bridge to emit the ApprovalRequest event, capture the
+        // request_id, then call respond().
+        let request_id = match rx.recv().await.unwrap() {
+            ControlEvent::ApprovalRequest { request_id, .. } => request_id,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        bridge
+            .respond(
+                &request_id,
+                ApprovalResponse {
+                    approved: true,
+                    comment: None,
+                    edited_summary: None,
+                    reason: None,
+                    from_ttl: false,
+                },
+            )
+            .await
+            .unwrap();
+        let resp = request_handle.await.unwrap().unwrap();
+        assert!(resp.approved);
+        assert_eq!(counters_for(&state, "lead").await, (1, 1, 0));
     }
 
     #[tokio::test]
