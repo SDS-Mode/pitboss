@@ -39,14 +39,82 @@ pub const RATE_LIMIT_DEFAULT_BACKOFF_SECS: i64 = 300;
 /// no IO, no global state. Public for direct use by `pitboss-web`'s
 /// log-tail importer and similar non-dispatcher callers.
 ///
-/// Auth is checked before rate-limit: when both markers coexist (e.g. an
-/// expired key hits burst-limit before the 401 is returned) the run would
-/// otherwise cycle indefinitely — rate-limit back-off clears on its own,
-/// auth failure does not. Classifying as `AuthFailure` terminates the run
-/// promptly via the operator's spawn-gate window, which is the correct
-/// response when credentials are broken.
+/// **Two-stage matcher** (#185):
+///
+///   1. **Schema-first.** Walk the blob line-by-line, attempt to parse
+///      each line as a stream-JSON event, and look for the upstream
+///      Anthropic API error envelope shape (`{"error": {"type": …,
+///      "message": …}}`, optionally nested under `result`). The
+///      `error.type` strings (`rate_limit_exceeded`, `authentication_error`,
+///      `invalid_request_error`) are part of the public Anthropic API
+///      contract and are far more stable than scanning prose — when
+///      present, they're authoritative.
+///   2. **Substring fallback.** When no JSON envelope yields a
+///      classification, fall through to the substring matchers below
+///      (`match_auth` / `match_rate_limit` / …) which handle CLI banner
+///      text (e.g. `"You've hit your limit · resets Apr 23, 3pm"`) and
+///      shell-level errors (e.g. `getaddrinfo ENOTFOUND`) that don't
+///      arrive as structured events.
+///
+/// Auth is checked before rate-limit at both stages: when both markers
+/// coexist (e.g. an expired key hits burst-limit before the 401 is
+/// returned) the run would otherwise cycle indefinitely — rate-limit
+/// back-off clears on its own, auth failure does not. Classifying as
+/// `AuthFailure` terminates the run promptly via the operator's
+/// spawn-gate window, which is the correct response when credentials
+/// are broken.
 #[must_use]
 pub fn classify(blob: &str) -> FailureReason {
+    // Stage 1: schema-driven classification from stream-JSON events.
+    // Collect every structured reason in declaration order, then pick by
+    // priority below — auth wins when it co-occurs with rate-limit.
+    let json_reasons: Vec<FailureReason> = blob.lines().filter_map(classify_event_line).collect();
+
+    if json_reasons
+        .iter()
+        .any(|r| matches!(r, FailureReason::AuthFailure))
+    {
+        return FailureReason::AuthFailure;
+    }
+    // Sub-priority within JSON: ContextExceeded > RateLimit > InvalidArgument.
+    // ContextExceeded outranks RateLimit because a too-long prompt cannot
+    // be retried without operator action, while RateLimit will clear on
+    // its own — surfacing ContextExceeded is the actionable signal.
+    if let Some(reason) = json_reasons
+        .iter()
+        .find(|r| matches!(r, FailureReason::ContextExceeded))
+    {
+        return reason.clone();
+    }
+    if let Some(reason) = json_reasons
+        .iter()
+        .find(|r| matches!(r, FailureReason::RateLimit { .. }))
+    {
+        // Substring auth check guards against the case where the API
+        // returned a rate-limit JSON event but the CLI banner also
+        // showed an auth marker — keep the "auth wins" rule.
+        if match_auth(blob).is_some() {
+            return FailureReason::AuthFailure;
+        }
+        // Re-resolve `resets_at` from the full blob's CLI banner if the
+        // JSON event didn't carry one — `match_rate_limit` already does
+        // the timestamp parse + warn-on-fail, so prefer its output when
+        // the schema path returned `resets_at: None`.
+        if matches!(reason, FailureReason::RateLimit { resets_at: None }) {
+            if let Some(banner) = match_rate_limit(blob) {
+                return banner;
+            }
+        }
+        return reason.clone();
+    }
+    if let Some(reason) = json_reasons.into_iter().next() {
+        if match_auth(blob).is_some() {
+            return FailureReason::AuthFailure;
+        }
+        return reason;
+    }
+
+    // Stage 2: substring fallback for non-JSON content.
     if let Some(reason) = match_auth(blob) {
         return reason;
     }
@@ -64,6 +132,62 @@ pub fn classify(blob: &str) -> FailureReason {
     }
     FailureReason::Unknown {
         message: excerpt(blob),
+    }
+}
+
+/// Stage-1 schema matcher: parse a single stream-JSON line and map a
+/// recognized Anthropic API `error.type` to a [`FailureReason`].
+///
+/// Accepted envelope shapes:
+///   * `{"type":"error","error":{"type":"…","message":"…"}}`
+///   * `{"error":{"type":"…","message":"…"}}`
+///   * `{"result":{"error":{"type":"…","message":"…"}}}` (claude SDK
+///     wraps responses under `result` for some streaming flows)
+///
+/// Returns `None` on JSON parse failure, when no `error` envelope is
+/// present, or when the `error.type` string doesn't map to a known
+/// failure variant — the caller falls through to substring matching.
+fn classify_event_line(line: &str) -> Option<FailureReason> {
+    let trimmed = line.trim();
+    // Cheap shape gate: stream-JSON events always start with `{`. Skip
+    // everything else without paying for a JSON parse — the bulk of a
+    // typical worker log is plain stdout from tool calls.
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let err = v
+        .get("error")
+        .or_else(|| v.get("result").and_then(|r| r.get("error")))?;
+    let err_type = err.get("type")?.as_str()?;
+    let err_msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+
+    match err_type {
+        "rate_limit_exceeded" | "overloaded_error" => Some(FailureReason::RateLimit {
+            resets_at: parse_reset_timestamp(err_msg),
+        }),
+        "authentication_error" => Some(FailureReason::AuthFailure),
+        "invalid_request_error" => {
+            // Disambiguate context-exceeded from generic invalid-request:
+            // the API uses `invalid_request_error` for both, distinguished
+            // only by the message body. Mirrors the substring path's
+            // ContextExceeded > InvalidArgument priority.
+            if err_msg.contains("prompt is too long") || err_msg.contains("context_length_exceeded")
+            {
+                Some(FailureReason::ContextExceeded)
+            } else {
+                // Preserve a useful excerpt — prefer the schema-supplied
+                // `error.message` over scraping the whole blob since it's
+                // the API's own description of what went wrong.
+                let msg = if err_msg.is_empty() {
+                    excerpt(line)
+                } else {
+                    excerpt(err_msg)
+                };
+                Some(FailureReason::InvalidArgument { message: msg })
+            }
+        }
+        _ => None,
     }
 }
 
@@ -426,7 +550,13 @@ mod tests {
             r#"{"error":{"type":"invalid_request_error","message":"missing required field"}}"#;
         match classify(blob) {
             FailureReason::InvalidArgument { message } => {
-                assert!(message.contains("invalid_request_error"));
+                // Schema-first matcher (#185) extracts the API-supplied
+                // `error.message` directly — more useful than scraping
+                // the whole envelope. Check for the message body.
+                assert!(
+                    message.contains("missing required field"),
+                    "expected schema-extracted error message, got: {message}"
+                );
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
@@ -565,6 +695,117 @@ mod tests {
                 assert_eq!(message, "connection refused");
             }
             other => panic!("expected unchanged NetworkError, got {other:?}"),
+        }
+    }
+
+    // ── #185: schema-first stream-JSON event classification ────────────
+
+    /// Schema-first path matches the `result.error.type` envelope used
+    /// by claude SDK streaming responses. Pre-#185 the classifier only
+    /// looked for `error.type` at the top level and missed this shape.
+    #[test]
+    fn json_result_envelope_rate_limit_classifies() {
+        let blob =
+            r#"{"type":"result","result":{"error":{"type":"rate_limit_exceeded","message":""}}}"#;
+        assert!(matches!(
+            classify(blob),
+            FailureReason::RateLimit { resets_at: None }
+        ));
+    }
+
+    /// Schema-first path picks up `overloaded_error` (Anthropic's API
+    /// emits this when 529-throttled at the platform layer rather than
+    /// hitting a per-key rate limit). Both should classify as
+    /// `RateLimit` so the spawn gate applies the standard backoff.
+    #[test]
+    fn json_overloaded_error_classifies_as_rate_limit() {
+        let blob = r#"{"error":{"type":"overloaded_error","message":"please retry later"}}"#;
+        assert!(matches!(
+            classify(blob),
+            FailureReason::RateLimit { resets_at: None }
+        ));
+    }
+
+    /// When the JSON event also carries a parseable `resets …` hint in
+    /// `error.message`, the schema path extracts it without needing the
+    /// substring fallback.
+    #[test]
+    fn json_rate_limit_with_resets_in_message_parses_timestamp() {
+        let blob = r#"{"error":{"type":"rate_limit_exceeded","message":"resets May 5, 9:45am"}}"#;
+        match classify(blob) {
+            FailureReason::RateLimit {
+                resets_at: Some(ts),
+            } => {
+                use chrono::{Datelike, Timelike};
+                assert_eq!(ts.month(), 5);
+                assert_eq!(ts.day(), 5);
+                assert_eq!(ts.hour(), 9);
+                assert_eq!(ts.minute(), 45);
+            }
+            other => panic!("expected RateLimit with timestamp, got {other:?}"),
+        }
+    }
+
+    /// Mixed log: streaming-JSON `error` event interleaved with prose
+    /// stdout from earlier tool calls. The schema path must find the
+    /// JSON envelope without being thrown off by the surrounding noise.
+    #[test]
+    fn schema_classifies_amid_mixed_stdout_lines() {
+        let blob = "tool call output\n\
+                    more text\n\
+                    {\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid_api_key\"}}\n\
+                    trailing line";
+        assert!(matches!(classify(blob), FailureReason::AuthFailure));
+    }
+
+    /// Auth-vs-rate-limit precedence holds when one comes from the JSON
+    /// envelope and the other from the CLI banner: the substring auth
+    /// check guards the schema path so a rate-limit JSON event with a
+    /// co-occurring auth banner still terminates the run promptly.
+    #[test]
+    fn schema_rate_limit_with_substring_auth_banner_classifies_as_auth() {
+        let blob = "{\"error\":{\"type\":\"rate_limit_exceeded\"}}\n\
+             401 Unauthorized: authentication_error";
+        assert!(matches!(classify(blob), FailureReason::AuthFailure));
+    }
+
+    /// JSON `invalid_request_error` with a `prompt is too long` body
+    /// must classify as `ContextExceeded` even though the API uses the
+    /// same `error.type` for both. Mirrors the substring fallback's
+    /// disambiguation rule.
+    #[test]
+    fn json_invalid_request_with_prompt_too_long_classifies_as_context_exceeded() {
+        let blob = r#"{"error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens"}}"#;
+        assert!(matches!(classify(blob), FailureReason::ContextExceeded));
+    }
+
+    /// Unknown `error.type` strings fall through to the substring path.
+    /// A future Anthropic API change adding a new error variant must
+    /// not be silently misclassified — the substring path either
+    /// recognizes a marker (network/auth/etc.) or returns Unknown.
+    #[test]
+    fn json_unknown_error_type_falls_through_to_substring_or_unknown() {
+        let blob = r#"{"error":{"type":"some_future_error_type","message":"new failure mode"}}"#;
+        match classify(blob) {
+            FailureReason::Unknown { message } => {
+                // Excerpt should preserve enough context for triage.
+                assert!(
+                    message.contains("some_future_error_type") || message.contains("new failure"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected Unknown for unrecognized error.type, got {other:?}"),
+        }
+    }
+
+    /// Non-JSON blob doesn't trigger the schema path — substring
+    /// matchers continue to handle CLI banner output.
+    #[test]
+    fn cli_banner_text_falls_through_to_substring_matcher() {
+        let blob = "You've hit your limit · resets Apr 23, 3pm";
+        match classify(blob) {
+            FailureReason::RateLimit { resets_at: Some(_) } => {}
+            other => panic!("expected RateLimit with timestamp, got {other:?}"),
         }
     }
 
