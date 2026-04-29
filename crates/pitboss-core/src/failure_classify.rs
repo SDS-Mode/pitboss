@@ -349,15 +349,88 @@ pub fn enrich_with_resume_hint(
     }
 }
 
+/// Build a short, operator-readable excerpt from a log blob. Used by the
+/// `Unknown` / `NetworkError` / `InvalidArgument` variants and surfaced
+/// directly in the failures dashboard, so its output must be human-legible
+/// — not a mid-codepoint, mid-line slice of stream-JSON.
+///
+/// **Strategy** (#222 / #223):
+///
+///   1. **Last full line.** Stream-JSON emits one event per line; "last
+///      240 chars" almost always landed mid-event and produced output
+///      like `put_tokens":0,"ephemeral_5m_input_tokens":0}...`. Walk
+///      lines bottom-up to find the last non-empty line.
+///   2. **JSON-aware extraction.** If that line parses as a stream-JSON
+///      event, prefer (in order):
+///         * `error.message` / `result.error.message` — the API's own
+///           description of what went wrong.
+///         * `result.result` (string) — claude SDK puts the agent's
+///           final answer / human-readable error message here. When
+///           the wrapper exits non-zero but the agent emitted a clean
+///           result event (e.g. "There's an issue with the selected
+///           model …"), this is the message the operator wants.
+///   3. **Char-cap as the floor.** Cap at `EXCERPT_MAX_CHARS` codepoints
+///      after extraction — never mid-codepoint (`chars()` is
+///      codepoint-aware) and only mid-line if the chosen line itself
+///      exceeds the cap.
 #[must_use]
 pub fn excerpt(blob: &str) -> String {
     let trimmed = blob.trim();
-    if trimmed.chars().count() <= EXCERPT_MAX_CHARS {
-        return trimmed.to_string();
+    if trimmed.is_empty() {
+        return String::new();
     }
-    // Take the LAST EXCERPT_MAX_CHARS chars — errors sit at the tail.
-    let start = trimmed.chars().count().saturating_sub(EXCERPT_MAX_CHARS);
-    trimmed.chars().skip(start).collect()
+
+    // Walk lines bottom-up to find the last non-empty line. A trailing
+    // newline is common; skip blank lines to land on the actual final
+    // event.
+    let last_line = trimmed
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(trimmed)
+        .trim();
+
+    // Try JSON-aware extraction on the last line. Cheap shape gate first
+    // — most lines are not JSON, and parsing every blob's tail eagerly
+    // would burn CPU on the hot dispatch path.
+    if last_line.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(last_line) {
+            // Prefer error.message at any of the recognized locations.
+            let err_msg = v
+                .pointer("/error/message")
+                .or_else(|| v.pointer("/result/error/message"))
+                .and_then(|m| m.as_str());
+            if let Some(msg) = err_msg.filter(|s| !s.is_empty()) {
+                return cap_chars(msg);
+            }
+            // claude SDK final-answer / error string at /result.
+            // String, not object — when the field is an object it's
+            // typically a structured tool-call result and we'd rather
+            // fall through to the raw line.
+            if let Some(msg) = v.pointer("/result").and_then(|m| m.as_str()) {
+                if !msg.is_empty() {
+                    return cap_chars(msg);
+                }
+            }
+        }
+    }
+
+    // Fallback: the last full line, capped. Still strictly better than
+    // the pre-fix mid-line slice — at least the operator sees one
+    // complete event boundary.
+    cap_chars(last_line)
+}
+
+/// Cap a string at `EXCERPT_MAX_CHARS` codepoints, taking the tail when
+/// it overflows. Codepoint-aware so it never produces a partial UTF-8
+/// sequence.
+fn cap_chars(s: &str) -> String {
+    let count = s.chars().count();
+    if count <= EXCERPT_MAX_CHARS {
+        return s.to_string();
+    }
+    let start = count - EXCERPT_MAX_CHARS;
+    s.chars().skip(start).collect()
 }
 
 /// Parse a claude-CLI reset timestamp like `"resets Apr 23, 3pm"` into a
@@ -578,6 +651,93 @@ mod tests {
         let blob = "a".repeat(EXCERPT_MAX_CHARS + 100);
         let e = excerpt(&blob);
         assert_eq!(e.chars().count(), EXCERPT_MAX_CHARS);
+    }
+
+    /// #222 regression: pre-fix the excerpt sliced the last 240 chars
+    /// out of the blob, almost always landing mid-stream-JSON-event and
+    /// producing operator-illegible output. Now we walk bottom-up to
+    /// find the last full line.
+    #[test]
+    fn excerpt_takes_last_full_line_not_mid_event() {
+        let blob = format!(
+            "tool stdout line 1\n\
+             tool stdout line 2\n\
+             {{\"type\":\"result\",\"foo\":\"{}\",\"bar\":42}}",
+            "x".repeat(50)
+        );
+        let e = excerpt(&blob);
+        // Must NOT start with the middle of the JSON event.
+        assert!(
+            e.starts_with('{') || e.starts_with("\"type\""),
+            "expected a clean line start, got: {e:?}"
+        );
+        assert!(!e.contains("tool stdout"));
+    }
+
+    /// #222 / #223 regression: when the last line is a stream-JSON
+    /// `result` event with a string `result` field (claude SDK final
+    /// answer / human-readable error), surface THAT as the message
+    /// rather than the whole envelope. This is what made the failures
+    /// dashboard legible after #222 — a worker that exited 1 because of
+    /// a bad model name now shows "There's an issue with the selected
+    /// model …" instead of `put_tokens":0,"ephemeral_5m_input_tokens":0}…`.
+    #[test]
+    fn excerpt_extracts_result_string_from_sdk_envelope() {
+        let blob = r#"{"type":"result","subtype":"x","result":"There's an issue with the selected model (claude-haiku-4-5-bad). It may not exist or you may not have access to it.","stop_reason":"stop_sequence","session_id":"abc"}"#;
+        let e = excerpt(blob);
+        assert!(
+            e.starts_with("There's an issue with the selected model"),
+            "expected agent's result string, got: {e:?}"
+        );
+        assert!(!e.contains("\"stop_reason\""));
+    }
+
+    /// When the last line carries an `error.message`, prefer that over
+    /// `result.result` — the API's own description is more authoritative.
+    #[test]
+    fn excerpt_prefers_error_message_over_result_string() {
+        let blob = r#"{"error":{"type":"some_error","message":"the actionable description"},"result":"fallback string"}"#;
+        let e = excerpt(blob);
+        assert_eq!(e, "the actionable description");
+    }
+
+    /// `result.error.message` (nested envelope used by some streaming
+    /// flows) is also picked up.
+    #[test]
+    fn excerpt_extracts_nested_result_error_message() {
+        let blob = r#"{"result":{"error":{"type":"x","message":"nested actionable description"}}}"#;
+        let e = excerpt(blob);
+        assert_eq!(e, "nested actionable description");
+    }
+
+    /// Non-JSON tails fall through to last-line + cap; never produce
+    /// mid-codepoint output.
+    #[test]
+    fn excerpt_non_json_tail_falls_back_to_last_line() {
+        let blob = "stdout line 1\nstdout line 2\nERROR: something broke\n\n";
+        let e = excerpt(blob);
+        assert_eq!(e, "ERROR: something broke");
+    }
+
+    /// JSON parse failures fall through to last-line + cap rather than
+    /// silently corrupting the message.
+    #[test]
+    fn excerpt_malformed_json_falls_back_to_last_line() {
+        let blob = "earlier output\n{\"truncated\":";
+        let e = excerpt(blob);
+        // Falls back to the malformed line itself (capped).
+        assert_eq!(e, "{\"truncated\":");
+    }
+
+    /// Empty `result.result` strings are skipped — they're not useful
+    /// excerpts, fall back to the line.
+    #[test]
+    fn excerpt_skips_empty_result_string() {
+        let blob = r#"{"type":"result","result":"","stop_reason":"end_turn"}"#;
+        let e = excerpt(blob);
+        // Falls back to the raw line; just assert it didn't return "".
+        assert!(!e.is_empty());
+        assert!(e.contains("end_turn"));
     }
 
     /// #185 medium regression: a rate-limit marker with a malformed
