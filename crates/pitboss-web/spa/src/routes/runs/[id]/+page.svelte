@@ -43,14 +43,18 @@
   } from '$lib/components/ui/table';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
+  import { Switch } from '$lib/components/ui/switch';
+  import { Label } from '$lib/components/ui/label';
   import {
     ArrowLeft,
     ChevronRight,
     RefreshCw,
     AlertTriangle,
     Octagon,
-    GitFork
+    GitFork,
+    Filter
   } from 'lucide-svelte';
+  import { browser } from '$app/environment';
   import type { RunStatus } from '$lib/api';
 
   const runId = $derived(page.params.id ?? '');
@@ -194,6 +198,81 @@
   let liveEvents = $state<ControlEnvelope[]>([]);
   let sseStatus = $state<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
   const MAX_LIVE_EVENTS = 200;
+
+  // ---- SSE event filter (per-tab, persisted) ----------------------------
+  // Hide noise (default on): suppress `store_activity` events whose
+  // `counters` array is empty. Those fire on a heartbeat from the
+  // dispatcher and crowd out signal events when no shared-store ops
+  // are happening — the most common noise the operator complained
+  // about.
+  //
+  // disabledKinds tracks event kinds the operator has hidden via the
+  // filter UI. Stored in localStorage so refreshes don't reset
+  // operator preferences. We keep `disabled` rather than `enabled`
+  // so future event kinds added by the dispatcher default to visible
+  // (additive — the operator opts out when they get noisy).
+  const FILTER_STORAGE_KEY = 'pitboss-sse-filters-v1';
+  let hideNoise = $state(true);
+  let disabledKinds = $state<Record<string, boolean>>({});
+  let filterPanelOpen = $state(false);
+
+  if (browser) {
+    try {
+      const raw = window.localStorage.getItem(FILTER_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          hideNoise?: boolean;
+          disabledKinds?: Record<string, boolean>;
+        };
+        if (typeof parsed.hideNoise === 'boolean') hideNoise = parsed.hideNoise;
+        if (parsed.disabledKinds) disabledKinds = parsed.disabledKinds;
+      }
+    } catch {
+      /* malformed storage — ignore and use defaults */
+    }
+  }
+
+  $effect(() => {
+    if (!browser) return;
+    try {
+      window.localStorage.setItem(
+        FILTER_STORAGE_KEY,
+        JSON.stringify({ hideNoise, disabledKinds })
+      );
+    } catch {
+      /* quota / disabled — silently ignore */
+    }
+  });
+
+  /** Determine if a given event should be hidden under the current filters. */
+  function isHidden(e: ControlEnvelope): boolean {
+    if (disabledKinds[e.event]) return true;
+    if (
+      hideNoise &&
+      e.event === 'store_activity' &&
+      Array.isArray((e as ControlEnvelope & { counters?: unknown[] }).counters) &&
+      ((e as ControlEnvelope & { counters: unknown[] }).counters?.length ?? 0) === 0
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /** Events visible under current filters. Re-derives on every event arrival. */
+  const visibleEvents = $derived.by(() => liveEvents.filter((e) => !isHidden(e)));
+
+  /** All event kinds the operator has seen this session, sorted alphabetically. */
+  const seenKinds = $derived.by(() => {
+    const s = new Set<string>();
+    for (const e of liveEvents) s.add(e.event);
+    return [...s].sort();
+  });
+
+  function toggleKind(kind: string) {
+    disabledKinds = { ...disabledKinds, [kind]: !disabledKinds[kind] };
+  }
+
+  const hiddenCount = $derived(liveEvents.length - visibleEvents.length);
 
   // ---- Phase 3: control state derived from the live event stream ------
   // The dispatcher pushes typed events; we keep the latest snapshot of
@@ -722,14 +801,55 @@
         <PolicyEditor {runId} initialRules={policyRules} />
 
         <Card>
-          <CardHeader class="pb-2">
-            <CardTitle class="text-base">Event stream</CardTitle>
-            <CardDescription class="text-xs">
-              SSE bridge: <span class="font-mono">{sseStatus}</span>
-              · {liveEvents.length} event{liveEvents.length === 1 ? '' : 's'}{#if liveEvents.length === MAX_LIVE_EVENTS}
-                (latest only){/if}
-            </CardDescription>
+          <CardHeader class="flex-row items-start justify-between gap-2 pb-2 space-y-0">
+            <div>
+              <CardTitle class="text-base">Event stream</CardTitle>
+              <CardDescription class="text-xs">
+                SSE bridge: <span class="font-mono">{sseStatus}</span>
+                · {visibleEvents.length} of {liveEvents.length} event{liveEvents.length === 1
+                  ? ''
+                  : 's'}{#if liveEvents.length === MAX_LIVE_EVENTS}
+                  (latest only){/if}{#if hiddenCount > 0}
+                  <span class="text-muted-foreground/70"> · {hiddenCount} hidden</span>{/if}
+              </CardDescription>
+            </div>
+            <Button
+              variant={filterPanelOpen ? 'default' : 'outline'}
+              size="sm"
+              onclick={() => (filterPanelOpen = !filterPanelOpen)}
+            >
+              <Filter class="mr-1.5 size-3.5" /> Filters
+            </Button>
           </CardHeader>
+          {#if filterPanelOpen}
+            <div class="border-border/60 mx-6 mb-2 rounded-md border p-3 text-xs">
+              <div class="mb-2 flex items-center gap-2">
+                <Switch id="sse-hide-noise" bind:checked={hideNoise} />
+                <Label for="sse-hide-noise" class="cursor-pointer text-xs">
+                  Hide noise (empty <code>store_activity</code> heartbeats)
+                </Label>
+              </div>
+              {#if seenKinds.length > 0}
+                <div class="text-muted-foreground mb-1.5 text-[11px]">Event kinds</div>
+                <div class="flex flex-wrap gap-1.5">
+                  {#each seenKinds as k (k)}
+                    <button
+                      onclick={() => toggleKind(k)}
+                      class="rounded border px-2 py-0.5 font-mono text-[11px] {disabledKinds[k]
+                        ? 'border-muted-foreground/20 text-muted-foreground/50 line-through'
+                        : 'border-sky-500/40 text-sky-700 dark:text-sky-400'}"
+                    >
+                      {k}
+                    </button>
+                  {/each}
+                </div>
+              {:else}
+                <p class="text-muted-foreground text-[11px]">
+                  No events seen yet — kinds appear here as they arrive.
+                </p>
+              {/if}
+            </div>
+          {/if}
           <CardContent class="pt-0">
             {#if liveEvents.length === 0}
               <p class="text-muted-foreground py-4 text-center text-sm">
@@ -739,9 +859,14 @@
                     ? 'Connection failed. Run may have ended or dispatcher is unreachable.'
                     : 'Connecting…'}
               </p>
+            {:else if visibleEvents.length === 0}
+              <p class="text-muted-foreground py-4 text-center text-sm">
+                All {liveEvents.length} event{liveEvents.length === 1 ? ' is' : 's are'} hidden by
+                current filters.
+              </p>
             {:else}
               <div class="max-h-[40vh] space-y-1 overflow-auto font-mono text-xs">
-                {#each liveEvents as e, idx (idx)}
+                {#each visibleEvents as e, idx (idx)}
                   <div class="bg-muted/30 rounded border-l-2 border-sky-500/40 px-2 py-1">
                     <span class="text-sky-700 dark:text-sky-400">{e.event}</span>
                     {#if e.actor_path && Array.isArray(e.actor_path) && e.actor_path.length > 0}
