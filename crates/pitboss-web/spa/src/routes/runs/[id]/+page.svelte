@@ -269,7 +269,15 @@
     activeApproval = null;
     superseded = false;
     const teardown = subscribeRunEvents(runId, {
-      onOpen: () => (sseStatus = 'open'),
+      onOpen: () => {
+        sseStatus = 'open';
+        // The dispatcher emits WorkersSnapshot only in response to
+        // ListWorkers, not proactively. Without this the Workers card
+        // sits at "Waiting for first snapshot…" for the whole run.
+        // Same for store_activity — fire once on connect so the panel
+        // has something before the first heartbeat.
+        void postControlOp(runId, { op: 'list_workers' }).catch(() => {});
+      },
       onError: () => (sseStatus = 'error'),
       onEvent: (envelope) => {
         ingest(envelope);
@@ -286,6 +294,39 @@
       teardown();
       sseStatus = 'closed';
     };
+  });
+
+  // ---- In-progress polling ---------------------------------------------
+  // Two pieces of UI state that DON'T derive from the SSE event stream:
+  //
+  //   1. summary.jsonl on disk — the per-task TaskRecord append log. Task
+  //      counts, costs, tokens, exit codes, durations all read from here.
+  //      The dispatcher appends as each actor finishes; without polling
+  //      the page only ever sees what was on disk at mount time.
+  //
+  //   2. WorkersSnapshot — emitted on demand in response to a list_workers
+  //      op, never proactively. New workers added/removed mid-run aren't
+  //      visible until we ask.
+  //
+  // Poll every 3 s while the run is in-progress. 3 s is a tradeoff: fast
+  // enough that the operator sees workers appearing within a refresh
+  // tick, slow enough that a tab left open all day doesn't burn cycles.
+  // The interval clears as soon as inProgress flips false (run finalized
+  // and the page swaps over to the static summary.json view).
+  const POLL_INTERVAL_MS = 3000;
+  $effect(() => {
+    if (!runId || !inProgress) return;
+    const tick = async () => {
+      try {
+        summaryJsonl = await getSummaryJsonl(runId);
+      } catch {
+        /* run may have just finalized — next render uses summary.json */
+      }
+      // Fire-and-forget; the WorkersSnapshot reply lands via SSE.
+      void postControlOp(runId, { op: 'list_workers' }).catch(() => {});
+    };
+    const handle = setInterval(tick, POLL_INTERVAL_MS);
+    return () => clearInterval(handle);
   });
 
   async function sendOp(opPromise: Promise<void>, label: string) {

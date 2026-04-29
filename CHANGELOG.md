@@ -7,6 +7,27 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Run-detail view now updates task counts, costs, tokens, and worker
+  list while a run is in progress.** Pre-fix, the page fetched
+  `summary.jsonl` once at mount and never re-read it, so the per-task
+  metrics derived from it (count, cost, token totals, durations, failure
+  reasons) froze at whatever happened to be on disk when the operator
+  navigated to the page. The Workers card had a related but separate
+  bug: the dispatcher emits `WorkersSnapshot` only in response to a
+  `list_workers` op, never proactively, and the SPA never sent that op
+  — so the panel sat at "Waiting for first snapshot…" for the entire
+  run.
+
+  **Fix:** added a 3 s polling effect on the run-detail page that
+  re-fetches `summary.jsonl` and POSTs `list_workers` while the run is
+  in-progress. Also fires `list_workers` once on initial SSE connect
+  so the first paint has worker tiles instead of a placeholder. Tears
+  down as soon as `inProgress` flips false (run finalized — page swaps
+  to the static `summary.json` view), so completed runs don't burn
+  cycles.
+
 ### Added
 
 - **`pitboss-web stop` subcommand** for graceful shutdown of the web
