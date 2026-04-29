@@ -324,6 +324,14 @@ pub struct DispatchState {
     /// sublead_id. Populated by `reconcile_terminated_sublead`; consulted by
     /// `wait_for_actor_internal` to satisfy `wait_actor(sublead_id)` calls.
     pub sublead_results: RwLock<HashMap<String, SubleadTerminalRecord>>,
+    /// Layer handles for sub-leads that have terminated (and therefore
+    /// been removed from `subleads`). Kept alive for the duration of the
+    /// run so `ListWorkers` can still surface the sub-tree's actors —
+    /// otherwise a TUI/console attached late in a run with short-lived
+    /// sub-trees sees only the actors that happened to still be active
+    /// at the moment of the snapshot, with no way to inspect what came
+    /// before.
+    pub terminated_sublead_layers: RwLock<Vec<Arc<LayerState>>>,
     /// Worker-id → layer-id index for O(1) KV routing.
     ///
     /// - Root-layer workers map to `None`.
@@ -415,6 +423,7 @@ impl DispatchState {
             root,
             subleads: RwLock::new(HashMap::new()),
             sublead_results: RwLock::new(HashMap::new()),
+            terminated_sublead_layers: RwLock::new(Vec::new()),
             worker_layer_index: RwLock::new(HashMap::new()),
             run_leases: Arc::new(RunLeaseRegistry::new()),
             last_approval_response: RwLock::new(HashMap::new()),
