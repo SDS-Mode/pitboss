@@ -7,6 +7,24 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **MCP module: rustdoc cleanup for `McpServer` + sparse tool
+  descriptions** (#151 L4 + L5).
+  - L4: added a top-level rustdoc block on `McpServer` enumerating
+    its actual public surface (`start`, `socket_path`, `Drop`) so
+    future audit / extraction tools no longer hallucinate
+    `McpServer::new` / `McpServer::shutdown` (which never existed).
+    `socket_path()` also got its own rustdoc explaining the
+    lifetime contract (the file is removed on `Drop`).
+  - L5: expanded the descriptions Claude sees for `spawn_worker`,
+    `worker_status`, and `request_approval` so each carries
+    explicit when-to-use guidance, the call's cost (blocking
+    semantics, side effects, budget impact), and the alternative
+    tool to reach for instead. Brings them up to the level of
+    `cancel_worker` / `pause_worker` / `propose_plan` which were
+    already detailed.
+
 ### Fixed
 
 - **MCP bridge: half-close socket write half on c2s EOF** (#151 L1).
