@@ -150,6 +150,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   unit tests in `pidfile::tests` covering self-PID liveness,
   garbage-PID handling, and the EPERM-classifies-as-alive branch.
 
+- **SSE event-stream filter UI on the run-detail page.** A new "Filters"
+  button next to the Event stream card title opens a panel with two
+  controls: a "Hide noise" switch (default on) that suppresses
+  `store_activity` events with empty `counters` arrays — the
+  dispatcher heartbeats those even when no shared-store ops are
+  happening, and they were burying signal events in the operator's
+  view — and a per-event-kind toggle row built from the kinds the
+  operator has actually seen this session. Choices persist to
+  `localStorage` (`pitboss-sse-filters-v1`) so refreshes don't reset
+  filter state. Stored as `disabledKinds` rather than `enabledKinds`
+  so future event kinds added by the dispatcher default to visible —
+  the operator opts out when a kind gets noisy. Card description now
+  shows `<visible> of <total> events · <hidden> hidden` to make the
+  filter effect explicit.
+
 - **`GET /api/runs/{run_id}/tasks/{task_id}` — single-task metadata
   endpoint** (#225). Returns the full `TaskRecord` JSON for one actor
   by reading `summary.jsonl` line-by-line, so leads / sub-leads / sub-tree
