@@ -7,6 +7,19 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/runs/{run_id}/tasks/{task_id}` — single-task metadata
+  endpoint** (#225). Returns the full `TaskRecord` JSON for one actor
+  by reading `summary.jsonl` line-by-line, so leads / sub-leads / sub-tree
+  workers are all directly addressable. Pre-fix, the SPA's per-task
+  page had to load the entire run summary just to render one row, and
+  hierarchical-run sub-tree records were unreachable because
+  `summary.json`'s `tasks[]` only carried the root layer (#221). The
+  per-task SPA page now fetches metadata and log in parallel
+  (`Promise.allSettled`); a 404 on metadata is non-fatal so the page
+  still renders the log for older runs that pre-date the endpoint.
+
 ### Fixed
 
 - **Approval counters now bump for every resolution path, not just
