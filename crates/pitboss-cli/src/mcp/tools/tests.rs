@@ -421,6 +421,7 @@ async fn wait_for_worker_returns_outcome_on_completion() {
             approvals_rejected: 0,
             model: None,
             failure_reason: None,
+            cost_usd: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -495,6 +496,7 @@ async fn wait_for_any_returns_first_completed() {
             approvals_rejected: 0,
             model: None,
             failure_reason: None,
+            cost_usd: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert("w-b".into(), WorkerState::Done(rec));
@@ -1111,6 +1113,7 @@ async fn handle_reprompt_worker_from_done_errors() {
         approvals_rejected: 0,
         model: None,
         failure_reason: None,
+        cost_usd: None,
     };
     state
         .root

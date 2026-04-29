@@ -389,6 +389,7 @@ pub async fn run_hierarchical(
             lead_status = pitboss_core::store::TaskStatus::ApprovalRejected;
         }
     }
+    let lead_cost_usd = pitboss_core::prices::cost_usd(&lead.model, &total_token_usage);
     let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
         status: lead_status,
@@ -431,6 +432,7 @@ pub async fn run_hierarchical(
                 r
             }
         }),
+        cost_usd: lead_cost_usd,
     };
 
     // Cleanup worktree per policy. Surface the result via tracing
@@ -584,8 +586,10 @@ pub async fn run_hierarchical(
     // would still see the worker as Running).
     let now = Utc::now();
     let mut cancelled_records: Vec<pitboss_core::store::TaskRecord> = Vec::new();
-    let make_cancelled =
-        |id: &str, parent_id: &str, model: Option<String>| pitboss_core::store::TaskRecord {
+    let make_cancelled = |id: &str, parent_id: &str, model: Option<String>| {
+        let token_usage = pitboss_core::parser::TokenUsage::default();
+        let cost_usd = pitboss_core::prices::cost_usd(model.as_deref().unwrap_or(""), &token_usage);
+        pitboss_core::store::TaskRecord {
             task_id: id.to_string(),
             status: pitboss_core::store::TaskStatus::Cancelled,
             exit_code: None,
@@ -594,7 +598,7 @@ pub async fn run_hierarchical(
             duration_ms: 0,
             worktree_path: None,
             log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
-            token_usage: Default::default(),
+            token_usage,
             claude_session_id: None,
             final_message_preview: Some("cancelled when lead exited".into()),
             final_message: None,
@@ -606,7 +610,9 @@ pub async fn run_hierarchical(
             approvals_rejected: 0,
             model,
             failure_reason: None,
-        };
+            cost_usd,
+        }
+    };
     {
         let workers = state.root.workers.read().await;
         let worker_models = state.root.worker_models.read().await;
@@ -1215,6 +1221,7 @@ mod await_drained_tests {
                     approvals_rejected: 0,
                     model: None,
                     failure_reason: None,
+                    cost_usd: None,
                 }),
             );
             workers.insert("running-root".into(), WorkerState::Pending);
@@ -1267,6 +1274,7 @@ mod summary_jsonl_aggregation_tests {
             approvals_rejected: 0,
             model: None,
             failure_reason: None,
+            cost_usd: None,
         }
     }
 

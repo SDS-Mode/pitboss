@@ -155,6 +155,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "runs_env_json",
         apply: migrate_runs_env,
     },
+    Migration {
+        version: 9,
+        name: "cost_usd",
+        apply: migrate_cost_usd,
+    },
 ];
 
 /// Apply every entry in [`MIGRATIONS`] whose version is not yet
@@ -295,6 +300,14 @@ fn migrate_final_message(conn: &rusqlite::Connection) -> Result<(), StoreError> 
         .map_err(|e| StoreError::Incomplete(format!("migrate final_message alter: {e}")))?;
     }
     Ok(())
+}
+
+/// Idempotent migration: add the v0.11 `cost_usd` column (estimated USD cost
+/// computed from `model + token_usage` at finalize time). Stored as `REAL
+/// NULL` so older records and tasks whose model isn't in the price table
+/// keep `NULL` and consumers render "—".
+fn migrate_cost_usd(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    add_column_if_missing(conn, "task_records", "cost_usd", "REAL NULL")
 }
 
 /// Idempotent migration: add v0.4 counter columns to `task_records` if missing.
@@ -512,6 +525,7 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             model                 TEXT NULL,
             failure_reason        TEXT NULL,
             final_message         TEXT NULL,
+            cost_usd              REAL NULL,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -617,6 +631,7 @@ struct TaskRow {
     model: Option<String>,
     failure_reason: Option<String>,
     final_message: Option<String>,
+    cost_usd: Option<f64>,
 }
 
 impl TaskRow {
@@ -645,6 +660,7 @@ impl TaskRow {
             model: row.get("model").unwrap_or(None),
             failure_reason: row.get("failure_reason").unwrap_or(None),
             final_message: row.get("final_message").unwrap_or(None),
+            cost_usd: row.get("cost_usd").unwrap_or(None),
         })
     }
 
@@ -682,6 +698,7 @@ impl TaskRow {
                 .failure_reason
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok()),
+            cost_usd: self.cost_usd,
         })
     }
 }
@@ -720,7 +737,7 @@ fn fetch_task_records(
                   claude_session_id, final_message_preview, parent_task_id, \
                   pause_count, reprompt_count, approvals_requested, \
                   approvals_approved, approvals_rejected, model, failure_reason, \
-                  final_message \
+                  final_message, cost_usd \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -864,9 +881,9 @@ impl SessionStore for SqliteStore {
                       claude_session_id, final_message_preview, parent_task_id, \
                       pause_count, reprompt_count, approvals_requested, \
                       approvals_approved, approvals_rejected, model, failure_reason, \
-                      final_message) \
+                      final_message, cost_usd) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -898,6 +915,7 @@ impl SessionStore for SqliteStore {
                             .as_ref()
                             .and_then(|fr| serde_json::to_string(fr).ok()),
                         record.final_message,
+                        record.cost_usd,
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -1081,6 +1099,7 @@ mod sqlite_tests {
             approvals_rejected: 0,
             model: None,
             failure_reason: None,
+            cost_usd: None,
         }
     }
 

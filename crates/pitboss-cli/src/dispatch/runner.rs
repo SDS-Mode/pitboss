@@ -615,6 +615,8 @@ async fn execute_task(
                 p
             }
             Err(e) => {
+                let token_usage = pitboss_core::parser::TokenUsage::default();
+                let cost_usd = pitboss_core::prices::cost_usd(&task.model, &token_usage);
                 return TaskRecord {
                     task_id: task.id.clone(),
                     status: TaskStatus::SpawnFailed,
@@ -624,7 +626,7 @@ async fn execute_task(
                     duration_ms: 0,
                     worktree_path: None,
                     log_path,
-                    token_usage: Default::default(),
+                    token_usage,
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     final_message: None,
@@ -636,6 +638,7 @@ async fn execute_task(
                     approvals_rejected: 0,
                     model: Some(task.model.clone()),
                     failure_reason: None,
+                    cost_usd,
                 };
             }
         }
@@ -691,6 +694,7 @@ async fn execute_task(
             r
         }
     });
+    let cost_usd = pitboss_core::prices::cost_usd(&task.model, &outcome.token_usage);
     TaskRecord {
         task_id: task.id.clone(),
         status,
@@ -712,6 +716,7 @@ async fn execute_task(
         approvals_rejected: 0,
         model: Some(task.model.clone()),
         failure_reason,
+        cost_usd,
     }
 }
 

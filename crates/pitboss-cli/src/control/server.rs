@@ -2436,6 +2436,7 @@ mod tests {
                 approvals_rejected: 0,
                 model: None,
                 failure_reason: None,
+                cost_usd: None,
             }),
         );
         state

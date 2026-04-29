@@ -1267,6 +1267,7 @@ async fn wait_actor_still_handles_worker_back_compat() {
             approvals_rejected: 0,
             model: None,
             failure_reason: None,
+            cost_usd: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
@@ -1615,6 +1616,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
             approvals_rejected: 0,
             model: Some("claude-haiku-4-5".into()),
             failure_reason: None,
+            cost_usd: None,
         };
         sub.workers.write().await.insert(
             s1.clone(),

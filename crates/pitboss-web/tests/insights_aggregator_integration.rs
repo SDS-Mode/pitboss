@@ -70,6 +70,7 @@ fn task(id: &str, status: TaskStatus, reason: Option<FailureReason>) -> TaskReco
         approvals_rejected: 0,
         model: None,
         failure_reason: reason,
+        cost_usd: None,
     }
 }
 
