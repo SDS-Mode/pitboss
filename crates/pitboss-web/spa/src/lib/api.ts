@@ -126,6 +126,42 @@ export function getTaskLog(runId: string, taskId: string, opts: TaskLogOpts = {}
   return request<string>(path, { accept: 'text' });
 }
 
+/**
+ * Wire-format mirror of `pitboss_core::store::TaskRecord`. The SPA only
+ * names the fields it renders; backend additions land here as needed.
+ */
+export interface TaskRecord {
+  task_id: string;
+  status: string;
+  exit_code: number | null;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  worktree_path: string | null;
+  log_path: string;
+  token_usage: {
+    input: number;
+    output: number;
+    cache_read?: number;
+    cache_creation?: number;
+  };
+  claude_session_id: string | null;
+  final_message_preview: string | null;
+  final_message: string | null;
+  parent_task_id: string | null;
+  pause_count: number;
+  reprompt_count: number;
+  approvals_requested: number;
+  approvals_approved: number;
+  approvals_rejected: number;
+  model: string | null;
+  failure_reason: unknown | null;
+}
+
+export function getTaskDetail(runId: string, taskId: string): Promise<TaskRecord> {
+  return request<TaskRecord>(`/api/runs/${enc(runId)}/tasks/${enc(taskId)}`);
+}
+
 // ---- Control writes (POST /api/runs/:id/control) ------------------------
 
 /**

@@ -123,6 +123,54 @@ pub struct LogQuery {
     pub tail: Option<bool>,
 }
 
+/// `GET /api/runs/:run_id/tasks/:task_id` — single `TaskRecord` for one
+/// actor (lead, sub-lead, or worker). Reads `summary.jsonl` line by line
+/// and returns the first record whose `task_id` matches. `summary.jsonl`
+/// is the source of truth — it captures every actor across every layer
+/// (root + sub-leads + workers), unlike `summary.json` which is written
+/// once at finalize and aggregates only what the dispatcher had visible
+/// at that moment (#221).
+///
+/// 404 when the run dir exists but no record carries the given task_id.
+pub async fn task_detail(
+    State(state): State<AppState>,
+    AxPath((run_id, task_id)): AxPath<(String, String)>,
+) -> ApiResult<Response> {
+    let run_dir = run_dir(state.runs_dir(), &run_id)?;
+    // task_id is rendered into a JSON string match below, not into a
+    // path, so the path-segment sanitizer doesn't apply here. We still
+    // bound the length to keep the substring scan cheap.
+    if task_id.is_empty() || task_id.len() > 256 {
+        return Err(ApiError::BadRequest("invalid task_id length".into()));
+    }
+    let path = run_dir.join("summary.jsonl");
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ApiError::NotFound),
+        Err(e) => return Err(e.into()),
+    };
+    // Lossy decode: a partial-write tail (the dispatcher appends as
+    // each actor finishes) shouldn't 500 the request — better to skip
+    // a malformed line than to fail a perfectly-readable lookup.
+    let text = String::from_utf8_lossy(&bytes);
+    let needle = format!("\"task_id\":\"{task_id}\"");
+    for line in text.lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        // Substring match isn't authoritative (the task_id could appear
+        // inside another field — a parent_task_id reference, the log
+        // path, etc.). Confirm with a real parse.
+        let Ok(rec) = serde_json::from_str::<pitboss_core::store::TaskRecord>(line) else {
+            continue;
+        };
+        if rec.task_id == task_id {
+            return Ok(Json(rec).into_response());
+        }
+    }
+    Err(ApiError::NotFound)
+}
+
 /// `GET /api/runs/:id/tasks/:task_id/log` — task `stdout.log`.
 pub async fn task_log(
     State(state): State<AppState>,
@@ -224,5 +272,202 @@ mod tests {
     fn sanitize_rejects_overlong_ids() {
         let big = "a".repeat(129);
         assert!(sanitize_id(&big).is_err());
+    }
+
+    // ── #225: task_detail endpoint ─────────────────────────────────────────
+
+    use crate::state::AppState;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use tempfile::TempDir;
+
+    /// Lay down a run dir with a `summary.jsonl` containing the given
+    /// raw lines. Returns the AppState anchored at that dir's parent.
+    fn build_run_with_summary_jsonl(run_id: &str, lines: &[&str]) -> (TempDir, AppState) {
+        let tmp = TempDir::new().unwrap();
+        let runs_dir = tmp.path().to_path_buf();
+        let run_dir = runs_dir.join(run_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut content = String::new();
+        for l in lines {
+            content.push_str(l);
+            content.push('\n');
+        }
+        std::fs::write(run_dir.join("summary.jsonl"), content).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(runs_dir, manifests_dir, None);
+        (tmp, state)
+    }
+
+    /// Minimal valid `TaskRecord` JSON line. `pitboss-core` is allowed
+    /// to evolve the shape; we keep the fixture in sync with whatever
+    /// `serde_json::to_string(&TaskRecord)` currently emits to avoid
+    /// hand-rolled drift.
+    fn task_record_line(task_id: &str, status: &str, parent: Option<&str>) -> String {
+        use pitboss_core::store::TaskRecord;
+        let rec = TaskRecord {
+            task_id: task_id.to_string(),
+            status: serde_json::from_str(&format!("\"{status}\"")).unwrap(),
+            exit_code: Some(0),
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            duration_ms: 1000,
+            worktree_path: None,
+            log_path: PathBuf::from(format!("/tmp/pitboss/{task_id}/stdout.log")),
+            token_usage: pitboss_core::parser::TokenUsage::default(),
+            claude_session_id: None,
+            final_message_preview: None,
+            final_message: None,
+            parent_task_id: parent.map(String::from),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: Some("claude-haiku-4-5".to_string()),
+            failure_reason: None,
+        };
+        serde_json::to_string(&rec).unwrap()
+    }
+
+    async fn body_to_value(resp: Response) -> serde_json::Value {
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn task_detail_returns_record_for_matching_id() {
+        let run_id = "01950000-0000-7000-8000-000000000001";
+        let (_tmp, state) = build_run_with_summary_jsonl(
+            run_id,
+            &[
+                &task_record_line("worker-A", "Success", Some("lead-1")),
+                &task_record_line("worker-B", "Failed", Some("lead-1")),
+            ],
+        );
+
+        let resp = task_detail(
+            State(state),
+            AxPath((run_id.to_string(), "worker-B".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_to_value(resp).await;
+        assert_eq!(v["task_id"], "worker-B");
+        assert_eq!(v["status"], "Failed");
+        assert_eq!(v["parent_task_id"], "lead-1");
+    }
+
+    /// Hierarchical-run regression: a sub-lead's record must be findable
+    /// via the same endpoint as a worker. summary.jsonl is the source of
+    /// truth across all layers (#221).
+    #[tokio::test]
+    async fn task_detail_finds_sublead_record() {
+        let run_id = "01950000-0000-7000-8000-000000000002";
+        let (_tmp, state) = build_run_with_summary_jsonl(
+            run_id,
+            &[
+                &task_record_line("worker-A", "Success", Some("sublead-1")),
+                &task_record_line("sublead-1", "Success", Some("lead-1")),
+                &task_record_line("lead-1", "Success", None),
+            ],
+        );
+
+        let resp = task_detail(
+            State(state),
+            AxPath((run_id.to_string(), "sublead-1".to_string())),
+        )
+        .await
+        .unwrap();
+        let v = body_to_value(resp).await;
+        assert_eq!(v["task_id"], "sublead-1");
+        assert_eq!(v["parent_task_id"], "lead-1");
+    }
+
+    /// The substring scan (`"task_id":"<X>"`) is only an optimization —
+    /// records that mention `<X>` in some other field (e.g.,
+    /// `parent_task_id`) must NOT be returned for that lookup.
+    #[tokio::test]
+    async fn task_detail_does_not_match_parent_task_id_substring() {
+        let run_id = "01950000-0000-7000-8000-000000000003";
+        let (_tmp, state) = build_run_with_summary_jsonl(
+            run_id,
+            // worker-X mentions "needle" only as parent_task_id.
+            &[&task_record_line("worker-X", "Success", Some("needle"))],
+        );
+
+        let resp = task_detail(
+            State(state),
+            AxPath((run_id.to_string(), "needle".to_string())),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn task_detail_returns_404_when_summary_jsonl_missing() {
+        let run_id = "01950000-0000-7000-8000-000000000004";
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(run_id)).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(tmp.path().to_path_buf(), manifests_dir, None);
+
+        let resp = task_detail(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn task_detail_rejects_overlong_task_id() {
+        let run_id = "01950000-0000-7000-8000-000000000005";
+        let (_tmp, state) = build_run_with_summary_jsonl(run_id, &[]);
+        let huge = "a".repeat(257);
+        let resp = task_detail(State(state), AxPath((run_id.to_string(), huge))).await;
+        assert!(matches!(resp, Err(ApiError::BadRequest(_))));
+    }
+
+    /// A run that exists but contains no record for the requested task
+    /// returns 404 (vs 200 with empty body or 500). Pre-fix the issue
+    /// suggested this case in the spec.
+    #[tokio::test]
+    async fn task_detail_returns_404_when_task_id_not_in_summary() {
+        let run_id = "01950000-0000-7000-8000-000000000006";
+        let (_tmp, state) =
+            build_run_with_summary_jsonl(run_id, &[&task_record_line("worker-A", "Success", None)]);
+        let resp = task_detail(
+            State(state),
+            AxPath((run_id.to_string(), "worker-Z".to_string())),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    /// Malformed JSON lines (e.g., a partial-write tail caught mid-flush)
+    /// must not 500 the request — the scan skips and continues.
+    #[tokio::test]
+    async fn task_detail_skips_malformed_lines() {
+        let run_id = "01950000-0000-7000-8000-000000000007";
+        let lines = [
+            "{\"truncated\":".to_string(), // malformed
+            task_record_line("worker-good", "Success", None),
+        ];
+        let (_tmp, state) = build_run_with_summary_jsonl(
+            run_id,
+            &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+
+        let resp = task_detail(
+            State(state),
+            AxPath((run_id.to_string(), "worker-good".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

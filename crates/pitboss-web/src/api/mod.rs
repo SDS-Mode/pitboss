@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/{run_id}/manifest", get(runs::manifest))
         .route("/runs/{run_id}/resolved", get(runs::resolved))
         .route("/runs/{run_id}/summary-jsonl", get(runs::summary_jsonl))
+        .route("/runs/{run_id}/tasks/{task_id}", get(runs::task_detail))
         .route("/runs/{run_id}/tasks/{task_id}/log", get(runs::task_log))
         .route("/runs/{run_id}/events", get(events::events))
         .route("/runs/{run_id}/control", post(control::send))
