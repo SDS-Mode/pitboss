@@ -502,6 +502,17 @@
       } catch {
         /* run may have just finalized — next render uses summary.json */
       }
+      // Re-fetch the top-level run record so the page transitions
+      // gracefully when the dispatcher writes the finalised summary:
+      // `r.in_progress` flips false, `inProgress` flips, and the UI
+      // swaps from the Live view to the Tasks/Manifest/etc. view
+      // without a manual reload. Without this, the page sits stuck
+      // in the Live view with frozen data after finalization.
+      try {
+        detail = await getRun(runId);
+      } catch {
+        /* network blip — keep the last good record */
+      }
       // Fire-and-forget; the WorkersSnapshot reply lands via SSE.
       void postControlOp(runId, { op: 'list_workers' }).catch(() => {});
     };
@@ -727,6 +738,16 @@
       <TabsTrigger value="summary">Summary JSON</TabsTrigger>
     </TabsList>
 
+    <!--
+      The Live tab (event stream + Filter UI + Workers card) is
+      gated on inProgress on purpose: SSE closes when the
+      dispatcher exits and there's no static event-log surface
+      yet, so a finalised run has nothing live to show. The 3-s
+      polling tick re-fetches the run record (see effect above),
+      so this gate flips at finalize without a manual reload.
+      Don't remove the gate — fix the post-finalise event view
+      instead if operators want to filter historical events.
+    -->
     {#if inProgress}
       <TabsContent value="live" class="mt-4 space-y-4">
         {#if superseded}
