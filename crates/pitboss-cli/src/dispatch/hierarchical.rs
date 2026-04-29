@@ -144,7 +144,7 @@ pub async fn run_hierarchical(
             s
         },
     ));
-    let _mcp = McpServer::start(socket.clone(), state.clone()).await?;
+    let mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
     // Seed /resume/subleads with prior sub-lead session IDs so the root lead
     // can read them on a resume run and pass resume_session_id to spawn_sublead.
@@ -622,6 +622,15 @@ pub async fn run_hierarchical(
     } else {
         0
     };
+
+    // #151 M2: deterministic MCP teardown. Awaits per-connection
+    // cleanup (lease release, identity slot drain) before the
+    // dispatcher returns, so callers observe a fully-quiesced run.
+    // Pre-fix this happened in synchronous Drop with no await on
+    // `tracker.wait()`, which left detached cleanup tasks racing
+    // against the dispatcher's exit.
+    mcp.shutdown().await;
+
     Ok(rc)
 }
 

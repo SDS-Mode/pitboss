@@ -7,6 +7,31 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`McpServer::shutdown` — async, deterministic teardown** (#151 M2).
+  Pre-fix the only teardown path was synchronous `Drop`, which
+  fires the `CancellationToken` and aborts the accept loop's join
+  handle but cannot `await tracker.wait()` — so per-connection
+  cleanup tasks (`release_all_for_actor` for held leases, identity
+  slot drain) were detached at drop time and raced against the
+  dispatcher's exit. Harmless in production today (the run is
+  exiting anyway), but observable as flaky test teardowns and as
+  leases that look "still held" to a follow-up reader for a few
+  millis after the run finishes. Now: an `async fn shutdown(self)`
+  signals the accept loop, fires the cancel token, closes the
+  tracker, **awaits `tracker.wait()`** so per-connection cleanup
+  finishes, then awaits the join handle and removes the socket
+  file. `Drop` stays as a fallback for non-async drop sites and is
+  a no-op tail after `shutdown` consumes the same fields. The
+  hierarchical dispatcher (`run_hierarchical`) now ends with
+  `mcp.shutdown().await` before returning. Pinned by a regression
+  test (`server_shutdown_completes_promptly_with_active_connection`)
+  that opens a raw connection to keep the tracker non-empty,
+  awaits shutdown, and asserts both the prompt return (proves the
+  cancel token unblocks the per-connection `select!`) and that
+  the socket file is removed.
+
 ### Documentation
 
 - **MCP module: rustdoc cleanup for `McpServer` + sparse tool

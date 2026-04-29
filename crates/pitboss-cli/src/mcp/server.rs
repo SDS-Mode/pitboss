@@ -1287,6 +1287,50 @@ impl McpServer {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    /// Async, deterministic teardown.
+    ///
+    /// Signals the accept loop to exit, fires the
+    /// `CancellationToken` so per-connection tasks unblock from
+    /// their inner `select!` arms, closes the `TaskTracker` so no
+    /// new tasks can be spawned, then **awaits** `tracker.wait()`
+    /// so per-connection cleanup work — primarily
+    /// `release_all_for_actor` for held leases — finishes before
+    /// this function returns. Finally awaits the accept-loop join
+    /// handle and removes the socket file.
+    ///
+    /// Prefer this over relying on `Drop` when the caller can be
+    /// async: `Drop` cannot `await` the tracker, so without
+    /// `shutdown` the dispatcher returns while detached cleanup
+    /// tasks are still releasing leases. That race is harmless in
+    /// production today because the run is exiting anyway, but it
+    /// shows up as flaky test teardowns and as leases that look
+    /// "still held" to a follow-up reader for a few millis after
+    /// the run finishes. (#151 M2)
+    ///
+    /// `Drop` remains as a fallback for non-async drop sites; it
+    /// is a no-op after `shutdown` consumes the same fields.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.cancel.cancel();
+        self.tracker.close();
+        // Wait for every per-connection task spawned via
+        // `tracker_outer.spawn(...)` in the accept loop to finish.
+        // Each one holds the `connection_actor` mutex and runs
+        // `release_all_for_actor` on disconnect; awaiting the
+        // tracker is what ensures those releases complete.
+        self.tracker.wait().await;
+        if let Some(h) = self.join_handle.take() {
+            let _ = h.await;
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
+        // self drops here; Drop fires on the moved-out fields but
+        // shutdown_tx / join_handle are already None and the
+        // CancellationToken / tracker are idempotent on re-cancel
+        // / re-close, so it's a no-op tail.
+    }
 }
 
 impl Drop for McpServer {
@@ -1302,10 +1346,14 @@ impl Drop for McpServer {
         if let Some(h) = self.join_handle.take() {
             h.abort();
         }
-        // Note: we can't `.await` tracker.wait() from a sync Drop. The
-        // CancellationToken fires above let per-connection tasks exit quickly
-        // without us blocking here. If a future async shutdown() method is
-        // added, that would be the place to await the tracker.
+        // We can't `.await` tracker.wait() from a sync Drop, so this
+        // path is best-effort: the CancellationToken fired above lets
+        // per-connection tasks exit quickly, but the function returns
+        // without waiting for their cleanup (`release_all_for_actor`)
+        // to finish. Async callers should prefer `McpServer::shutdown`
+        // — it does the same teardown but awaits the tracker so
+        // per-connection cleanup is observably complete on return.
+        // (#151 M2)
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
@@ -1410,6 +1458,100 @@ mod tests {
 
         drop(server);
         // Socket is cleaned up on drop.
+    }
+
+    /// #151 M2 regression: `shutdown` returns *after* per-connection
+    /// cleanup tasks have completed, not just after the accept loop
+    /// has been signalled. Pre-fix the only teardown path was
+    /// synchronous `Drop`, which couldn't `await tracker.wait()`,
+    /// so the dispatcher would return while detached
+    /// `release_all_for_actor` tasks were still running.
+    ///
+    /// We can't easily plant a flag inside the per-connection
+    /// cleanup hook from a unit test (it requires a bound MCP
+    /// identity), so this test verifies the next-best invariant:
+    /// `shutdown().await` completes promptly even with an active
+    /// connection (proves the cancel token unblocks the inner
+    /// `select!`) and the socket file is gone afterwards.
+    /// Together with the implementation's `tracker.wait().await`,
+    /// these establish the deterministic teardown contract.
+    #[tokio::test]
+    async fn server_shutdown_completes_promptly_with_active_connection() {
+        use crate::dispatch::state::{ApprovalPolicy, DispatchState};
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+        use pitboss_core::session::CancelToken;
+        use pitboss_core::store::{JsonFileStore, SessionStore};
+        use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let manifest = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: 4,
+            halt_on_failure: false,
+            run_dir: dir.path().to_path_buf(),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            lifecycle: None,
+        };
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let run_id = Uuid::now_v7();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+        let wt_mgr = Arc::new(WorktreeManager::new());
+        let run_subdir = dir.path().join(run_id.to_string());
+        let state = Arc::new(DispatchState::new(
+            run_id,
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("/bin/true"),
+            wt_mgr,
+            CleanupPolicy::Never,
+            run_subdir,
+            ApprovalPolicy::Block,
+            None,
+            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+        ));
+
+        let sock = dir.path().join("shutdown-test.sock");
+        let server = McpServer::start(sock.clone(), state).await.unwrap();
+
+        // Open a raw connection so the accept loop spawns a tracked
+        // per-connection task. shutdown() must drain that task
+        // (via the cancel token) before returning.
+        let _stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started_at = std::time::Instant::now();
+        server.shutdown().await;
+        let elapsed = started_at.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "shutdown took too long: {elapsed:?}"
+        );
+        assert!(
+            !sock.exists(),
+            "socket file should be removed after shutdown"
+        );
     }
 
     #[tokio::test]
