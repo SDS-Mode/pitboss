@@ -298,6 +298,18 @@ pitboss container-build pitboss.toml --dry-run   # print podman/docker invocatio
 
 `pitboss container-dispatch` automatically picks up the derived tag when `extra_apt` or `copy` is non-empty and the tag exists locally — no explicit wiring needed in the manifest. Stale derived tags from prior builds remain in the local image store; prune them with the runtime's standard tooling (`podman image prune`, etc.) — a pitboss-aware sweeper is tracked in the roadmap.
 
+#### Image tag cadence (`ghcr.io/sds-mode/pitboss-with-claude`)
+
+Three tag families are published:
+
+| Tag family | Mutability | When it moves | Use when |
+|---|---|---|---|
+| `:0.9.1`, `:0.9`, `:0` | **Immutable snapshot** | Never (released) | You want a fixed, auditable point release. These tags do **not** receive backports — fixes that land after a release tag are only available via `:main` or `:latest`. |
+| `:main`, `:latest` | **Rolling** | Every push to main | You want the latest fixes since the most recent release. Both move together; `:latest` is a convenience alias for `:main`. |
+| `:main-<short-sha>` | Per-commit immutable | One per main commit | You need to pin a `container-dispatch` to a specific main-HEAD commit for reproducibility (debugging, soak tests). |
+
+Pushes to main rebuild the image regardless of whether the commit touched code paths — including README/CHANGELOG-only commits. This is deliberate: the cost of a stale published image (operators hitting "already-fixed" bugs in their containers) is higher than the runner-minute cost of always rebuilding. PRs that touch only README/CHANGELOG still skip CI; the rebuild fires when the squash commit lands on main.
+
 ### `[[mcp_server]]` (v0.9+)
 
 Declare external MCP servers to inject into **every actor's** `--mcp-config` (lead, sub-leads, and workers). This is the native alternative to the KV-bridge workaround for giving all actors access to tools like context7.
