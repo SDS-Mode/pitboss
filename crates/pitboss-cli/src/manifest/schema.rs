@@ -112,6 +112,15 @@ pub struct ContainerConfig {
     #[serde(default, rename = "mount")]
     #[field(skip)]
     pub mounts: Vec<MountSpec>,
+    /// Host→container file copies baked into a derived image at
+    /// `pitboss container-build` time. Unlike `mount`, these are not
+    /// runtime bind-mounts — the file contents are layered into the
+    /// container image, so they're available even when no host path is
+    /// mounted there. Use this for small build inputs (scripts,
+    /// configuration) that should travel with the image.
+    #[serde(default, rename = "copy")]
+    #[field(skip)]
+    pub copy: Vec<CopySpec>,
     /// Working directory inside the container.
     /// Defaults to the container path of the first `[[container.mount]]` entry,
     /// or `/home/pitboss` if no mounts are declared.
@@ -136,6 +145,23 @@ pub struct MountSpec {
     #[serde(default)]
     #[field(label = "Read-only", help = "Mount read-only.")]
     pub readonly: bool,
+}
+
+/// A single host→container `COPY` entry baked into the derived image
+/// by `pitboss container-build`. Unlike `MountSpec`, this is image
+/// content, not a runtime mount — the host file is read at build time
+/// and layered into the image.
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
+#[serde(deny_unknown_fields)]
+pub struct CopySpec {
+    /// Absolute path on the host (tilde expansion is performed at build time).
+    /// Must be a regular file or a directory. Read at `container-build` time
+    /// only; subsequent host mutations require a rebuild.
+    #[field(label = "Host path", help = "Absolute host path. ~ is expanded.")]
+    pub host: PathBuf,
+    /// Absolute path inside the container.
+    #[field(label = "Container path", help = "Absolute path inside the container.")]
+    pub container: PathBuf,
 }
 
 /// An external MCP server to inject into every actor's `--mcp-config`.

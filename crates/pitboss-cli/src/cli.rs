@@ -173,6 +173,29 @@ pub enum Command {
         #[arg(long)]
         runtime: Option<String>,
     },
+    /// Build a derived container image from the manifest's `[container]`
+    /// section. Synthesizes a thin Dockerfile (`extra_apt` + `[[container.copy]]`),
+    /// builds it with `--layers`, and tags the result deterministically as
+    /// `pitboss-derived-<sha>:local`. Idempotent: skips the build when the
+    /// derived tag already exists locally (use `--no-cache` to force).
+    /// Pairs with `pitboss container-dispatch`, which picks up the same
+    /// derived tag automatically when `extra_apt`/`copy` are non-empty.
+    ContainerBuild {
+        manifest: PathBuf,
+        /// Override container runtime detection ("docker" or "podman").
+        #[arg(long)]
+        runtime: Option<String>,
+        /// Force a rebuild even when the derived tag is already present.
+        #[arg(long)]
+        no_cache: bool,
+        /// Print the synthesized Dockerfile to stdout and exit. Useful
+        /// for previewing the build before committing to it.
+        #[arg(long)]
+        print_dockerfile: bool,
+        /// Print the assembled `<runtime> build …` command and exit.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print a snapshot of all task records for a prior run.
     /// Reads summary.jsonl (in-flight) or summary.json (finalized).
     Status {
