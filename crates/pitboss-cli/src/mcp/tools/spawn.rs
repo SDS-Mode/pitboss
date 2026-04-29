@@ -373,6 +373,8 @@ async fn run_worker(
                 release_reservation_for_layer(&layer, &task_id).await;
                 // Record a SpawnFailed TaskRecord and broadcast done.
                 let now = Utc::now();
+                let token_usage = pitboss_core::parser::TokenUsage::default();
+                let cost_usd = pitboss_core::prices::cost_usd(&model, &token_usage);
                 let rec = TaskRecord {
                     task_id: task_id.clone(),
                     status: TaskStatus::SpawnFailed,
@@ -382,7 +384,7 @@ async fn run_worker(
                     duration_ms: 0,
                     worktree_path: None,
                     log_path: log_path.clone(),
-                    token_usage: Default::default(),
+                    token_usage,
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     final_message: None,
@@ -394,6 +396,7 @@ async fn run_worker(
                     approvals_rejected: 0,
                     model: Some(model.clone()),
                     failure_reason: None,
+                    cost_usd,
                 };
                 let _ = layer.store.append_record(layer.run_id, &rec).await;
                 layer
@@ -605,6 +608,7 @@ async fn run_worker(
         Some(&log_path),
         Some(&stderr_path),
     );
+    let cost_usd = pitboss_core::prices::cost_usd(&model, &outcome.token_usage);
     let rec = TaskRecord {
         task_id: task_id.clone(),
         status,
@@ -626,6 +630,7 @@ async fn run_worker(
         approvals_rejected: counters.approvals_rejected,
         model: Some(model.clone()),
         failure_reason,
+        cost_usd,
     };
 
     // Persist record.
@@ -999,6 +1004,7 @@ pub async fn spawn_resume_worker(
             .get(&task_id_bg)
             .cloned()
             .unwrap_or_default();
+        let cost_usd = pitboss_core::prices::cost_usd(&resume_model, &outcome.token_usage);
         let rec = TaskRecord {
             task_id: task_id_bg.clone(),
             status,
@@ -1024,6 +1030,7 @@ pub async fn spawn_resume_worker(
                 Some(&log_path),
                 Some(&stderr_path),
             ),
+            cost_usd,
         };
         let _ = layer_bg.store.append_record(layer_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {

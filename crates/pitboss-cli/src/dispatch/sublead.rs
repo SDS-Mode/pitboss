@@ -744,6 +744,7 @@ async fn spawn_sublead_session(
 
         // 9. Build and persist a TaskRecord for the sub-lead's compound session.
         //    Uses total_token_usage across all subprocess iterations.
+        let cost_usd = pitboss_core::prices::cost_usd(&model_bg, &total_token_usage);
         let rec = pitboss_core::store::TaskRecord {
             task_id: sublead_id_bg.clone(),
             status,
@@ -778,6 +779,7 @@ async fn spawn_sublead_session(
                     r
                 }
             }),
+            cost_usd,
         };
         if let Err(e) = sub_layer_bg
             .store
