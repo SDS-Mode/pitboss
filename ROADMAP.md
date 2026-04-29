@@ -1,530 +1,203 @@
 # Pitboss Roadmap
 
-Capture of deferred work. Items here are scoped but unscheduled — grab
-one when you're ready, or file issues to formalize priority.
+A directory into ongoing work. Each entry is a **3-line abstract +
+status + tracking link** — long-form design lives in the linked
+GitHub issue, not here.
 
-**Last refresh: v0.9.1 (2026-04-27).** Everything shipped through v0.9.1
-has been removed from this file — check `CHANGELOG.md` for per-version
-history. If you're about to add an item, slot it into one of the tiered
-sections below (biggest effort first).
+## How to use this file
+
+- **Closed items live in `CHANGELOG.md`, not here.** When a roadmap
+  item ships, delete it from this file. Don't strikethrough, don't
+  leave a "Closed —" marker. Git history and the changelog carry that
+  load.
+- **One entry per item.** If it fits on a screen, keep it inline; if
+  the design needs more than ~10 lines, file a tracking issue
+  (label: `roadmap`) and leave a 3-line abstract here pointing at it.
+- **Status vocabulary** (pick one): `scoped` / `in-progress` /
+  `blocked: <what>` / `parked: <why>` / `non-goal`.
+- **Tracking line** (always present): `**Tracking:** #NNN` or
+  `**Tracking:** none yet — file before grabbing`.
+- **No version targeting.** Use GitHub Milestones for release-train
+  scheduling. Strategic horizons can stay inline as `parked:` notes.
+
+Last refreshed: v0.9.1 (2026-04-29).
 
 ---
 
-## Major features
+## Major initiatives
 
-### Dispatcher worker pattern (nested dispatches)
+Multi-PR features in active shaping. Each one is large enough to
+warrant its own tracking issue with the design discussion.
 
-A worker (or sub-lead) marked `type = "dispatcher"` invokes a child
-`pitboss dispatch` against its own manifest as a self-contained unit
-of work. Different from the existing depth-2 sub-lead model: the child
-run has its own budget envelope, KV namespace, run lifecycle, and
-`summary.json` — the parent doesn't manage internals, only the
-outcome.
+### Nested-dispatch worker type
 
-Proposed manifest fragment:
+A worker marked `type = "dispatcher"` invokes a child `pitboss
+dispatch` against its own manifest as a self-contained unit of work,
+with its own budget envelope, KV namespace, and `summary.json`.
+Pairs with a cost oracle so a planner lead can pre-flight-estimate
+total spend from real historical data.
 
-```toml
-[[task]]
-id                 = "build-db-tier"
-type               = "dispatcher"        # relaxes sandbox, adds pitboss to PATH
-manifest           = "builds/db-tier.toml"
-timeout_secs       = 3600
-completion_marker  = "db-tier.done"      # file carries child run ID
-```
+**Status:** scoped — depends on sandbox relaxation + `completion_marker` plumbing.
+**Tracking:** #248.
 
-Required pitboss changes:
+### Web Insights Slice B — manifest detail + per-task drill
 
-1. `type = "dispatcher"` worker role that relaxes the run-dir sandbox
-   specifically for designated dispatcher actors and adds the pitboss
-   binary to PATH.
-2. `completion_marker` task field — dispatcher waits on the file
-   (which carries the child run ID, not a boolean) before settling
-   the parent task. Absence at `timeout_secs` → failure surfaced up
-   the tree.
-3. Helper plumbing for the parent to locate and parse the child's
-   `summary.json` so failures bubble rather than time out blindly.
+Per-manifest landing page (`/manifests/<name>`) with run history,
+KPI strip, trend sparklines, plus a side-panel drill from any task
+row to that task ID's history across the manifest's runs. Reuses
+the Slice A aggregator with no new backend storage.
 
-Child spend is **not** auto-rolled into the parent budget. Instead
-each child manifest's `summary.json` accumulates as a data point for
-a cost oracle the operator can query before dispatch:
+**Status:** scoped.
+**Tracking:** #249.
 
-```
-builds/windows-server-2019/base.toml      → $1.42 avg
-builds/postgres-16/standard.toml          → $0.93 avg
-```
+### Web Insights Slice C — run comparison + standalone Gantt
 
-A planner lead consults historical summaries to give pre-flight cost
-estimates from real data, not guesses.
+Side-by-side compare of two runs of the same manifest (Gantt diff,
+per-task delta, manifest TOML diff). Extracts the per-run task-tree
+drawing into a reusable `gantt.svelte` component consumed by both
+the existing single-run view and the new compare route.
 
-**Why it's a distinct concept from sub-leads:** sub-leads exist within
-the root lead's budget and KV namespace — useful for breaking up one
-logical job. A nested dispatch is a named, versioned, reusable unit
-of work that any actor with dispatcher privileges can fire. Primary
-use case is infra buildouts with well-defined sub-problems (db tier,
-app tier, reverse proxy) where each sub-problem benefits from being
-independently auditable.
+**Status:** scoped.
+**Tracking:** #250.
 
-**Status:** not feasible today — workers are sandbox-locked to the
-run directory and cannot exec the pitboss binary. Requires the
-`dispatcher` role + completion-marker plumbing as a coordinated
-feature add.
+### Typed worker/sublead profiles
 
-### Web operational console
+Operator-declared `[[worker_type]]` / `[[sublead_type]]` profiles
+with tool allowlists, model allowlists, and timeout/budget caps the
+dispatcher enforces at spawn-arg validation time — a belt-and-
+suspenders against prompt drift. Folds in per-actor MCP server
+scoping as a sub-task.
 
-The TUI is fine for a single local run but does not compose: it
-cannot be embedded in a dashboard, queried programmatically, shared
-across operators, or run headlessly. It is also the first thing that
-breaks in backgrounded dispatch. Run artifacts are already structured
-JSON (`summary.json`, `summary.jsonl`, per-task logs) — a read-only
-server watching `~/.local/share/pitboss/runs/` covers most of the
-operational need with no database. The filesystem is the database
-initially.
+**Status:** scoped — high-impact safety primitive.
+**Tracking:** #252.
 
-Build order by value:
+### Lead+sublead budget accounting
 
-1. **Post-run archaeology view.** Buildable today against existing
-   artifacts, zero pitboss changes. Renders timeline, spend breakdown,
-   task tree, long-pole identification from a root run ID.
-2. **Pre-flight tree** — the same `pitboss tree` rendered in the
-   browser, with manifest tree visualization, budget envelopes, and
-   estimated cost.
-3. **Live run graph** — real-time tree with node states and live
-   spend. Requires polling or a websocket feed from the dispatcher;
-   only becomes essential once nested dispatches are a real feature.
+Today `[run].budget_usd` accounts only for `spawn_worker` spend; the
+lead's own tokens are unbounded. Reconcile lead and sublead spend
+into the same `spent_usd` mutex, add an optional `lead_budget_usd`
+separate cap, and surface running lead-spend live in
+`worker_status`. Backstop for runaway-lead failure modes.
 
-The TUI stays for quick local watches; the web console is the
-operational picture at scale. Pairs naturally with the dispatcher-
-worker pattern above — once nested dispatches are real, the live
-graph is how an operator follows a multi-tier infra build without
-camping a terminal.
-
-**Status:** Phases 1–5 + tile grid + live graph + **Slice A
-(Insights & Error Patterns)** all live. The cross-run aggregator,
-Drain-lite failure clustering, errors dashboard at
-`/insights/failures`, and run-list facets are merged. Remaining
-slices below are deferred follow-ups that reuse the Slice A data
-layer with no re-architecture.
-
-#### Slice B — Manifest detail + per-task historical drill
-
-Per-manifest landing page that reuses the aggregator: run history
-table, KPI strip (success rate, avg cost, avg duration), trend
-sparklines for cost + duration, run-timeline strip. Click-through
-from any task row in the existing per-run Tasks tab to a side
-panel showing that task ID's history across the manifest's runs
-(failure-rate, last 10 outcomes, dominant cluster). Depends only
-on Slice A's `RunDigest` + `TaskFailureDigest` — no new backend
-storage. Estimated: one PR for the manifest page, one for the
-per-task drill panel.
-
-#### Slice C — Run comparison + standalone Gantt
-
-Side-by-side compare of two runs of the same manifest: gantt diff,
-per-task cost/duration delta, status change highlights, manifest
-TOML diff. Extracts the per-run task-tree drawing into a reusable
-Gantt component so both the new compare view and the existing
-single-run task tab consume one renderer. Depends on Slice A
-aggregator + a new `lib/components/charts/gantt.svelte` shared
-primitive. Estimated: one PR for the Gantt extract, one for the
-compare route.
+**Status:** scoped — sibling to #252.
+**Tracking:** #253.
 
 ### Non-Anthropic model support (v1.0 destination)
 
-Today pitboss assumes the `claude` CLI as the worker subprocess and
-prices spend against Anthropic model rates. v1.0 should target
-model-agnostic dispatch: the same manifest, KV, approval, and
-budget flow with workers backed by other providers (OpenAI, Google,
-local OSS endpoints, etc.).
+Make pitboss model-agnostic: provider-tagged spawner trait, pricing
+registry indexed by `(provider, model)`, per-provider failure
+classifiers, tool-use translation. Strategic — explicitly out of
+scope for v0.x but flagged so v0.x design choices don't foreclose
+the option.
 
-Touches at minimum:
-
-- **Subprocess adapter layer.** `claude` is hardcoded as the worker
-  binary today; v1.0 needs a provider-tagged spawner trait so each
-  manifest task / lead / sub-lead can declare its provider, and the
-  dispatcher selects the right adapter (CLI invocation, SDK call,
-  or HTTP shim) without leaking provider specifics into the rest
-  of the pipeline.
-- **Tool-use translation.** Anthropic, OpenAI, and Gemini have
-  similar-but-not-identical `tools` semantics. Either translate at
-  the dispatcher boundary or scope the tool surface to the
-  intersection — the latter is simpler but forecloses
-  provider-specific tool features.
-- **Pricing registry.** `pitboss-core::pricing` extends to a
-  provider-tagged registry; provider id flows through `TaskRecord`
-  so `summary.json` and the web console's per-run / cross-run
-  aggregators can break spend down per provider.
-- **MCP server.** Anthropic-only today. Mixed runs either gate
-  `pitboss mcp-bridge` to Anthropic workers or ship an OpenAI-style
-  function-calling shim. Per-actor MCP scoping (see Safety section)
-  is the natural seam for this gating.
-- **Failure-classification.** Rate-limit / auth-failure detection
-  in `pitboss-core::failure_classify` is currently keyed on
-  Anthropic error shapes. Each adapter contributes its own
-  classifiers feeding the same `ApiHealth` gate.
-
-**Status:** v1.0 destination — explicitly out of scope for v0.x.
-Flagged here so v0.x design choices weigh whether they foreclose
-the option (e.g. new manifest fields default to Anthropic-shape
-semantics; new MCP tools assume Anthropic stream-json events).
-No concrete blocking demand today; driven by the strategic need
-to keep pitboss useful as the model market diversifies.
+**Status:** parked: v1.0 horizon, no concrete blocking demand today.
+**Tracking:** #251.
 
 ---
 
-## Ops / infra polish
+## Scoped & ready
+
+One- or two-PR items, well-understood enough that the inline
+abstract is the spec.
 
 - **`pitboss schema --format=n8n-form` export.** Emit the manifest
   field set as an n8n-style form-field JSON descriptor (`fieldLabel`,
-  `fieldType`, `requiredField`, `defaultValue`, `fieldOptions.values`
-  for enums) so a form-builder UI (n8n Form Trigger node, custom
-  React frontend, etc.) can drive operator manifest entry without
-  re-implementing field knowledge. Depends on the field-metadata
-  derive layer landing as part of the manifest TOML redesign initiative.
-  **Status:** scoped, deferred from the redesign initiative; reserved
-  for its own PR once the metadata layer ships.
-- **MCP protocol extensions.** We only implement `tools`. Adding
-  `resources` + `prompts` would be cheap and makes pitboss a more
-  complete MCP citizen — useful if we ever expose it to non-claude
-  MCP clients.
+  `fieldType`, `requiredField`, `defaultValue`, `fieldOptions.values`)
+  so a form-builder UI can drive operator manifest entry without
+  re-implementing field knowledge. The CLI hint already exists in
+  `pitboss schema --help`. **Status:** scoped. **Tracking:** none yet.
+
+- **MCP protocol extensions: `resources` + `prompts`.** We only
+  implement `tools` today. Adding the other two surfaces makes
+  pitboss a more complete MCP citizen — useful when exposing it to
+  non-claude MCP clients. **Status:** scoped. **Tracking:** none yet.
+
+- **`pitboss scaffold` / `pitboss init` template generator.** Emit a
+  valid TOML skeleton with commented placeholders. Two tiers:
+  `simple` (coordinator + flat worker pool) and `full` (coordinator
+  + sub-leads + workers + seam worker + KV refs + budget fields).
+  Agents are reliably better at filling in than constructing from
+  scratch. **Status:** scoped. **Tracking:** none yet.
+
+- **TUI run-list staleness detection.** Add a `Stale` state when the
+  last `summary.jsonl` line is more than N hours old (default 4h)
+  AND the socket either won't accept connections or the bound
+  process no longer exists. Pairs with `pitboss prune` (already
+  shipped) — `Stale` is what `prune` matches on by default.
+  **Status:** scoped. **Tracking:** none yet.
+
+- **systemd unit for long-lived dispatcher mode.** Run `pitboss
+  dispatch` as a service rather than a one-shot, with restart
+  semantics and journaled logs. **Status:** scoped. **Tracking:**
+  none yet.
+
 - **Opt-in telemetry.** Aggregate run counts + token totals (no
   prompt content). Default off; explicit config key to enable.
-- **systemd unit.** For long-lived dispatcher mode (`pitboss
-  dispatch` as a service rather than a one-shot).
-- **`cargo publish` to crates.io.** Once we want third-party
-  library consumers.
-- **`pitboss prune` subcommand.** Scan the runs dir for orphans —
-  entries with no `summary.json` AND no responsive control socket —
-  and either mark them `Cancelled` (synthesize a minimal summary.json
-  reflecting the partial state in `summary.jsonl`) or remove them
-  outright with `--remove`. Today, any dispatch killed before clean
-  finalize (`kill -KILL`, OOM, segfault) leaves an orphan that
-  `pitboss-tui list` misreports as `running` indefinitely. Manual
-  cleanup is `rm -rf ~/.local/share/pitboss/runs/<id>` plus
-  `rm /run/user/$(id -u)/pitboss/<id>-*.sock` — fine for an operator
-  who knows the layout, but a built-in `prune` makes the lifecycle
-  legible. Defaults to dry-run; `--apply` for the destructive path;
-  `--older-than 24h` for time-windowed sweeps.
-  **Status:** fully scoped; reserved for its own PR (separate from
-  manifest-quality work) due to new-subcommand test surface.
-- **TUI run-list staleness detection.** The run-list status column
-  derives "running" from "summary.json missing + control socket
-  liveness probe doesn't fail." A stale unix socket file can stick
-  around without a live binder, so dead runs occasionally show as
-  `running` until cleaned up by hand. Add a third state — `Stale` —
-  when (a) the last `summary.jsonl` line is more than N hours old
-  (default 4h), AND (b) the socket either won't accept connections or
-  the bound process no longer exists. Pairs naturally with `pitboss
-  prune` above: `Stale` is what `prune` matches on by default.
-- **`pitboss tree <manifest>` pre-flight subcommand.** Static TOML
-  walk that prints the dispatch tree with per-actor budget envelopes
-  and an aggregated total. `--check <USD>` mode acts as a dispatch
-  gate — refuses to proceed if aggregate budget exceeds the
-  threshold or a referenced child manifest is missing. Useful as a
-  CI gate and a cost preview before firing $20+ runs. Buildable
-  today against the existing manifest parser; precursor to the live
-  run graph in the web console section above.
-- **`pitboss scaffold` / `pitboss init` template generator.** Emit
-  a valid TOML skeleton with commented placeholders to stdout or a
-  named file. Two tiers: `simple` (coordinator + flat worker pool,
-  2 levels) and `full` (coordinator + sub-leads + workers + seam
-  worker + KV refs + budget fields, optional sections commented).
-  Agents are reliably better at filling in than constructing from
-  scratch — a structurally correct skeleton removes most
-  first-attempt parse failures and lets the agent focus on prompt
-  content. Defaults to `simple`; agents reach for `full` only when
-  a task genuinely requires a seam worker or nested sub-leads.
-- ~~**`pitboss validate` — detect promptless lead.**~~ **Closed** — shipped in
-  PR #122. `validate` now rejects empty or whitespace-only lead prompts with an
-  error pointing at the TOML subtable-ordering root cause.
-- **AGENTS.md `[[lead]]` vs `[lead]` consistency.** The manifest
-  schema section uses `[[lead]]` while the depth-2 example uses
-  `[lead]`. The depth-2 fields (`allow_subleads`, `max_subleads`,
-  `max_workers_across_tree`, `[lead.sublead_defaults]`) reject under
-  `[[lead]]` with `unknown field`. Pick one syntax for hierarchical
-  manifests and propagate; flag the other as deprecated or as
-  flat-mode-only.
+  **Status:** scoped. **Tracking:** none yet.
+
+- **`cargo publish` to crates.io.** Once we want third-party library
+  consumers of `pitboss-core` / `pitboss-schema`. **Status:** parked:
+  no third-party consumer demand today. **Tracking:** none yet.
 
 ---
 
-## Safety / defense in depth
+## Deferred
 
-### Typed worker/sub-lead profiles with dispatcher-enforced tool caps
+Items with an explicit blocker — usually waiting on something
+upstream.
 
-Today the lead's prompt is the sole guard against an off-policy spawn.
-When the lead calls `spawn_worker(tools=[...], model=...)`, pitboss
-honours whatever it sends. A drift in the lead's prompt template, a
-copy-pasted worker snippet, or a hostile actor earlier in the chain
-can silently widen the worker's capability surface without the
-operator's knowledge.
+- **Path B `permission_routing` stabilization.** The implementation
+  PRs (#92, #93, #94) merged, but `validate.rs` still rejects
+  `permission_routing = "path_b"` as "not yet stable". Soak in
+  staging, then remove the validate gate. **Status:** blocked: needs
+  real-world soak before gate removal. **Tracking:** none yet (file
+  when ready to remove the gate).
 
-Add declarative actor profiles that the dispatcher enforces at
-spawn-arg validation time — a belt-and-suspenders allowlist the lead
-cannot override:
+- **Broadcast mode (`pitboss b "<prompt>"`).** Send the same prompt
+  to every running tile. Parked because the original UX (interactive
+  snap-in) was retired in v0.3.4 — needs a different surface now.
+  **Status:** parked: needs UX redesign post-snap-in retirement.
+  **Tracking:** none yet.
 
-```toml
-[[worker_type]]
-id            = "extraction"
-tools         = ["Read", "Glob", "Grep"]            # allowlist
-allowed_models = ["claude-haiku-4-5", "claude-sonnet-4-6"]
-max_timeout_secs = 900
+- **Depth > 2 hierarchies.** Sub-leads spawning their own sub-leads.
+  Depth=2 cap is enforced at both the MCP handler and the sub-lead's
+  `--allowedTools` list. **Status:** parked: no concrete need that
+  can't be served by a wider flat fan-out. **Tracking:** none yet.
 
-[[worker_type]]
-id    = "writer"
-tools = ["Read", "Glob", "Grep", "Write"]
-
-[[sublead_type]]
-id            = "planner"
-tools         = ["Read", "Glob", "Grep"]
-allowed_models = ["claude-opus-4-7"]
-max_budget_usd = 2.00
-```
-
-`spawn_worker` / `spawn_sublead` gain an optional `type: "<id>"` arg.
-When supplied (or required by the manifest — see below), the
-dispatcher:
-
-1. Looks up the type's profile. Unknown id → reject the spawn.
-2. Validates the lead's `tools` arg is a **subset** of the profile's
-   allowlist. Any tool not in the allowlist → reject.
-3. Validates `model` is in `allowed_models` (when set). Unlisted → reject.
-4. Clamps `timeout_secs` down to `max_timeout_secs` (when set);
-   doesn't round up if the lead's value is smaller.
-5. (Sub-leads) Clamps `budget_usd` down to `max_budget_usd`.
-
-If `tools` is omitted by the lead, the spawn gets the profile's full
-allowlist — not the lead's tools. A manifest-level `require_actor_type`
-flag (default false for back-compat) forces every `spawn_worker` /
-`spawn_sublead` to name a type, rejecting legacy type-less spawns.
-
-**Why this belongs as a manifest concept, not a prompt constraint:**
-
-- The operator (not the lead) sets the capability surface. Prompts are
-  tuned iteratively; manifests are code-review artifacts.
-- Works with `[lead.sublead_defaults]` — profiles are a sibling to
-  defaults, not a replacement.
-- Auditable: `pitboss validate` can report the full capability matrix
-  of a manifest without running it. `pitboss status` could show which
-  type each live worker was spawned under.
-- Composable: a team could ship a "safe" base manifest with restrictive
-  types and let downstream manifests redeclare or extend.
-
-**Scope for initial implementation:**
-
-- [ ] `[[worker_type]]` and `[[sublead_type]]` parsing + validation
-- [ ] `type` arg on `spawn_worker` / `spawn_sublead` MCP tools
-- [ ] Dispatcher-side clipping + rejection with clear error messages
-- [ ] `pitboss validate` surfaces unknown types referenced anywhere
-- [ ] Record resolved type on `TaskRecord` so `summary.json` shows it
-- [ ] Docs: AGENTS.md section + pitboss.example.toml commented block
-
-**Deferred to follow-up:**
-
-- Env var allowlists per type (e.g. "type `db-writer` may read
-  `DATABASE_URL` but not `AWS_*`")
-- Per-type working-directory constraints
-- `[[task_type]]` for flat mode (the same capability surface, but flat
-  mode's use cases are narrower — defer until a concrete ask)
-- TUI support: surface the type label in tile headers + approvals pane
-
-**Status:** scoped, not started. Good candidate for v0.9.
-
-### Lead-side budget accounting and cap
-
-Today `[run].budget_usd` reserves and accounts only for `spawn_worker`
-estimates — it does **not** count the lead's own token spend. A lead
-that does heavy synthesis or thrashes through orchestration retries can
-burn arbitrary amounts of compute without ever tripping the budget cap.
-
-Concrete failure mode (observed in the docs-vault-update v1 dispatch
-run, 2026-04-24): an Opus lead orchestrating 16 workers across 54
-minutes consumed ~$15 in lead tokens alone, against a `budget_usd =
-5.00` declaration. Workers reserved + spent within budget; the lead's
-own spend was untracked and unbounded.
-
-Two changes to make budget actually predictive of total cost:
-
-1. **Track lead token consumption against `spent_usd`.** Pitboss
-   already prices each model. The lead's own `Event::Result` reports
-   its token usage on every turn — feed that into the same
-   `spent_usd.lock().await` mutex that workers do. The lead's parent
-   spawn site (`run_dispatch`) already has the model rate; add a
-   reconciliation pass per assistant turn or at lead termination.
-2. **Optional `lead_budget_usd` separate cap.** When set, the lead's
-   spend is capped independently — useful for runs that want generous
-   worker budgets but a tight orchestration budget (the inverse case
-   shows up too — large per-worker budgets for code generation, small
-   lead budget for a fixed-shape orchestration plan).
-
-Sub-leads pose a third wrinkle: their own token spend should count
-toward the run's total. Same mechanism — sub-lead reconciliation at
-termination.
-
-**Why this matters beyond cost predictability:** the budget cap is
-also a kill switch for runaway lead behavior. If a lead enters a
-retry loop or pathological orchestration pattern, today there is no
-financial backstop other than `lead_timeout_secs`. A budget cap that
-includes lead spend would terminate the run when total cost exceeds
-the declared envelope — a more ergonomic safety than time-based.
-
-**Scope:** track lead spend by default (+ sub-lead spend); add
-optional `lead_budget_usd` for the separate-cap case. Surface running
-lead-spend total via `worker_status` / `pitboss status` output so
-operators can observe the eat-rate live.
-
-**Status:** scoped, not started. Sibling to typed worker profiles
-above; both are operator-declared bounds the dispatcher enforces.
-
-### External MCP server injection — per-actor scoping (v2)
-
-~~v1 (`scope = "all"`) shipped in v0.9~~ — `[[mcp_server]]` declarations are
-now injected into every actor's `--mcp-config` at dispatch time.
-
-Remaining work:
-
-- **Per-actor scoping** (`scope = "lead" | "sublead" | "worker"`).
-  More secure but more verbose; useful once operators need to restrict a server
-  to only part of the tree (e.g. context7 for the lead only, not workers).
-  Natural landing point is alongside typed worker profiles — a `worker_type`
-  profile could declare which MCP servers workers of that type see.
-- **Allowlist interaction with typed profiles.** When typed profiles ship,
-  `[[mcp_server]]` entries should be gateable per type so the safety belt
-  holds even when a server is declared run-wide.
-
-**Status:** v1 shipped (PR #122). Per-actor scoping deferred pending typed
-worker profiles.
+- **Full TUI approval-replay on run-switch (#95).** Drain of stale
+  events on `SwitchRun` shipped (#104); replay of pending approvals
+  on re-connect remains. **Status:** scoped. **Tracking:** #95.
 
 ---
 
-## Medium-term — deferred, lower priority
+## Non-goals
 
-### Broadcast mode (`pitboss b "<prompt>"`)
+Explicit "don't build these" — design constraints, not accidental
+limits.
 
-Send the same prompt to every running tile. From the v0.2.1 roadmap.
-Depends on interactive snap-in (retired — see below). **Status:**
-parked; probably needs a different UX surface now.
+- **Worker → worker MCP channel.** Workers are terminal nodes. No
+  spawning, no lateral calls. Breaking this re-introduces the
+  contention + ordering complexity pitboss was built to avoid. Use
+  the shared store (`/shared/*`, `/peer/<id>/*`) for worker-to-worker
+  data. Depth-2 via *sub-leads* is a distinct concept — a sub-lead
+  is a full orchestrator, not a worker calling peers.
 
-### Depth > 2 hierarchies
+- **Interactive snap-in (keystroke passthrough).** Forwarding
+  keystrokes from a focused TUI tile into a running claude
+  subprocess. Analyzed in v0.3.4 and retired — hierarchical mode is
+  the correct abstraction for the "operator can't watch 16 workers"
+  problem. View-only Detail view stays.
 
-Depth-2 (root lead → sub-leads → workers) shipped in v0.6.0. Depth-3+
-(sub-leads spawning their own sub-leads) remains a non-goal for now —
-the same "flatter decomposition" concern applies with more force. The
-depth=2 cap is enforced at both the MCP handler and the sub-lead's
-`--allowedTools` list. **Status:** depth=2 SHIPPED (v0.6.0); depth>2
-parked pending a concrete need that can't be served by a wider flat
-fan-out.
+- **Windows-native builds.** Pitboss relies on unix sockets +
+  SIGTERM. Porting would mean a named-pipe abstraction + different
+  process signaling for zero incremental use case we know about.
+  Revisit if a concrete need emerges.
 
-### Peer messaging
+- **Heavy workflow-engine features.** No DAG dependencies between
+  tasks, no conditional branches, no retry policies. If you want
+  those, you want a proper workflow system (Airflow, Prefect).
+  Pitboss's value is that it stays simple.
 
-Workers pass results to siblings without the lead in the middle.
-Considered and implemented differently in v0.4.2 — the worker shared
-store (`/shared/*` namespace) covers the most common case via a hub
-model. Lateral MCP calls between workers remain a non-goal (see
-below). **Status:** partially subsumed by shared store; MCP-channel
-form explicitly retired.
-
----
-
-## Deferred from v0.9.0 (targeting v0.10+)
-
-Items that were scoped or considered during v0.8 / v0.9 development but
-explicitly deferred. These are reasonably well-understood problems,
-not blue-sky ideas.
-
-### Path B stabilization (#92, #93, #94)
-
-v0.8 added the `permission_routing = "path_b"` manifest field but
-gates it with a validation error. Three tracked bugs block stabilization:
-
-- **#92:** `--permission-prompt-tool` flag isn't threaded to all
-  spawn-args call sites (root lead vs. sub-lead vs. worker).
-- **#93:** The `PermissionPromptResponse` wire format doesn't match
-  what claude's SDK expects.
-- **#94:** `CLAUDE_CODE_ENTRYPOINT=sdk-ts` must be evicted from the
-  environment when Path B is active (otherwise Path A takes over).
-
-**Status:** work-in-progress on `feat/path-b-permission-routing`.
-Landing all three unblocks removal of the validate-time gate.
-
-### Phase 4 per-sub-tree runners (#100) — closed
-
-Originally tracked four concerns: (1) fire-once watchers miss
-late-registered actors; (2) the root watcher reaches into sub-tree
-`worker_cancels` directly (ownership inversion); (3) `terminate()` does
-not cascade symmetrically with `drain()`; (4) the spawn-time mitigation
-is a band-aid on (1).
-
-**Status:** closed across PRs 100.1–100.3. (1) and (4) are fixed by
-making the eager registration cascade a documented part of the
-contract, not a band-aid (`LayerState::register_worker_cancel`,
-`DispatchState::register_sublead`, pinned by
-`tests/cancel_cascade_flows.rs`). (2) is fixed because the watchers now
-fan out via `LayerState::cascade_to_workers` /
-`DispatchState::cascade_to_subleads` — no watcher reaches across layer
-boundaries. (3) is fixed because both watchers funnel through
-`CancelToken::cascade_to`, which encodes terminate-dominates-drain in
-one place. The "per-sub-tree runner" abstraction itself was not built;
-the audit's correctness goals were met without introducing a new
-runner type.
-
-### TUI approval replay on run-switch (#95)
-
-When the TUI is launched without a run-id and the operator picks a run
-from the selector, pending approval_requested events already in the
-queue are not re-displayed. Launching with a run-id prefix works.
-
-**Status:** partially mitigated — `ctrl_events_rx` is now drained on
-`SwitchRun` so stale events from the prior run no longer leak (#104,
-closed). Full replay of pending approvals on re-connect remains open.
-
-### Slack notification sink escaping
-
-v0.7 hardened the Discord sink (escape markdown + `allowed_mentions: []`)
-but the Slack sink wasn't audited for the same class of injection.
-If Slack sink formats untrusted fields into `mrkdwn` blocks, same
-treatment applies. **Status:** deferred; audit + fix in one small PR
-when prioritized.
-
-### Low-severity nits from v0.8 ultrareview
-
-- ~~**#96:** `pitboss status` table overflows the task-ID column.~~ **Closed** — `truncate_ellipsis` added to `pitboss-core::fmt`, applied in `status.rs` and `tui_table.rs`.
-- ~~**#97:** Duration formatter has no hour rollover; four duplicate copies.~~ **Closed** — centralized into `pitboss_core::fmt::format_duration_ms` with hour rollover; duplicates removed.
-- ~~**#98:** Sync `std::fs` write inside `tokio::spawn` in `sublead.rs`.~~ **Closed** — switched to `tokio::fs::OpenOptions` + `AsyncWriteExt`.
-
----
-
-## Non-goals (don't build these)
-
-### Worker → worker MCP channel
-
-Specifically: don't let workers spawn sub-workers or send tool calls
-laterally. Workers are terminal nodes — no spawning, no lateral calls.
-This is a design constraint, not an accidental limit. Breaking it
-re-introduces the contention + ordering complexity that pitboss was
-built to avoid. (Note: v0.6.0 added depth-2 via *sub-leads*, which are
-a distinct concept — a sub-lead is a full orchestrator, not a worker
-calling peers.) If you need workers to share data, use the shared store
-(`/shared/*` or `/peer/<id>/*` namespaces — see `AGENTS.md`).
-
-### Interactive snap-in (keystroke passthrough)
-
-Forwarding keystrokes from a focused TUI tile into a running claude
-subprocess. Analyzed in v0.3.4 and **retired** — hierarchical mode is
-the correct abstraction for the "operator can't watch 16 workers"
-problem. The `pitboss attach` escape hatch (above) covers the narrow
-cases where view-only isn't enough. View-only Detail view stays.
-
-### Windows-native builds
-
-Pitboss relies on unix sockets + SIGTERM for cancellation. Porting to
-Windows would mean a named-pipe abstraction + different process
-signaling. The current target audience runs on Linux + macOS;
-supporting Windows would materially expand the surface area for zero
-incremental use cases we know about. Revisit if a concrete need
-emerges.
-
-### Heavy dependency-manager features
-
-Pitboss is a dispatcher, not a workflow engine. Don't add DAG
-dependencies between tasks, conditional branches, retry policies, etc.
-If you want those, you want a proper workflow system (Airflow,
-Prefect). Pitboss's value is that it stays simple.
+- **Peer-messaging via lateral MCP calls.** Considered in v0.4.2 and
+  resolved differently — the worker shared store covers the common
+  case via a hub model. The MCP-channel form is explicitly retired.
