@@ -35,8 +35,8 @@ per-task and run-total cost estimates client-side. See
 `CHANGELOG.md` for the full per-version history and `AGENTS.md`
 for the MCP tool reference, keybindings, and manifest schema.
 
-Rust toolkit for running and observing parallel Claude Code sessions. A
-dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
+Rust toolkit for running and observing parallel Goose-powered agent sessions. A
+dispatcher (`pitboss`) fans out `goose run` subprocesses under a concurrency
 cap, captures structured artifacts per run, and — in hierarchical mode —
 lets a **lead** dynamically spawn more workers via MCP. The TUI
 (`pitboss-tui`) gives the floor view: tile grid, live log tailing, budget +
@@ -51,7 +51,7 @@ consistently usable output.
 | Term | Meaning |
 |---|---|
 | **Pitboss** | The `pitboss` dispatcher binary. Runs manifests, manages worktrees, persists run state. |
-| **Lead** | The coordinating `claude` subprocess in a hierarchical run — receives the operator's prompt + MCP tools, decides how many workers to spawn. |
+| **Lead** | The coordinating Goose subprocess in a hierarchical run — receives the operator's prompt + MCP tools, decides how many workers to spawn. |
 | **Run** | One invocation of `pitboss dispatch`. Produces `~/.local/share/pitboss/runs/<run-id>/` with manifest snapshot, resolved config, per-task logs, and a summary. |
 | **House rules** | The hierarchical-run guardrails: `max_workers`, `budget_usd`, `lead_timeout_secs`. |
 

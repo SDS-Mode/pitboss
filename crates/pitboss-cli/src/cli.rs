@@ -48,7 +48,7 @@ pub enum Command {
         /// Override run_dir from the manifest / default.
         #[arg(long)]
         run_dir: Option<PathBuf>,
-        /// Print the resolved claude spawn commands and exit.
+        /// Print the resolved Goose spawn commands and exit.
         #[arg(long, conflicts_with_all = ["background", "internal_run_id"])]
         dry_run: bool,
         /// Detach the dispatcher to run in the background (`nohup`-equivalent).
@@ -133,7 +133,7 @@ pub enum Command {
     /// access (installed binary, container, CI runner). Content is
     /// compiled in at build time and matches the running binary's version.
     AgentsMd,
-    /// Internal: proxy stdio <-> unix-socket for a claude subprocess's MCP client.
+    /// Internal: proxy stdio <-> unix-socket for an actor subprocess's MCP client.
     /// Launched automatically by the `--mcp-config` file that pitboss generates
     /// per-actor. Not intended for direct human use.
     McpBridge {
