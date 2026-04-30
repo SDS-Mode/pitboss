@@ -145,6 +145,7 @@ impl SessionStore for JsonFileStore {
             manifest_name: None,
             pitboss_version: meta.pitboss_version,
             claude_version: meta.claude_version,
+            agent_versions: meta.agent_versions,
             started_at: started,
             ended_at: ended,
             total_duration_ms: (ended - started).num_milliseconds(),
@@ -170,6 +171,7 @@ mod iter_runs_tests {
             manifest_path: PathBuf::from("/x.toml"),
             pitboss_version: "0.9.1".into(),
             claude_version: None,
+            agent_versions: HashMap::new(),
             started_at: started,
             env: HashMap::new(),
         }

@@ -24,6 +24,42 @@ use pitboss_core::store::{RunMeta, SessionStore};
 
 use crate::manifest::resolve::ResolvedManifest;
 
+/// Current dispatch still uses Claude for hierarchical mode and Goose for flat
+/// mode. Keep this in one helper so the v0.10 hierarchical Goose switch has a
+/// single metadata policy to update.
+pub fn dispatch_agent_key(resolved: &ResolvedManifest) -> &'static str {
+    if resolved.lead.is_some() {
+        "claude"
+    } else {
+        "goose"
+    }
+}
+
+pub fn agent_versions_for_run(
+    resolved: &ResolvedManifest,
+    agent_version: Option<&str>,
+) -> std::collections::HashMap<String, String> {
+    let mut versions = std::collections::HashMap::new();
+    if let Some(version) = agent_version {
+        versions.insert(
+            dispatch_agent_key(resolved).to_string(),
+            version.to_string(),
+        );
+    }
+    versions
+}
+
+pub fn legacy_claude_version(
+    resolved: &ResolvedManifest,
+    agent_version: Option<String>,
+) -> Option<String> {
+    if dispatch_agent_key(resolved) == "claude" {
+        agent_version
+    } else {
+        None
+    }
+}
+
 /// Identifiers + paths produced by [`init_run_state`] and consumed by
 /// the rest of the dispatch path. `run_dir` is the resolved run root
 /// (operator override or `resolved.run_dir`); `run_subdir` is the
@@ -65,7 +101,7 @@ pub async fn init_run_state(
     resolved: &ResolvedManifest,
     manifest_text: &str,
     manifest_path: &Path,
-    claude_version: Option<String>,
+    agent_version: Option<String>,
     store: &Arc<dyn SessionStore>,
     pre_minted_run_id: Option<Uuid>,
     run_dir_override: Option<PathBuf>,
@@ -98,7 +134,8 @@ pub async fn init_run_state(
         run_id,
         manifest_path: manifest_path.to_path_buf(),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version,
+        claude_version: legacy_claude_version(resolved, agent_version.clone()),
+        agent_versions: agent_versions_for_run(resolved, agent_version.as_deref()),
         started_at,
         env: Default::default(),
     };

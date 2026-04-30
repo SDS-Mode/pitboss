@@ -27,6 +27,7 @@ mod integration_tests {
             manifest_path: root.join("pitboss.toml"),
             pitboss_version: "0.1.0".into(),
             claude_version: Some("1.0.0".into()),
+            agent_versions: HashMap::new(),
             started_at: Utc::now(),
             env: HashMap::new(),
         }
@@ -81,6 +82,7 @@ mod integration_tests {
             manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
+            agent_versions: HashMap::new(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
             total_duration_ms: 0,

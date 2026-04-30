@@ -129,7 +129,13 @@ pub struct RunMeta {
     pub run_id: Uuid,
     pub manifest_path: PathBuf,
     pub pitboss_version: String,
+    /// Legacy single-agent version field retained for pre-Goose consumers.
+    /// New code should read `agent_versions`.
     pub claude_version: Option<String>,
+    /// CLI/runtime versions keyed by agent binary name, e.g. `"claude"` or
+    /// `"goose"`. Empty for legacy runs where the version was not captured.
+    #[serde(default)]
+    pub agent_versions: HashMap<String, String>,
     pub started_at: DateTime<Utc>,
     pub env: HashMap<String, String>,
 }
@@ -145,7 +151,14 @@ pub struct RunSummary {
     #[serde(default)]
     pub manifest_name: Option<String>,
     pub pitboss_version: String,
+    /// Legacy single-agent version field retained for pre-Goose consumers.
+    /// New code should read `agent_versions`.
     pub claude_version: Option<String>,
+    /// CLI/runtime versions keyed by agent binary name, e.g. `"claude"` or
+    /// `"goose"`. Empty for legacy summaries where the version was not
+    /// captured.
+    #[serde(default)]
+    pub agent_versions: HashMap<String, String>,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub total_duration_ms: i64,
@@ -428,6 +441,7 @@ mod tests {
             manifest_name: Some("nightly".into()),
             pitboss_version: "0.10".into(),
             claude_version: None,
+            agent_versions: HashMap::new(),
             started_at: Utc.with_ymd_and_hms(2026, 4, 27, 0, 0, 0).unwrap(),
             ended_at: Utc.with_ymd_and_hms(2026, 4, 27, 0, 1, 0).unwrap(),
             total_duration_ms: 60_000,
@@ -461,6 +475,7 @@ mod tests {
         }"#;
         let s: RunSummary = serde_json::from_str(old).unwrap();
         assert!(s.manifest_name.is_none());
+        assert!(s.agent_versions.is_empty());
     }
 
     #[test]

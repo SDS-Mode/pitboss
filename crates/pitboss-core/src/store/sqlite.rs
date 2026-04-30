@@ -29,6 +29,7 @@
 //! v0.2.1. The `Connection` is wrapped in `Arc<Mutex<_>>` so the store is
 //! `Send + Sync`. Concurrent writes are serialised at the mutex.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -164,6 +165,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         name: "task_provider",
         apply: migrate_task_provider,
+    },
+    Migration {
+        version: 11,
+        name: "agent_versions",
+        apply: migrate_agent_versions,
     },
 ];
 
@@ -452,6 +458,45 @@ fn migrate_runs_env(conn: &rusqlite::Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Idempotent migration: add provider-neutral agent version metadata to runs.
+fn migrate_agent_versions(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let runs_exists = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'runs'",
+            )
+            .map_err(|e| StoreError::Incomplete(format!("migrate agent versions check: {e}")))?;
+        stmt.exists([]).map_err(|e| {
+            StoreError::Incomplete(format!("migrate agent versions check exists: {e}"))
+        })?
+    };
+    if !runs_exists {
+        return Ok(());
+    }
+    let has_col = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('runs') \
+                 WHERE name = 'agent_versions_json'",
+            )
+            .map_err(|e| {
+                StoreError::Incomplete(format!("migrate agent_versions_json prepare: {e}"))
+            })?;
+        stmt.exists([]).map_err(|e| {
+            StoreError::Incomplete(format!("migrate agent_versions_json exists: {e}"))
+        })?
+    };
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN agent_versions_json TEXT NULL",
+            [],
+        )
+        .map_err(|e| StoreError::Incomplete(format!("migrate agent_versions_json alter: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Idempotent migration: pre-v0.3.0 DBs had a `shire_version` column on the
 /// `runs` table. During the pitboss rebrand we renamed it to
 /// `pitboss_version`. This check runs before `init_schema` so:
@@ -512,7 +557,8 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             tasks_total      INTEGER,
             tasks_failed     INTEGER,
             was_interrupted  INTEGER DEFAULT 0,
-            env_json         TEXT NULL
+            env_json         TEXT NULL,
+            agent_versions_json TEXT NULL
         );
         CREATE TABLE IF NOT EXISTS task_records (
             run_id                TEXT NOT NULL,
@@ -583,6 +629,21 @@ fn parse_ts(s: &str) -> Result<DateTime<Utc>, StoreError> {
         .map_err(|e| StoreError::Incomplete(format!("bad timestamp '{s}': {e}")))
 }
 
+fn parse_agent_versions(
+    json: Option<&str>,
+    claude_version: Option<&str>,
+) -> HashMap<String, String> {
+    let mut versions = json
+        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
+        .unwrap_or_default();
+    if versions.is_empty() {
+        if let Some(version) = claude_version {
+            versions.insert("claude".to_string(), version.to_string());
+        }
+    }
+    versions
+}
+
 // ---------------------------------------------------------------------------
 // load_run helpers — extracted so the impl block stays under the line limit.
 // ---------------------------------------------------------------------------
@@ -595,6 +656,7 @@ struct RunRow {
     manifest_path: String,
     pitboss_version: String,
     claude_version: Option<String>,
+    agent_versions_json: Option<String>,
     started_at: String,
     ended_at: Option<String>,
     tasks_total: Option<i64>,
@@ -608,6 +670,7 @@ impl RunRow {
             manifest_path: row.get("manifest_path")?,
             pitboss_version: row.get("pitboss_version")?,
             claude_version: row.get("claude_version")?,
+            agent_versions_json: row.get("agent_versions_json").unwrap_or(None),
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,
             tasks_total: row.get("tasks_total")?,
@@ -731,7 +794,7 @@ fn fetch_run_row(
 ) -> Result<Option<RunRow>, StoreError> {
     let mut stmt = guard
         .prepare(
-            "SELECT manifest_path, pitboss_version, claude_version, \
+            "SELECT manifest_path, pitboss_version, claude_version, agent_versions_json, \
                  started_at, ended_at, tasks_total, tasks_failed, was_interrupted \
              FROM runs WHERE run_id = ?1",
         )
@@ -829,7 +892,11 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
         // when SqliteStore moves out of test-only use.
         manifest_name: None,
         pitboss_version: run.pitboss_version,
-        claude_version: run.claude_version,
+        claude_version: run.claude_version.clone(),
+        agent_versions: parse_agent_versions(
+            run.agent_versions_json.as_deref(),
+            run.claude_version.as_deref(),
+        ),
         started_at,
         ended_at,
         total_duration_ms: (ended_at - started_at).num_milliseconds(),
@@ -855,6 +922,7 @@ impl SessionStore for SqliteStore {
         let manifest_path = meta.manifest_path.to_string_lossy().into_owned();
         let pitboss_version = meta.pitboss_version.clone();
         let claude_version = meta.claude_version.clone();
+        let agent_versions = meta.agent_versions.clone();
         let started_at = meta.started_at.to_rfc3339();
         // Persist env as JSON for parity with `JsonFileStore` (#149 M2).
         // Empty maps are stored as `NULL` rather than `"{}"` to keep the
@@ -867,6 +935,14 @@ impl SessionStore for SqliteStore {
                     .map_err(|e| StoreError::Incomplete(format!("init_run env: {e}")))?,
             )
         };
+        let agent_versions_json = if agent_versions.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&agent_versions)
+                    .map_err(|e| StoreError::Incomplete(format!("init_run agent_versions: {e}")))?,
+            )
+        };
 
         tokio::task::spawn_blocking(move || {
             let guard = conn
@@ -875,8 +951,8 @@ impl SessionStore for SqliteStore {
             guard
                 .execute(
                     "INSERT OR REPLACE INTO runs \
-                     (run_id, manifest_path, pitboss_version, claude_version, started_at, env_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (run_id, manifest_path, pitboss_version, claude_version, started_at, env_json, agent_versions_json) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     rusqlite::params![
                         run_id,
                         manifest_path,
@@ -884,6 +960,7 @@ impl SessionStore for SqliteStore {
                         claude_version,
                         started_at,
                         env_json,
+                        agent_versions_json,
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("init_run insert: {e}")))?;
@@ -1039,7 +1116,7 @@ fn iter_runs_blocking(guard: &rusqlite::Connection) -> Result<Vec<RunMeta>, Stor
     let mut stmt = guard
         .prepare(
             "SELECT run_id, manifest_path, pitboss_version, claude_version, \
-                    started_at, env_json \
+                    started_at, env_json, agent_versions_json \
              FROM runs ORDER BY started_at DESC",
         )
         .map_err(|e| StoreError::from_rusqlite(&e))?;
@@ -1052,13 +1129,21 @@ fn iter_runs_blocking(guard: &rusqlite::Connection) -> Result<Vec<RunMeta>, Stor
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })
         .map_err(|e| StoreError::from_rusqlite(&e))?;
     let mut metas: Vec<RunMeta> = Vec::new();
     for raw in mapped {
-        let Ok((run_id_s, manifest_path, pitboss_version, claude_version, started_at, env_json)) =
-            raw
+        let Ok((
+            run_id_s,
+            manifest_path,
+            pitboss_version,
+            claude_version,
+            started_at,
+            env_json,
+            agent_versions_json,
+        )) = raw
         else {
             continue;
         };
@@ -1076,7 +1161,11 @@ fn iter_runs_blocking(guard: &rusqlite::Connection) -> Result<Vec<RunMeta>, Stor
             run_id,
             manifest_path: PathBuf::from(manifest_path),
             pitboss_version,
-            claude_version,
+            claude_version: claude_version.clone(),
+            agent_versions: parse_agent_versions(
+                agent_versions_json.as_deref(),
+                claude_version.as_deref(),
+            ),
             started_at,
             env,
         });
@@ -1103,6 +1192,7 @@ mod sqlite_tests {
             manifest_path: dir.join("pitboss.toml"),
             pitboss_version: "0.1.0".into(),
             claude_version: Some("1.0.0".into()),
+            agent_versions: HashMap::new(),
             started_at: Utc::now(),
             env: HashMap::new(),
         }
@@ -1159,6 +1249,7 @@ mod sqlite_tests {
             manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
+            agent_versions: std::collections::HashMap::new(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
             total_duration_ms: 0,
@@ -1255,6 +1346,7 @@ mod sqlite_tests {
             manifest_name: None,
             pitboss_version: "0.3.0".into(),
             claude_version: None,
+            agent_versions: std::collections::HashMap::new(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
             total_duration_ms: 0,
@@ -1348,6 +1440,7 @@ mod sqlite_tests {
             manifest_name: None,
             pitboss_version: "0.1.0".into(),
             claude_version: None,
+            agent_versions: std::collections::HashMap::new(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
             total_duration_ms: 0,
@@ -1481,11 +1574,14 @@ mod sqlite_tests {
         let mut env = HashMap::new();
         env.insert("PITBOSS_NOTIFY_SLACK_WEBHOOK".to_string(), "x".to_string());
         env.insert("PITBOSS_RUN_BUDGET_USD".to_string(), "10.50".to_string());
+        let mut agent_versions = HashMap::new();
+        agent_versions.insert("goose".to_string(), "goose 1.33.1".to_string());
         let m = RunMeta {
             run_id,
             manifest_path: dir.path().join("p.toml"),
             pitboss_version: "0.9.1".into(),
             claude_version: None,
+            agent_versions,
             started_at: Utc::now(),
             env,
         };
@@ -1512,6 +1608,19 @@ mod sqlite_tests {
         assert_eq!(
             parsed.get("PITBOSS_RUN_BUDGET_USD").map(String::as_str),
             Some("10.50")
+        );
+        let agent_versions_json: Option<String> = conn
+            .query_row(
+                "SELECT agent_versions_json FROM runs WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed_versions: HashMap<String, String> =
+            serde_json::from_str(&agent_versions_json.expect("agent versions persisted")).unwrap();
+        assert_eq!(
+            parsed_versions.get("goose").map(String::as_str),
+            Some("goose 1.33.1")
         );
     }
 

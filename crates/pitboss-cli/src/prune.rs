@@ -211,6 +211,7 @@ fn build_synthesized_summary(run_dir: &Path) -> Result<RunSummary> {
         manifest_name: None,
         pitboss_version: meta.pitboss_version,
         claude_version: meta.claude_version,
+        agent_versions: meta.agent_versions,
         started_at: meta.started_at,
         ended_at: ended,
         total_duration_ms: (ended - meta.started_at).num_milliseconds(),
@@ -473,6 +474,7 @@ mod tests {
             manifest_path: PathBuf::from("/tmp/manifest.toml"),
             pitboss_version: "test".to_string(),
             claude_version: None,
+            agent_versions: HashMap::new(),
             started_at: Utc::now(),
             env: HashMap::new(),
         };

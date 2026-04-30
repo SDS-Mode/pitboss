@@ -80,6 +80,13 @@ prompt = "p"
     );
     let s: serde_json::Value = serde_json::from_slice(&std::fs::read(&summary).unwrap()).unwrap();
     assert_eq!(s["tasks_total"].as_u64().unwrap(), 3);
+    assert!(s["claude_version"].is_null());
+    assert!(
+        s["agent_versions"]["goose"]
+            .as_str()
+            .is_some_and(|v| v.contains("fake-goose")),
+        "summary should record the Goose binary version, got {s}"
+    );
 }
 
 #[test]

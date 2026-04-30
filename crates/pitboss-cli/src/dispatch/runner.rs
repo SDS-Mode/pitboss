@@ -433,7 +433,14 @@ async fn finalize_run(
             manifest_path,
         ),
         pitboss_version: env!("CARGO_PKG_VERSION").to_string(),
-        claude_version,
+        claude_version: crate::dispatch::entrypoint::legacy_claude_version(
+            resolved,
+            claude_version.clone(),
+        ),
+        agent_versions: crate::dispatch::entrypoint::agent_versions_for_run(
+            resolved,
+            claude_version.as_deref(),
+        ),
         started_at: init.started_at,
         ended_at,
         total_duration_ms: (ended_at - init.started_at).num_milliseconds(),

@@ -813,6 +813,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
             manifest_path: dir.path().join("manifest.toml"),
             pitboss_version: "test".into(),
             claude_version: None,
+            agent_versions: std::collections::HashMap::new(),
             started_at: chrono::Utc::now(),
             env: Default::default(),
         })

@@ -122,6 +122,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         manifest_name,
         pitboss_version: meta.pitboss_version,
         claude_version: meta.claude_version,
+        agent_versions: meta.agent_versions,
         started_at: started,
         ended_at: ended,
         total_duration_ms: (ended - started).num_milliseconds(),
@@ -555,6 +556,7 @@ mod tests {
             manifest_name: None,
             pitboss_version: "0.1.0".to_string(),
             claude_version: None,
+            agent_versions: HashMap::new(),
             started_at: now,
             ended_at: now + chrono::Duration::seconds(60),
             total_duration_ms: 60_000,
@@ -661,6 +663,7 @@ mod tests {
             manifest_path: PathBuf::from("/tmp/test.toml"),
             pitboss_version: "0.1.0".to_string(),
             claude_version: None,
+            agent_versions: HashMap::new(),
             started_at,
             env: HashMap::new(),
         };
