@@ -10,8 +10,8 @@
 //!   4. The hidden `--internal-run-id` flag is honored (foreground
 //!      dispatch with that flag uses the supplied id).
 //!
-//! Fake-claude scripts keep these tests deterministic and fast (no
-//! Anthropic API calls).
+//! Fake-goose scripts keep these tests deterministic and fast (no
+//! provider API calls).
 
 mod support;
 
@@ -75,8 +75,8 @@ prompt = "p"
     cmd.arg("dispatch")
         .arg(&manifest_path)
         .arg("--background")
-        .env("PITBOSS_CLAUDE_BINARY", fake_claude_path())
-        .env("PITBOSS_FAKE_SCRIPT", fixture("success.jsonl"))
+        .env("PITBOSS_GOOSE_BINARY", fake_goose_path())
+        .env("PITBOSS_FAKE_SCRIPT", fixture("goose-success.jsonl"))
         .env("PITBOSS_FAKE_EXIT_CODE", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -180,8 +180,8 @@ prompt = "p"
     cmd.arg("dispatch")
         .arg(&manifest_path)
         .args(["--internal-run-id", &preset_run_id])
-        .env("PITBOSS_CLAUDE_BINARY", fake_claude_path())
-        .env("PITBOSS_FAKE_SCRIPT", fixture("success.jsonl"))
+        .env("PITBOSS_GOOSE_BINARY", fake_goose_path())
+        .env("PITBOSS_FAKE_SCRIPT", fixture("goose-success.jsonl"))
         .env("PITBOSS_FAKE_EXIT_CODE", "0");
     let out = cmd.output().unwrap();
     assert!(
