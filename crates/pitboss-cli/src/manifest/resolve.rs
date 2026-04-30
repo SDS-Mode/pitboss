@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
+use pitboss_core::provider::Provider;
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
@@ -18,6 +19,8 @@ pub struct ResolvedTask {
     pub directory: PathBuf,
     pub prompt: String,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub provider: Provider,
     pub model: String,
     pub effort: Effort,
     pub tools: Vec<String>,
@@ -167,6 +170,7 @@ pub struct ResolvedManifest {
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_PROVIDER: Provider = Provider::Anthropic;
 const DEFAULT_EFFORT: Effort = Effort::High;
 const DEFAULT_TIMEOUT_SECS: u64 = 3600;
 use super::schema::DEFAULT_MAX_PARALLEL_TASKS;
@@ -175,6 +179,54 @@ fn default_tools() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+fn parse_provider(raw: Option<&str>) -> Result<Option<Provider>> {
+    raw.map(str::parse)
+        .transpose()
+        .map_err(|e: String| anyhow!(e))
+}
+
+fn split_provider_model(model: &str) -> Option<(Provider, String)> {
+    let (provider, model) = model.split_once('/')?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    let provider = provider.parse().ok()?;
+    Some((provider, model.to_string()))
+}
+
+fn resolve_provider_and_model(
+    actor_provider: Option<&str>,
+    actor_model: Option<&str>,
+    defaults: &Defaults,
+    goose: &crate::manifest::schema::GooseConfig,
+    context: &str,
+) -> Result<(Provider, String)> {
+    let default_provider = parse_provider(defaults.provider.as_deref())
+        .context("[defaults].provider")?
+        .or(parse_provider(goose.default_provider.as_deref())
+            .context("[goose].default_provider")?)
+        .unwrap_or(DEFAULT_PROVIDER);
+    let explicit_actor_provider =
+        parse_provider(actor_provider).with_context(|| format!("{context}.provider"))?;
+
+    let raw_model = actor_model
+        .map(str::to_string)
+        .or_else(|| defaults.model.clone());
+
+    let (model_provider, model) = match raw_model {
+        Some(model) => match split_provider_model(&model) {
+            Some((provider, stripped)) => (Some(provider), stripped),
+            None => (None, model),
+        },
+        None => (None, DEFAULT_MODEL.to_string()),
+    };
+
+    let provider = explicit_actor_provider
+        .or(model_provider)
+        .unwrap_or(default_provider);
+    Ok((provider, model))
 }
 
 pub fn resolve(
@@ -189,7 +241,12 @@ pub fn resolve(
 
     let mut resolved_tasks = Vec::with_capacity(manifest.tasks.len());
     for task in &manifest.tasks {
-        resolved_tasks.push(resolve_task(task, &manifest.defaults, &templates)?);
+        resolved_tasks.push(resolve_task(
+            task,
+            &manifest.defaults,
+            &manifest.goose,
+            &templates,
+        )?);
     }
 
     let resolved_sublead_defaults = manifest
@@ -201,6 +258,7 @@ pub fn resolve(
         Some(resolve_lead(
             l,
             &manifest.defaults,
+            &manifest.goose,
             resolved_sublead_defaults.clone(),
         )?)
     } else {
@@ -261,6 +319,7 @@ pub fn resolve(
 fn resolve_lead(
     lead: &Lead,
     defaults: &Defaults,
+    _goose: &crate::manifest::schema::GooseConfig,
     sublead_defaults: Option<ResolvedSubleadDefaults>,
 ) -> Result<ResolvedLead> {
     let mut env = defaults.env.clone();
@@ -306,6 +365,7 @@ fn resolve_lead(
 fn resolve_task(
     task: &Task,
     defaults: &Defaults,
+    goose: &crate::manifest::schema::GooseConfig,
     templates: &HashMap<String, &Template>,
 ) -> Result<ResolvedTask> {
     let prompt = match (&task.prompt, &task.template) {
@@ -324,16 +384,22 @@ fn resolve_task(
     let mut env = defaults.env.clone();
     env.extend(task.env.clone());
 
+    let context = format!("[[task]] id='{}'", task.id);
+    let (provider, model) = resolve_provider_and_model(
+        task.provider.as_deref(),
+        task.model.as_deref(),
+        defaults,
+        goose,
+        &context,
+    )?;
+
     Ok(ResolvedTask {
         id: task.id.clone(),
         directory: task.directory.clone(),
         prompt,
         branch: task.branch.clone(),
-        model: task
-            .model
-            .clone()
-            .or_else(|| defaults.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        provider,
+        model,
         effort: task.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
         tools: task
             .tools
@@ -639,6 +705,37 @@ mod tests {
         let r = resolve(m, None).unwrap();
         assert_eq!(r.tasks[0].model, "override-m");
         assert_eq!(r.tasks[0].tools, vec!["Read"]);
+    }
+
+    #[test]
+    fn task_provider_resolves_from_defaults() {
+        let m = man(r#"
+            [defaults]
+            provider = "google"
+            model = "gemini-2.5-flash"
+
+            [[task]]
+            id = "a"
+            directory = "/tmp"
+            prompt = "p"
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert_eq!(r.tasks[0].provider, Provider::Google);
+        assert_eq!(r.tasks[0].model, "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn task_model_short_form_seeds_provider() {
+        let m = man(r#"
+            [[task]]
+            id = "a"
+            directory = "/tmp"
+            prompt = "p"
+            model = "ollama/llama3.1"
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert_eq!(r.tasks[0].provider, Provider::Ollama);
+        assert_eq!(r.tasks[0].model, "llama3.1");
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod fmt;
 pub mod parser;
 pub mod prices;
 pub mod process;
+pub mod provider;
 pub mod session;
 pub mod store;
 pub mod worktree;

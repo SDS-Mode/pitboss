@@ -363,9 +363,16 @@ fn run_dispatch(
             std::process::exit(2);
         }
     };
-    let claude_bin = std::env::var_os("PITBOSS_CLAUDE_BINARY")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("claude"));
+    let is_hierarchical = resolved.lead.is_some();
+    let agent_bin = if is_hierarchical {
+        std::env::var_os("PITBOSS_CLAUDE_BINARY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("claude"))
+    } else {
+        std::env::var_os("PITBOSS_GOOSE_BINARY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("goose"))
+    };
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -379,10 +386,18 @@ fn run_dispatch(
     };
 
     let code = rt.block_on(async move {
-        let claude_version = if dry_run {
+        let agent_version = if dry_run {
             None
+        } else if is_hierarchical {
+            match dispatch::probe_claude(&agent_bin).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 2;
+                }
+            }
         } else {
-            match dispatch::probe_claude(&claude_bin).await {
+            match dispatch::probe_goose(&agent_bin).await {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("{e}");
@@ -390,14 +405,14 @@ fn run_dispatch(
                 }
             }
         };
-        if resolved.lead.is_some() {
+        if is_hierarchical {
             // Hierarchical mode
             return match dispatch::hierarchical::run_hierarchical(
                 resolved,
                 manifest_text,
                 manifest.to_path_buf(),
-                claude_bin,
-                claude_version,
+                agent_bin,
+                agent_version,
                 run_dir_override,
                 dry_run,
                 std::collections::HashMap::new(),
@@ -416,8 +431,8 @@ fn run_dispatch(
             resolved,
             manifest_text,
             manifest.to_path_buf(),
-            claude_bin,
-            claude_version,
+            agent_bin,
+            agent_version,
             run_dir_override,
             dry_run,
             pre_minted_run_id,
@@ -652,9 +667,16 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
         }
     };
 
-    let claude_bin = std::env::var_os("PITBOSS_CLAUDE_BINARY")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("claude"));
+    let is_hierarchical = resolved.lead.is_some();
+    let agent_bin = if is_hierarchical {
+        std::env::var_os("PITBOSS_CLAUDE_BINARY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("claude"))
+    } else {
+        std::env::var_os("PITBOSS_GOOSE_BINARY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("goose"))
+    };
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -668,23 +690,33 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
     };
 
     let code = rt.block_on(async move {
-        let claude_version = match dispatch::probe_claude(&claude_bin).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("{e}");
-                return 2;
+        let agent_version = if is_hierarchical {
+            match dispatch::probe_claude(&agent_bin).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 2;
+                }
+            }
+        } else {
+            match dispatch::probe_goose(&agent_bin).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 2;
+                }
             }
         };
         // Use the prior run's run_dir so artifacts land alongside the original.
         // run_dir_override replaces both the base and the resolved manifest's run_dir.
         let effective_run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
-        if resolved.lead.is_some() {
+        if is_hierarchical {
             return match dispatch::hierarchical::run_hierarchical(
                 resolved,
                 String::new(),
                 std::path::PathBuf::new(),
-                claude_bin,
-                claude_version,
+                agent_bin,
+                agent_version,
                 Some(effective_run_dir),
                 false,
                 sublead_sessions,
@@ -703,8 +735,8 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
             resolved,
             String::new(),
             std::path::PathBuf::new(),
-            claude_bin,
-            claude_version,
+            agent_bin,
+            agent_version,
             Some(effective_run_dir),
             false,
             None,

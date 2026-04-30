@@ -7,7 +7,7 @@ use chrono::Utc;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::parser::{parse_line_all, Event, TokenUsage};
+use crate::parser::{parse_line_all_dialect, Event, ParseDialect, TokenUsage};
 use crate::process::{ProcessSpawner, SpawnCmd};
 
 use super::{CancelToken, SessionOutcome, SessionState};
@@ -19,6 +19,7 @@ pub struct SessionHandle {
     log_path: Option<PathBuf>,
     stderr_log_path: Option<PathBuf>,
     session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    parse_dialect: ParseDialect,
     pid_slot: Option<Arc<std::sync::atomic::AtomicU32>>,
     terminate_grace: Duration,
     stream_drain_timeout: Duration,
@@ -37,6 +38,7 @@ impl SessionHandle {
             log_path: None,
             stderr_log_path: None,
             session_id_tx: None,
+            parse_dialect: ParseDialect::Claude,
             pid_slot: None,
             terminate_grace: super::TERMINATE_GRACE,
             stream_drain_timeout: super::DEFAULT_STREAM_DRAIN_TIMEOUT,
@@ -58,6 +60,12 @@ impl SessionHandle {
     #[must_use]
     pub fn with_session_id_tx(mut self, tx: tokio::sync::mpsc::Sender<String>) -> Self {
         self.session_id_tx = Some(tx);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parse_dialect(mut self, dialect: ParseDialect) -> Self {
+        self.parse_dialect = dialect;
         self
     }
 
@@ -173,6 +181,7 @@ impl SessionHandle {
             log_writer,
             accum_stream,
             self.session_id_tx.clone(),
+            self.parse_dialect,
         ));
 
         // Drain stderr into a separate log file if requested. Many subprocess errors
@@ -335,6 +344,7 @@ async fn stream_loop(
     mut log: Option<tokio::fs::File>,
     accum: Arc<Mutex<StreamAccum>>,
     session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    parse_dialect: ParseDialect,
 ) {
     // Tracks whether we've already published the session id on the
     // `session_id_tx` channel — Claude Code emits `system{init}` first
@@ -349,7 +359,7 @@ async fn stream_loop(
                     let _ = w.write_all(line.as_bytes()).await;
                     let _ = w.write_all(b"\n").await;
                 }
-                let events = match parse_line_all(line.as_bytes()) {
+                let events = match parse_line_all_dialect(line.as_bytes(), parse_dialect) {
                     Ok(evs) => evs,
                     Err(e) => {
                         tracing::debug!(
@@ -394,7 +404,7 @@ async fn stream_loop(
                         Event::System {
                             subtype: Some(ref st),
                             session_id: Some(ref sid),
-                        } if st == "init" && !session_id_published => {
+                        } if st == "init" && !sid.is_empty() && !session_id_published => {
                             if let Some(tx) = &session_id_tx {
                                 if let Err(e) = tx.try_send(sid.clone()) {
                                     tracing::debug!(
@@ -418,7 +428,7 @@ async fn stream_loop(
                             let mut a = accum
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if !session_id_published {
+                            if !sid.is_empty() && !session_id_published {
                                 // Fallback: init didn't carry a session_id (older
                                 // claude builds, or a wire-format change). Fire
                                 // here so the dispatcher's notification still
@@ -434,7 +444,9 @@ async fn stream_loop(
                                 }
                                 session_id_published = true;
                             }
-                            a.session_id = Some(sid);
+                            if !sid.is_empty() {
+                                a.session_id = Some(sid);
+                            }
                             a.usage.add(&u);
                             a.saw_result = true;
                         }

@@ -205,6 +205,27 @@ pub struct McpServerSpec {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
+#[serde(deny_unknown_fields)]
+pub struct GooseConfig {
+    #[field(
+        label = "Goose binary",
+        help = "Path to the goose binary. Defaults to PATH lookup of `goose`."
+    )]
+    pub binary_path: Option<PathBuf>,
+    #[field(
+        label = "Default provider",
+        help = "Default Goose provider when an actor does not set provider.",
+        enum_values = ["anthropic", "openai", "google", "ollama", "openrouter", "azure", "bedrock"]
+    )]
+    pub default_provider: Option<String>,
+    #[field(
+        label = "Default max turns",
+        help = "Default goose --max-turns safety cap for every spawn."
+    )]
+    pub default_max_turns: Option<u32>,
+}
+
 /// Top-level manifest. One canonical shape: either flat-mode (`[[task]]`) or
 /// hierarchical-mode (`[lead]`), mutually exclusive.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -214,6 +235,8 @@ pub struct Manifest {
     pub run: RunConfig,
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default)]
+    pub goose: GooseConfig,
     #[serde(default, rename = "template")]
     pub templates: Vec<Template>,
     #[serde(default, rename = "task")]
@@ -482,8 +505,14 @@ pub enum WorktreeCleanup {
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
     #[field(
+        label = "Provider",
+        help = "Goose provider (anthropic, openai, google, ollama, openrouter, azure, bedrock, or a future provider string).",
+        enum_values = ["anthropic", "openai", "google", "ollama", "openrouter", "azure", "bedrock"]
+    )]
+    pub provider: Option<String>,
+    #[field(
         label = "Model",
-        help = "Claude model id (e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7)."
+        help = "Model id passed to Goose. Short form provider/model is accepted when provider is omitted."
     )]
     pub model: Option<String>,
     #[field(
@@ -579,6 +608,12 @@ pub struct Task {
     #[field(label = "Model", help = "Per-task override of [defaults].model.")]
     pub model: Option<String>,
     #[field(
+        label = "Provider",
+        help = "Per-task Goose provider override.",
+        enum_values = ["anthropic", "openai", "google", "ollama", "openrouter", "azure", "bedrock"]
+    )]
+    pub provider: Option<String>,
+    #[field(
         label = "Effort",
         help = "Per-task override of [defaults].effort.",
         enum_values = ["low", "medium", "high", "xhigh", "max"]
@@ -646,6 +681,13 @@ pub struct Lead {
     #[serde(default)]
     #[field(label = "Model", help = "Per-lead override of [defaults].model.")]
     pub model: Option<String>,
+    #[serde(default)]
+    #[field(
+        label = "Provider",
+        help = "Per-lead Goose provider override.",
+        enum_values = ["anthropic", "openai", "google", "ollama", "openrouter", "azure", "bedrock"]
+    )]
+    pub provider: Option<String>,
     #[serde(default)]
     #[field(
         label = "Effort",
@@ -755,6 +797,12 @@ pub struct Lead {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct SubleadDefaults {
+    #[field(
+        label = "Provider",
+        help = "Default Goose provider for spawned sub-leads.",
+        enum_values = ["anthropic", "openai", "google", "ollama", "openrouter", "azure", "bedrock"]
+    )]
+    pub provider: Option<String>,
     #[field(
         label = "Budget (USD)",
         help = "Per-sub-lead envelope when read_down = false."

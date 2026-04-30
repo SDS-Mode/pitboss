@@ -534,6 +534,7 @@ mod tests {
             directory: dir,
             prompt: "p".into(),
             branch: branch.map(str::to_string),
+            provider: pitboss_core::provider::Provider::Anthropic,
             model: "m".into(),
             effort: Effort::High,
             tools: vec![],

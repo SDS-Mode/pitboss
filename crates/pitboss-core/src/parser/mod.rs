@@ -1,10 +1,16 @@
-//! Line-oriented parser for Claude Code `--output-format stream-json` output.
+//! Line-oriented parsers for agent `--output-format stream-json` output.
 
 pub mod events;
 
 pub use events::{Event, TokenUsage};
 
 use crate::error::ParseError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseDialect {
+    Claude,
+    Goose,
+}
 
 /// Parse a single stream-json line and return the first recognized event.
 /// For assistant messages with multiple content blocks, only the first
@@ -25,6 +31,20 @@ pub fn parse_line(bytes: &[u8]) -> Result<Event, ParseError> {
 /// downstream consumers don't drop the tail of a `[text, tool_use, text]`
 /// layout.
 pub fn parse_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
+    parse_line_all_dialect(bytes, ParseDialect::Claude)
+}
+
+pub fn parse_line_all_dialect(
+    bytes: &[u8],
+    dialect: ParseDialect,
+) -> Result<Vec<Event>, ParseError> {
+    match dialect {
+        ParseDialect::Claude => parse_claude_line_all(bytes),
+        ParseDialect::Goose => parse_goose_line_all(bytes),
+    }
+}
+
+fn parse_claude_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
     let raw = std::str::from_utf8(bytes)
         .map_err(|_| {
             ParseError::malformed("non-utf8 line", String::from_utf8_lossy(bytes).into_owned())
@@ -63,6 +83,105 @@ pub fn parse_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
             raw: raw.to_string(),
         }]),
     }
+}
+
+fn parse_goose_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
+    let raw = std::str::from_utf8(bytes)
+        .map_err(|_| {
+            ParseError::malformed("non-utf8 line", String::from_utf8_lossy(bytes).into_owned())
+        })?
+        .trim_end_matches(['\n', '\r']);
+
+    if raw.is_empty() {
+        return Err(ParseError::malformed("empty line", raw));
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(vec![Event::Unknown {
+                raw: raw.to_string(),
+            }]);
+        }
+    };
+
+    match value.get("type").and_then(|v| v.as_str()) {
+        Some("message") => parse_goose_message(&value, raw),
+        Some("complete") => {
+            let total_tokens = value
+                .get("total_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Ok(vec![Event::Result {
+                subtype: Some("complete".to_string()),
+                session_id: String::new(),
+                text: None,
+                usage: TokenUsage {
+                    input: 0,
+                    output: total_tokens,
+                    cache_read: 0,
+                    cache_creation: 0,
+                },
+            }])
+        }
+        _ => Ok(vec![Event::Unknown {
+            raw: raw.to_string(),
+        }]),
+    }
+}
+
+fn parse_goose_message(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, ParseError> {
+    let content = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ParseError::malformed("goose message missing content", raw))?;
+
+    let mut events = Vec::new();
+    for block in content {
+        match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(serde_json::Value::as_str) {
+                    events.push(Event::AssistantText {
+                        text: text.to_string(),
+                    });
+                }
+            }
+            "toolRequest" => {
+                let call = block.get("toolCall").and_then(|v| v.get("value"));
+                let tool_name = call
+                    .and_then(|v| v.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let input_summary = call
+                    .and_then(|v| v.get("arguments"))
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                events.push(Event::AssistantToolUse {
+                    tool_name,
+                    input_summary,
+                });
+            }
+            "toolResponse" => {
+                let result = block.get("toolResult").and_then(|v| v.get("value"));
+                let content_summary = result
+                    .and_then(|v| v.get("content"))
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                events.push(Event::ToolResult { content_summary });
+            }
+            "thinking" => {}
+            _ => {}
+        }
+    }
+
+    if events.is_empty() {
+        return Ok(vec![Event::Unknown {
+            raw: raw.to_string(),
+        }]);
+    }
+    Ok(events)
 }
 
 fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, ParseError> {
@@ -332,6 +451,39 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_goose_text_and_complete() {
+        let text =
+            br#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        let events = parse_line_all_dialect(text, ParseDialect::Goose).unwrap();
+        assert_eq!(events, vec![Event::AssistantText { text: "hi".into() }]);
+
+        let complete = br#"{"type":"complete","total_tokens":161}"#;
+        let events = parse_line_all_dialect(complete, ParseDialect::Goose).unwrap();
+        match &events[0] {
+            Event::Result {
+                usage, session_id, ..
+            } => {
+                assert_eq!(usage.output, 161);
+                assert!(session_id.is_empty());
+            }
+            other => panic!("expected result event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_goose_tool_request() {
+        let line = br#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolRequest","toolCall":{"status":"success","value":{"name":"npx__read_graph","arguments":{}}}}]}}"#;
+        let events = parse_line_all_dialect(line, ParseDialect::Goose).unwrap();
+        assert_eq!(
+            events,
+            vec![Event::AssistantToolUse {
+                tool_name: "npx__read_graph".into(),
+                input_summary: "{}".into()
+            }]
+        );
     }
 
     #[test]

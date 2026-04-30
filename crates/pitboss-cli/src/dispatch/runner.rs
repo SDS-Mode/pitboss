@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use pitboss_core::parser::ParseDialect;
 use pitboss_core::process::{ProcessSpawner, SpawnCmd, TokioSpawner};
 use pitboss_core::session::{CancelToken, SessionHandle};
 use pitboss_core::store::{JsonFileStore, RunSummary, SessionStore, TaskRecord, TaskStatus};
@@ -16,32 +17,7 @@ use uuid::Uuid;
 
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
-/// Seed an env map with pitboss's own defaults for spawned claude subprocesses.
-/// Currently: set `CLAUDE_CODE_ENTRYPOINT=sdk-ts` if not already present.
-///
-/// Rationale: pitboss is the external permission authority (via
-/// `approval_policy`, `[[approval_policy]]` rules, and the TUI). Claude's
-/// own interactive permission gate is redundant under pitboss orchestration
-/// and causes silent stalls in headless dispatch when no operator is
-/// present to answer each prompt. The `sdk-ts` value tells claude "you're
-/// running under an SDK runtime that manages permissions externally."
-///
-/// **Companion flag**: every pitboss-spawned claude (lead, sub-lead, worker)
-/// also launches with `--dangerously-skip-permissions`. Together the env
-/// var and the flag close the full permission surface (MCP tools, file I/O,
-/// bash-with-`$VAR`, bash-with-`&&`). See `lead_spawn_args` for the
-/// detailed trust-model writeup.
-///
-/// Operators who want claude's own gate back for a specific actor can
-/// override `CLAUDE_CODE_ENTRYPOINT` via `[defaults.env]`, `[lead.env]`,
-/// `[[task]].env`, or the `env` field on `spawn_sublead` — but the
-/// `--dangerously-skip-permissions` CLI flag is set unconditionally and
-/// is not env-overridable. Operators who need the claude gate fully back
-/// should not use pitboss's headless dispatch.
-///
-/// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
-/// for the deferred alternative (routing claude's gate through pitboss's
-/// approval queue rather than bypassing it).
+/// Seed an env map with pitboss's own defaults for spawned Claude subprocesses.
 pub fn apply_pitboss_env_defaults(
     env: &mut std::collections::HashMap<String, String>,
     permission_routing: crate::manifest::schema::PermissionRouting,
@@ -49,15 +25,10 @@ pub fn apply_pitboss_env_defaults(
     use crate::manifest::schema::PermissionRouting;
     match permission_routing {
         PermissionRouting::PathA => {
-            // Path A (default): sdk-ts entrypoint bypasses claude's built-in gate.
             env.entry("CLAUDE_CODE_ENTRYPOINT".to_string())
                 .or_insert_with(|| "sdk-ts".to_string());
         }
-        PermissionRouting::PathB => {
-            // Path B: leave the entrypoint unset so claude's gate is active.
-            // Pitboss registers `permission_prompt` MCP tool to intercept checks.
-            // Do NOT set sdk-ts — that would bypass the gate we want to route.
-        }
+        PermissionRouting::PathB => {}
     }
 }
 
@@ -227,12 +198,13 @@ struct RunHarness {
 /// have written the manifest snapshot to the run subdir, so the dry-run
 /// check happens AFTER init. Pre-existing behavior.
 fn print_dry_run_plan(resolved: &ResolvedManifest, claude_binary: &Path) {
+    let spawner = crate::provider::GooseSpawner::default();
     for t in &resolved.tasks {
         println!(
             "DRY-RUN {}: {} {}",
             t.id,
             claude_binary.display(),
-            spawn_args(t).join(" ")
+            spawn_args_with(t, &spawner).join(" ")
         );
     }
 }
@@ -646,13 +618,16 @@ async fn execute_task(
         task.directory.clone()
     };
 
-    let mut cmd_env = task.env.clone();
-    apply_pitboss_env_defaults(&mut cmd_env, Default::default());
     let cmd = SpawnCmd {
         program: claude.to_path_buf(),
-        args: spawn_args(task),
+        args: spawn_args_with(
+            task,
+            &crate::provider::GooseSpawner {
+                default_max_turns: None,
+            },
+        ),
         cwd: cwd.clone(),
-        env: cmd_env,
+        env: task.env.clone(),
     };
 
     table.lock().await.mark_running(&task.id);
@@ -660,6 +635,7 @@ async fn execute_task(
     let outcome = SessionHandle::new(task.id.clone(), spawner, cmd)
         .with_log_path(log_path.clone())
         .with_stderr_log_path(stderr_log_path.clone())
+        .with_parse_dialect(ParseDialect::Goose)
         .run_to_completion(cancel, Duration::from_secs(task.timeout_secs))
         .await;
 
@@ -748,33 +724,13 @@ async fn execute_task(
 /// MUST include the same two flags; there is a regression test
 /// (`every_spawn_variant_has_plugin_isolation_flags`) that asserts
 /// this.
+#[cfg(test)]
 fn spawn_args(task: &ResolvedTask) -> Vec<String> {
-    // claude CLI requires --verbose when combining -p (print mode) with
-    // --output-format stream-json. Without it, claude rejects the invocation
-    // with "When using --print, --output-format=stream-json requires --verbose".
-    let mut args = vec![
-        "--output-format".into(),
-        "stream-json".into(),
-        "--verbose".into(),
-        // Permission authority is pitboss (see lead_spawn_args doc).
-        "--dangerously-skip-permissions".into(),
-        // Plugin/skill isolation (see lead_spawn_args doc).
-        "--strict-mcp-config".into(),
-        "--disable-slash-commands".into(),
-    ];
-    if !task.tools.is_empty() {
-        args.push("--allowedTools".into());
-        args.push(task.tools.join(","));
-    }
-    args.push("--model".into());
-    args.push(task.model.clone());
-    if let Some(sess) = &task.resume_session_id {
-        args.push("--resume".into());
-        args.push(sess.clone());
-    }
-    args.push("-p".into());
-    args.push(task.prompt.clone());
-    args
+    spawn_args_with(task, &crate::provider::GooseSpawner::default())
+}
+
+fn spawn_args_with(task: &ResolvedTask, spawner: &crate::provider::GooseSpawner) -> Vec<String> {
+    spawner.flat_task_args(task)
 }
 
 /// MCP tool names the lead needs permission to call. Pre-approved via the
@@ -1376,6 +1332,7 @@ mod tests {
                     directory: dir.path().to_path_buf(),
                     prompt: "p".into(),
                     branch: None,
+                    provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
@@ -1389,6 +1346,7 @@ mod tests {
                     directory: dir.path().to_path_buf(),
                     prompt: "p".into(),
                     branch: None,
+                    provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
@@ -1474,6 +1432,7 @@ mod tests {
             directory: dir.path().to_path_buf(),
             prompt: "p".into(),
             branch: None,
+            provider: pitboss_core::provider::Provider::Anthropic,
             model: "m".into(),
             effort: crate::manifest::schema::Effort::High,
             tools: vec![],
@@ -1577,6 +1536,7 @@ mod tests {
                     directory: dir.path().to_path_buf(),
                     prompt: "p".into(),
                     branch: None,
+                    provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
@@ -1590,6 +1550,7 @@ mod tests {
                     directory: dir.path().to_path_buf(),
                     prompt: "p".into(),
                     branch: None,
+                    provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
@@ -1660,6 +1621,7 @@ mod tests {
             directory: PathBuf::from("/tmp"),
             prompt: "test prompt".into(),
             branch: None,
+            provider: pitboss_core::provider::Provider::Anthropic,
             model: "claude-test".into(),
             effort: crate::manifest::schema::Effort::High,
             tools: vec![],
@@ -1696,8 +1658,10 @@ mod tests {
 
     #[test]
     fn every_spawn_variant_has_all_isolation_flags() {
-        // Canary for all three hardening flags every pitboss-spawned claude
-        // must carry:
+        // Flat dispatch now uses Goose. Goose profile isolation is
+        // `--no-profile`; `--quiet` is required to keep stream-json clean.
+        // Hierarchical spawning is still on the Claude path in this slice,
+        // so those variants continue to carry the Claude hardening flags:
         //   - `--dangerously-skip-permissions`: pitboss is the permission
         //     authority; without this, headless dispatch silently stalls on
         //     bash-with-`$VAR`, write-outside-cwd, etc.
@@ -1712,6 +1676,7 @@ mod tests {
             directory: PathBuf::from("/tmp"),
             prompt: "p".into(),
             branch: None,
+            provider: pitboss_core::provider::Provider::Anthropic,
             model: "m".into(),
             effort: crate::manifest::schema::Effort::High,
             tools: vec!["Read".into()],
@@ -1740,8 +1705,25 @@ mod tests {
             sublead_defaults: None,
         };
         let cfg = PathBuf::from("/tmp/cfg.json");
+        let flat = spawn_args(&task);
+        assert!(
+            flat.iter().any(|a| a == "run"),
+            "flat task should invoke goose run: {flat:?}"
+        );
+        assert!(
+            flat.iter().any(|a| a == "--no-profile"),
+            "flat task spawn args missing --no-profile: {flat:?}"
+        );
+        assert!(
+            flat.iter().any(|a| a == "--quiet"),
+            "flat task spawn args missing --quiet: {flat:?}"
+        );
+        assert!(
+            flat.iter().any(|a| a == "--no-session"),
+            "fresh flat task spawn args missing --no-session: {flat:?}"
+        );
+
         let cases: Vec<(&str, Vec<String>)> = vec![
-            ("flat task", spawn_args(&task)),
             ("lead", lead_spawn_args(&lead, &cfg)),
             (
                 "lead_resume",

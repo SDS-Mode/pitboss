@@ -34,6 +34,35 @@ pub async fn probe_claude(binary: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Probe the goose CLI for its version string.
+pub async fn probe_goose(binary: &Path) -> Result<Option<String>> {
+    let output = Command::new(binary).arg("--version").output().await;
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        }
+        Ok(o) => {
+            tracing::warn!(code = ?o.status.code(), "goose --version exited non-zero; proceeding without version");
+            Ok(None)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("goose binary not found at {}", binary.display())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            bail!(
+                "goose binary at {} is not executable (permission denied)",
+                binary.display()
+            )
+        }
+        Err(e) => bail!("failed to probe goose: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

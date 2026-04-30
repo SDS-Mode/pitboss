@@ -14,6 +14,7 @@ pub mod list;
 pub mod manifest;
 pub mod mcp;
 pub mod notify;
+pub mod provider;
 pub mod prune;
 pub mod runs;
 pub mod shared_store;
