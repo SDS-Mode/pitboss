@@ -26,6 +26,6 @@ Language models are stochastic. A well-run pit is not.
 
 ## Current version
 
-**v0.9.1** — web operational console (republished from v0.9.0 after a release-pipeline fix; no functional changes). New `pitboss-web` binary (single-binary axum + embedded SvelteKit SPA) gives the dispatcher a full browser surface alongside the TUI: live SSE event streams, control writes (cancel / pause / reprompt / approve), manifest authoring through a 5-step guided wizard with schema-driven hover tooltips, and a cross-run failures dashboard with Drain-lite clustering of error templates. New `[run].name` field surfaces a human-readable label so related runs group together in the console.
+**v0.9.2** — container subsystem grows into a real toolchain. New manifest fields `[container].extra_apt` and `[[container.copy]]`, plus the new `pitboss container-build` and `pitboss container-prune` subcommands, let operators bake apt packages and host files into a deterministically-tagged derived image and sweep the stragglers. `pitboss container-dispatch` picks up the cached tag automatically. Image cadence also fixed: the published `pitboss-with-claude` rolls forward on every main merge with `:main`, `:main-<sha>`, and `:latest` tags. Plus per-task `cost_usd` persistence on `TaskRecord`, an SSE event-stream filter on the run-detail page, and graceful shutdown for `pitboss-web stop`.
 
 See [Changelog](./reference/changelog.md) for the full version history.

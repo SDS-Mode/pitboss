@@ -1,8 +1,8 @@
 ---
 document: pitboss-agent-instructions
 schema_version: 1
-pitboss_version: 0.9.1
-last_updated: 2026-04-27
+pitboss_version: 0.9.2
+last_updated: 2026-04-30
 audience: ai-agent
 canonical_url: https://github.com/SDS-Mode/pitboss/blob/main/AGENTS.md
 ---

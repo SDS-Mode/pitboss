@@ -16,21 +16,24 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.9.1** is the web operational console release (republished from
-v0.9.0 after a release-pipeline fix; no functional changes). Pitboss now ships a
-single-binary HTTP server (`pitboss-web`) with an embedded SvelteKit
-SPA that gives the dispatcher a full browser surface alongside the TUI:
-live SSE event streams from in-flight runs, control writes (cancel /
-pause / reprompt / approve) over per-run sockets, manifest authoring
-through a 5-step guided wizard with hover tooltips sourced from the
-canonical schema metadata, and a cross-run failures dashboard with
-Drain-lite clustering of error templates. New `[run].name` field
-surfaces a human-readable label so related runs group together in the
-console. The TUI and the web console are first-class peers against the
-same `~/.local/share/pitboss/runs` directory; pick whichever fits the
-moment. See `CHANGELOG.md` for the full per-version history and
-`AGENTS.md` for the MCP tool reference, keybindings, and manifest
-schema.
+**v0.9.2** turns the container subsystem into a real toolchain.
+`pitboss container-dispatch` now reads two new manifest fields:
+`[container].extra_apt` for distro packages installed at dispatch
+start (the simple slow path) and `[[container.copy]]` for host
+files baked into a derived image at build time. The new
+`pitboss container-build` subcommand synthesizes a thin Dockerfile
+from those fields and tags the result deterministically as
+`pitboss-derived-<sha>:local`; subsequent dispatches pick up the
+cached tag automatically and drop the apt-at-spin-up cost.
+`pitboss container-prune` sweeps the stale tags that accumulate as
+manifests evolve. Image cadence also gets fixed: the published
+`pitboss-with-claude` rolls forward on every main merge with
+`:main`, `:main-<sha>`, and `:latest` tags instead of stagnating
+between release tags. Cost telemetry persists per-task
+`cost_usd` on `TaskRecord`, and the run-detail page now renders
+per-task and run-total cost estimates client-side. See
+`CHANGELOG.md` for the full per-version history and `AGENTS.md`
+for the MCP tool reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
