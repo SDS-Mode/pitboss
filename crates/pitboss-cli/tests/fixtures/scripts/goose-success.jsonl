@@ -1,0 +1,2 @@
+{"stdout":"{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}"}
+{"stdout":"{\"type\":\"complete\",\"total_tokens\":3}"}

@@ -8,6 +8,7 @@ members = [
     "crates/pitboss-schema",
     "crates/pitboss-schema-derive",
     "tests-support/fake-claude",
+    "tests-support/fake-goose",
     "tests-support/fake-mcp-client",
     "tests-support/fake-control-client",
 ]

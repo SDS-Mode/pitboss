@@ -6,10 +6,14 @@ use tempfile::TempDir;
 
 fn ensure_built() {
     let status = Command::new(env!("CARGO"))
-        .args(["build", "-p", "pitboss-cli", "-p", "fake-claude"])
+        .args(["build", "-p", "pitboss-cli", "-p", "fake-goose"])
         .status()
         .unwrap();
     assert!(status.success(), "build failed");
+}
+
+fn fake_goose_path() -> std::path::PathBuf {
+    workspace_root().join("target/debug/fake-goose")
 }
 
 #[test]
@@ -55,8 +59,8 @@ prompt = "p"
 
     let mut cmd = Command::new(pitboss_binary());
     cmd.arg("dispatch").arg(&manifest_path);
-    cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
-    cmd.env("PITBOSS_FAKE_SCRIPT", fixture("success.jsonl"));
+    cmd.env("PITBOSS_GOOSE_BINARY", fake_goose_path());
+    cmd.env("PITBOSS_FAKE_SCRIPT", fixture("goose-success.jsonl"));
     cmd.env("PITBOSS_FAKE_EXIT_CODE", "0");
     let out = cmd.output().unwrap();
     assert!(
@@ -88,7 +92,7 @@ fn halt_on_failure_stops_remaining_tasks() {
     // 5 tasks, max_parallel=1 so ordering is deterministic, halt_on_failure=true.
     // All tasks use exit2.jsonl + exit code 2 so the first failure triggers cascade.
     let manifest_path = repo.path().join("pitboss.toml");
-    let exit2_script = fixture("exit2.jsonl");
+    let exit2_script = fixture("goose-exit2.jsonl");
     std::fs::write(
         &manifest_path,
         format!(
@@ -135,7 +139,7 @@ prompt = "p"
 
     let mut cmd = Command::new(pitboss_binary());
     cmd.arg("dispatch").arg(&manifest_path);
-    cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
+    cmd.env("PITBOSS_GOOSE_BINARY", fake_goose_path());
     cmd.env("PITBOSS_FAKE_SCRIPT", &exit2_script);
     cmd.env("PITBOSS_FAKE_EXIT_CODE", "2");
     let out = cmd.output().unwrap();
@@ -200,7 +204,7 @@ env = {{ PITBOSS_FAKE_SCRIPT = "{hold}", PITBOSS_FAKE_HOLD = "1" }}
 "#,
             run_dir = run_dir.path().display(),
             repo = repo.path().display(),
-            hold = fixture("hold.jsonl").display()
+            hold = fixture("goose-hold.jsonl").display()
         ),
     )
     .unwrap();
@@ -208,7 +212,7 @@ env = {{ PITBOSS_FAKE_SCRIPT = "{hold}", PITBOSS_FAKE_HOLD = "1" }}
     let mut child = std::process::Command::new(pitboss_binary())
         .arg("dispatch")
         .arg(&manifest_path)
-        .env("PITBOSS_CLAUDE_BINARY", fake_claude_path())
+        .env("PITBOSS_GOOSE_BINARY", fake_goose_path())
         .spawn()
         .unwrap();
 
@@ -240,7 +244,7 @@ fn validation_failure_exits_two() {
     let out = std::process::Command::new(pitboss_binary())
         .arg("dispatch")
         .arg(&manifest_path)
-        .env("PITBOSS_CLAUDE_BINARY", fake_claude_path())
+        .env("PITBOSS_GOOSE_BINARY", fake_goose_path())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));

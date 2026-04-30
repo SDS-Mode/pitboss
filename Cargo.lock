@@ -702,6 +702,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fake-goose"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fake-mcp-client"
 version = "0.0.0"
 dependencies = [

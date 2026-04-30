@@ -46,12 +46,25 @@ pub fn fake_claude_path() -> PathBuf {
     workspace_root().join("target/debug/fake-claude")
 }
 
+#[allow(dead_code)]
+pub fn fake_goose_path() -> PathBuf {
+    workspace_root().join("target/debug/fake-goose")
+}
+
 /// Build the pitboss-cli + fake-claude binaries so tests that spawn
 /// them as real subprocesses can find them at `target/debug/...`.
 #[allow(dead_code)]
 pub fn ensure_built() {
     let status = Command::new(env!("CARGO"))
-        .args(["build", "-p", "pitboss-cli", "-p", "fake-claude"])
+        .args([
+            "build",
+            "-p",
+            "pitboss-cli",
+            "-p",
+            "fake-claude",
+            "-p",
+            "fake-goose",
+        ])
         .status()
         .unwrap();
     assert!(status.success(), "build failed");

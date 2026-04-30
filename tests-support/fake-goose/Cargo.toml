@@ -1,0 +1,15 @@
+[package]
+name         = "fake-goose"
+version      = "0.0.0"
+edition      = "2021"
+rust-version = "1.82"
+publish      = false
+
+[[bin]]
+name = "fake-goose"
+path = "src/main.rs"
+
+[dependencies]
+anyhow     = { workspace = true }
+serde_json = { workspace = true }
+tokio      = { workspace = true, features = ["rt", "time"] }
