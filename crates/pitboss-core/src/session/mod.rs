@@ -100,6 +100,7 @@ mod happy_path_tests {
     #[tokio::test]
     async fn goose_chunked_text_lands_as_one_final_message() {
         let script = FakeScript::new()
+            .stdout_line(r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"I will call the tool first, then return the requested sentinel."}]}}"#)
             .stdout_line(r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolRequest","toolCall":{"status":"success","value":{"name":"pitboss__list_workers","arguments":{}}}}]}}"#)
             .stdout_line(r#"{"type":"message","message":{"role":"user","content":[{"type":"toolResponse","toolResult":{"status":"success","value":{"content":[{"type":"text","text":"{\"workers\":[]}"}]}}}]}}"#)
             .stdout_line(r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"PITBOSS_GO"}]}}"#)

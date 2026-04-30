@@ -380,12 +380,7 @@ async fn stream_loop(
                             if parse_dialect == ParseDialect::Goose {
                                 a.active_text.push_str(&text);
                                 let candidate = a.active_text.clone();
-                                let trimmed_len = candidate.trim().len();
-                                let current_len =
-                                    a.last_text.as_deref().map_or(0, |t| t.trim().len());
-                                if trimmed_len > current_len {
-                                    a.last_text = Some(candidate);
-                                }
+                                a.last_text = Some(candidate);
                                 continue;
                             }
                             // Prefer the longest nontrivial assistant text. Rationale:
