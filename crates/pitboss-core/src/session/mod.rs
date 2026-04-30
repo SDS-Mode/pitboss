@@ -98,6 +98,33 @@ mod happy_path_tests {
     }
 
     #[tokio::test]
+    async fn goose_chunked_text_lands_as_one_final_message() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolRequest","toolCall":{"status":"success","value":{"name":"pitboss__list_workers","arguments":{}}}}]}}"#)
+            .stdout_line(r#"{"type":"message","message":{"role":"user","content":[{"type":"toolResponse","toolResult":{"status":"success","value":{"content":[{"type":"text","text":"{\"workers\":[]}"}]}}}]}}"#)
+            .stdout_line(r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"PITBOSS_GO"}]}}"#)
+            .stdout_line(r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"OSE_MCP_SMOKE_OK"}]}}"#)
+            .stdout_line(r#"{"type":"complete","total_tokens":42}"#)
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let outcome = SessionHandle::new("t-goose", spawner, cmd())
+            .with_parse_dialect(crate::parser::ParseDialect::Goose)
+            .run_to_completion(CancelToken::new(), Duration::from_secs(30))
+            .await;
+
+        assert!(matches!(outcome.final_state, SessionState::Completed));
+        assert_eq!(outcome.token_usage.output, 42);
+        assert_eq!(
+            outcome.final_message.as_deref(),
+            Some("PITBOSS_GOOSE_MCP_SMOKE_OK")
+        );
+        assert_eq!(
+            outcome.final_message_preview.as_deref(),
+            Some("PITBOSS_GOOSE_MCP_SMOKE_OK")
+        );
+    }
+
+    #[tokio::test]
     async fn nonzero_exit_becomes_failed_state() {
         let script = FakeScript::new()
             .stdout_line(r#"{"type":"result","session_id":"s","usage":{"input_tokens":0,"output_tokens":0}}"#)

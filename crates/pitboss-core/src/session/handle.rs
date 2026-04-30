@@ -336,6 +336,7 @@ struct StreamAccum {
     usage: TokenUsage,
     session_id: Option<String>,
     last_text: Option<String>,
+    active_text: String,
     saw_result: bool,
 }
 
@@ -376,6 +377,17 @@ async fn stream_loop(
                             let mut a = accum
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if parse_dialect == ParseDialect::Goose {
+                                a.active_text.push_str(&text);
+                                let candidate = a.active_text.clone();
+                                let trimmed_len = candidate.trim().len();
+                                let current_len =
+                                    a.last_text.as_deref().map_or(0, |t| t.trim().len());
+                                if trimmed_len > current_len {
+                                    a.last_text = Some(candidate);
+                                }
+                                continue;
+                            }
                             // Prefer the longest nontrivial assistant text. Rationale:
                             // claude often appends a short confirmation ("Done.", "OK")
                             // after the real output; taking the last text buries the
@@ -393,6 +405,14 @@ async fn stream_loop(
                             if trimmed_len > current_len {
                                 a.last_text = Some(text);
                             }
+                        }
+                        Event::AssistantToolUse { .. } | Event::ToolResult { .. }
+                            if parse_dialect == ParseDialect::Goose =>
+                        {
+                            let mut a = accum
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            a.active_text.clear();
                         }
                         // `system{subtype:"init"}` is the FIRST event of every
                         // claude session and already carries `session_id` — fire
