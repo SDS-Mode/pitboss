@@ -358,6 +358,7 @@ mod tests {
                 worktree_path: None,
                 log_path: std::path::PathBuf::from("/tmp/log"),
                 token_usage: TokenUsage::default(),
+                provider: pitboss_core::provider::Provider::Anthropic,
                 claude_session_id: session_id.map(str::to_string),
                 final_message_preview: None,
                 final_message: None,
@@ -386,6 +387,7 @@ mod tests {
             tasks_failed: 0,
             was_interrupted: false,
             tasks,
+            cost_by_provider: std::collections::HashMap::new(),
         };
         std::fs::write(
             dir.join("summary.json"),
@@ -628,6 +630,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::new(),
             token_usage: Default::default(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: Some("session-abc-123".into()),
             final_message_preview: None,
             final_message: None,
@@ -654,6 +657,7 @@ mod tests {
             tasks_failed: 0,
             was_interrupted: false,
             tasks: vec![lead_record],
+            cost_by_provider: std::collections::HashMap::new(),
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -743,6 +747,7 @@ mod tests {
             worktree_path: Some(missing_wt.clone()),
             log_path: PathBuf::new(),
             token_usage: Default::default(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: Some("session-gone".into()),
             final_message_preview: None,
             final_message: None,
@@ -769,6 +774,7 @@ mod tests {
             tasks_failed: 0,
             was_interrupted: false,
             tasks: vec![lead_record],
+            cost_by_provider: std::collections::HashMap::new(),
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -854,6 +860,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::new(),
             token_usage: Default::default(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: Some("root-sess-001".into()),
             final_message_preview: None,
             final_message: None,
@@ -880,6 +887,7 @@ mod tests {
             tasks_failed: 0,
             was_interrupted: false,
             tasks: vec![lead_record],
+            cost_by_provider: std::collections::HashMap::new(),
         };
         std::fs::write(
             run_dir.join("summary.json"),

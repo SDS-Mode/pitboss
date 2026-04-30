@@ -129,6 +129,14 @@ impl SessionStore for JsonFileStore {
             .iter()
             .filter(|t| !matches!(t.status, super::TaskStatus::Success))
             .count();
+        let mut cost_by_provider = std::collections::HashMap::new();
+        for task in &tasks {
+            if let Some(cost) = task.cost_usd {
+                *cost_by_provider
+                    .entry(task.provider.as_key())
+                    .or_insert(0.0) += cost;
+            }
+        }
         let started = meta.started_at;
         let ended = tasks.last().map_or(started, |t| t.ended_at);
         Ok(RunSummary {
@@ -144,6 +152,7 @@ impl SessionStore for JsonFileStore {
             tasks_failed,
             was_interrupted: true,
             tasks,
+            cost_by_provider,
         })
     }
 }

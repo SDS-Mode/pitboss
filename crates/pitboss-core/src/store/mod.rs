@@ -44,6 +44,7 @@ mod integration_tests {
             worktree_path: None,
             log_path: PathBuf::from("/dev/null"),
             token_usage: crate::parser::TokenUsage::default(),
+            provider: crate::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,
@@ -87,6 +88,7 @@ mod integration_tests {
             tasks_failed: 1,
             was_interrupted: false,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
+            cost_by_provider: HashMap::new(),
         };
         store.finalize_run(&summary).await.unwrap();
 

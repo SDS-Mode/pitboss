@@ -275,6 +275,7 @@ async fn wait_actor_alias_resolves_worker_id() {
             worktree_path: None,
             log_path: std::path::PathBuf::new(),
             token_usage: Default::default(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: Some("ok".into()),
             final_message: Some("ok".into()),

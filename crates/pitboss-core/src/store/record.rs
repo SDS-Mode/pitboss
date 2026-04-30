@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::parser::TokenUsage;
+use crate::provider::Provider;
 
 /// Structured classification of *why* a claude subprocess failed, derived by
 /// scanning its stdout/stderr after a non-zero exit. Populated on the
@@ -63,6 +64,10 @@ pub struct TaskRecord {
     pub worktree_path: Option<PathBuf>,
     pub log_path: PathBuf,
     pub token_usage: TokenUsage,
+    /// AI provider that produced this record. Defaults to Anthropic for
+    /// pre-provider summaries.
+    #[serde(default)]
+    pub provider: Provider,
     pub claude_session_id: Option<String>,
     /// First ~200 chars of the assistant's chosen final message, with an
     /// ellipsis if truncated. Suitable for table cells and chat embeds where
@@ -109,6 +114,16 @@ pub struct TaskRecord {
     pub cost_usd: Option<f64>,
 }
 
+impl TaskRecord {
+    /// Provider-agnostic accessor for the resumable session id. The JSON field
+    /// name remains `claude_session_id` for compatibility during the v0.10
+    /// Goose pivot.
+    #[must_use]
+    pub fn agent_session_id(&self) -> Option<&str> {
+        self.claude_session_id.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunMeta {
     pub run_id: Uuid,
@@ -138,6 +153,9 @@ pub struct RunSummary {
     pub tasks_failed: usize,
     pub was_interrupted: bool,
     pub tasks: Vec<TaskRecord>,
+    /// Per-provider USD spend rollup. Empty when costs are unknown.
+    #[serde(default)]
+    pub cost_by_provider: HashMap<String, f64>,
 }
 
 #[cfg(test)]
@@ -163,6 +181,7 @@ mod tests {
                 cache_creation: 4,
                 reasoning: None,
             },
+            provider: Provider::Anthropic,
             claude_session_id: Some("sess".into()),
             final_message_preview: Some("ok".into()),
             final_message: Some("ok".into()),
@@ -195,6 +214,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::from("/dev/null"),
             token_usage: TokenUsage::default(),
+            provider: Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,
@@ -258,6 +278,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::from("/tmp/log"),
             token_usage: TokenUsage::default(),
+            provider: Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,
@@ -376,6 +397,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::from("/dev/null"),
             token_usage: TokenUsage::default(),
+            provider: Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: Some(format!("{}…", &full[..200])),
             final_message: Some(full.clone()),
@@ -413,6 +435,7 @@ mod tests {
             tasks_failed: 0,
             was_interrupted: false,
             tasks: vec![],
+            cost_by_provider: HashMap::new(),
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("nightly"));
@@ -452,6 +475,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::from("/tmp/log"),
             token_usage: TokenUsage::default(),
+            provider: Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,

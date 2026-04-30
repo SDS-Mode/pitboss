@@ -757,6 +757,7 @@ async fn spawn_sublead_session(
             worktree_path: None,
             log_path: log_path.clone(),
             token_usage: total_token_usage,
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: final_outcome.claude_session_id,
             final_message_preview: final_outcome.final_message_preview,
             final_message: final_outcome.final_message,

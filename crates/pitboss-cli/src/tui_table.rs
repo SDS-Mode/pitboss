@@ -166,6 +166,7 @@ mod tests {
                 cache_creation: 4,
                 reasoning: None,
             },
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,

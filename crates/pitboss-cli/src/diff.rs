@@ -85,6 +85,14 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         .iter()
         .filter(|t| !matches!(t.status, pitboss_core::store::TaskStatus::Success))
         .count();
+    let mut cost_by_provider = std::collections::HashMap::new();
+    for task in &tasks {
+        if let Some(cost) = task.cost_usd {
+            *cost_by_provider
+                .entry(task.provider.as_key())
+                .or_insert(0.0) += cost;
+        }
+    }
 
     // Try to read meta.json for run_id and started_at.
     let meta_path = run_dir.join("meta.json");
@@ -122,6 +130,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         tasks_failed,
         was_interrupted: true,
         tasks,
+        cost_by_provider,
     })
 }
 
@@ -529,6 +538,7 @@ mod tests {
                 cache_creation: 0,
                 reasoning: None,
             },
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,
@@ -564,6 +574,7 @@ mod tests {
             tasks_failed: failed,
             was_interrupted: false,
             tasks,
+            cost_by_provider: std::collections::HashMap::new(),
         }
     }
 

@@ -406,6 +406,7 @@ pub async fn run_hierarchical(
         },
         log_path: lead_log_path.clone(),
         token_usage: total_token_usage,
+        provider: pitboss_core::provider::Provider::Anthropic,
         claude_session_id: final_outcome.claude_session_id,
         final_message_preview: final_outcome.final_message_preview,
         final_message: final_outcome.final_message,
@@ -599,6 +600,7 @@ pub async fn run_hierarchical(
             worktree_path: None,
             log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
             token_usage,
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: Some("cancelled when lead exited".into()),
             final_message: None,
@@ -675,6 +677,14 @@ pub async fn run_hierarchical(
             }
         })
         .count();
+    let mut cost_by_provider = std::collections::HashMap::new();
+    for record in &all_records {
+        if let Some(cost) = record.cost_usd {
+            *cost_by_provider
+                .entry(record.provider.as_key())
+                .or_insert(0.0) += cost;
+        }
+    }
 
     let ended_at = Utc::now();
     let manifest_name = crate::dispatch::summary::resolve_manifest_display_name(
@@ -694,6 +704,7 @@ pub async fn run_hierarchical(
         tasks_failed,
         was_interrupted,
         tasks: all_records,
+        cost_by_provider,
     };
     store.finalize_run(&summary).await?;
 
@@ -1210,6 +1221,7 @@ mod await_drained_tests {
                     worktree_path: None,
                     log_path: PathBuf::from("/dev/null"),
                     token_usage: Default::default(),
+                    provider: pitboss_core::provider::Provider::Anthropic,
                     claude_session_id: None,
                     final_message_preview: None,
                     final_message: None,
@@ -1263,6 +1275,7 @@ mod summary_jsonl_aggregation_tests {
             worktree_path: None,
             log_path: PathBuf::from("/dev/null"),
             token_usage: Default::default(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,

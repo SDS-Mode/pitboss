@@ -2425,6 +2425,7 @@ mod tests {
                 worktree_path: None,
                 log_path: PathBuf::from("/dev/null"),
                 token_usage: Default::default(),
+                provider: pitboss_core::provider::Provider::Anthropic,
                 claude_session_id: None,
                 final_message_preview: None,
                 final_message: None,

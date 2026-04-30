@@ -218,6 +218,7 @@ fn build_synthesized_summary(run_dir: &Path) -> Result<RunSummary> {
         tasks_failed: 0,
         was_interrupted: true,
         tasks: Vec::new(),
+        cost_by_provider: std::collections::HashMap::new(),
     })
 }
 

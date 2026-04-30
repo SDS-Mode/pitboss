@@ -164,6 +164,7 @@ mod tests {
             worktree_path: None,
             log_path: PathBuf::from("/tmp/stdout.log"),
             token_usage: TokenUsage::default(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             claude_session_id: None,
             final_message_preview: None,
             final_message: None,

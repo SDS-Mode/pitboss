@@ -415,6 +415,14 @@ async fn finalize_run(
         .iter()
         .filter(|r| !matches!(r.status, TaskStatus::Success))
         .count();
+    let mut cost_by_provider = std::collections::HashMap::new();
+    for record in &records {
+        if let Some(cost) = record.cost_usd {
+            *cost_by_provider
+                .entry(record.provider.as_key())
+                .or_insert(0.0) += cost;
+        }
+    }
 
     let ended_at = Utc::now();
     let summary = RunSummary {
@@ -434,6 +442,7 @@ async fn finalize_run(
         was_interrupted: (harness.cancel.is_draining() || harness.cancel.is_terminated())
             && !halt_drained.load(Ordering::Acquire),
         tasks: records,
+        cost_by_provider,
     };
     harness.store.finalize_run(&summary).await?;
 
@@ -588,7 +597,8 @@ async fn execute_task(
             }
             Err(e) => {
                 let token_usage = pitboss_core::parser::TokenUsage::default();
-                let cost_usd = pitboss_core::prices::cost_usd(&task.model, &token_usage);
+                let cost_usd =
+                    pitboss_core::prices::cost_usd_v2(&task.provider, &task.model, &token_usage);
                 return TaskRecord {
                     task_id: task.id.clone(),
                     status: TaskStatus::SpawnFailed,
@@ -599,6 +609,7 @@ async fn execute_task(
                     worktree_path: None,
                     log_path,
                     token_usage,
+                    provider: task.provider.clone(),
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     final_message: None,
@@ -670,7 +681,8 @@ async fn execute_task(
             r
         }
     });
-    let cost_usd = pitboss_core::prices::cost_usd(&task.model, &outcome.token_usage);
+    let cost_usd =
+        pitboss_core::prices::cost_usd_v2(&task.provider, &task.model, &outcome.token_usage);
     TaskRecord {
         task_id: task.id.clone(),
         status,
@@ -681,6 +693,7 @@ async fn execute_task(
         worktree_path,
         log_path,
         token_usage: outcome.token_usage,
+        provider: task.provider.clone(),
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         final_message: outcome.final_message,
