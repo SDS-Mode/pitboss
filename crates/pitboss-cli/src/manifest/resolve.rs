@@ -216,6 +216,7 @@ fn resolve_provider_and_model(
     let raw_model = actor_model
         .map(str::to_string)
         .or_else(|| defaults.model.clone());
+    let model_was_supplied = raw_model.is_some();
 
     let (model_provider, model) = match raw_model {
         Some(model) => match split_provider_model(&model) {
@@ -228,6 +229,12 @@ fn resolve_provider_and_model(
     let provider = explicit_actor_provider
         .or(model_provider)
         .unwrap_or(default_provider);
+    if !model_was_supplied && provider != DEFAULT_PROVIDER {
+        bail!(
+            "{context} resolves provider '{}' but no model; set model explicitly for non-default providers",
+            provider.goose_arg()
+        );
+    }
     Ok((provider, model))
 }
 
@@ -754,6 +761,22 @@ mod tests {
         "#);
         let r = resolve(m, None).unwrap();
         assert_eq!(r.tasks[0].goose_max_turns, Some(3));
+    }
+
+    #[test]
+    fn non_default_provider_requires_model() {
+        let m = man(r#"
+            [[task]]
+            id = "a"
+            directory = "/tmp"
+            prompt = "p"
+            provider = "google"
+        "#);
+        let err = resolve(m, None).unwrap_err();
+        assert!(
+            err.to_string().contains("no model"),
+            "expected no-model error, got: {err:#}"
+        );
     }
 
     #[test]
