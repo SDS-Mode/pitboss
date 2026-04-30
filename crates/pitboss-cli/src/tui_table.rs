@@ -164,6 +164,7 @@ mod tests {
                 output: 2,
                 cache_read: 3,
                 cache_creation: 4,
+                reasoning: None,
             },
             claude_session_id: None,
             final_message_preview: None,

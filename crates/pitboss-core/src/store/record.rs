@@ -161,6 +161,7 @@ mod tests {
                 output: 2,
                 cache_read: 3,
                 cache_creation: 4,
+                reasoning: None,
             },
             claude_session_id: Some("sess".into()),
             final_message_preview: Some("ok".into()),

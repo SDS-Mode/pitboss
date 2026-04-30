@@ -51,6 +51,10 @@ pub struct TokenUsage {
     pub output: u64,
     pub cache_read: u64,
     pub cache_creation: u64,
+    /// Reasoning tokens reported by providers that expose them. `None` for
+    /// Anthropic/Claude-shaped streams and older persisted records.
+    #[serde(default)]
+    pub reasoning: Option<u64>,
 }
 
 impl TokenUsage {
@@ -68,10 +72,16 @@ impl TokenUsage {
         self.output = self.output.saturating_add(other.output);
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
         self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
+        self.reasoning = match (self.reasoning, other.reasoning) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
         let saturated = (self.input == u64::MAX && prev.input != u64::MAX)
             || (self.output == u64::MAX && prev.output != u64::MAX)
             || (self.cache_read == u64::MAX && prev.cache_read != u64::MAX)
-            || (self.cache_creation == u64::MAX && prev.cache_creation != u64::MAX);
+            || (self.cache_creation == u64::MAX && prev.cache_creation != u64::MAX)
+            || (matches!(self.reasoning, Some(u64::MAX))
+                && !matches!(prev.reasoning, Some(u64::MAX)));
         if saturated {
             tracing::warn!(
                 "TokenUsage::add saturated at u64::MAX — token counter overflow \

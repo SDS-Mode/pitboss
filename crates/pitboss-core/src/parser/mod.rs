@@ -121,6 +121,7 @@ fn parse_goose_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
                     output: total_tokens,
                     cache_read: 0,
                     cache_creation: 0,
+                    reasoning: None,
                 },
             }])
         }
@@ -273,6 +274,7 @@ fn parse_result(value: &serde_json::Value, raw: &str) -> Result<Event, ParseErro
         output: u64_field(usage_val, "output_tokens"),
         cache_read: u64_field(usage_val, "cache_read_input_tokens"),
         cache_creation: u64_field(usage_val, "cache_creation_input_tokens"),
+        reasoning: None,
     };
 
     let subtype = value
@@ -445,7 +447,8 @@ mod tests {
                         input: 10,
                         output: 20,
                         cache_read: 5,
-                        cache_creation: 2
+                        cache_creation: 2,
+                        reasoning: None,
                     }
                 );
             }

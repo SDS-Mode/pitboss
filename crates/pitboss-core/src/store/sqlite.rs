@@ -683,6 +683,7 @@ impl TaskRow {
                     .unwrap_or(0)
                     .try_into()
                     .unwrap_or(0),
+                reasoning: None,
             },
             claude_session_id: self.claude_session_id,
             final_message_preview: self.final_message_preview,

@@ -218,6 +218,7 @@ fn task_metrics(rec: &pitboss_core::store::TaskRecord, model: Option<&str>) -> T
                 output: rec.token_usage.output,
                 cache_read: rec.token_usage.cache_read,
                 cache_creation: rec.token_usage.cache_creation,
+                reasoning: rec.token_usage.reasoning,
             },
         )
     });
@@ -252,6 +253,7 @@ fn run_totals(summary: &RunSummary, models: &HashMap<String, String>) -> RunTota
                     output: rec.token_usage.output,
                     cache_read: rec.token_usage.cache_read,
                     cache_creation: rec.token_usage.cache_creation,
+                    reasoning: rec.token_usage.reasoning,
                 },
             ) {
                 cost_usd += c;
@@ -525,6 +527,7 @@ mod tests {
                 output: tout,
                 cache_read: 0,
                 cache_creation: 0,
+                reasoning: None,
             },
             claude_session_id: None,
             final_message_preview: None,

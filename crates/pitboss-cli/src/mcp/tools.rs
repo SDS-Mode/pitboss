@@ -86,6 +86,8 @@ pub struct TokenUsageSchema {
     pub output: u64,
     pub cache_read: u64,
     pub cache_creation: u64,
+    #[serde(default)]
+    pub reasoning: Option<u64>,
 }
 
 // Compile-time structural parity guards between TokenUsageSchema and
@@ -104,12 +106,14 @@ impl From<pitboss_core::parser::TokenUsage> for TokenUsageSchema {
             output,
             cache_read,
             cache_creation,
+            reasoning,
         } = u;
         Self {
             input,
             output,
             cache_read,
             cache_creation,
+            reasoning,
         }
     }
 }
@@ -121,12 +125,14 @@ impl From<TokenUsageSchema> for pitboss_core::parser::TokenUsage {
             output,
             cache_read,
             cache_creation,
+            reasoning,
         } = s;
         Self {
             input,
             output,
             cache_read,
             cache_creation,
+            reasoning,
         }
     }
 }
