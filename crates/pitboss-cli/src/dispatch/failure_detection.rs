@@ -1,6 +1,6 @@
-//! Post-exit classification of claude-subprocess failures.
+//! Post-exit classification of agent subprocess failures.
 //!
-//! When a claude worker/lead exits non-zero, we don't just want to know *that*
+//! When an agent worker/lead exits non-zero, we don't just want to know *that*
 //! it failed — callers (parent leads, the TUI, the spawn gater) need to know
 //! *why* so they can react appropriately: back off on rate-limit, retry on
 //! transient network, fail-fast on auth. Exit code alone is 1 for all of
@@ -23,6 +23,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use pitboss_core::failure_classify::classify;
+use pitboss_core::provider::Provider;
 use pitboss_core::store::FailureReason;
 use tokio::sync::RwLock;
 
@@ -42,11 +43,12 @@ const RATE_LIMIT_DEFAULT_BACKOFF_SECS: i64 = 300;
 /// credentials. 10 minutes.
 const AUTH_FAILURE_BACKOFF_SECS: i64 = 600;
 
-/// Rolling per-run view of the Anthropic API's recent behavior, derived from
+/// Rolling per-run view of each provider API's recent behavior, derived from
 /// classified worker failures. Used by `handle_spawn_worker` /
-/// `handle_spawn_sublead` to reject new spawns while a known-bad condition
-/// persists (rate-limited, auth-broken) rather than burning budget on
-/// subprocesses that will immediately fail with the same error.
+/// `handle_spawn_sublead` to reject new spawns for the affected provider while
+/// a known-bad condition persists (rate-limited, auth-broken) rather than
+/// burning budget on subprocesses that will immediately fail with the same
+/// error.
 ///
 /// Only `RateLimit` and `AuthFailure` populate state here. `NetworkError` is
 /// intentionally *not* tracked — networks recover on their own and the
@@ -55,8 +57,13 @@ const AUTH_FAILURE_BACKOFF_SECS: i64 = 600;
 /// per-task payload problems, not API health.
 #[derive(Debug, Default)]
 pub struct ApiHealth {
-    rate_limit: RwLock<Option<RateLimitState>>,
-    auth_failure: RwLock<Option<DateTime<Utc>>>,
+    providers: RwLock<std::collections::HashMap<Provider, ProviderHealth>>,
+}
+
+#[derive(Debug, Default)]
+struct ProviderHealth {
+    rate_limit: Option<RateLimitState>,
+    auth_failure: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,20 +94,31 @@ impl ApiHealth {
         Self::default()
     }
 
-    /// Update health state from a classified failure. No-op for reasons that
-    /// don't affect spawn gating (`NetworkError`, `ContextExceeded`,
-    /// `InvalidArgument`, `Unknown`). Safe to call from any path that
-    /// received a `Some(FailureReason)`.
+    /// Update Anthropic health state from a classified failure. Compatibility
+    /// wrapper for the current hierarchical Claude path; new Goose provider
+    /// paths should call [`Self::record_for_provider`].
     pub async fn record(&self, reason: &FailureReason) {
+        self.record_for_provider(&Provider::Anthropic, reason).await;
+    }
+
+    /// Update provider health state from a classified failure. No-op for
+    /// reasons that don't affect spawn gating (`NetworkError`,
+    /// `ContextExceeded`, `InvalidArgument`, `Unknown`). Safe to call from any
+    /// path that received a `Some(FailureReason)`.
+    pub async fn record_for_provider(&self, provider: &Provider, reason: &FailureReason) {
         match reason {
             FailureReason::RateLimit { resets_at } => {
-                *self.rate_limit.write().await = Some(RateLimitState {
+                let mut providers = self.providers.write().await;
+                let bucket = providers.entry(provider.clone()).or_default();
+                bucket.rate_limit = Some(RateLimitState {
                     hit_at: Utc::now(),
                     resets_at: *resets_at,
                 });
             }
             FailureReason::AuthFailure => {
-                *self.auth_failure.write().await = Some(Utc::now());
+                let mut providers = self.providers.write().await;
+                let bucket = providers.entry(provider.clone()).or_default();
+                bucket.auth_failure = Some(Utc::now());
             }
             FailureReason::NetworkError { .. }
             | FailureReason::ContextExceeded
@@ -109,17 +127,32 @@ impl ApiHealth {
         }
     }
 
-    /// Return `Err(SpawnGateReason)` when a new spawn should be refused,
-    /// `Ok(())` otherwise. Checks the most severe gate first (auth, then
-    /// rate-limit) so the returned reason is the most actionable.
+    /// Check Anthropic health. Compatibility wrapper for the current
+    /// hierarchical Claude path; new Goose provider paths should call
+    /// [`Self::check_can_spawn_for_provider`].
     pub async fn check_can_spawn(&self) -> Result<(), SpawnGateReason> {
-        if let Some(hit_at) = *self.auth_failure.read().await {
+        self.check_can_spawn_for_provider(&Provider::Anthropic)
+            .await
+    }
+
+    /// Return `Err(SpawnGateReason)` when a new spawn for `provider` should be
+    /// refused, `Ok(())` otherwise. Checks the most severe gate first (auth,
+    /// then rate-limit) so the returned reason is the most actionable.
+    pub async fn check_can_spawn_for_provider(
+        &self,
+        provider: &Provider,
+    ) -> Result<(), SpawnGateReason> {
+        let providers = self.providers.read().await;
+        let Some(state) = providers.get(provider) else {
+            return Ok(());
+        };
+        if let Some(hit_at) = state.auth_failure {
             let clears_at = hit_at + chrono::Duration::seconds(AUTH_FAILURE_BACKOFF_SECS);
             if Utc::now() < clears_at {
                 return Err(SpawnGateReason::AuthFailed { clears_at });
             }
         }
-        if let Some(state) = *self.rate_limit.read().await {
+        if let Some(state) = state.rate_limit {
             let retry_after = state.resets_at.unwrap_or_else(|| {
                 state.hit_at + chrono::Duration::seconds(RATE_LIMIT_DEFAULT_BACKOFF_SECS)
             });
@@ -262,6 +295,25 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn api_health_gates_are_provider_scoped() {
+        let h = ApiHealth::new();
+        h.record_for_provider(
+            &Provider::OpenAi,
+            &FailureReason::RateLimit { resets_at: None },
+        )
+        .await;
+
+        assert!(h
+            .check_can_spawn_for_provider(&Provider::Anthropic)
+            .await
+            .is_ok());
+        assert!(matches!(
+            h.check_can_spawn_for_provider(&Provider::OpenAi).await,
+            Err(SpawnGateReason::RateLimited { .. })
+        ));
     }
 
     #[tokio::test]
