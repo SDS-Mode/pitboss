@@ -32,6 +32,10 @@ use crate::mcp::tools::{
 struct SpawnSubleadRequest {
     /// The prompt the sub-lead's Claude session will start with.
     prompt: String,
+    /// Provider name for the sub-lead. If omitted, falls back to
+    /// `[sublead_defaults].provider`, then the root lead provider.
+    #[serde(default)]
+    provider: Option<String>,
     /// Model name for the sub-lead.
     model: String,
     /// Hard budget cap for this sub-tree, USD. Required unless
@@ -499,6 +503,7 @@ impl PitbossHandler {
 
         let spawn_req = SubleadSpawnRequest {
             prompt: req.prompt,
+            provider: req.provider,
             model: req.model,
             budget_usd: req.budget_usd,
             max_workers: req.max_workers,

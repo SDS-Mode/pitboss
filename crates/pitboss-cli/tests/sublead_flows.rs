@@ -491,6 +491,7 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
     // Spawn a sub-lead with $5.0 budget via spawn_sublead (the real path).
     let req = SubleadSpawnRequest {
         prompt: "test prompt".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(5.0),
         max_workers: Some(2),
@@ -1118,6 +1119,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
     // Spawn a sub-lead.
     let req = SubleadSpawnRequest {
         prompt: "test".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(2.0),
         max_workers: Some(1),
@@ -1179,6 +1181,7 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
     // Spawn a sub-lead.
     let req = SubleadSpawnRequest {
         prompt: "block-test".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(3.0),
         max_workers: Some(2),
@@ -1669,6 +1672,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
     // Spawn a sub-lead with $5 budget.
     let req = SubleadSpawnRequest {
         prompt: "budget test sublead".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(5.0),
         max_workers: Some(4),

@@ -202,6 +202,7 @@ async fn root_spawns_sublead_which_completes() {
     // Root lead spawns a sub-lead with $3 envelope.
     let req = SubleadSpawnRequest {
         prompt: "execute sub-task A".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(envelope_budget),
         max_workers: Some(2),
@@ -296,6 +297,7 @@ async fn root_kill_cascades_to_sublead_workers() {
     // Root lead spawns a sub-lead.
     let req = SubleadSpawnRequest {
         prompt: "sub-task B".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(2.0),
         max_workers: Some(2),
@@ -662,6 +664,7 @@ async fn budget_envelope_returns_to_root_pool() {
     // Root lead spawns sub-lead with $5 envelope.
     let req = SubleadSpawnRequest {
         prompt: "write output file".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(envelope_budget),
         max_workers: Some(2),
@@ -863,6 +866,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
     // that launches fake-claude in the background.
     let req = SubleadSpawnRequest {
         prompt: "run sub-task A".into(),
+        provider: None,
         model: "claude-haiku-4-5".into(),
         budget_usd: Some(2.0),
         max_workers: Some(2),

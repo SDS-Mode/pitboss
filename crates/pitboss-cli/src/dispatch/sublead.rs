@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use pitboss_core::provider::Provider;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -81,6 +82,7 @@ impl SubleadOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct SubleadSpawnRequest {
     pub prompt: String,
+    pub provider: Option<String>,
     pub model: String,
     pub budget_usd: Option<f64>,
     pub max_workers: Option<u32>,
@@ -104,6 +106,48 @@ pub struct SubleadSpawnRequest {
     /// `pitboss resume` seeds `/resume/subleads` in the shared store with
     /// prior session IDs. `None` for fresh spawns.
     pub resume_session_id: Option<String>,
+}
+
+fn split_provider_model(model: &str) -> Option<(Provider, String)> {
+    let (provider, model) = model.split_once('/')?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider.parse().ok()?, model.to_string()))
+}
+
+fn parse_provider(raw: Option<&str>) -> anyhow::Result<Option<Provider>> {
+    raw.map(str::parse)
+        .transpose()
+        .map_err(|e: String| anyhow::anyhow!(e))
+}
+
+fn resolve_sublead_provider_model(
+    state: &DispatchState,
+    req: &SubleadSpawnRequest,
+) -> anyhow::Result<(Provider, String)> {
+    let lead = state.root.manifest.lead.as_ref();
+    let defaults = lead.and_then(|l| l.sublead_defaults.as_ref());
+    let fallback_provider = defaults
+        .map(|d| d.provider.clone())
+        .or_else(|| lead.map(|l| l.provider.clone()))
+        .unwrap_or_default();
+    resolve_sublead_provider_model_from(req, fallback_provider)
+}
+
+fn resolve_sublead_provider_model_from(
+    req: &SubleadSpawnRequest,
+    fallback_provider: Provider,
+) -> anyhow::Result<(Provider, String)> {
+    let explicit_provider = parse_provider(req.provider.as_deref())?;
+    let (model_provider, model) = match split_provider_model(&req.model) {
+        Some((provider, stripped)) => (Some(provider), stripped),
+        None => (None, req.model.clone()),
+    };
+    let provider = explicit_provider
+        .or(model_provider)
+        .unwrap_or(fallback_provider);
+    Ok((provider, model))
 }
 
 /// Validated, defaults-applied resource envelope for a sub-lead spawn.
@@ -228,11 +272,17 @@ pub async fn spawn_sublead(
     state: &Arc<DispatchState>,
     req: SubleadSpawnRequest,
 ) -> Result<ActorId> {
+    let (sublead_provider, sublead_model) = resolve_sublead_provider_model(state, &req)?;
+
     // API health gate: refuse new sub-leads while a recent rate-limit or
     // auth failure persists. Mirrors the check in `handle_spawn_worker`
     // so the lead can't sidestep the gate by routing through a new
     // sub-tree. See `dispatch::failure_detection` for the rules.
-    if let Err(gate) = state.api_health.check_can_spawn().await {
+    if let Err(gate) = state
+        .api_health
+        .check_can_spawn_for_provider(&sublead_provider)
+        .await
+    {
         use crate::dispatch::failure_detection::SpawnGateReason;
         match gate {
             SpawnGateReason::RateLimited { retry_after } => {
@@ -374,7 +424,8 @@ pub async fn spawn_sublead(
             state.clone(),
             sub_layer.clone(),
             req.prompt,
-            req.model,
+            sublead_provider,
+            sublead_model,
             envelope,
             req.env,
             req.tools,
@@ -461,6 +512,7 @@ async fn spawn_sublead_session(
     state: Arc<DispatchState>,
     sub_layer: Arc<LayerState>,
     prompt: String,
+    provider: Provider,
     model: String,
     envelope: ResolvedEnvelope,
     operator_env: std::collections::HashMap<String, String>,
@@ -606,6 +658,7 @@ async fn spawn_sublead_session(
     let state_bg = state.clone();
     let sub_layer_bg = sub_layer.clone();
     let sublead_id_bg = sublead_id.clone();
+    let provider_bg = provider.clone();
     let model_bg = model.clone();
     let mcp_config_path_bg = mcp_config_path.clone();
     let operator_env_bg = operator_env;
@@ -695,7 +748,9 @@ async fn spawn_sublead_session(
         // here from inside the loop; benign (no worker spawn into the
         // sub-tree can occur between iterations because the sub-lead's
         // MCP session is closed while its subprocess is dead).
-        if let Some(cost) = pitboss_core::prices::cost_usd(&model_bg, &total_token_usage) {
+        if let Some(cost) =
+            pitboss_core::prices::cost_usd_v2(&provider_bg, &model_bg, &total_token_usage)
+        {
             *sub_layer_bg.spent_usd.lock().await += cost;
         }
 
@@ -744,7 +799,8 @@ async fn spawn_sublead_session(
 
         // 9. Build and persist a TaskRecord for the sub-lead's compound session.
         //    Uses total_token_usage across all subprocess iterations.
-        let cost_usd = pitboss_core::prices::cost_usd(&model_bg, &total_token_usage);
+        let cost_usd =
+            pitboss_core::prices::cost_usd_v2(&provider_bg, &model_bg, &total_token_usage);
         let rec = pitboss_core::store::TaskRecord {
             task_id: sublead_id_bg.clone(),
             status,
@@ -757,7 +813,7 @@ async fn spawn_sublead_session(
             worktree_path: None,
             log_path: log_path.clone(),
             token_usage: total_token_usage,
-            provider: pitboss_core::provider::Provider::Anthropic,
+            provider: provider_bg.clone(),
             claude_session_id: final_outcome.claude_session_id,
             final_message_preview: final_outcome.final_message_preview,
             final_message: final_outcome.final_message,
@@ -837,7 +893,10 @@ async fn spawn_sublead_session(
         // sees why this branch of the tree died, and update api_health
         // so further spawns across the tree see the gate.
         if let Some(reason) = rec.failure_reason.clone() {
-            state_bg.api_health.record(&reason).await;
+            state_bg
+                .api_health
+                .record_for_provider(&provider_bg, &reason)
+                .await;
             crate::dispatch::failure_detection::broadcast_worker_failed(
                 &state_bg.root,
                 sublead_id_bg.clone(),
@@ -1036,5 +1095,52 @@ mod env_composition_tests {
         // CLAUDE_CODE_ENTRYPOINT so the MCP permission bypass engages.
         let out = compose_sublead_env(&HashMap::new(), &HashMap::new(), Default::default());
         assert!(out.contains_key("CLAUDE_CODE_ENTRYPOINT"));
+    }
+
+    fn request(provider: Option<&str>, model: &str) -> SubleadSpawnRequest {
+        SubleadSpawnRequest {
+            prompt: "sublead".into(),
+            provider: provider.map(str::to_string),
+            model: model.into(),
+            budget_usd: Some(1.0),
+            max_workers: Some(1),
+            lead_timeout_secs: None,
+            initial_ref: HashMap::new(),
+            read_down: false,
+            env: HashMap::new(),
+            tools: Vec::new(),
+            resume_session_id: None,
+        }
+    }
+
+    #[test]
+    fn sublead_model_short_form_sets_provider() {
+        let (provider, model) = resolve_sublead_provider_model_from(
+            &request(None, "openai/gpt-4o"),
+            Provider::Anthropic,
+        )
+        .unwrap();
+        assert_eq!(provider, Provider::OpenAi);
+        assert_eq!(model, "gpt-4o");
+    }
+
+    #[test]
+    fn sublead_explicit_provider_wins_over_model_short_form() {
+        let (provider, model) = resolve_sublead_provider_model_from(
+            &request(Some("google"), "openai/gpt-4o"),
+            Provider::Anthropic,
+        )
+        .unwrap();
+        assert_eq!(provider, Provider::Google);
+        assert_eq!(model, "gpt-4o");
+    }
+
+    #[test]
+    fn sublead_provider_falls_back_to_defaults() {
+        let (provider, model) =
+            resolve_sublead_provider_model_from(&request(None, "gemini-2.5-pro"), Provider::Google)
+                .unwrap();
+        assert_eq!(provider, Provider::Google);
+        assert_eq!(model, "gemini-2.5-pro");
     }
 }
