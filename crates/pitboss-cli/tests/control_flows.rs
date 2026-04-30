@@ -545,6 +545,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
             tools: None,
             timeout_secs: None,
             model: None,
+            provider: None,
             meta: None,
         },
     )
@@ -650,6 +651,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
             tools: None,
             timeout_secs: None,
             model: None,
+            provider: None,
             meta: None,
         },
     )

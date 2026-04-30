@@ -77,6 +77,8 @@ pub struct LayerState {
     pub worker_prompts: RwLock<HashMap<String, String>>,
     /// Per-worker resolved model, keyed by task_id.
     pub worker_models: RwLock<HashMap<String, String>>,
+    /// Per-worker resolved provider, keyed by task_id.
+    pub worker_providers: RwLock<HashMap<String, pitboss_core::provider::Provider>>,
     /// Per-worker reserved cost (USD) at spawn time.
     pub worker_reservations: RwLock<HashMap<String, f64>>,
     /// Dependencies needed to actually launch worker subprocesses.
@@ -209,6 +211,7 @@ impl LayerState {
             worker_cancels: RwLock::new(HashMap::new()),
             worker_prompts: RwLock::new(HashMap::new()),
             worker_models: RwLock::new(HashMap::new()),
+            worker_providers: RwLock::new(HashMap::new()),
             worker_reservations: RwLock::new(HashMap::new()),
             spawner,
             claude_binary,

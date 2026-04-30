@@ -57,6 +57,8 @@ pub struct SpawnWorkerArgs {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Caller identity injected by mcp-bridge. Used to route the new worker
     /// into the caller's layer (sub-lead callers land in their sub-tree;
     /// root-lead callers land in root). Absent for v0.5 back-compat callers —

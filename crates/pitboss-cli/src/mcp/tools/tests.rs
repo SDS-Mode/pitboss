@@ -190,6 +190,7 @@ async fn spawn_worker_adds_entry_to_state() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let result = handle_spawn_worker(&state, args).await.unwrap();
@@ -215,6 +216,60 @@ async fn spawn_worker_adds_entry_to_state() {
 }
 
 #[tokio::test]
+async fn spawn_worker_model_short_form_sets_provider() {
+    let state = test_state().await;
+    let args = SpawnWorkerArgs {
+        prompt: "use openai".into(),
+        directory: Some("/tmp".into()),
+        branch: None,
+        tools: None,
+        timeout_secs: None,
+        model: Some("openai/gpt-4o".into()),
+        provider: None,
+        meta: None,
+    };
+    let result = handle_spawn_worker(&state, args).await.unwrap();
+
+    assert_eq!(
+        state
+            .root
+            .worker_providers
+            .read()
+            .await
+            .get(&result.task_id),
+        Some(&pitboss_core::provider::Provider::OpenAi)
+    );
+    assert_eq!(
+        state
+            .root
+            .worker_models
+            .read()
+            .await
+            .get(&result.task_id)
+            .map(String::as_str),
+        Some("gpt-4o")
+    );
+}
+
+#[tokio::test]
+async fn spawn_worker_non_default_provider_requires_model() {
+    let state = test_state().await;
+    let args = SpawnWorkerArgs {
+        prompt: "use google".into(),
+        directory: Some("/tmp".into()),
+        branch: None,
+        tools: None,
+        timeout_secs: None,
+        model: None,
+        provider: Some("google".into()),
+        meta: None,
+    };
+
+    let err = handle_spawn_worker(&state, args).await.unwrap_err();
+    assert!(err.to_string().contains("requires an explicit model"));
+}
+
+#[tokio::test]
 async fn spawn_worker_refuses_when_max_workers_reached() {
     let state = test_state().await; // max_workers = 4
                                     // Fill up to cap
@@ -226,6 +281,7 @@ async fn spawn_worker_refuses_when_max_workers_reached() {
             tools: None,
             timeout_secs: None,
             model: None,
+            provider: None,
             meta: None,
         };
         handle_spawn_worker(&state, args).await.unwrap();
@@ -238,6 +294,7 @@ async fn spawn_worker_refuses_when_max_workers_reached() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -255,6 +312,7 @@ async fn spawn_worker_refuses_when_budget_exceeded() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -281,6 +339,7 @@ async fn spawn_worker_refuses_when_api_rate_limited() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -302,6 +361,7 @@ async fn spawn_worker_refuses_when_api_auth_failed() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -322,6 +382,7 @@ async fn spawn_worker_refuses_when_draining() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -338,6 +399,7 @@ async fn worker_status_reads_state() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
@@ -371,6 +433,7 @@ async fn cancel_worker_sets_cancelled_state() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
@@ -615,6 +678,7 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
         tools: None,
         timeout_secs: None,
         model: None, // falls back to lead model (claude-haiku-4-5)
+        provider: None,
         meta: None,
     };
 
@@ -685,6 +749,7 @@ async fn burst_spawn_is_budget_capped_via_reservation() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
 
@@ -730,6 +795,7 @@ async fn reservation_released_on_worker_completion() {
             tools: None,
             timeout_secs: None,
             model: None,
+            provider: None,
             meta: None,
         },
     )
@@ -763,15 +829,20 @@ async fn reservation_released_on_worker_completion() {
 
 #[test]
 fn initial_estimate_is_model_aware() {
-    assert!((initial_estimate_for("claude-haiku-4-5") - 0.10).abs() < 1e-9);
-    assert!((initial_estimate_for("claude-sonnet-4-6") - 0.50).abs() < 1e-9);
-    assert!((initial_estimate_for("claude-opus-4-7") - 2.00).abs() < 1e-9);
+    let anthropic = pitboss_core::provider::Provider::Anthropic;
+    assert!((initial_estimate_for(&anthropic, "claude-haiku-4-5") - 0.10).abs() < 1e-9);
+    assert!((initial_estimate_for(&anthropic, "claude-sonnet-4-6") - 0.50).abs() < 1e-9);
+    assert!((initial_estimate_for(&anthropic, "claude-opus-4-7") - 2.00).abs() < 1e-9);
     // Unknown model falls back to Haiku's rate.
-    assert!((initial_estimate_for("claude-unknown-x-y") - 0.10).abs() < 1e-9);
+    assert!((initial_estimate_for(&anthropic, "claude-unknown-x-y") - 0.10).abs() < 1e-9);
     // Dated suffix is normalized (matches `rates_for` in pitboss-core::prices).
-    assert!((initial_estimate_for("claude-haiku-4-5-20251001") - 0.10).abs() < 1e-9);
-    assert!((initial_estimate_for("claude-sonnet-4-6-20251001") - 0.50).abs() < 1e-9);
-    assert!((initial_estimate_for("claude-opus-4-7-20251001") - 2.00).abs() < 1e-9);
+    assert!((initial_estimate_for(&anthropic, "claude-haiku-4-5-20251001") - 0.10).abs() < 1e-9);
+    assert!((initial_estimate_for(&anthropic, "claude-sonnet-4-6-20251001") - 0.50).abs() < 1e-9);
+    assert!((initial_estimate_for(&anthropic, "claude-opus-4-7-20251001") - 2.00).abs() < 1e-9);
+    assert_eq!(
+        initial_estimate_for(&pitboss_core::provider::Provider::Ollama, "llama3.1"),
+        0.0
+    );
 }
 
 #[tokio::test]
@@ -787,6 +858,7 @@ async fn running_worker_state_gets_session_id_after_init() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None,
     };
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
@@ -1659,6 +1731,7 @@ async fn spawn_worker_blocks_when_plan_not_approved() {
             tools: None,
             timeout_secs: None,
             model: None,
+            provider: None,
             meta: None,
         },
     )
@@ -1687,6 +1760,7 @@ async fn spawn_worker_allowed_when_require_plan_approval_off() {
             tools: None,
             timeout_secs: None,
             model: None,
+            provider: None,
             meta: None,
         },
     )

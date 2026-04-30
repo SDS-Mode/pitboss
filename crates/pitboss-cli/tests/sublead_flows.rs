@@ -1413,6 +1413,7 @@ async fn v0_5_back_compat_no_meta_routes_to_root() {
         tools: None,
         timeout_secs: None,
         model: None,
+        provider: None,
         meta: None, // Explicitly absent — the v0.5 compat path
     };
     let result = handle_spawn_worker(&state, args)
@@ -1694,6 +1695,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         tools: None,
         timeout_secs: None,
         model: Some("claude-haiku-4-5".into()),
+        provider: None,
         meta: Some(MetaField {
             actor_id: sublead_id.clone(),
             actor_role: ActorRole::Sublead,

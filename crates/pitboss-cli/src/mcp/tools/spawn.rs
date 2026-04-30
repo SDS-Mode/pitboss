@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use pitboss_core::provider::Provider;
 use pitboss_core::store::TaskRecord;
 use uuid::Uuid;
 
@@ -43,6 +44,57 @@ async fn resolve_target_layer(
              only leads and sub-leads may spawn workers"
         ),
     }
+}
+
+fn split_provider_model(model: &str) -> Option<(Provider, String)> {
+    let (provider, model) = model.split_once('/')?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider.parse().ok()?, model.to_string()))
+}
+
+fn parse_spawn_provider(raw: Option<&str>) -> anyhow::Result<Option<Provider>> {
+    raw.map(str::parse)
+        .transpose()
+        .map_err(|e: String| anyhow::anyhow!(e))
+}
+
+fn resolve_worker_provider_model(
+    args: &SpawnWorkerArgs,
+    lead: Option<&crate::manifest::resolve::ResolvedLead>,
+    root_lead: Option<&crate::manifest::resolve::ResolvedLead>,
+) -> anyhow::Result<(Provider, String)> {
+    let fallback_provider = lead
+        .map(|l| l.provider.clone())
+        .or_else(|| root_lead.map(|l| l.provider.clone()))
+        .unwrap_or_default();
+    let fallback_model = lead
+        .map(|l| l.model.clone())
+        .or_else(|| root_lead.map(|l| l.model.clone()))
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+
+    let explicit_provider = parse_spawn_provider(args.provider.as_deref())?;
+    let raw_model = args.model.clone();
+    let (model_provider, model) = match raw_model {
+        Some(model) => match split_provider_model(&model) {
+            Some((provider, stripped)) => (Some(provider), stripped),
+            None => (None, model),
+        },
+        None => (None, fallback_model),
+    };
+    let provider = explicit_provider
+        .clone()
+        .or(model_provider)
+        .unwrap_or(fallback_provider.clone());
+    if explicit_provider.is_some()
+        && args.model.is_none()
+        && provider != Provider::Anthropic
+        && provider != fallback_provider
+    {
+        bail!("spawn_worker provider '{provider}' requires an explicit model");
+    }
+    Ok((provider, model))
 }
 
 pub async fn handle_spawn_worker(
@@ -115,13 +167,11 @@ pub async fn handle_spawn_worker(
         }
     }
 
-    // Resolve the worker's model up-front so the budget guard can price it.
+    // Resolve the worker's provider/model up-front so the budget guard can
+    // price it and the terminal TaskRecord records the actual provider.
     let lead = target_layer.manifest.lead.as_ref();
-    let worker_model = args
-        .model
-        .clone()
-        .or_else(|| lead.map(|l| l.model.clone()))
-        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    let root_lead = state.root.manifest.lead.as_ref();
+    let (worker_provider, worker_model) = resolve_worker_provider_model(&args, lead, root_lead)?;
 
     let task_id = format!("worker-{}", Uuid::now_v7());
 
@@ -139,7 +189,9 @@ pub async fn handle_spawn_worker(
         // Estimate this worker's cost using its intended model, as the median
         // of prior workers priced at their actual models (or a model-specific
         // fallback if no worker has completed yet).
-        let estimate = estimate_new_worker_cost_for_layer(&target_layer, &worker_model).await;
+        let estimate =
+            estimate_new_worker_cost_for_layer(&target_layer, &worker_provider, &worker_model)
+                .await;
 
         // Hold `reserved_usd` across the whole compute/compare/add step so
         // two concurrent spawn_workers can't both pass the budget check
@@ -225,6 +277,11 @@ pub async fn handle_spawn_worker(
         .write()
         .await
         .insert(task_id.clone(), worker_model.clone());
+    target_layer
+        .worker_providers
+        .write()
+        .await
+        .insert(task_id.clone(), worker_provider.clone());
 
     // Resolve the worker's directory and worktree-use, falling back through:
     //   1. `args.directory` / per-args overrides — operator's spawn_worker call
@@ -244,7 +301,6 @@ pub async fn handle_spawn_worker(
     // sublead-1's only worker SpawnFailed; sublead-2's first worker
     // SpawnFailed and its second only succeeded because haiku retried with
     // an explicit directory after seeing the failure.
-    let root_lead = state.root.manifest.lead.as_ref();
     let worker_dir: std::path::PathBuf = args
         .directory
         .as_ref()
@@ -306,6 +362,7 @@ pub async fn handle_spawn_worker(
             prompt_bg,
             worker_dir,
             worker_branch,
+            worker_provider,
             worker_model,
             worker_tools,
             worker_timeout_secs,
@@ -332,6 +389,7 @@ async fn run_worker(
     prompt: String,
     directory: std::path::PathBuf,
     branch: Option<String>,
+    provider: Provider,
     model: String,
     tools: Vec<String>,
     timeout_secs: u64,
@@ -374,7 +432,7 @@ async fn run_worker(
                 // Record a SpawnFailed TaskRecord and broadcast done.
                 let now = Utc::now();
                 let token_usage = pitboss_core::parser::TokenUsage::default();
-                let cost_usd = pitboss_core::prices::cost_usd(&model, &token_usage);
+                let cost_usd = pitboss_core::prices::cost_usd_v2(&provider, &model, &token_usage);
                 let rec = TaskRecord {
                     task_id: task_id.clone(),
                     status: TaskStatus::SpawnFailed,
@@ -385,7 +443,7 @@ async fn run_worker(
                     worktree_path: None,
                     log_path: log_path.clone(),
                     token_usage,
-                    provider: pitboss_core::provider::Provider::Anthropic,
+                    provider,
                     claude_session_id: None,
                     final_message_preview: Some(format!("worktree error: {e}")),
                     final_message: None,
@@ -609,7 +667,7 @@ async fn run_worker(
         Some(&log_path),
         Some(&stderr_path),
     );
-    let cost_usd = pitboss_core::prices::cost_usd(&model, &outcome.token_usage);
+    let cost_usd = pitboss_core::prices::cost_usd_v2(&provider, &model, &outcome.token_usage);
     let rec = TaskRecord {
         task_id: task_id.clone(),
         status,
@@ -620,7 +678,7 @@ async fn run_worker(
         worktree_path,
         log_path,
         token_usage: outcome.token_usage,
-        provider: pitboss_core::provider::Provider::Anthropic,
+        provider: provider.clone(),
         claude_session_id: outcome.claude_session_id,
         final_message_preview: outcome.final_message_preview,
         final_message: outcome.final_message,
@@ -645,7 +703,10 @@ async fn run_worker(
     // while the condition persists — one dead worker is enough; a loop
     // of them burns budget faster than any operator can intervene.
     if let Some(reason) = rec.failure_reason.clone() {
-        state.api_health.record(&reason).await;
+        state
+            .api_health
+            .record_for_provider(&provider, &reason)
+            .await;
         crate::dispatch::failure_detection::broadcast_worker_failed(
             &state.root,
             task_id.clone(),
@@ -660,7 +721,7 @@ async fn run_worker(
     release_reservation_for_layer(&layer, &task_id).await;
 
     // Accumulate cost into the layer's spent_usd.
-    if let Some(cost) = pitboss_core::prices::cost_usd(&model, &rec.token_usage) {
+    if let Some(cost) = pitboss_core::prices::cost_usd_v2(&provider, &model, &rec.token_usage) {
         *layer.spent_usd.lock().await += cost;
     }
 
@@ -710,21 +771,31 @@ async fn release_reservation_for_layer(layer: &Arc<LayerState>, task_id: &str) {
 /// Estimate the cost (USD) of a new worker against the given `LayerState`'s
 /// completed-worker history. Takes a `LayerState` reference so it works for
 /// both root and sub-tree layers.
-async fn estimate_new_worker_cost_for_layer(layer: &Arc<LayerState>, intended_model: &str) -> f64 {
-    use pitboss_core::prices::cost_usd;
+async fn estimate_new_worker_cost_for_layer(
+    layer: &Arc<LayerState>,
+    intended_provider: &Provider,
+    intended_model: &str,
+) -> f64 {
     let workers = layer.workers.read().await;
     let models = layer.worker_models.read().await;
     let mut costs: Vec<f64> = Vec::new();
     for (id, w) in workers.iter() {
         if let WorkerState::Done(rec) = w {
-            let m = models.get(id).map(String::as_str).unwrap_or(intended_model);
-            if let Some(c) = cost_usd(m, &rec.token_usage) {
+            let m = rec
+                .model
+                .as_deref()
+                .or_else(|| models.get(id).map(String::as_str))
+                .unwrap_or(intended_model);
+            if let Some(c) = rec
+                .cost_usd
+                .or_else(|| pitboss_core::prices::cost_usd_v2(&rec.provider, m, &rec.token_usage))
+            {
                 costs.push(c);
             }
         }
     }
     if costs.is_empty() {
-        return initial_estimate_for(intended_model);
+        return initial_estimate_for(intended_provider, intended_model);
     }
     costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     costs[costs.len() / 2]
@@ -818,6 +889,13 @@ pub async fn spawn_resume_worker(
         .get(&task_id)
         .cloned()
         .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    let provider = layer
+        .worker_providers
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .unwrap_or_default();
     let tools: Vec<String> = layer
         .manifest
         .lead
@@ -955,6 +1033,7 @@ pub async fn spawn_resume_worker(
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
     let resume_model = model.clone();
+    let resume_provider = provider.clone();
     // Register a pid slot for the resumed subprocess too, so
     // freeze-pause works across continue_worker boundaries.
     let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -1006,7 +1085,11 @@ pub async fn spawn_resume_worker(
             .get(&task_id_bg)
             .cloned()
             .unwrap_or_default();
-        let cost_usd = pitboss_core::prices::cost_usd(&resume_model, &outcome.token_usage);
+        let cost_usd = pitboss_core::prices::cost_usd_v2(
+            &resume_provider,
+            &resume_model,
+            &outcome.token_usage,
+        );
         let rec = TaskRecord {
             task_id: task_id_bg.clone(),
             status,
@@ -1017,7 +1100,7 @@ pub async fn spawn_resume_worker(
             worktree_path: None,
             log_path: log_path.clone(),
             token_usage: outcome.token_usage,
-            provider: pitboss_core::provider::Provider::Anthropic,
+            provider: resume_provider.clone(),
             claude_session_id: outcome.claude_session_id,
             final_message_preview: outcome.final_message_preview,
             final_message: outcome.final_message,
@@ -1037,7 +1120,10 @@ pub async fn spawn_resume_worker(
         };
         let _ = layer_bg.store.append_record(layer_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {
-            state_bg.api_health.record(&reason).await;
+            state_bg
+                .api_health
+                .record_for_provider(&resume_provider, &reason)
+                .await;
             crate::dispatch::failure_detection::broadcast_worker_failed(
                 &layer_bg,
                 task_id_bg.clone(),
@@ -1065,7 +1151,13 @@ pub async fn spawn_resume_worker(
 ///
 /// Normalizes dated model suffixes (e.g. `claude-haiku-4-5-20251001`) the
 /// same way `pitboss_core::prices::rates_for` does.
-pub(crate) fn initial_estimate_for(model: &str) -> f64 {
+pub(crate) fn initial_estimate_for(provider: &Provider, model: &str) -> f64 {
+    if matches!(provider, Provider::Ollama) {
+        return 0.0;
+    }
+    if !matches!(provider, Provider::Anthropic) {
+        return 0.10;
+    }
     let base = model.split('-').take(4).collect::<Vec<_>>().join("-");
     match base.as_str() {
         "claude-opus-4-7" => 2.00,
