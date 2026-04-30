@@ -103,14 +103,14 @@ use_worktree = true
 # dispatch — the behavior is then identical to v0.7.
 #
 # [container]
-# image      = "ghcr.io/sds-mode/pitboss-with-claude:latest"  # bundled claude CLI
+# image      = "ghcr.io/sds-mode/pitboss-with-goose:latest"  # bundled Goose CLI
 # runtime    = "auto"              # "docker" | "podman" | "auto" (auto prefers podman)
 # workdir    = "/project"          # cwd inside the container; defaults to first mount's container path
 # extra_args = []                  # inserted verbatim before the image name
 #
-# # Declare one [[container.mount]] per bind mount the run needs. Two mounts are
-# # auto-injected regardless: ~/.claude → /home/pitboss/.claude (OAuth) and the
-# # run artifact directory. The manifest itself is mounted read-only at
+# # Declare one [[container.mount]] per bind mount the run needs. Goose auth/state
+# # directories, ~/.claude for claude-acp compatibility, and the run artifact
+# # directory are auto-injected. The manifest itself is mounted read-only at
 # # /run/pitboss.toml. Declare only the project + reference mounts here.
 #
 # [[container.mount]]

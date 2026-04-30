@@ -1,15 +1,17 @@
 # Using Claude in a container
 
-Pitboss ships two container images:
+Pitboss ships a Goose-native container image plus a temporary Claude
+compatibility image:
 
 | Image | What's inside | When to use |
 |-------|---------------|-------------|
-| `ghcr.io/sds-mode/pitboss` | Pitboss binaries only | You want to mount or install `claude` yourself, or you're layering pitboss into an existing base image. |
-| `ghcr.io/sds-mode/pitboss-with-claude` | Pitboss + pinned Claude Code CLI | You want a self-contained image you can pull and run. |
+| `ghcr.io/sds-mode/pitboss` | Pitboss binaries only | You are layering pitboss into an existing base image. |
+| `ghcr.io/sds-mode/pitboss-with-goose` | Pitboss + pinned Goose CLI | Default for `container-dispatch`. |
+| `ghcr.io/sds-mode/pitboss-with-claude` | Pitboss + pinned Claude Code CLI | Legacy compatibility for the pre-Goose Claude Code workflow. |
 
 Both images are multi-arch (`linux/amd64` + `linux/arm64`) and follow the same tag scheme (`:latest`, semver tags, `:main`).
 
-The bundled image pins a specific Claude Code version. To check it at runtime:
+The Claude compatibility image pins a specific Claude Code version. To check it at runtime:
 
 ```bash
 podman inspect ghcr.io/sds-mode/pitboss-with-claude:latest \

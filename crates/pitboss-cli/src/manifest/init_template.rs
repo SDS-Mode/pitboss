@@ -135,7 +135,7 @@ read_down         = false  # When true, sub-leads share the root's pool.
 # prompt = "Audit {pkg} in {dir}."
 
 # [container]
-# image   = "ghcr.io/sds-mode/pitboss-with-claude:latest"
+# image   = "ghcr.io/sds-mode/pitboss-with-goose:latest"
 # runtime = "auto"
 #
 # [[container.mount]]

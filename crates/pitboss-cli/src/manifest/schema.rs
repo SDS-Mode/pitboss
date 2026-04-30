@@ -69,10 +69,10 @@ pub enum PermissionRouting {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerConfig {
-    /// Container image. Default: `ghcr.io/sds-mode/pitboss-with-claude:latest`.
+    /// Container image. Default: `ghcr.io/sds-mode/pitboss-with-goose:latest`.
     #[field(
         label = "Image",
-        help = "Container image reference. Defaults to ghcr.io/sds-mode/pitboss-with-claude:latest."
+        help = "Container image reference. Defaults to ghcr.io/sds-mode/pitboss-with-goose:latest."
     )]
     pub image: Option<String>,
     /// Container runtime: `"docker"`, `"podman"`, or `"auto"` (default).
@@ -108,7 +108,7 @@ pub struct ContainerConfig {
         help = "Debian/Ubuntu packages installed inside the container before pitboss dispatch starts. Adds 30–90s spin-up per dispatch. Example: [\"mdbook\", \"jq\"]."
     )]
     pub extra_apt: Vec<String>,
-    /// Host→container bind mounts (besides the auto-injected `~/.claude` and run_dir).
+    /// Host→container bind mounts (besides auto-injected Goose auth/state dirs and run_dir).
     #[serde(default, rename = "mount")]
     #[field(skip)]
     pub mounts: Vec<MountSpec>,

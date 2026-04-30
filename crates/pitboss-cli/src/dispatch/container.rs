@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::manifest::schema::ContainerConfig;
 
-const DEFAULT_IMAGE: &str = "ghcr.io/sds-mode/pitboss-with-claude:latest";
+const DEFAULT_IMAGE: &str = "ghcr.io/sds-mode/pitboss-with-goose:latest";
 const PITBOSS_CONTAINER_USER_UID: u32 = 1000;
 
 /// Entry point called from `main.rs` for `pitboss container-dispatch`.
@@ -153,20 +153,37 @@ fn build_run_args(
         covered_container_paths.push(container_path.clone());
     }
 
-    // ── Auto-inject ~/.claude ─────────────────────────────────────────────────
-    // Required for OAuth auth (Linux) unless the operator already declared
-    // a mount targeting /home/pitboss/.claude.
-    let claude_container = PathBuf::from("/home/pitboss/.claude");
-    if !covered_container_paths.contains(&claude_container) {
-        if let Some(home) = home_dir() {
-            let host_claude = home.join(".claude");
-            args.push("-v".into());
-            args.push(format!(
-                "{}:{}:rw,z",
-                host_claude.display(),
-                claude_container.display()
-            ));
-        }
+    // ── Auto-inject Goose auth/state ──────────────────────────────────────────
+    // Goose owns provider authentication. Keep its XDG config/data/state
+    // directories available inside the container unless the operator already
+    // declared a mount for the same container path.
+    if let Some(home) = home_dir() {
+        auto_inject_mount(
+            &mut args,
+            &covered_container_paths,
+            home.join(".config/goose"),
+            PathBuf::from("/home/pitboss/.config/goose"),
+        );
+        auto_inject_mount(
+            &mut args,
+            &covered_container_paths,
+            home.join(".local/share/goose"),
+            PathBuf::from("/home/pitboss/.local/share/goose"),
+        );
+        auto_inject_mount(
+            &mut args,
+            &covered_container_paths,
+            home.join(".local/state/goose"),
+            PathBuf::from("/home/pitboss/.local/state/goose"),
+        );
+
+        // Compatibility for Goose pass-through providers such as claude-acp.
+        auto_inject_mount(
+            &mut args,
+            &covered_container_paths,
+            home.join(".claude"),
+            PathBuf::from("/home/pitboss/.claude"),
+        );
     }
 
     // ── Auto-inject run_dir ───────────────────────────────────────────────────
@@ -397,6 +414,19 @@ fn default_run_dir() -> PathBuf {
         .join(".local/share/pitboss/runs")
 }
 
+fn auto_inject_mount(
+    args: &mut Vec<String>,
+    covered_container_paths: &[PathBuf],
+    host: PathBuf,
+    container: PathBuf,
+) {
+    if covered_container_paths.contains(&container) {
+        return;
+    }
+    args.push("-v".into());
+    args.push(format!("{}:{}:rw,z", host.display(), container.display()));
+}
+
 /// Read `manifest_abs`, remove the `[container]` key, and write the result to
 /// a temp file. Returns the temp file path, which is mounted read-only into the
 /// container in place of the original manifest.
@@ -554,37 +584,56 @@ prompt = "hi"
     }
 
     #[test]
-    fn auto_inject_claude_when_not_in_mounts() {
+    fn auto_inject_goose_auth_state_when_not_in_mounts() {
         let cfg = make_config(vec![]);
         let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
         let joined = args.join(" ");
         assert!(
-            joined.contains("/home/pitboss/.claude"),
-            "auto-inject claude: {joined}"
+            joined.contains("/home/pitboss/.config/goose"),
+            "auto-inject goose config: {joined}"
+        );
+        assert!(
+            joined.contains("/home/pitboss/.local/share/goose"),
+            "auto-inject goose data: {joined}"
+        );
+        assert!(
+            joined.contains("/home/pitboss/.local/state/goose"),
+            "auto-inject goose state: {joined}"
         );
     }
 
     #[test]
-    fn skip_claude_auto_inject_when_already_declared() {
+    fn skip_goose_auto_inject_when_already_declared() {
         let cfg = ContainerConfig {
             mounts: vec![MountSpec {
-                host: PathBuf::from("/my/claude"),
-                container: PathBuf::from("/home/pitboss/.claude"),
+                host: PathBuf::from("/my/goose"),
+                container: PathBuf::from("/home/pitboss/.config/goose"),
                 readonly: false,
             }],
             ..ContainerConfig::default()
         };
         let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
-        // Count -v args that mount to /home/pitboss/.claude — should be exactly 1
+        // Count -v args that mount to /home/pitboss/.config/goose — should be exactly 1
         // (the declared mount). The -w workdir may also reference the path but is
         // not a duplicate mount injection.
         let mount_count = args
             .windows(2)
-            .filter(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.claude:"))
+            .filter(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.config/goose:"))
             .count();
         assert_eq!(
             mount_count, 1,
-            "claude mount should appear exactly once: {args:?}"
+            "goose config mount should appear exactly once: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auto_inject_claude_for_pass_through_compatibility() {
+        let cfg = make_config(vec![]);
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("/home/pitboss/.claude"),
+            "claude-acp compatibility mount: {joined}"
         );
     }
 

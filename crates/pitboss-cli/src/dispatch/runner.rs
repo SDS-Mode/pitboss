@@ -1601,7 +1601,7 @@ mod tests {
 
         let spawner = Arc::new(CyclingFake(
             vec![FakeScript::new()
-                .stdout_line(r#"{"type":"result","session_id":"s","usage":{"input_tokens":1,"output_tokens":2}}"#)
+                .stdout_line(r#"{"type":"complete","total_tokens":3}"#)
                 .exit_code(0)],
             std::sync::Mutex::new(0),
         ));

@@ -150,7 +150,7 @@ Enables `pitboss container-dispatch`. When present, task and lead `directory` fi
 
 ```toml
 [container]
-image   = "ghcr.io/sds-mode/pitboss-with-claude:latest"  # optional
+image   = "ghcr.io/sds-mode/pitboss-with-goose:latest"  # optional
 runtime = "auto"     # "docker", "podman", or "auto"
 workdir = "/project" # optional; defaults to first mount's container path
 
@@ -162,7 +162,7 @@ readonly  = false
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `image` | string | Container image. Default: `ghcr.io/sds-mode/pitboss-with-claude:latest`. |
+| `image` | string | Container image. Default: `ghcr.io/sds-mode/pitboss-with-goose:latest`. |
 | `runtime` | string | `"docker"`, `"podman"`, or `"auto"` (prefers podman when available). |
 | `extra_args` | string[] | Extra args inserted verbatim before the image name in the `run` invocation. |
 | `workdir` | path | Working directory inside the container. Defaults to the first mount's container path, or `/home/pitboss`. |
@@ -171,7 +171,7 @@ readonly  = false
 | `mount.container` | path | Absolute path inside the container. |
 | `mount.readonly` | bool | Mount read-only. Default: `false`. |
 
-Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory. See [Container dispatch](./container-dispatch.md) for the full guide.
+Goose auth/state directories, the run artifact directory, and the manifest are auto-injected. `~/.claude` is also mounted for `claude-acp` pass-through compatibility. See [Container dispatch](./container-dispatch.md) for the full guide.
 
 ---
 

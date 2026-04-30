@@ -100,12 +100,14 @@ podman run --rm -v $(pwd)/pitboss.toml:/run/pitboss.toml \
     pitboss validate /run/pitboss.toml
 ```
 
-The image carries `git` (needed for worktree isolation) but NOT the
-`goose` binary — mount your host's Goose install or build a derived image
-that layers it in.
+The base image carries `git` (needed for worktree isolation) but NOT the
+`goose` binary. The Goose-capable image target is
+`ghcr.io/sds-mode/pitboss-with-goose:latest`; it bundles a pinned Goose CLI
+for `container-dispatch`. Publishing that renamed image is staged separately
+from this POC branch's runtime changes.
 
 A compatibility variant image `ghcr.io/sds-mode/pitboss-with-claude`
-continues to exist for the Claude Code container workflow. See
+continues to exist for the legacy Claude Code container workflow. See
 [Using Claude in a container](./book/src/operator-guide/using-claude-in-container.md)
 for auth setup and caveats.
 

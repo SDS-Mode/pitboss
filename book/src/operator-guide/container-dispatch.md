@@ -2,14 +2,14 @@
 
 `pitboss container-dispatch` runs a dispatch inside a Docker or Podman container
 with declarative bind mounts. The container image bundles the pitboss binary and
-a pinned Claude Code CLI; you provide the project directory, any reference
-material, and the `~/.claude` OAuth directory as host mounts.
+a pinned Goose CLI; you provide the project directory and any reference
+material as host mounts. Pitboss auto-mounts Goose auth/state directories.
 
 ## When to use it
 
 - You want isolation from the host filesystem for untrusted or experimental dispatches.
-- Your CI/CD pipeline doesn't have Claude Code installed on the runner.
-- You want consistent Claude version pinning across runs.
+- Your CI/CD pipeline doesn't have Goose installed on the runner.
+- You want consistent Goose version pinning across runs.
 
 ## Manifest schema
 
@@ -17,7 +17,7 @@ Add a `[container]` section and one or more `[[container.mount]]` entries:
 
 ```toml
 [container]
-image   = "ghcr.io/sds-mode/pitboss-with-claude:latest"  # optional; this is the default
+image   = "ghcr.io/sds-mode/pitboss-with-goose:latest"  # optional; this is the default
 runtime = "podman"   # "docker", "podman", or "auto" (default: auto-detect)
 workdir = "/project" # optional; defaults to the first mount's container path
 
@@ -43,11 +43,14 @@ host-filesystem check for these paths at validation time.
 
 ## Auto-injected mounts
 
-Two mounts are always added automatically (unless you declare them yourself):
+These mounts are added automatically unless you declare them yourself:
 
 | Host path | Container path | Notes |
 |-----------|----------------|-------|
-| `~/.claude` | `/home/pitboss/.claude` | OAuth auth; read-write |
+| `~/.config/goose` | `/home/pitboss/.config/goose` | Goose provider config; read-write |
+| `~/.local/share/goose` | `/home/pitboss/.local/share/goose` | Goose sessions/data; read-write |
+| `~/.local/state/goose` | `/home/pitboss/.local/state/goose` | Goose state/cache; read-write |
+| `~/.claude` | `/home/pitboss/.claude` | Claude ACP pass-through compatibility; read-write |
 | `~/.local/share/pitboss/runs` | `/home/pitboss/.local/share/pitboss/runs` | Run artifacts; read-write |
 
 The manifest itself is always injected at `/run/pitboss.toml` (read-only).

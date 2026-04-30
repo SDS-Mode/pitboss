@@ -58,6 +58,7 @@ fn run_stats(state: &AppState) -> (u64, u64, i64, bool, f64) {
                 output: tile.token_usage_output,
                 cache_read: tile.cache_read,
                 cache_creation: tile.cache_creation,
+                reasoning: None,
             };
             if let Some(c) = pitboss_core::prices::cost_usd(model, &usage) {
                 total_cost += c;
@@ -558,6 +559,7 @@ fn render_completed_page(frame: &mut Frame, area: Rect, state: &AppState) {
                     output: tile.token_usage_output,
                     cache_read: tile.cache_read,
                     cache_creation: tile.cache_creation,
+                    reasoning: None,
                 };
                 pitboss_core::prices::cost_usd(m, &usage)
             })
@@ -1057,6 +1059,7 @@ fn render_subtree_worker_tile(
                 output: tile.token_usage_output,
                 cache_read: tile.cache_read,
                 cache_creation: tile.cache_creation,
+                reasoning: None,
             };
             pitboss_core::prices::fmt_cost(pitboss_core::prices::cost_usd(model, &usage))
         },
@@ -1170,6 +1173,7 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
                 output: tile.token_usage_output,
                 cache_read: tile.cache_read,
                 cache_creation: tile.cache_creation,
+                reasoning: None,
             };
             pitboss_core::prices::fmt_cost(pitboss_core::prices::cost_usd(model, &usage))
         },
@@ -1620,6 +1624,7 @@ fn render_detail_metadata(
             output: tile.token_usage_output,
             cache_read: tile.cache_read,
             cache_creation: tile.cache_creation,
+            reasoning: None,
         };
         let cost = pitboss_core::prices::cost_usd(model, &usage);
         let cost_str = pitboss_core::prices::fmt_cost(cost);

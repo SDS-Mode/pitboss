@@ -1,6 +1,6 @@
 # Container-dispatch smoke test
 #
-# Exercises the `pitboss container-dispatch` feature (branch: claude/dynamic-container-pitboss-cEGMU).
+# Exercises the Goose-backed `pitboss container-dispatch` feature.
 # Mounts the pitboss source tree read-only into the container and spawns
 # three workers (one per crate) to produce short summaries. Cheap and fast
 # (~2-3 min, ~$0.15).
@@ -19,6 +19,7 @@
 
 # ── Container config ─────────────────────────────────────────────────────────
 [container]
+# Default image: ghcr.io/sds-mode/pitboss-with-goose:latest
 # runtime auto-detected (prefers podman on this system)
 workdir = "/project"
 
@@ -33,6 +34,7 @@ readonly  = true
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 [defaults]
+provider     = "anthropic"
 model        = "claude-haiku-4-5"
 use_worktree = false
 

@@ -293,7 +293,7 @@ The `[container]` section enables `pitboss container-dispatch`, which assembles 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `image` | string | `ghcr.io/sds-mode/pitboss-with-claude:latest` | Container image to run. |
+| `image` | string | `ghcr.io/sds-mode/pitboss-with-goose:latest` | Container image to run. |
 | `runtime` | `"docker"` \| `"podman"` \| `"auto"` | `"auto"` | Runtime selector. `"auto"` prefers podman when available. |
 | `extra_args` | array of string | `[]` | Verbatim flags for `podman run` / `docker run`. The escape hatch for any container-runtime concern: networking (`--network=corp-fw`, `--dns=10.0.0.53`, `--add-host=svc:1.2.3.4`), capabilities (`--cap-add=NET_ADMIN`), security (`--security-opt=…`), resource limits (`--memory=4g`, `--cpus=2`). |
 | `extra_apt` | array of string | `[]` | Debian/Ubuntu packages installed inside the container. Two paths: by default they are installed at dispatch start (~30–90 s per run); after `pitboss container-build`, they are baked into a derived image and dispatch picks up the cached tag automatically. Each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*`; rejected at validate time otherwise. |
@@ -307,7 +307,7 @@ The `[container]` section enables `pitboss container-dispatch`, which assembles 
 | `container` | yes | Absolute path inside the container. |
 | `readonly` | no | Default `false`. |
 
-Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
+Goose auth/state mounts are always auto-injected unless already declared: `~/.config/goose → /home/pitboss/.config/goose`, `~/.local/share/goose → /home/pitboss/.local/share/goose`, and `~/.local/state/goose → /home/pitboss/.local/state/goose`. The run artifact directory is also auto-injected, and the manifest itself is injected at `/run/pitboss.toml` read-only. For `claude-acp` pass-through compatibility, `~/.claude → /home/pitboss/.claude` is also mounted when not already declared.
 
 #### `[[container.copy]]`
 
@@ -345,9 +345,9 @@ pitboss container-prune m1.toml m2.toml --apply  # remove the stale tags
 
 The output is tab-separated for grep / awk consumption (`pitboss container-prune | awk '$1=="stale"'`). Never touches images outside the `pitboss-derived-*:local` namespace, so it's safe to run on hosts with unrelated images. Time-based eviction (`--keep-recent N` etc.) is intentionally deferred — see #267 for the design discussion.
 
-#### Image tag cadence (`ghcr.io/sds-mode/pitboss-with-claude`)
+#### Image publishing note (`ghcr.io/sds-mode/pitboss-with-goose`)
 
-Three tag families are published:
+Expected tag families after the publishing rename lands:
 
 | Tag family | Mutability | When it moves | Use when |
 |---|---|---|---|
@@ -355,7 +355,7 @@ Three tag families are published:
 | `:main`, `:latest` | **Rolling** | Every push to main | You want the latest fixes since the most recent release. Both move together; `:latest` is a convenience alias for `:main`. |
 | `:main-<short-sha>` | Per-commit immutable | One per main commit | You need to pin a `container-dispatch` to a specific main-HEAD commit for reproducibility (debugging, soak tests). |
 
-Pushes to main rebuild the image regardless of whether the commit touched code paths — including README/CHANGELOG-only commits. This is deliberate: the cost of a stale published image (operators hitting "already-fixed" bugs in their containers) is higher than the runner-minute cost of always rebuilding. PRs that touch only README/CHANGELOG still skip CI; the rebuild fires when the squash commit lands on main.
+The Goose image is the intended v0.10 container-dispatch default. In this POC branch the runtime default and Dockerfile target are present, while GHCR publishing and the one-release `ghcr.io/sds-mode/pitboss-with-claude` compatibility alias remain separate release-engineering work.
 
 ### `[[mcp_server]]` (v0.9+)
 

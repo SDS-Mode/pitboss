@@ -8,6 +8,7 @@ use std::path::Path;
 
 use chrono::{TimeZone, Utc};
 use pitboss_core::parser::TokenUsage;
+use pitboss_core::provider::Provider;
 use pitboss_core::store::{FailureReason, RunSummary, TaskRecord, TaskStatus};
 use uuid::Uuid;
 
@@ -36,6 +37,7 @@ fn write_summary(runs_dir: &Path, name: Option<&str>, manifest_path: &str, tasks
         manifest_name: name.map(String::from),
         pitboss_version: "0.test".into(),
         claude_version: None,
+        agent_versions: Default::default(),
         started_at: Utc.with_ymd_and_hms(2026, 4, 27, 10, 0, 0).unwrap(),
         ended_at: Utc.with_ymd_and_hms(2026, 4, 27, 10, 5, 0).unwrap(),
         total_duration_ms: 300_000,
@@ -43,6 +45,7 @@ fn write_summary(runs_dir: &Path, name: Option<&str>, manifest_path: &str, tasks
         tasks_failed: failed,
         was_interrupted: false,
         tasks,
+        cost_by_provider: Default::default(),
     };
     let bytes = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(dir.join("summary.json"), bytes).unwrap();
@@ -68,6 +71,7 @@ fn task(id: &str, status: TaskStatus, reason: Option<FailureReason>) -> TaskReco
         approvals_requested: 0,
         approvals_approved: 0,
         approvals_rejected: 0,
+        provider: Provider::Anthropic,
         model: None,
         failure_reason: reason,
         cost_usd: None,

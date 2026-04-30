@@ -32,7 +32,7 @@ use crate::manifest::schema::{ContainerConfig, CopySpec};
 /// Default base image when `[container].image` is unset. Mirrors the
 /// constant in `dispatch/container.rs`; kept duplicated rather than
 /// re-exported to keep the module-graph DAG simple.
-const DEFAULT_BASE_IMAGE: &str = "ghcr.io/sds-mode/pitboss-with-claude:latest";
+const DEFAULT_BASE_IMAGE: &str = "ghcr.io/sds-mode/pitboss-with-goose:latest";
 
 /// Options bag for `run_container_build` — separate from
 /// `ContainerConfig` because these are CLI-driven and don't belong in

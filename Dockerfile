@@ -4,9 +4,8 @@
 # copy just the two release binaries into a slim debian runtime. The
 # runtime image carries `git` (pitboss uses git worktrees for task
 # isolation), `ca-certificates` (for webhook notifications), and the
-# pitboss + pitboss-tui binaries on $PATH. It intentionally does NOT
-# bundle `claude` — that's caller-supplied, usually via a volume mount
-# of the host's Claude Code install.
+# pitboss + pitboss-tui binaries on $PATH. The `with-goose` target adds
+# the Goose CLI used for agent dispatch.
 #
 # Build:   podman build -t pitboss:local .
 # Run:     podman run --rm -it -v $(pwd)/manifest.toml:/run/pitboss.toml \
@@ -67,6 +66,52 @@ WORKDIR /home/pitboss
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["pitboss", "--help"]
+
+# --- Stage 3: runtime + Goose CLI ---
+#
+# Canonical agent runtime image for the Goose provider pivot. Goose owns
+# provider auth and model dispatch; pitboss owns orchestration.
+FROM runtime AS with-goose
+
+USER root
+
+ARG TARGETARCH=amd64
+ARG GOOSE_VERSION=1.33.1
+RUN test -n "$GOOSE_VERSION" || (echo "GOOSE_VERSION build arg is required" && exit 1)
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) goose_arch="x86_64" ;; \
+        arm64) goose_arch="aarch64" ;; \
+        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    tmp="$(mktemp -d)"; \
+    curl -fsSL "https://github.com/aaif-goose/goose/releases/download/v${GOOSE_VERSION}/goose-${goose_arch}-unknown-linux-gnu.tar.gz" \
+        -o "$tmp/goose.tar.gz"; \
+    tar -xzf "$tmp/goose.tar.gz" -C "$tmp"; \
+    goose_bin="$(find "$tmp" -type f -name goose | head -n 1)"; \
+    test -n "$goose_bin"; \
+    install -m 0755 "$goose_bin" /usr/local/bin/goose; \
+    rm -rf "$tmp"; \
+    goose --version
+
+RUN mkdir -p /usr/share/doc/goose && \
+    printf '%s\n' \
+      'This image bundles aaif-goose/goose (Apache-2.0).' \
+      'Source: https://github.com/aaif-goose/goose' \
+      "Version: ${GOOSE_VERSION}" \
+      > /usr/share/doc/goose/ATTRIBUTION
+
+USER pitboss
+
+LABEL ai.aaif.goose.version="${GOOSE_VERSION}"
+
+# Entrypoint and default CMD are inherited from `runtime`.
 
 # --- Stage 2b (intermediate): Node.js 20 source ---
 #

@@ -32,6 +32,7 @@ dump_shared_store = false
 require_plan_approval = false
 
 [defaults]
+provider = "anthropic"
 model = "<value>"
 effort = "low"
 tools = []
@@ -61,6 +62,7 @@ template = "<value>"
 vars = { EXAMPLE_KEY = "value" }
 branch = "<value>"
 model = "<value>"
+provider = "anthropic"
 effort = "low"
 tools = []
 timeout_secs = 0
@@ -75,6 +77,7 @@ prompt = """
 """
 branch = "<value>"
 model = "<value>"
+provider = "anthropic"
 effort = "low"
 tools = []
 timeout_secs = 0
@@ -90,6 +93,7 @@ max_sublead_budget_usd = 0.0
 max_total_workers = 0
 
 [sublead_defaults]
+provider = "anthropic"
 budget_usd = 0.0
 max_workers = 0
 lead_timeout_secs = 0

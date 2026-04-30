@@ -325,6 +325,7 @@ mod tests {
             approvals_requested: 0,
             approvals_approved: 0,
             approvals_rejected: 0,
+            provider: pitboss_core::provider::Provider::Anthropic,
             model: Some("claude-haiku-4-5".to_string()),
             failure_reason: None,
             cost_usd: None,
