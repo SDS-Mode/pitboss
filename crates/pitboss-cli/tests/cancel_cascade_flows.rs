@@ -69,6 +69,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         prompt: "root prompt".into(),
         branch: None,
         model: "claude-haiku-4-5".into(),
+        provider: pitboss_core::provider::Provider::Anthropic,
         effort: Effort::High,
         tools: vec![],
         timeout_secs: 3600,

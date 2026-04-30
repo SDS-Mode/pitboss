@@ -41,6 +41,8 @@ pub struct ResolvedLead {
     pub directory: PathBuf,
     pub prompt: String,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub provider: Provider,
     pub model: String,
     pub effort: Effort,
     pub tools: Vec<String>,
@@ -86,6 +88,8 @@ pub struct ResolvedLead {
 /// Resolved defaults for sub-lead spawn requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedSubleadDefaults {
+    #[serde(default)]
+    pub provider: Provider,
     pub budget_usd: Option<f64>,
     pub max_workers: Option<u32>,
     pub lead_timeout_secs: Option<u64>,
@@ -261,7 +265,8 @@ pub fn resolve(
     let resolved_sublead_defaults = manifest
         .sublead_defaults
         .as_ref()
-        .map(resolve_sublead_defaults);
+        .map(|spec| resolve_sublead_defaults(spec, &manifest.defaults, &manifest.goose))
+        .transpose()?;
 
     let resolved_lead = if let Some(l) = &manifest.lead {
         Some(resolve_lead(
@@ -328,7 +333,7 @@ pub fn resolve(
 fn resolve_lead(
     lead: &Lead,
     defaults: &Defaults,
-    _goose: &crate::manifest::schema::GooseConfig,
+    goose: &crate::manifest::schema::GooseConfig,
     sublead_defaults: Option<ResolvedSubleadDefaults>,
 ) -> Result<ResolvedLead> {
     let mut env = defaults.env.clone();
@@ -342,16 +347,21 @@ fn resolve_lead(
         .or(defaults.timeout_secs)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+    let (provider, model) = resolve_provider_and_model(
+        lead.provider.as_deref(),
+        lead.model.as_deref(),
+        defaults,
+        goose,
+        "[lead]",
+    )?;
+
     Ok(ResolvedLead {
         id: lead.id.clone(),
         directory: lead.directory.clone(),
         prompt: lead.prompt.clone(),
         branch: lead.branch.clone(),
-        model: lead
-            .model
-            .clone()
-            .or_else(|| defaults.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        provider,
+        model,
         effort: lead.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
         tools: lead
             .tools
@@ -427,13 +437,25 @@ fn resolve_task(
 }
 
 /// Convert a `SubleadDefaults` (TOML deserialized) into a `ResolvedSubleadDefaults`.
-fn resolve_sublead_defaults(spec: &SubleadDefaults) -> ResolvedSubleadDefaults {
-    ResolvedSubleadDefaults {
+fn resolve_sublead_defaults(
+    spec: &SubleadDefaults,
+    defaults: &Defaults,
+    goose: &crate::manifest::schema::GooseConfig,
+) -> Result<ResolvedSubleadDefaults> {
+    let provider = parse_provider(spec.provider.as_deref())
+        .context("[sublead_defaults].provider")?
+        .or(parse_provider(defaults.provider.as_deref()).context("[defaults].provider")?)
+        .or(parse_provider(goose.default_provider.as_deref())
+            .context("[goose].default_provider")?)
+        .unwrap_or(DEFAULT_PROVIDER);
+
+    Ok(ResolvedSubleadDefaults {
+        provider,
         budget_usd: spec.budget_usd,
         max_workers: spec.max_workers,
         lead_timeout_secs: spec.lead_timeout_secs,
         read_down: spec.read_down,
-    }
+    })
 }
 
 fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> {
@@ -777,6 +799,61 @@ mod tests {
             err.to_string().contains("no model"),
             "expected no-model error, got: {err:#}"
         );
+    }
+
+    #[test]
+    fn lead_provider_and_short_model_resolve() {
+        let m = man(r#"
+            [lead]
+            id = "lead"
+            directory = "/tmp"
+            prompt = "p"
+            model = "openai/gpt-4o"
+        "#);
+        let r = resolve(m, None).unwrap();
+        let lead = r.lead.unwrap();
+        assert_eq!(lead.provider, Provider::OpenAi);
+        assert_eq!(lead.model, "gpt-4o");
+    }
+
+    #[test]
+    fn lead_non_default_provider_requires_model() {
+        let m = man(r#"
+            [lead]
+            id = "lead"
+            directory = "/tmp"
+            prompt = "p"
+            provider = "google"
+        "#);
+        let err = resolve(m, None).unwrap_err();
+        assert!(
+            err.to_string().contains("no model"),
+            "expected no-model error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn sublead_defaults_provider_resolves_from_defaults() {
+        let m = man(r#"
+            [defaults]
+            provider = "google"
+            model = "gemini-2.5-flash"
+
+            [lead]
+            id = "lead"
+            directory = "/tmp"
+            prompt = "p"
+            allow_subleads = true
+            max_workers = 2
+            max_subleads = 1
+            max_total_workers = 2
+
+            [sublead_defaults]
+            read_down = true
+        "#);
+        let r = resolve(m, None).unwrap();
+        let sublead_defaults = r.lead.unwrap().sublead_defaults.unwrap();
+        assert_eq!(sublead_defaults.provider, Provider::Google);
     }
 
     #[test]

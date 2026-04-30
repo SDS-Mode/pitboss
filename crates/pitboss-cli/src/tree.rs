@@ -290,7 +290,8 @@ fn render_sublead_defaults(out: &mut String, sd: &ResolvedSubleadDefaults) {
     let _ = writeln!(out, "    [sublead_defaults]");
     let _ = writeln!(
         out,
-        "      budget={}  max_workers={}  lead_timeout={}  read_down={}",
+        "      provider={}  budget={}  max_workers={}  lead_timeout={}  read_down={}",
+        sd.provider,
         format_usd(sd.budget_usd),
         sd.max_workers
             .map(|n| n.to_string())

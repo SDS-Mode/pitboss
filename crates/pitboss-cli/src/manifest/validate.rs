@@ -801,6 +801,7 @@ mod tests {
         let (_d, r) = hierarchical_with_subleads(
             true,
             Some(super::super::resolve::ResolvedSubleadDefaults {
+                provider: pitboss_core::provider::Provider::Anthropic,
                 budget_usd: None,
                 max_workers: None,
                 lead_timeout_secs: None,
@@ -815,6 +816,7 @@ mod tests {
         let (_d, r) = hierarchical_with_subleads(
             true,
             Some(super::super::resolve::ResolvedSubleadDefaults {
+                provider: pitboss_core::provider::Provider::Anthropic,
                 budget_usd: Some(1.0),
                 max_workers: None,
                 lead_timeout_secs: None,
@@ -829,6 +831,7 @@ mod tests {
         let (_d, r) = hierarchical_with_subleads(
             true,
             Some(super::super::resolve::ResolvedSubleadDefaults {
+                provider: pitboss_core::provider::Provider::Anthropic,
                 budget_usd: Some(2.0),
                 max_workers: Some(4),
                 lead_timeout_secs: Some(1800),
@@ -843,6 +846,7 @@ mod tests {
         let (_d, r) = hierarchical_with_subleads(
             true,
             Some(super::super::resolve::ResolvedSubleadDefaults {
+                provider: pitboss_core::provider::Provider::Anthropic,
                 budget_usd: None,
                 max_workers: None,
                 lead_timeout_secs: None,
@@ -857,6 +861,7 @@ mod tests {
         let (_d, r) = hierarchical_with_subleads(
             true,
             Some(super::super::resolve::ResolvedSubleadDefaults {
+                provider: pitboss_core::provider::Provider::Anthropic,
                 budget_usd: Some(2.0),
                 max_workers: Some(4),
                 lead_timeout_secs: None,
@@ -901,6 +906,7 @@ mod tests {
             prompt: "p".into(),
             branch: None,
             model: "m".into(),
+            provider: pitboss_core::provider::Provider::Anthropic,
             effort: super::super::schema::Effort::High,
             tools: vec![],
             timeout_secs: 600,
