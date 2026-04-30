@@ -923,6 +923,59 @@ fn build_mcp_servers_json(
     servers
 }
 
+pub fn build_goose_extension_commands(
+    pitboss_exe: &std::path::Path,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+    token: Option<&str>,
+    extra_servers: &[crate::manifest::schema::McpServerSpec],
+) -> Vec<String> {
+    let mut commands = vec![build_pitboss_bridge_extension_command(
+        pitboss_exe,
+        socket,
+        actor_id,
+        actor_role,
+        token,
+    )];
+    commands.extend(extra_servers.iter().map(mcp_server_extension_command));
+    commands
+}
+
+fn build_pitboss_bridge_extension_command(
+    pitboss_exe: &std::path::Path,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+    token: Option<&str>,
+) -> String {
+    let mut args = vec![
+        "mcp-bridge".to_string(),
+        "--actor-id".to_string(),
+        actor_id.to_string(),
+        "--actor-role".to_string(),
+        actor_role.to_string(),
+    ];
+    if let Some(t) = token {
+        args.push("--token".to_string());
+        args.push(t.to_string());
+    }
+    args.push(socket.to_string_lossy().into_owned());
+    crate::provider::extension_command(pitboss_exe, &args)
+}
+
+fn mcp_server_extension_command(spec: &crate::manifest::schema::McpServerSpec) -> String {
+    let mut env: Vec<_> = spec.env.iter().collect();
+    env.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut words: Vec<String> = env
+        .into_iter()
+        .map(|(key, value)| crate::provider::shell_word(&format!("{key}={value}")))
+        .collect();
+    words.push(crate::provider::shell_word(&spec.command));
+    words.extend(spec.args.iter().map(|arg| crate::provider::shell_word(arg)));
+    words.join(" ")
+}
+
 async fn write_mcp_config(
     path: &std::path::Path,
     socket: &std::path::Path,
@@ -1054,6 +1107,56 @@ pub async fn build_sublead_mcp_config(
                 .await;
     }
     Ok(mcp_config_path)
+}
+
+#[cfg(test)]
+mod goose_extension_tests {
+    use super::*;
+    use crate::manifest::schema::McpServerSpec;
+    use std::collections::HashMap;
+
+    #[test]
+    fn goose_extensions_include_authenticated_pitboss_bridge() {
+        let commands = build_goose_extension_commands(
+            std::path::Path::new("/tmp/pit boss"),
+            std::path::Path::new("/tmp/run.sock"),
+            "lead one",
+            "lead",
+            Some("tok'en"),
+            &[],
+        );
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0],
+            "'/tmp/pit boss' mcp-bridge --actor-id 'lead one' --actor-role lead --token 'tok'\\''en' /tmp/run.sock"
+        );
+    }
+
+    #[test]
+    fn goose_extensions_preserve_manifest_mcp_servers() {
+        let mut env = HashMap::new();
+        env.insert("Z_TOKEN".to_string(), "two words".to_string());
+        env.insert("A_MODE".to_string(), "dev".to_string());
+        let commands = build_goose_extension_commands(
+            std::path::Path::new("/tmp/pitboss"),
+            std::path::Path::new("/tmp/run.sock"),
+            "worker-1",
+            "worker",
+            None,
+            &[McpServerSpec {
+                id: "context7".to_string(),
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "@upstash/context7-mcp".to_string()],
+                env,
+            }],
+        );
+
+        assert_eq!(
+            commands[1],
+            "A_MODE=dev 'Z_TOKEN=two words' npx -y '@upstash/context7-mcp'"
+        );
+    }
 }
 
 #[cfg(test)]

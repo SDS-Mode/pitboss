@@ -1,3 +1,3 @@
 pub mod goose;
 
-pub use goose::GooseSpawner;
+pub use goose::{extension_command, shell_word, GooseSpawner};
