@@ -38,7 +38,10 @@ for the MCP tool reference, keybindings, and manifest schema.
 Rust toolkit for running and observing parallel Goose-powered agent sessions. A
 dispatcher (`pitboss`) fans out `goose run` subprocesses under a concurrency
 cap, captures structured artifacts per run, and — in hierarchical mode —
-lets a **lead** dynamically spawn more workers via MCP. The TUI
+lets a **lead** dynamically spawn more workers via MCP. Goose owns the model
+provider boundary, so one manifest can target API-key providers, local
+providers, or subscription-auth CLI providers by changing `provider` and
+`model`. The TUI
 (`pitboss-tui`) gives the floor view: tile grid, live log tailing, budget +
 token counters.
 
@@ -98,10 +101,13 @@ podman run --rm -v $(pwd)/pitboss.toml:/run/pitboss.toml \
 ```
 
 The image carries `git` (needed for worktree isolation) but NOT the
-`claude` binary — mount your host's Claude Code install or build a
-derived image that layers it in.
+`goose` binary — mount your host's Goose install or build a derived image
+that layers it in.
 
-A variant image `ghcr.io/sds-mode/pitboss-with-claude` bundles a pinned Claude Code CLI (`2.1.114`) so you can run pitboss without installing claude on the host. See [Using Claude in a container](./book/src/operator-guide/using-claude-in-container.md) for auth setup and caveats.
+A compatibility variant image `ghcr.io/sds-mode/pitboss-with-claude`
+continues to exist for the Claude Code container workflow. See
+[Using Claude in a container](./book/src/operator-guide/using-claude-in-container.md)
+for auth setup and caveats.
 
 ### Direct tarball download
 
@@ -134,7 +140,7 @@ pitboss schema                            emit manifest-map.md or reference TOML
 pitboss validate <manifest>               parse + resolve + validate, exit non-zero on error
 pitboss tree <manifest>                   pre-flight visualization + cost gate; --check <USD>
 pitboss dispatch <manifest>               deal a run; --background detaches & returns a run-id
-pitboss resume <run-id>                   re-deal a prior run, reusing claude_session_id
+pitboss resume <run-id>                   re-deal a prior run, reusing captured agent session ids
 pitboss attach <run-id> <task-id>         follow-mode log viewer for a single worker
 pitboss diff <run-a> <run-b>              compare two runs side-by-side
 pitboss container-dispatch <manifest>     run dispatch inside a Docker/Podman container
@@ -173,7 +179,10 @@ land in `~/.local/share/pitboss/runs/<run-id>/`.
 
 ```toml
 [run]
-max_parallel = 2
+max_parallel_tasks = 2
+
+[goose]
+default_provider = "anthropic"
 
 [[task]]
 id = "hello"
@@ -209,13 +218,16 @@ many hands as you need to finish the job, within house rules*.
 
 ```toml
 [run]
+default_approval_policy = "auto_approve"
+
+[lead]
+id = "triage"
+directory = "/path/to/repo"
+provider = "anthropic"
+model = "claude-haiku-4-5"
 max_workers = 4
 budget_usd = 5.00
 lead_timeout_secs = 900
-
-[[lead]]
-id = "triage"
-directory = "/path/to/repo"
 prompt = """
 Inspect recent PRs, spawn one worker per unique author, ask each to summarize
 that author's work in summary-<id>.md, then write a combined digest.
@@ -224,11 +236,14 @@ branch = "feat/triage-lead"
 ```
 
 ```bash
-pitboss validate pitboss.toml    # prints a hierarchical summary when [[lead]] is set
+pitboss validate pitboss.toml    # prints a hierarchical summary when [lead] is set
 pitboss dispatch pitboss.toml
 ```
 
-The lead has these MCP tools, auto-allowed in its `--allowedTools`:
+The lead has these MCP tools injected through Goose extensions. The display
+name in raw streams can be provider-specific (`pitboss__list_workers` in
+standard Goose streams, `mcp__pitboss__list_workers` through Claude ACP), but
+the logical toolset is the same:
 
 | Tool | Purpose |
 |---|---|
@@ -240,8 +255,8 @@ The lead has these MCP tools, auto-allowed in its `--allowedTools`:
 | `mcp__pitboss__list_workers` | Snapshot of active + completed workers |
 | `mcp__pitboss__cancel_worker` | Signal a per-worker `CancelToken`; optional `reason` delivers a synthetic reprompt to the parent |
 | `mcp__pitboss__pause_worker` | Pause a worker — `mode="cancel"` (default, terminates + snapshots session) or `mode="freeze"` (SIGSTOPs the subprocess in place) |
-| `mcp__pitboss__continue_worker` | Resume a paused/frozen worker (`claude --resume` or SIGCONT respectively) |
-| `mcp__pitboss__reprompt_worker` | Mid-flight redirect: kill + `claude --resume <sid>` with a new prompt |
+| `mcp__pitboss__continue_worker` | Resume a paused/frozen worker (`goose run --resume` or SIGCONT respectively) |
+| `mcp__pitboss__reprompt_worker` | Mid-flight redirect: kill + `goose run --resume` with a new prompt |
 | `mcp__pitboss__request_approval` | Gate a single in-flight action on operator approval; accepts an optional typed `ApprovalPlan` |
 | `mcp__pitboss__propose_plan` | Pre-flight gate: submit an execution plan for approval; required before `spawn_worker` when `[run].require_plan_approval = true` |
 | `mcp__pitboss__spawn_sublead` | (v0.6+, root lead only) Spawn a sub-lead with its own envelope; requires `[lead] allow_subleads = true` |
@@ -263,12 +278,40 @@ hub-mediated coordination. See `AGENTS.md` for full schemas.
 - **`lead_timeout_secs`** — wall-clock cap on the lead. The pit always clears.
 - Depth is capped at 2. Workers don't spawn sub-workers. Root leads may spawn sub-leads (v0.6+, opt-in via `allow_subleads = true`); sub-leads spawn only workers.
 
+### Goose Runtime
+
+Pitboss runs every actor with `goose run --quiet --no-profile
+--output-format stream-json`. Set `[goose].binary_path` to use a specific
+Goose binary, `[goose].default_provider` to avoid repeating a provider on
+every actor, and `[goose].default_max_turns` to apply a run-wide
+`--max-turns` safety cap. Actors can override `provider` and `model`.
+
+Provider strings are passed through to Goose. Built-in typed aliases include
+`anthropic`, `openai`, `google`, `ollama`, `openrouter`, `azure`, and
+`bedrock`; unknown provider strings are accepted and recorded as
+`other:<name>` in rollups.
+
+Subscription-auth providers verified against Goose 1.33.1:
+
+| Use case | Provider | Model example | Auth path |
+|---|---|---|---|
+| Claude subscription | `claude-acp` | `sonnet` | Claude Code subscription login through the `claude-agent-acp` adapter |
+| Codex / ChatGPT subscription | `chatgpt_codex` | `gpt-5.3-codex`, `gpt-5.4` | Codex/ChatGPT login managed by Goose |
+
+Direct API providers still require their provider credentials. For example,
+`provider = "anthropic"` uses the Anthropic API path and requires
+`ANTHROPIC_API_KEY`; it does not use the Claude Code subscription login.
+For Codex subscription auth, prefer Goose's built-in `chatgpt_codex` provider;
+`codex-acp` requires a separate adapter binary.
+Subscription-backed providers may report `cost_usd = null` because Pitboss
+does not have public per-token pricing for that auth path.
+
 ### The bridge
 
-Claude Code's MCP client only speaks stdio. The pitboss MCP server listens on
-a unix socket. Between them is `pitboss mcp-bridge <socket>` — a stdio↔socket
-proxy that pitboss auto-launches via the lead's generated `--mcp-config`. You
-never invoke it directly.
+Goose extensions speak stdio. The pitboss MCP server listens on a unix socket.
+Between them is `pitboss mcp-bridge <socket>` — a stdio↔socket proxy that
+pitboss auto-launches via the generated Goose `--with-extension` arguments.
+You never invoke it directly.
 
 ### On the floor
 
@@ -283,7 +326,7 @@ A root lead can spawn sub-leads at runtime, each with its own envelope
 (budget, worker cap, timeout) and isolated coordination layer. Useful
 when a project decomposes into orthogonal phases that each need their own
 clean context. `spawn_sublead_session` is fully wired — sub-leads run as
-real Claude subprocesses end-to-end with complete lifecycle tracking
+real Goose subprocesses end-to-end with complete lifecycle tracking
 (Cancel/Timeout/Error outcome classification, `TaskRecord` persistence,
 budget reconciliation, and reprompt-loop kill+resume). See `AGENTS.md`
 for the full model, manifest fields, and MCP tool schemas.
@@ -293,16 +336,20 @@ for the full model, manifest fields, and MCP tool schemas.
 `pitboss resume <run-id>` re-deals any prior run.
 
 - **Flat**: each task respawns with its original `claude_session_id`.
-- **Hierarchical**: only the lead resumes (`--resume <session-id>`); the lead
+- **Hierarchical**: only the lead resumes (`goose run --resume <session-id>`); the lead
   decides whether to deal fresh workers. `resolved.json` in the new run
   records the `resume_session_id` for audit.
 
+The persisted field name remains `claude_session_id` for compatibility with
+older summaries, but Goose-backed runs may store a Goose session name there.
+
 ## Concurrency
 
-Default `max_parallel` is 4. Override priority: `[run].max_parallel` beats
-`ANTHROPIC_MAX_CONCURRENT` env beats the default.
+Default `max_parallel_tasks` is 4. Override priority:
+`[run].max_parallel_tasks` beats the legacy `ANTHROPIC_MAX_CONCURRENT` env
+name, which beats the default.
 
-In hierarchical mode, `max_workers` is independent of `max_parallel` — it
+In hierarchical mode, `max_workers` is independent of `max_parallel_tasks` — it
 caps the lead's fanout, not the overall process count.
 
 ## Philosophy
@@ -336,13 +383,17 @@ v0.7 added the Path A permission default, the bundled `pitboss-with-claude` cont
 ## Manual smoke testing
 
 Offline scripts are in `scripts/` (see Development below). For live
-verification against real `claude`: validate a hierarchical manifest,
+verification against real providers: validate a hierarchical manifest,
 dispatch a 2–4 worker triage, watch the TUI annotations, tighten `budget_usd`
 to force mid-run rejections, Ctrl-C a running dispatch, resume a completed
-run. Budget: ~$0.50–$1.50 on Haiku for a full sweep.
+run. Budget depends on the selected Goose provider and model.
 
-Requires `claude` authenticated via its normal subscription config (no
-`ANTHROPIC_API_KEY` needed on Claude Code login systems).
+For subscription-auth smoke tests, use `provider = "claude-acp"` with
+`model = "sonnet"` for Claude Code subscription auth through
+`claude-agent-acp`, or
+`provider = "chatgpt_codex"` with `model = "gpt-5.3-codex"` for Codex /
+ChatGPT subscription auth. For API-key providers, make sure the corresponding
+provider key is present in the environment Goose will inherit.
 
 ## Development
 
