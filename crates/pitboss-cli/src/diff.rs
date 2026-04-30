@@ -5,7 +5,6 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use pitboss_core::parser::TokenUsage;
 use pitboss_core::prices;
 use pitboss_core::store::RunSummary;
 use serde::Serialize;
@@ -218,19 +217,17 @@ pub struct DiffReport {
 // Builder
 // ---------------------------------------------------------------------------
 
+fn effective_model<'a>(
+    rec: &'a pitboss_core::store::TaskRecord,
+    models: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    rec.model
+        .as_deref()
+        .or_else(|| models.get(&rec.task_id).map(String::as_str))
+}
+
 fn task_metrics(rec: &pitboss_core::store::TaskRecord, model: Option<&str>) -> TaskMetrics {
-    let cost = model.and_then(|m| {
-        prices::cost_usd(
-            m,
-            &TokenUsage {
-                input: rec.token_usage.input,
-                output: rec.token_usage.output,
-                cache_read: rec.token_usage.cache_read,
-                cache_creation: rec.token_usage.cache_creation,
-                reasoning: rec.token_usage.reasoning,
-            },
-        )
-    });
+    let cost = model.and_then(|m| prices::cost_usd_v2(&rec.provider, m, &rec.token_usage));
     TaskMetrics {
         status: format!("{:?}", rec.status),
         duration_ms: rec.duration_ms,
@@ -254,17 +251,8 @@ fn run_totals(summary: &RunSummary, models: &HashMap<String, String>) -> RunTota
         token_out += rec.token_usage.output;
         cache_read += rec.token_usage.cache_read;
         cache_write += rec.token_usage.cache_creation;
-        if let Some(model) = models.get(&rec.task_id) {
-            if let Some(c) = prices::cost_usd(
-                model,
-                &TokenUsage {
-                    input: rec.token_usage.input,
-                    output: rec.token_usage.output,
-                    cache_read: rec.token_usage.cache_read,
-                    cache_creation: rec.token_usage.cache_creation,
-                    reasoning: rec.token_usage.reasoning,
-                },
-            ) {
+        if let Some(model) = effective_model(rec, models) {
+            if let Some(c) = prices::cost_usd_v2(&rec.provider, model, &rec.token_usage) {
                 cost_usd += c;
             }
         }
@@ -310,8 +298,8 @@ pub fn build_report(
         if let Some(rec_b) = b_map.get(id) {
             per_task.push(TaskPair {
                 task_id: id.to_string(),
-                a: task_metrics(rec_a, a_models.get(id).map(String::as_str)),
-                b: task_metrics(rec_b, b_models.get(id).map(String::as_str)),
+                a: task_metrics(rec_a, effective_model(rec_a, a_models)),
+                b: task_metrics(rec_b, effective_model(rec_b, b_models)),
             });
         } else {
             only_a.push(id.to_string());
@@ -622,6 +610,27 @@ mod tests {
         // 1M input + 1M output on haiku = $4.80
         assert!(
             (totals.cost_usd - 4.80).abs() < 1e-4,
+            "cost {}",
+            totals.cost_usd
+        );
+    }
+
+    #[test]
+    fn run_totals_uses_record_provider_and_model() {
+        let mut task = make_task(
+            "openai-task",
+            TaskStatus::Success,
+            1000,
+            1_000_000,
+            1_000_000,
+        );
+        task.provider = pitboss_core::provider::Provider::OpenAi;
+        task.model = Some("gpt-4o".into());
+        let summary = make_summary(vec![task]);
+
+        let totals = run_totals(&summary, &HashMap::new());
+        assert!(
+            (totals.cost_usd - 12.50).abs() < 1e-6,
             "cost {}",
             totals.cost_usd
         );
