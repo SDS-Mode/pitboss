@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use pitboss_core::parser::ParseDialect;
 use pitboss_core::provider::Provider;
 use serde_json::Value;
 use uuid::Uuid;
@@ -684,6 +685,8 @@ async fn spawn_sublead_session(
                 timeout: Duration::from_secs(timeout_secs),
                 log_path: log_path.clone(),
                 stderr_path: stderr_path.clone(),
+                parse_dialect: ParseDialect::Claude,
+                session_id_fallback: None,
             },
             reprompt_rx,
             |sid, new_prompt| {

@@ -43,7 +43,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use pitboss_core::parser::TokenUsage;
+use pitboss_core::parser::{ParseDialect, TokenUsage};
 use pitboss_core::process::SpawnCmd;
 use pitboss_core::session::{CancelToken, SessionHandle, SessionOutcome};
 
@@ -66,6 +66,11 @@ pub struct KillResumeArgs {
     pub log_path: PathBuf,
     /// Stderr log path passed to every iteration's `SessionHandle`.
     pub stderr_path: PathBuf,
+    /// Stream-json dialect emitted by the actor binary.
+    pub parse_dialect: ParseDialect,
+    /// Deterministic session identifier for runtimes that resume by a caller
+    /// supplied name rather than by an emitted `system/init` id.
+    pub session_id_fallback: Option<String>,
 }
 
 /// Aggregated result across all iterations.
@@ -120,7 +125,7 @@ pub async fn run_kill_resume_loop(
         },
     );
 
-    let mut last_session_id: Option<String> = None;
+    let mut last_session_id: Option<String> = args.session_id_fallback.clone();
     let mut total_token_usage = TokenUsage::default();
     let mut reprompt_count: u32 = 0;
 
@@ -149,6 +154,7 @@ pub async fn run_kill_resume_loop(
         )
         .with_log_path(args.log_path.clone())
         .with_stderr_log_path(args.stderr_path.clone())
+        .with_parse_dialect(args.parse_dialect)
         .with_session_id_tx(session_id_tx)
         .run_to_completion(proc_cancel, args.timeout)
         .await;

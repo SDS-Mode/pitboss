@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use pitboss_core::parser::ParseDialect;
 use pitboss_core::process::{ProcessSpawner, TokioSpawner};
 use pitboss_core::session::CancelToken;
 use pitboss_core::store::{JsonFileStore, RunSummary, SessionStore};
@@ -321,6 +322,8 @@ pub async fn run_hierarchical(
             timeout: std::time::Duration::from_secs(lead.timeout_secs),
             log_path: lead_log_path.clone(),
             stderr_path: lead_stderr_path.clone(),
+            parse_dialect: ParseDialect::Claude,
+            session_id_fallback: None,
         },
         reprompt_rx,
         |sid, new_prompt| {
