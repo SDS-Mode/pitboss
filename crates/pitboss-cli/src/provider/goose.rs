@@ -13,6 +13,7 @@ impl GooseSpawner {
         self.base_args(
             &task.provider,
             &task.model,
+            task.goose_max_turns.or(self.default_max_turns),
             task.resume_session_id.as_deref(),
             &task.prompt,
         )
@@ -22,6 +23,7 @@ impl GooseSpawner {
         &self,
         provider: &Provider,
         model: &str,
+        max_turns: Option<u32>,
         resume_session: Option<&str>,
         prompt: &str,
     ) -> Vec<String> {
@@ -36,7 +38,7 @@ impl GooseSpawner {
             "--model".to_string(),
             model.to_string(),
         ];
-        if let Some(max_turns) = self.default_max_turns {
+        if let Some(max_turns) = max_turns {
             args.push("--max-turns".to_string());
             args.push(max_turns.to_string());
         }

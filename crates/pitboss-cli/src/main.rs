@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use pitboss_cli::{
@@ -364,6 +364,17 @@ fn run_dispatch(
         }
     };
     let is_hierarchical = resolved.lead.is_some();
+    let manifest_goose_binary = if is_hierarchical {
+        None
+    } else {
+        match goose_binary_path_from_manifest(&manifest_text, manifest) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("validation failed: {e:#}");
+                std::process::exit(2);
+            }
+        }
+    };
     let agent_bin = if is_hierarchical {
         std::env::var_os("PITBOSS_CLAUDE_BINARY")
             .map(std::path::PathBuf::from)
@@ -371,6 +382,7 @@ fn run_dispatch(
     } else {
         std::env::var_os("PITBOSS_GOOSE_BINARY")
             .map(std::path::PathBuf::from)
+            .or(manifest_goose_binary)
             .unwrap_or_else(|| std::path::PathBuf::from("goose"))
     };
 
@@ -447,6 +459,26 @@ fn run_dispatch(
         }
     });
     std::process::exit(code);
+}
+
+fn goose_binary_path_from_manifest(
+    manifest_text: &str,
+    manifest_path: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>> {
+    let manifest: manifest::schema::Manifest = toml::from_str(manifest_text)
+        .with_context(|| format!("parsing manifest at {}", manifest_path.display()))?;
+    manifest
+        .goose
+        .binary_path
+        .as_deref()
+        .map(expand_cli_path)
+        .transpose()
+}
+
+fn expand_cli_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let raw = path.to_string_lossy();
+    let expanded = shellexpand::full(&raw).with_context(|| format!("expanding path {raw}"))?;
+    Ok(std::path::PathBuf::from(expanded.into_owned()))
 }
 
 fn run_container_build(

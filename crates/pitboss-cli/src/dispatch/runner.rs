@@ -1334,6 +1334,7 @@ mod tests {
                     branch: None,
                     provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
+                    goose_max_turns: None,
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
                     timeout_secs: 30,
@@ -1348,6 +1349,7 @@ mod tests {
                     branch: None,
                     provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
+                    goose_max_turns: None,
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
                     timeout_secs: 30,
@@ -1434,6 +1436,7 @@ mod tests {
             branch: None,
             provider: pitboss_core::provider::Provider::Anthropic,
             model: "m".into(),
+            goose_max_turns: None,
             effort: crate::manifest::schema::Effort::High,
             tools: vec![],
             timeout_secs: 30,
@@ -1538,6 +1541,7 @@ mod tests {
                     branch: None,
                     provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
+                    goose_max_turns: None,
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
                     timeout_secs: 30,
@@ -1552,6 +1556,7 @@ mod tests {
                     branch: None,
                     provider: pitboss_core::provider::Provider::Anthropic,
                     model: "m".into(),
+                    goose_max_turns: None,
                     effort: crate::manifest::schema::Effort::High,
                     tools: vec![],
                     timeout_secs: 30,
@@ -1623,6 +1628,7 @@ mod tests {
             branch: None,
             provider: pitboss_core::provider::Provider::Anthropic,
             model: "claude-test".into(),
+            goose_max_turns: None,
             effort: crate::manifest::schema::Effort::High,
             tools: vec![],
             timeout_secs: 30,
@@ -1656,6 +1662,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn spawn_args_includes_resolved_goose_max_turns() {
+        let mut task = make_test_task("t", None);
+        task.goose_max_turns = Some(3);
+        let args = spawn_args(&task);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--max-turns" && pair[1] == "3"),
+            "expected --max-turns 3 in args: {args:?}"
+        );
+    }
+
     #[test]
     fn every_spawn_variant_has_all_isolation_flags() {
         // Flat dispatch now uses Goose. Goose profile isolation is
@@ -1678,6 +1696,7 @@ mod tests {
             branch: None,
             provider: pitboss_core::provider::Provider::Anthropic,
             model: "m".into(),
+            goose_max_turns: None,
             effort: crate::manifest::schema::Effort::High,
             tools: vec!["Read".into()],
             timeout_secs: 60,

@@ -22,6 +22,8 @@ pub struct ResolvedTask {
     #[serde(default)]
     pub provider: Provider,
     pub model: String,
+    #[serde(default)]
+    pub goose_max_turns: Option<u32>,
     pub effort: Effort,
     pub tools: Vec<String>,
     pub timeout_secs: u64,
@@ -400,6 +402,7 @@ fn resolve_task(
         branch: task.branch.clone(),
         provider,
         model,
+        goose_max_turns: goose.default_max_turns,
         effort: task.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
         tools: task
             .tools
@@ -736,6 +739,21 @@ mod tests {
         let r = resolve(m, None).unwrap();
         assert_eq!(r.tasks[0].provider, Provider::Ollama);
         assert_eq!(r.tasks[0].model, "llama3.1");
+    }
+
+    #[test]
+    fn goose_default_max_turns_resolves_to_tasks() {
+        let m = man(r#"
+            [goose]
+            default_max_turns = 3
+
+            [[task]]
+            id = "a"
+            directory = "/tmp"
+            prompt = "p"
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert_eq!(r.tasks[0].goose_max_turns, Some(3));
     }
 
     #[test]

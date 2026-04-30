@@ -536,6 +536,7 @@ mod tests {
             branch: branch.map(str::to_string),
             provider: pitboss_core::provider::Provider::Anthropic,
             model: "m".into(),
+            goose_max_turns: None,
             effort: Effort::High,
             tools: vec![],
             timeout_secs: 60,

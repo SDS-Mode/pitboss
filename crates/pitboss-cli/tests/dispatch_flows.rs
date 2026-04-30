@@ -249,3 +249,60 @@ fn validation_failure_exits_two() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn dry_run_uses_manifest_goose_binary_and_default_max_turns() {
+    ensure_built();
+    let repo = TempDir::new().unwrap();
+    init_git_repo(repo.path());
+    let run_dir = TempDir::new().unwrap();
+
+    let manifest_path = repo.path().join("pitboss.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[run]
+run_dir = "{run_dir}"
+
+[goose]
+binary_path = "{goose}"
+default_max_turns = 3
+
+[defaults]
+use_worktree = false
+
+[[task]]
+id = "t1"
+directory = "{repo}"
+prompt = "p"
+"#,
+            run_dir = run_dir.path().display(),
+            goose = fake_goose_path().display(),
+            repo = repo.path().display()
+        ),
+    )
+    .unwrap();
+
+    let out = std::process::Command::new(pitboss_binary())
+        .arg("dispatch")
+        .arg(&manifest_path)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&fake_goose_path().to_string_lossy().to_string()),
+        "dry-run output should use manifest goose binary; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("--max-turns 3"),
+        "dry-run output should include max turn cap; got: {stdout}"
+    );
+}
