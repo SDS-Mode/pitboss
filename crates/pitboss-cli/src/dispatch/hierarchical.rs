@@ -103,10 +103,25 @@ pub async fn run_hierarchical(
         .clone();
 
     if dry_run {
+        let session_name = lead
+            .resume_session_id
+            .as_deref()
+            .unwrap_or("pitboss-dry-run-lead");
+        let args =
+            crate::provider::GooseSpawner::default().actor_args(crate::provider::GooseActorArgs {
+                provider: &lead.provider,
+                model: &lead.model,
+                max_turns: None,
+                session_name: Some(session_name),
+                resume: lead.resume_session_id.is_some(),
+                extensions: &[],
+                prompt: &lead.prompt,
+            });
         println!("DRY-RUN lead: {}", lead.id);
         println!(
-            "DRY-RUN command: {} --verbose (mcp socket TBD)",
-            claude_binary.display()
+            "DRY-RUN command: {} {}",
+            claude_binary.display(),
+            args.join(" ")
         );
         return Ok(0);
     }
