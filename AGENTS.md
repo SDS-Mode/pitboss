@@ -24,8 +24,10 @@ that needs to orchestrate pitboss from natural language, stay here.
 
 ## Mission
 
-Pitboss is a Rust dispatcher that runs multiple `claude` subprocesses in
+Pitboss is a Rust dispatcher that runs multiple `goose run` subprocesses in
 parallel under a concurrency cap and captures structured artifacts per run.
+Goose owns the model-provider boundary; Pitboss owns orchestration, worktree
+isolation, budgets, lifecycle, MCP tools, and run artifacts.
 It has two modes:
 
 - **Flat**: the operator predeclares N tasks; pitboss runs them.
@@ -44,7 +46,7 @@ directory.
 Pitboss is the right tool when **all** of the following hold:
 
 1. The task decomposes into **≥ 2 units** that could run in parallel.
-2. Each unit is substantial enough to justify a fresh claude subprocess
+2. Each unit is substantial enough to justify a fresh Goose-backed agent session
    (order of ≥30 seconds of work), *not* a one-liner the caller could do
    inline.
 3. You want **isolated git worktrees** per unit (or you've set
@@ -55,7 +57,7 @@ Pitboss is the right tool when **all** of the following hold:
    per worker for process spawn + worktree prep).
 
 Anti-patterns — **don't use pitboss** for:
-- Single-shot work. One claude call is simpler than writing a manifest.
+- Single-shot work. One direct agent call is simpler than writing a manifest.
 - Tightly coupled work where units must communicate mid-execution. Pitboss
   workers cannot message each other (by design).
 - Work where the operator needs to inspect intermediate state
@@ -92,8 +94,8 @@ hierarchical.**
 |---|---|
 | **Pitboss** | The `pitboss` binary you invoke. |
 | **Run** | One `pitboss dispatch` invocation. Produces `~/.local/share/pitboss/runs/<run-id>/`. |
-| **Lead** | In hierarchical mode, the first claude subprocess. Receives the operator's prompt + the full MCP orchestration toolset. Decides how many workers to spawn. |
-| **Worker** | A claude subprocess executing a single task, either declared in `[[task]]` (flat) or dynamically spawned by the lead (hierarchical). |
+| **Lead** | In hierarchical mode, the first Goose-backed agent session. Receives the operator's prompt + the full MCP orchestration toolset. Decides how many workers to spawn. |
+| **Worker** | A Goose-backed agent session executing a single task, either declared in `[[task]]` (flat) or dynamically spawned by the lead (hierarchical). |
 | **House rules** | Hierarchical guardrails: `max_workers` (≤16), `budget_usd`, `lead_timeout_secs`. For depth-2 runs: also `max_subleads`, `max_sublead_budget_usd`, `max_total_workers`. |
 | **Worktree** | A per-task git worktree under a fresh branch, isolating concurrent work. `use_worktree = true` by default. |
 
@@ -130,7 +132,7 @@ caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 
 | Key | Type | Required? | Default | Notes |
 |---|---|---|---|---|
-| `max_parallel_tasks` | int | no | 4 | Concurrency cap for flat-mode `[[task]]` runs. Overridden by `ANTHROPIC_MAX_CONCURRENT` env. Renamed from `max_parallel` in v0.9. |
+| `max_parallel_tasks` | int | no | 4 | Concurrency cap for flat-mode `[[task]]` runs. Overridden by the legacy `ANTHROPIC_MAX_CONCURRENT` env. Renamed from `max_parallel` in v0.9. |
 | `halt_on_failure` | bool | no | false | Flat mode. If a task fails, skip remaining tasks. |
 | `run_dir` | string path | no | `~/.local/share/pitboss/runs` | Where per-run artifacts land. |
 | `worktree_cleanup` | `"always"` \| `"on_success"` \| `"never"` | no | `"on_success"` | What to do with each worker's worktree after completion. `"never"` for inspection-heavy runs. |
@@ -174,12 +176,43 @@ Inherited by every `[[task]]` and `[lead]` unless overridden.
 
 | Key | Type | Notes |
 |---|---|---|
-| `model` | string | e.g. `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`. Dated suffixes allowed. |
-| `effort` | `"low"` \| `"medium"` \| `"high"` | Maps to claude's `--effort` flag. |
-| `tools` | array of string | `--allowedTools` value. Defaults to `["Read", "Write", "Edit", "Bash", "Glob", "Grep"]` if unset. |
+| `provider` | string | Goose provider. Common values: `anthropic`, `openai`, `google`, `ollama`, `openrouter`, `azure`, `bedrock`; future Goose provider strings are accepted. |
+| `model` | string | Model id passed to Goose, e.g. `claude-haiku-4-5`, `gpt-5.3-codex`, `gpt-5.4`, `gemini-2.5-flash`, or `sonnet` for `claude-acp`. Short form `provider/model` is accepted when `provider` is omitted. |
+| `effort` | `"low"` \| `"medium"` \| `"high"` | Effort hint retained in the manifest and used where the selected provider/runtime supports it. |
+| `tools` | array of string | Legacy/user tool surface inherited by actors. For Goose-based external tools, prefer `[[mcp_server]]`. Pitboss always injects its orchestration MCP tools for leads/sub-leads and the shared-store MCP tools for workers. |
 | `timeout_secs` | int | Per-task wall-clock cap. |
 | `use_worktree` | bool | Default `true`. Set `false` for read-only analysis runs. |
-| `env` | table (string → string) | Env vars passed to the claude subprocess. |
+| `env` | table (string → string) | Env vars passed to the Goose subprocess. |
+
+### `[goose]`
+
+Run-wide Goose launcher defaults.
+
+| Key | Type | Notes |
+|---|---|---|
+| `binary_path` | string path | Path to the Goose binary. Defaults to PATH lookup of `goose`; can also be overridden operationally with `PITBOSS_GOOSE_BINARY`. |
+| `default_provider` | string | Goose provider used when an actor/default does not set `provider`. |
+| `default_max_turns` | int | Default `goose run --max-turns` safety cap for every actor spawn. |
+
+Provider strings are passed through to Goose. Built-in typed aliases include
+`anthropic`, `openai`, `google`, `ollama`, `openrouter`, `azure`, and
+`bedrock`; unknown provider strings are accepted and recorded as
+`other:<name>` in rollups.
+
+Subscription-auth providers verified against Goose 1.33.1:
+
+| Use case | Provider | Model example | Auth path |
+|---|---|---|---|
+| Claude subscription | `claude-acp` | `sonnet` | Claude Code subscription login through the `claude-agent-acp` adapter |
+| Codex / ChatGPT subscription | `chatgpt_codex` | `gpt-5.3-codex`, `gpt-5.4` | Codex/ChatGPT login managed by Goose |
+
+Direct API providers still require their provider credentials. For example,
+`provider = "anthropic"` uses the Anthropic API path and requires
+`ANTHROPIC_API_KEY`; it does not use the Claude Code subscription login. For
+Codex subscription auth, prefer Goose's built-in `chatgpt_codex` provider;
+`codex-acp` requires a separate adapter binary. Subscription-backed providers
+may report `cost_usd = null` because Pitboss does not have public per-token
+pricing for that auth path.
 
 ### `[[task]]` (flat mode, repeat)
 
@@ -187,9 +220,9 @@ Inherited by every `[[task]]` and `[lead]` unless overridden.
 |---|---|---|
 | `id` | yes | Short slug used in logs, worktree names. Alphanumeric + `_` + `-`. Unique within manifest. |
 | `directory` | yes | Must be inside a git repo if `use_worktree = true`. |
-| `prompt` | yes | What the claude subprocess receives via `-p`. |
+| `prompt` | yes | What the Goose subprocess receives via `-t`. |
 | `branch` | no | Branch name for the worktree. Defaults to a generated name. |
-| `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | no | Per-task overrides of `[defaults]`. |
+| `provider`, `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | no | Per-task overrides of `[defaults]`. |
 
 ### `[lead]` (hierarchical mode, exactly one, mutually exclusive with `[[task]]`)
 
@@ -207,10 +240,10 @@ Required and per-actor fields:
 | Key | Type | Required? | Notes |
 |---|---|---|---|
 | `id` | string | yes | Short slug used in logs, worktree names, TUI tiles. Alphanumeric + `_` + `-`. |
-| `directory` | string path | yes | Working dir for the lead's claude subprocess. Must be a git work-tree if `use_worktree = true`. |
-| `prompt` | string | yes | Operator instructions passed via `-p`. Must come before any `[lead.X]` subtable. |
+| `directory` | string path | yes | Working dir for the lead's Goose subprocess. Must be a git work-tree if `use_worktree = true`. |
+| `prompt` | string | yes | Operator instructions passed via `goose run -t`. Must come before any `[lead.X]` subtable. |
 | `branch` | string | no | Branch name for the lead's worktree. Auto-generated if omitted. |
-| `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | various | no | Per-lead overrides of `[defaults]`. |
+| `provider`, `model`, `effort`, `tools`, `timeout_secs`, `use_worktree`, `env` | various | no | Per-lead overrides of `[defaults]`. |
 
 Lead-level caps (moved from `[run]` in v0.9 — they're properties of the
 lead, not the run):
@@ -225,11 +258,11 @@ Depth-2 controls (sub-leads):
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `allow_subleads` | bool | `false` | Expose `spawn_sublead` in the root lead's `--allowedTools`. Required to enable depth-2. |
+| `allow_subleads` | bool | `false` | Expose `spawn_sublead` in the root lead's Pitboss MCP toolset. Required to enable depth-2. |
 | `max_subleads` | int | unset | Cap on total sub-leads the root lead may spawn. |
 | `max_sublead_budget_usd` | float | unset | Per-sub-lead envelope cap; `spawn_sublead` rejects envelopes exceeding this. |
 | `max_total_workers` | int | unset | Cap on total live workers including all sub-tree workers. Renamed from `max_workers_across_tree` in v0.9. |
-| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_a"` | `"path_a"` sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` so pitboss is the sole permission authority. `"path_b"` routes claude's built-in gate through pitboss's approval queue — rejected at validate time until stabilization (issues #92–#94). |
+| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_a"` | Legacy Claude permission-routing field retained for compatibility. Goose-based dispatch uses Pitboss MCP approval tools as the orchestration permission surface. |
 
 ### Top-level `[sublead_defaults]` (v0.9+, promoted from `[lead.sublead_defaults]`)
 
@@ -239,6 +272,7 @@ corresponding parameters. Top-level in v0.9 — the v0.8 nested
 
 ```toml
 [sublead_defaults]
+provider = "anthropic"
 budget_usd = 2.00
 max_workers = 4
 lead_timeout_secs = 1800
@@ -247,6 +281,7 @@ read_down = false
 
 | Key | Type | Notes |
 |---|---|---|
+| `provider` | string | Default Goose provider for spawned sub-leads. |
 | `budget_usd` | float | Per-sub-lead envelope when `read_down = false`. |
 | `max_workers` | int | Per-sub-lead worker pool when `read_down = false`. |
 | `lead_timeout_secs` | int | Wall-clock cap for the sub-lead session. |
@@ -324,7 +359,9 @@ Pushes to main rebuild the image regardless of whether the commit touched code p
 
 ### `[[mcp_server]]` (v0.9+)
 
-Declare external MCP servers to inject into **every actor's** `--mcp-config` (lead, sub-leads, and workers). This is the native alternative to the KV-bridge workaround for giving all actors access to tools like context7.
+Declare external MCP servers to inject into **every actor's** Goose extension
+set (lead, sub-leads, and workers). Pitboss converts these declarations into
+additional `goose run --with-extension` arguments.
 
 ```toml
 [[mcp_server]]
@@ -348,7 +385,9 @@ env     = { MY_TOKEN = "abc" }
 
 All declared servers are injected into all actors (scope = all). Per-actor scoping is deferred — see roadmap.
 
-**Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
+**Tools from injected servers are available immediately** — no additional
+tool allowlist configuration is needed; Goose discovers the tools from the
+server at startup.
 
 ### Migration from v0.8 → v0.9
 
@@ -383,7 +422,7 @@ pitboss validate pitboss.toml
 Exit 0 = valid. Non-zero = parse error or semantic error. **Always validate
 first.** This catches all the class-of-error issues (mixed `[[task]]` + `[lead]`,
 `max_workers = 17`, `budget_usd = 0`, missing `id`, directory doesn't exist,
-pre-v0.9 schema usage) before any claude subprocess is spawned.
+pre-v0.9 schema usage) before any Goose subprocess is spawned.
 
 ### Pre-flight cost gate (`pitboss tree`)
 
@@ -412,7 +451,7 @@ pitboss dispatch pitboss.toml
 Blocks until all tasks finish. Exit codes:
 - `0` — all tasks succeeded
 - `1` — one or more tasks failed (but pitboss itself ran cleanly)
-- `2` — manifest error, claude binary missing, etc.
+- `2` — manifest error, Goose binary missing, etc.
 - `130` — interrupted (Ctrl-C drained gracefully)
 
 ### Background dispatch (v0.10+)
@@ -432,7 +471,7 @@ a CI script — that needs to dispatch and stay responsive rather than
 block for the duration of the run.
 
 The flag is mode-agnostic: works with both flat (`[[task]]`) and
-hierarchical (`[lead]`) manifests. Whether a lead claude wraps the
+hierarchical (`[lead]`) manifests. Whether a lead agent wraps the
 dispatch is a manifest authoring decision, kept orthogonal to this
 flag's attached-vs-detached lifecycle concern.
 
@@ -458,11 +497,15 @@ pitboss resume <run-id>
 ```
 
 Re-runs a prior dispatch. For flat-mode runs, each task respawns with its
-original `claude_session_id`. For hierarchical runs, only the lead resumes
-(`--resume <session-id>`); the lead decides whether to spawn fresh workers.
+original captured session id. For hierarchical runs, only the lead resumes
+(`goose run --resume --name <session-name>`); the lead decides whether to
+spawn fresh workers. The persisted JSON field is still named
+`claude_session_id` for compatibility, but Goose-backed runs may store a
+Goose session name there.
 
 **Gotcha:** if the original run used `worktree_cleanup = "on_success"` (the
-default), the worktrees are gone — claude can't find its sessions by cwd.
+default), the worktrees are gone — the underlying agent may not be able to
+find its session state by cwd.
 Use `worktree_cleanup = "never"` on runs you know you want to resume.
 
 ### Attach (v0.5.0+)
@@ -499,35 +542,25 @@ section before writing manifests for headless dispatch.
 
 ### Permission model
 
-**Pitboss is the sole permission authority for every claude subprocess
-it spawns.** As of v0.7.1 every spawned claude (lead, sub-lead, worker)
-receives:
+Pitboss is the permission authority for **orchestration actions**: spawning,
+cancelling, pausing, continuing, reprompting, shared-store writes, leases, and
+operator approval requests. It enforces that surface through
+`[run].default_approval_policy`, `[[approval_policy]]` rules with TTL+fallback,
+the `request_approval` and `propose_plan` MCP tools, and the TUI's
+approve/reject modal.
 
-1. `CLAUDE_CODE_ENTRYPOINT=sdk-ts` in env — closes claude's MCP-tool
-   permission gate. Operator-overridable via `[defaults.env]`.
-2. `--dangerously-skip-permissions` on the CLI — closes claude's
-   filesystem (read/write outside cwd), bash-with-`$VAR`-expansion, and
-   bash-with-`&&` gates. **Set unconditionally; not env-overridable.**
+Every actor is launched through Goose with `--no-profile`, `--quiet`, and
+`--output-format stream-json`. Pitboss injects only the Pitboss MCP bridge and
+manifest-declared `[[mcp_server]]` extensions. Provider-native authentication
+and provider-native tool permissions still belong to the selected Goose
+provider. For example, `anthropic` needs `ANTHROPIC_API_KEY`, `claude-acp`
+uses Claude Code subscription auth through `claude-agent-acp`, and
+`chatgpt_codex` uses Codex/ChatGPT subscription auth managed by Goose.
 
-Without (1) sub-leads in headless dispatch exited in ~7 seconds
-reporting `Success` with no output (apologizing that they couldn't get
-MCP permission). Without (2), even after the MCP gate was closed, every
-sublead's `echo x >> "$WORK_DIR/file"` returned `"Contains
-simple_expansion"` — `-p` mode has no UI to answer the prompt — and the
-orchestration plan collapsed silently with empty registries and null
-kv reads.
-
-Pitboss replaces the closed claude gates with its own approval surface:
-`[run].approval_policy` (block / auto_approve / auto_reject),
-`[[approval_policy]]` rules with TTL+fallback, the `request_approval`
-and `propose_plan` MCP tools, and the TUI's approve/reject modal. If
-you need claude's own gate fully back, do not use pitboss's headless
-dispatch — drive the claude CLI interactively instead.
-
-The trust boundary: anything you wouldn't run in your own claude
-session under `--dangerously-skip-permissions` should not be in a
-pitboss manifest. Operator-supplied prompts have full filesystem and
-shell access at the `[lead].directory` cwd. Treat manifests as
+The trust boundary: anything you would not run in your own Goose/provider
+session should not be in a pitboss manifest. Operator-supplied prompts run in
+the `[lead].directory` or task `directory` cwd and can use whatever tools the
+selected provider plus injected MCP servers expose. Treat manifests as
 production code.
 
 ### Approval policy — set `auto_approve` (or use rules)
@@ -630,13 +663,13 @@ distinctly from a task that succeeded:
 | `Failed` | Task exited with non-zero status |
 | `TimedOut` | Task exceeded `timeout_secs` |
 | `Cancelled` | Task was explicitly cancelled by operator or cascade |
-| `SpawnFailed` | Task never started (worktree prep, claude not found, etc.) |
+| `SpawnFailed` | Task never started (worktree prep, Goose not found, provider startup failure, etc.) |
 | `ApprovalRejected` | Task's last approval returned `{approved: false}` from operator action or `[[approval_policy]]` auto_reject rule, then exited shortly after |
 | `ApprovalTimedOut` | Task's last approval aged past its declared `ttl_secs` and the configured `fallback` fired (v0.8: TTL is wired end-to-end via `BridgeEntry` — covers both queued approvals and ones already drained into a connected TUI). The task's `ApprovalResponse` carries `from_ttl: true` so downstream consumers can distinguish TTL-driven from operator-driven responses. |
 
 Before v0.7, both new statuses were reported as `Success` because the
-claude subprocess exited 0. If you see `ApprovalRejected` in
-`summary.json`, your manifest's `approval_policy` (or operator action)
+agent subprocess exited 0. If you see `ApprovalRejected` in
+`summary.json`, your manifest's approval policy (or operator action)
 denied the actor's request — revisit the approval configuration.
 
 ### Customizing sub-lead env and tools per spawn (v0.7+)
@@ -646,6 +679,7 @@ denied the actor's request — revisit the approval configuration.
 ```
 spawn_sublead(
   prompt: "...",
+  provider: "anthropic",
   model: "claude-sonnet-4-6",
   budget_usd: 2.0,
   max_workers: 4,
@@ -655,10 +689,9 @@ spawn_sublead(
 ```
 
 Both fields are optional. Operator-supplied `env` keys override pitboss
-defaults (including `CLAUDE_CODE_ENTRYPOINT` if you really want claude's
-own gate back for that sub-lead). Operator-supplied `tools` are added
-to the standard sublead MCP toolset; pitboss orchestration tools are
-always present regardless of override.
+defaults. Operator-supplied `tools` are added to the standard sublead tool
+surface; Pitboss orchestration tools are always present regardless of
+override.
 
 ### Offline access to this doc
 
@@ -687,12 +720,12 @@ Files in the run dir:
 |---|---|
 | `manifest.snapshot.toml` | Exact manifest bytes used for this run. |
 | `resolved.json` | Fully resolved manifest (defaults applied). |
-| `meta.json` | `run_id`, `started_at`, `claude_version`, `pitboss_version`. |
+| `meta.json` | `run_id`, `started_at`, legacy `claude_version`, `pitboss_version`, and provider-neutral `agent_versions` when available. |
 | `summary.json` | Written on clean finalize. Full structured summary of the run. |
 | `summary.jsonl` | Appended incrementally as tasks finish. Useful for live observation. |
-| `tasks/<id>/stdout.log` | Raw stream-json from the task's claude subprocess. |
+| `tasks/<id>/stdout.log` | Raw stream-json from the task's Goose subprocess. |
 | `tasks/<id>/stderr.log` | Stderr. |
-| `lead-mcp-config.json` | Hierarchical only. The `--mcp-config` file pointed at `pitboss mcp-bridge <socket>`. |
+| `lead-mcp-config.json` | Legacy hierarchical artifact for older direct-Claude runs. Goose-based runs inject the bridge through `--with-extension`. |
 
 ### `summary.json` structure
 
@@ -706,7 +739,8 @@ Files in the run dir:
   "tasks_failed": 0,
   "was_interrupted": false,
   "pitboss_version": "0.3.3",
-  "claude_version":  "2.1.112 (Claude Code)",
+  "claude_version":  null,
+  "agent_versions": { "goose": "1.33.1" },
   "tasks": [
     {
       "task_id": "triage",
@@ -734,18 +768,24 @@ Files in the run dir:
 Lead records have `parent_task_id: null`. Worker records have
 `parent_task_id: "<lead-id>"`. Query with `jq`.
 
+`claude_session_id` remains the persisted field name for compatibility with
+older consumers; in Goose-backed runs it may contain a Goose session name.
+
 ---
 
 ## The MCP tools the lead has
 
-When running hierarchical, the lead's `--allowedTools` is automatically
-populated with these. You (the operator) don't list them explicitly.
+When running hierarchical, Pitboss injects these tools through a Goose
+extension. You (the operator) don't list them explicitly. Raw stream tool
+names are provider-specific: standard Goose providers commonly emit
+`pitboss__list_workers`, while Claude ACP emits names like
+`mcp__pitboss__list_workers`. The logical toolset is the same.
 
 ### Orchestration tools
 
 | Tool | Args | Returns |
 |---|---|---|
-| `mcp__pitboss__spawn_worker` | `{prompt, directory?, branch?, tools?, timeout_secs?, model?}` | `{task_id, worktree_path}` |
+| `mcp__pitboss__spawn_worker` | `{prompt, directory?, branch?, tools?, timeout_secs?, provider?, model?}` | `{task_id, worktree_path}` |
 | `mcp__pitboss__worker_status` | `{task_id}` | `{state, started_at, partial_usage, last_text_preview, prompt_preview}` |
 | `mcp__pitboss__wait_for_worker` | `{task_id, timeout_secs?}` | full `TaskRecord` when worker settles |
 | `mcp__pitboss__wait_actor` | `{actor_id, timeout_secs?}` | `ActorTerminalRecord` (`Worker(TaskRecord)` or `Sublead(SubleadTerminalRecord)`) when actor settles. Accepts worker or sub-lead ids. `wait_for_worker` is a back-compat alias. |
@@ -754,10 +794,10 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__cancel_worker` | `{task_id, reason?: string}` | `{ok: bool}` — optional `reason` delivers a synthetic `[SYSTEM]` reprompt to the killed actor's direct parent lead via kill+resume |
 | `mcp__pitboss__pause_worker` | `{task_id, mode?}` — `mode` is `"cancel"` (default) or `"freeze"` | `{ok: bool}` |
 | `mcp__pitboss__continue_worker` | `{task_id, prompt?}` | `{ok: bool}` |
-| `mcp__pitboss__reprompt_worker` | `{task_id, prompt}` | `{ok: bool}` — mid-flight course-correct via `claude --resume` |
+| `mcp__pitboss__reprompt_worker` | `{task_id, prompt}` | `{ok: bool}` — mid-flight course-correct via Goose resume |
 | `mcp__pitboss__request_approval` | `{summary, timeout_secs?, plan?: ApprovalPlan}` | `{approved, comment?, edited_summary?, reason?}` |
 | `mcp__pitboss__propose_plan` | `{plan: ApprovalPlan, timeout_secs?}` | `{approved, comment?, edited_summary?, reason?}` |
-| `mcp__pitboss__spawn_sublead` | `{prompt, model, budget_usd?, max_workers?, lead_timeout_secs?, initial_ref?, read_down?, env?, tools?, resume_session_id?}` | `{sublead_id}` — root lead only; requires `[lead] allow_subleads = true`. `resume_session_id` is used by `pitboss resume` to re-attach a prior sub-lead session; omit for fresh spawns. See Depth-2 section. |
+| `mcp__pitboss__spawn_sublead` | `{prompt, provider?, model, budget_usd?, max_workers?, lead_timeout_secs?, initial_ref?, read_down?, env?, tools?, resume_session_id?}` | `{sublead_id}` — root lead only; requires `[lead] allow_subleads = true`. `resume_session_id` is used by `pitboss resume` to re-attach a prior sub-lead session; omit for fresh spawns. See Depth-2 section. |
 | `mcp__pitboss__run_lease_acquire` | `{key, ttl_secs, wait_secs?}` | `{lease_id, version, ...}` — run-global; auto-released on actor termination |
 | `mcp__pitboss__run_lease_release` | `{lease_id}` | `{ok: true}` |
 
@@ -767,17 +807,21 @@ requires `structuredContent` to be `{ [key: string]: unknown }`, so
 tools don't return bare arrays or null. Unwrap one level from callers.
 
 **Worker spawn arg rules:**
-- `prompt` is the new worker's system prompt / `-p` payload. Required.
+- `prompt` is the new worker's instruction payload passed to `goose run -t`.
+  Required.
 - `directory` defaults to the lead's `directory`.
-- `model` defaults to the lead's model. Override per-worker when you want
-  heavier workers (Sonnet) under a Haiku lead.
+- `provider` and `model` default to the caller lead's provider/model.
+  Override per-worker when you want a different provider or heavier model.
+  Short form `provider/model` is accepted in `model`.
+- Setting a non-default `provider` without an explicit `model` is rejected
+  unless that provider is already the caller's provider.
 - `tools` defaults to the lead's tools.
 
 ### Worker shared store (v0.4.2+)
 
-A per-run, in-memory, hub-mediated coordination surface. Workers get
-a narrower `mcp-config.json` that lists only the seven tools below
-(not `spawn_worker` or `spawn_sublead` — workers are terminal). Namespaces:
+A per-run, in-memory, hub-mediated coordination surface. Workers get only the
+seven shared-store tools below through their Goose extensions (not
+`spawn_worker` or `spawn_sublead` — workers are terminal). Namespaces:
 
 - `/ref/*` — lead-write, all-read. Use for shared context (plans,
   conventions, targets).
@@ -806,13 +850,12 @@ layer.
 Pause a running worker. Two modes, distinguished by `mode`:
 
 - `mode: "cancel"` (default, v0.4.1+) — terminates the subprocess and
-  snapshots `claude_session_id` so `continue_worker` can respawn via
-  `claude --resume`. Zero context loss on Anthropic's side; some
-  reload cost on resume.
+  snapshots the captured session id so `continue_worker` can respawn via
+  Goose resume. Some providers may reload context on resume.
 - `mode: "freeze"` (v0.5.0+) — SIGSTOPs the subprocess in place.
   `continue_worker` SIGCONTs to resume. No state loss at all, but
-  long freezes risk Anthropic dropping the HTTP session on their
-  side — use for short pauses only.
+  long freezes risk the provider dropping the HTTP/session state — use for
+  short pauses only.
 
 Args: `{task_id: string, mode?: "cancel" | "freeze"}`. Fails if
 worker is not in `Running` state with an initialized session.
@@ -820,7 +863,8 @@ worker is not in `Running` state with an initialized session.
 ### `mcp__pitboss__continue_worker`
 
 Continue a previously-paused or frozen worker. For paused workers,
-spawns `claude --resume <id>`; for frozen workers, SIGCONTs. Args:
+spawns `goose run --resume --name <session-name>`; for frozen workers,
+SIGCONTs. Args:
 `{task_id: string, prompt?: string}` (prompt ignored for frozen
 workers — use `reprompt_worker` after continue if you want to
 redirect a frozen worker).
@@ -832,7 +876,7 @@ until the operator approves, rejects, or edits. Args:
 `{summary: string, timeout_secs?: number, ttl_secs?: number, fallback?: "auto_reject"|"auto_approve"|"block", plan?: ApprovalPlan}`.
 Returns `{approved: bool, comment?: string, edited_summary?: string, reason?: string}`.
 When `approved = false`, `reason` carries the operator's rejection explanation if provided.
-Policy-gated: see `approval_policy` below.
+Policy-gated: see `default_approval_policy` below.
 
 `ApprovalPlan` (v0.5.0+) is a typed structured schema that the TUI
 renders as labeled sections:
@@ -947,7 +991,7 @@ Approval list pane (`'a'` to focus, v0.6+):
 - `Up` / `Down` — navigate pending approvals
 - `Enter` — open detail modal for the highlighted approval
 
-## `[run].approval_policy`
+## `[run].default_approval_policy`
 
 Run-level scalar. Controls handling of `request_approval` calls when
 no TUI is attached and no `[[approval_policy]]` rule matches.
@@ -962,7 +1006,7 @@ no TUI is attached and no `[[approval_policy]]` rule matches.
 
 Ordered list of deterministic rules evaluated in pure Rust before
 approvals reach the operator queue. **NOT LLM-evaluated.** First match
-wins; unmatched approvals fall through to `[run].approval_policy`.
+wins; unmatched approvals fall through to `[run].default_approval_policy`.
 
 ```toml
 [[approval_policy]]
@@ -1003,7 +1047,7 @@ For full syntax reference and defense-in-depth patterns see:
 
 When the operator rejects an approval, an optional `reason: string` is
 accepted in the modal. The reason flows back through MCP to the
-requesting actor's session so Claude can adapt without a separate
+requesting actor's session so the agent can adapt without a separate
 reprompt round-trip. Appears in the `reason` field of the approval
 response alongside `approved: false`.
 
@@ -1030,6 +1074,9 @@ Flat mode, predeclared tasks.
 [run]
 max_parallel_tasks = 3
 
+[goose]
+default_provider = "anthropic"
+
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false
@@ -1052,6 +1099,9 @@ prompt = "Read file-b.txt and summarize in one sentence to /tmp/summaries/b.md"
 Hierarchical mode, dynamic decomposition.
 
 ```toml
+[goose]
+default_provider = "anthropic"
+
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false
@@ -1061,9 +1111,10 @@ id = "author-digest"
 directory = "/path/to/repo"
 prompt = """
 List the last 20 commits with `git log --format='%H %an %s' -20`. Group
-them by author. Spawn one worker per unique author via
-mcp__pitboss__spawn_worker to summarize that author's work in
-/tmp/digest/<author-slug>.md. Wait for all via mcp__pitboss__wait_for_worker.
+them by author. Spawn one worker per unique author using the Pitboss
+spawn_worker tool to summarize that author's work in
+/tmp/digest/<author-slug>.md. Wait for all using the Pitboss wait_for_worker
+tool.
 Compose a combined /tmp/digest/SUMMARY.md. Then exit.
 """
 max_workers = 6
@@ -1089,6 +1140,9 @@ Sketch of the manifest:
 ```toml
 [run]
 worktree_cleanup = "never"
+
+[goose]
+default_provider = "anthropic"
 
 [defaults]
 model = "claude-haiku-4-5"
@@ -1130,6 +1184,9 @@ Run this pattern against any repo of similar shape by:
 ### 4. Tight-budget stress / graceful degradation
 
 ```toml
+[goose]
+default_provider = "anthropic"
+
 [defaults]
 model = "claude-haiku-4-5"
 use_worktree = false
@@ -1138,8 +1195,8 @@ use_worktree = false
 id = "partial"
 directory = "/path/to/repo"
 prompt = """
-Attempt to spawn 6 workers with mcp__pitboss__spawn_worker, one per file in
-src/. When a spawn fails with 'budget exceeded', DO NOT retry — record the
+Attempt to spawn 6 workers with the Pitboss spawn_worker tool, one per file
+in src/. When a spawn fails with 'budget exceeded', DO NOT retry — record the
 file and move on. Wait for successfully-spawned workers, then compose a
 partial summary noting which files were skipped and why.
 """
@@ -1158,7 +1215,7 @@ spend envelope.
 Pitboss supports a single optional level of nesting beyond the original
 hierarchical mode. A root lead with `allow_subleads = true` can spawn
 sub-leads at runtime via `spawn_sublead`. Each sub-lead is itself a
-Claude session with its own workers. Workers remain terminal — they
+Goose-backed agent session with its own workers. Workers remain terminal — they
 cannot spawn anything.
 
 ### When to use sub-leads
@@ -1166,7 +1223,7 @@ cannot spawn anything.
 Use sub-leads when the root lead's plan would otherwise require holding
 context for orthogonal sub-tasks simultaneously (e.g., "phase 1 and
 phase 2 both need their own decomposition tree, but they don't share
-implementation details"). Each sub-lead gets a clean Claude session
+implementation details"). Each sub-lead gets a clean Goose-backed session
 focused on its own slice.
 
 Use plain workers (no sub-leads) when each unit of work is a single
@@ -1199,6 +1256,7 @@ read_down = false
 ```
 spawn_sublead(
   prompt: string,
+  provider: string?,
   model: string,
   budget_usd: float,           # required unless read_down=true
   max_workers: u32,            # required unless read_down=true
@@ -1244,7 +1302,7 @@ Cancellation is depth-first. Root cancel → sub-leads → their workers, with t
 
 ## Writing manifests from natural-language requests
 
-When a human asks you (the agent) to "run claude on each X in Y and
+When a human asks you (the agent) to "run an agent on each X in Y and
 combine the results", the canonical translation is:
 
 1. Can I enumerate the Xs up front? → flat mode, one `[[task]]` per X.
