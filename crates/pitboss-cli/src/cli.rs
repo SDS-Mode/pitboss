@@ -196,6 +196,25 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Sweep stale `pitboss-derived-*:local` image tags from the local
+    /// image store. Cross-references against tags computed from the
+    /// supplied manifests; tags not referenced by any manifest are
+    /// "stale" and listed (or removed with `--apply`). With no
+    /// manifests, every derived tag is stale — explicit clean-slate
+    /// mode. Never touches images outside the `pitboss-derived-*`
+    /// namespace.
+    ContainerPrune {
+        /// Manifests whose derived tags should be retained. May be
+        /// repeated. With none, the reference set is empty and every
+        /// derived tag is reported stale.
+        manifests: Vec<PathBuf>,
+        /// Remove the stale tags. Default is dry-run.
+        #[arg(long)]
+        apply: bool,
+        /// Override container runtime detection ("docker" or "podman").
+        #[arg(long)]
+        runtime: Option<String>,
+    },
     /// Print a snapshot of all task records for a prior run.
     /// Reads summary.jsonl (in-flight) or summary.json (finalized).
     Status {

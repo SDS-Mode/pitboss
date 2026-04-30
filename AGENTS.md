@@ -296,7 +296,19 @@ pitboss container-build pitboss.toml --print-dockerfile  # preview
 pitboss container-build pitboss.toml --dry-run   # print podman/docker invocation
 ```
 
-`pitboss container-dispatch` automatically picks up the derived tag when `extra_apt` or `copy` is non-empty and the tag exists locally — no explicit wiring needed in the manifest. Stale derived tags from prior builds remain in the local image store; prune them with the runtime's standard tooling (`podman image prune`, etc.) — a pitboss-aware sweeper is tracked in the roadmap.
+`pitboss container-dispatch` automatically picks up the derived tag when `extra_apt` or `copy` is non-empty and the tag exists locally — no explicit wiring needed in the manifest.
+
+#### `pitboss container-prune` (v0.9.2+)
+
+Sweeps stale `pitboss-derived-*:local` tags from the local image store. Cross-references against derived tags computed from manifests passed on the CLI; everything not referenced by any of them is "stale".
+
+```bash
+pitboss container-prune                       # dry-run, all derived tags shown as stale
+pitboss container-prune m1.toml m2.toml       # dry-run, tags from m1/m2 marked active, rest stale
+pitboss container-prune m1.toml m2.toml --apply  # remove the stale tags
+```
+
+The output is tab-separated for grep / awk consumption (`pitboss container-prune | awk '$1=="stale"'`). Never touches images outside the `pitboss-derived-*:local` namespace, so it's safe to run on hosts with unrelated images. Time-based eviction (`--keep-recent N` etc.) is intentionally deferred — see #267 for the design discussion.
 
 #### Image tag cadence (`ghcr.io/sds-mode/pitboss-with-claude`)
 

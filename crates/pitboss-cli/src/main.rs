@@ -120,6 +120,13 @@ fn main() -> Result<()> {
                 dry_run,
             ));
         }
+        Command::ContainerPrune {
+            manifests,
+            apply,
+            runtime,
+        } => {
+            std::process::exit(run_container_prune(&manifests, apply, runtime));
+        }
         Command::Completions { shell } => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();
@@ -463,6 +470,24 @@ fn run_container_build(
         Ok(()) => 0,
         Err(e) => {
             eprintln!("container-build: {e:#}");
+            1
+        }
+    }
+}
+
+fn run_container_prune(
+    manifests: &[std::path::PathBuf],
+    apply: bool,
+    runtime: Option<String>,
+) -> i32 {
+    let opts = dispatch::container_prune::PruneOptions {
+        apply,
+        runtime_override: runtime,
+    };
+    match dispatch::container_prune::run_container_prune(manifests, &opts) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("container-prune: {e:#}");
             1
         }
     }
