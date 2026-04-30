@@ -248,11 +248,13 @@ fn match_auth(blob: &str) -> Option<FailureReason> {
     let has_401 =
         blob.contains("401") && (blob.contains("Unauthorized") || blob.contains("Authentication"));
     let has_invalid_key = blob.contains("invalid_api_key");
+    let has_missing_provider_key =
+        blob.contains("Configuration value not found:") && blob.contains("API_KEY");
     // Require "authentication_error" to co-occur with another auth signal so
     // prose mentions (e.g. "no authentication_error occurred") don't trigger
     // the 600-second backoff gate.
     let has_auth_error = blob.contains("authentication_error") && (has_401 || has_invalid_key);
-    if has_invalid_key || has_auth_error || has_401 {
+    if has_invalid_key || has_missing_provider_key || has_auth_error || has_401 {
         Some(FailureReason::AuthFailure)
     } else {
         None
@@ -607,6 +609,13 @@ mod tests {
     #[test]
     fn invalid_api_key_classifies_as_auth() {
         let blob = r#"{"error":{"type":"authentication_error","message":"invalid_api_key"}}"#;
+        assert!(matches!(classify(blob), FailureReason::AuthFailure));
+    }
+
+    #[test]
+    fn goose_missing_provider_key_classifies_as_auth() {
+        let blob = "error: Error Configuration value not found: ANTHROPIC_API_KEY.\n\
+                    Please check your system keychain and run 'goose configure' again.";
         assert!(matches!(classify(blob), FailureReason::AuthFailure));
     }
 
