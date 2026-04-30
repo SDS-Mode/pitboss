@@ -364,27 +364,23 @@ fn run_dispatch(
         }
     };
     let is_hierarchical = resolved.lead.is_some();
-    let manifest_goose_binary = if is_hierarchical {
-        None
-    } else {
-        match goose_binary_path_from_manifest(&manifest_text, manifest) {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("validation failed: {e:#}");
-                std::process::exit(2);
-            }
+    let manifest_goose_binary = match goose_binary_path_from_manifest(&manifest_text, manifest) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("validation failed: {e:#}");
+            std::process::exit(2);
         }
     };
-    let agent_bin = if is_hierarchical {
-        std::env::var_os("PITBOSS_CLAUDE_BINARY")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("claude"))
+    let legacy_hierarchical_binary = if is_hierarchical {
+        std::env::var_os("PITBOSS_CLAUDE_BINARY").map(std::path::PathBuf::from)
     } else {
-        std::env::var_os("PITBOSS_GOOSE_BINARY")
-            .map(std::path::PathBuf::from)
-            .or(manifest_goose_binary)
-            .unwrap_or_else(|| std::path::PathBuf::from("goose"))
+        None
     };
+    let agent_bin = std::env::var_os("PITBOSS_GOOSE_BINARY")
+        .map(std::path::PathBuf::from)
+        .or(manifest_goose_binary)
+        .or(legacy_hierarchical_binary)
+        .unwrap_or_else(|| std::path::PathBuf::from("goose"));
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -400,14 +396,6 @@ fn run_dispatch(
     let code = rt.block_on(async move {
         let agent_version = if dry_run {
             None
-        } else if is_hierarchical {
-            match dispatch::probe_claude(&agent_bin).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return 2;
-                }
-            }
         } else {
             match dispatch::probe_goose(&agent_bin).await {
                 Ok(v) => v,
@@ -700,15 +688,16 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
     };
 
     let is_hierarchical = resolved.lead.is_some();
-    let agent_bin = if is_hierarchical {
-        std::env::var_os("PITBOSS_CLAUDE_BINARY")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("claude"))
-    } else {
-        std::env::var_os("PITBOSS_GOOSE_BINARY")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("goose"))
-    };
+    let agent_bin = std::env::var_os("PITBOSS_GOOSE_BINARY")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            if is_hierarchical {
+                std::env::var_os("PITBOSS_CLAUDE_BINARY").map(std::path::PathBuf::from)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("goose"));
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -722,21 +711,11 @@ fn run_resume(run_id_prefix: &str, run_dir_override: Option<std::path::PathBuf>)
     };
 
     let code = rt.block_on(async move {
-        let agent_version = if is_hierarchical {
-            match dispatch::probe_claude(&agent_bin).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return 2;
-                }
-            }
-        } else {
-            match dispatch::probe_goose(&agent_bin).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return 2;
-                }
+        let agent_version = match dispatch::probe_goose(&agent_bin).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
             }
         };
         // Use the prior run's run_dir so artifacts land alongside the original.

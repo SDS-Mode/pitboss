@@ -242,7 +242,7 @@ pub async fn run_hierarchical(
     .await
     .context("start control server")?;
 
-    // 2. Build the --mcp-config file for the lead.
+    // 2. Build the bridge wiring for the lead.
     //
     // Mint a per-actor token for the root lead and embed it in the
     // bridge args. The server uses the token to bind connection identity
@@ -259,6 +259,16 @@ pub async fn run_hierarchical(
         &resolved.mcp_servers,
     )
     .await?;
+    let pitboss_exe =
+        std::env::current_exe().context("resolve current exe for goose extension command")?;
+    let lead_extensions = build_goose_extension_commands(
+        &pitboss_exe,
+        &socket,
+        &lead.id,
+        "lead",
+        Some(&lead_token),
+        &resolved.mcp_servers,
+    );
 
     // 3. Prepare lead worktree + spawn.
     let mut lead_worktree_handle: Option<pitboss_core::worktree::Worktree> = None;
@@ -307,9 +317,26 @@ pub async fn run_hierarchical(
     //     vs. `sublead_spawn_args`).
     let mut lead_env = lead.env.clone();
     crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
+    let lead_session_name = lead
+        .resume_session_id
+        .clone()
+        .unwrap_or_else(|| format!("pitboss-{run_id}-{}", lead.id));
+    let parse_dialect = crate::provider::parse_dialect_for_program(&claude_binary);
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
-        args: crate::dispatch::runner::lead_spawn_args(&lead, &mcp_config_path),
+        args: if parse_dialect == ParseDialect::Goose {
+            crate::provider::GooseSpawner::default().actor_args(crate::provider::GooseActorArgs {
+                provider: &lead.provider,
+                model: &lead.model,
+                max_turns: None,
+                session_name: Some(&lead_session_name),
+                resume: lead.resume_session_id.is_some(),
+                extensions: &lead_extensions,
+                prompt: &lead.prompt,
+            })
+        } else {
+            crate::dispatch::runner::lead_spawn_args(&lead, &mcp_config_path)
+        },
         cwd: lead_cwd.clone(),
         env: lead_env,
     };
@@ -322,8 +349,12 @@ pub async fn run_hierarchical(
             timeout: std::time::Duration::from_secs(lead.timeout_secs),
             log_path: lead_log_path.clone(),
             stderr_path: lead_stderr_path.clone(),
-            parse_dialect: ParseDialect::Claude,
-            session_id_fallback: None,
+            parse_dialect,
+            session_id_fallback: if parse_dialect == ParseDialect::Goose {
+                Some(lead_session_name.clone())
+            } else {
+                None
+            },
         },
         reprompt_rx,
         |sid, new_prompt| {
@@ -334,12 +365,26 @@ pub async fn run_hierarchical(
             );
             pitboss_core::process::SpawnCmd {
                 program: claude_binary.clone(),
-                args: crate::dispatch::runner::lead_resume_spawn_args(
-                    &lead,
-                    &mcp_config_path,
-                    sid,
-                    new_prompt,
-                ),
+                args: if parse_dialect == ParseDialect::Goose {
+                    crate::provider::GooseSpawner::default().actor_args(
+                        crate::provider::GooseActorArgs {
+                            provider: &lead.provider,
+                            model: &lead.model,
+                            max_turns: None,
+                            session_name: Some(sid),
+                            resume: true,
+                            extensions: &lead_extensions,
+                            prompt: new_prompt,
+                        },
+                    )
+                } else {
+                    crate::dispatch::runner::lead_resume_spawn_args(
+                        &lead,
+                        &mcp_config_path,
+                        sid,
+                        new_prompt,
+                    )
+                },
                 cwd: lead_cwd.clone(),
                 env: resume_env,
             }
@@ -351,6 +396,7 @@ pub async fn run_hierarchical(
     let overall_started_at = kr_result.overall_started_at;
     let total_token_usage = kr_result.total_token_usage;
     let reprompt_count = kr_result.reprompt_count;
+    let last_session_id = kr_result.last_session_id;
 
     // Close the reprompt channel so further sends fail fast.
     state.root.clear_reprompt_tx().await;
@@ -392,7 +438,8 @@ pub async fn run_hierarchical(
             lead_status = pitboss_core::store::TaskStatus::ApprovalRejected;
         }
     }
-    let lead_cost_usd = pitboss_core::prices::cost_usd(&lead.model, &total_token_usage);
+    let lead_cost_usd =
+        pitboss_core::prices::cost_usd_v2(&lead.provider, &lead.model, &total_token_usage);
     let lead_record = pitboss_core::store::TaskRecord {
         task_id: lead.id.clone(),
         status: lead_status,
@@ -409,8 +456,8 @@ pub async fn run_hierarchical(
         },
         log_path: lead_log_path.clone(),
         token_usage: total_token_usage,
-        provider: pitboss_core::provider::Provider::Anthropic,
-        claude_session_id: final_outcome.claude_session_id,
+        provider: lead.provider.clone(),
+        claude_session_id: final_outcome.claude_session_id.or(last_session_id),
         final_message_preview: final_outcome.final_message_preview,
         final_message: final_outcome.final_message,
         parent_task_id: None, // lead has no parent
@@ -463,7 +510,10 @@ pub async fn run_hierarchical(
     // api_health for completeness — any subleads spawned after this point
     // (rare) will see the gate.
     if let Some(reason) = lead_record.failure_reason.clone() {
-        state.api_health.record(&reason).await;
+        state
+            .api_health
+            .record_for_provider(&lead.provider, &reason)
+            .await;
         crate::dispatch::failure_detection::broadcast_worker_failed(
             &state.root,
             lead.id.clone(),
@@ -590,9 +640,16 @@ pub async fn run_hierarchical(
     // would still see the worker as Running).
     let now = Utc::now();
     let mut cancelled_records: Vec<pitboss_core::store::TaskRecord> = Vec::new();
-    let make_cancelled = |id: &str, parent_id: &str, model: Option<String>| {
+    let make_cancelled = |id: &str,
+                          parent_id: &str,
+                          provider: pitboss_core::provider::Provider,
+                          model: Option<String>| {
         let token_usage = pitboss_core::parser::TokenUsage::default();
-        let cost_usd = pitboss_core::prices::cost_usd(model.as_deref().unwrap_or(""), &token_usage);
+        let cost_usd = pitboss_core::prices::cost_usd_v2(
+            &provider,
+            model.as_deref().unwrap_or(""),
+            &token_usage,
+        );
         pitboss_core::store::TaskRecord {
             task_id: id.to_string(),
             status: pitboss_core::store::TaskStatus::Cancelled,
@@ -603,7 +660,7 @@ pub async fn run_hierarchical(
             worktree_path: None,
             log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
             token_usage,
-            provider: pitboss_core::provider::Provider::Anthropic,
+            provider,
             claude_session_id: None,
             final_message_preview: Some("cancelled when lead exited".into()),
             final_message: None,
@@ -621,6 +678,7 @@ pub async fn run_hierarchical(
     {
         let workers = state.root.workers.read().await;
         let worker_models = state.root.worker_models.read().await;
+        let worker_providers = state.root.worker_providers.read().await;
         for (id, w) in workers.iter() {
             if id == &lead.id || existing_ids.contains(id) {
                 continue;
@@ -629,6 +687,7 @@ pub async fn run_hierarchical(
                 cancelled_records.push(make_cancelled(
                     id,
                     &lead.id,
+                    worker_providers.get(id).cloned().unwrap_or_default(),
                     worker_models.get(id).cloned(),
                 ));
             }
@@ -639,6 +698,7 @@ pub async fn run_hierarchical(
         for (sublead_id, sub) in subleads.iter() {
             let workers = sub.workers.read().await;
             let worker_models = sub.worker_models.read().await;
+            let worker_providers = sub.worker_providers.read().await;
             for (id, w) in workers.iter() {
                 // Sub-lead layers register the sub-lead itself as a
                 // "worker" entry (the claude subprocess). Filter by the
@@ -652,6 +712,7 @@ pub async fn run_hierarchical(
                     cancelled_records.push(make_cancelled(
                         id,
                         sublead_id,
+                        worker_providers.get(id).cloned().unwrap_or_default(),
                         worker_models.get(id).cloned(),
                     ));
                 }

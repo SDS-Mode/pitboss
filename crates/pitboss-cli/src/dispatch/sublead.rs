@@ -517,7 +517,7 @@ async fn spawn_sublead_session(
     model: String,
     envelope: ResolvedEnvelope,
     operator_env: std::collections::HashMap<String, String>,
-    tools_override: Vec<String>,
+    _tools_override: Vec<String>,
     resume_session_id: Option<String>,
 ) -> Result<()> {
     use crate::dispatch::hierarchical::build_sublead_mcp_config;
@@ -538,7 +538,7 @@ async fn spawn_sublead_session(
     // into every tools/call's `_meta.token`, and the server uses the
     // bound identity for authz. Closes #145 for the sublead path.
     let sublead_token = state.mint_token(&sublead_id, "sublead").await;
-    let mcp_config_path = build_sublead_mcp_config(
+    let _mcp_config_path = build_sublead_mcp_config(
         &sublead_id,
         &socket_path,
         &state.root.run_subdir,
@@ -547,13 +547,27 @@ async fn spawn_sublead_session(
     )
     .await
     .context("build sublead mcp-config")?;
+    let pitboss_exe =
+        std::env::current_exe().context("resolve current exe for goose extension command")?;
+    let sublead_extensions = crate::dispatch::hierarchical::build_goose_extension_commands(
+        &pitboss_exe,
+        &socket_path,
+        &sublead_id,
+        "sublead",
+        Some(&sublead_token),
+        &state.root.manifest.mcp_servers,
+    );
 
     // 3. Build the CLI args: sublead toolset (or operator override),
     //    model, prompt, and optional --resume when continuing a prior session.
-    let tools_for_args: Option<&[String]> = if tools_override.is_empty() {
+    let sublead_session_name = resume_session_id
+        .clone()
+        .unwrap_or_else(|| format!("pitboss-{}-{sublead_id}", state.root.run_id));
+    let parse_dialect = crate::provider::parse_dialect_for_program(&sub_layer.claude_binary);
+    let tools_for_args: Option<&[String]> = if _tools_override.is_empty() {
         None
     } else {
-        Some(&tools_override)
+        Some(&_tools_override)
     };
     let spawn_routing = state
         .root
@@ -562,15 +576,27 @@ async fn spawn_sublead_session(
         .as_ref()
         .map(|l| l.permission_routing)
         .unwrap_or_default();
-    let args = sublead_spawn_args(
-        &sublead_id,
-        &prompt,
-        &model,
-        &mcp_config_path,
-        resume_session_id.as_deref(),
-        tools_for_args,
-        spawn_routing,
-    );
+    let args = if parse_dialect == ParseDialect::Goose {
+        crate::provider::GooseSpawner::default().actor_args(crate::provider::GooseActorArgs {
+            provider: &provider,
+            model: &model,
+            max_turns: None,
+            session_name: Some(&sublead_session_name),
+            resume: resume_session_id.is_some(),
+            extensions: &sublead_extensions,
+            prompt: &prompt,
+        })
+    } else {
+        sublead_spawn_args(
+            &sublead_id,
+            &prompt,
+            &model,
+            &_mcp_config_path,
+            resume_session_id.as_deref(),
+            tools_for_args,
+            spawn_routing,
+        )
+    };
 
     // 4. Task log directory (mirrors workers' layout for consistency).
     let task_dir = sub_layer.run_subdir.join("tasks").join(&sublead_id);
@@ -661,9 +687,10 @@ async fn spawn_sublead_session(
     let sublead_id_bg = sublead_id.clone();
     let provider_bg = provider.clone();
     let model_bg = model.clone();
-    let mcp_config_path_bg = mcp_config_path.clone();
     let operator_env_bg = operator_env;
-    let tools_override_bg = tools_override;
+    let sublead_extensions_bg = sublead_extensions.clone();
+    let tools_override_bg = _tools_override;
+    let mcp_config_path_bg = _mcp_config_path.clone();
     // Captured for the post-loop failure-reason enrichment (#184): when a
     // sub-lead is spawned with --resume and exits with an unhelpful
     // Unknown failure, the operator gets a hint pointing at the session
@@ -685,16 +712,15 @@ async fn spawn_sublead_session(
                 timeout: Duration::from_secs(timeout_secs),
                 log_path: log_path.clone(),
                 stderr_path: stderr_path.clone(),
-                parse_dialect: ParseDialect::Claude,
-                session_id_fallback: None,
+                parse_dialect,
+                session_id_fallback: if parse_dialect == ParseDialect::Goose {
+                    Some(sublead_session_name.clone())
+                } else {
+                    None
+                },
             },
             reprompt_rx,
             |sid, new_prompt| {
-                let tools_for_resume: Option<&[String]> = if tools_override_bg.is_empty() {
-                    None
-                } else {
-                    Some(&tools_override_bg)
-                };
                 let resume_routing = state_bg
                     .root
                     .manifest
@@ -702,15 +728,34 @@ async fn spawn_sublead_session(
                     .as_ref()
                     .map(|l| l.permission_routing)
                     .unwrap_or_default();
-                let resume_args = sublead_spawn_args(
-                    &sublead_id_bg,
-                    new_prompt,
-                    &model_bg,
-                    &mcp_config_path_bg,
-                    Some(sid),
-                    tools_for_resume,
-                    resume_routing,
-                );
+                let tools_for_resume: Option<&[String]> = if tools_override_bg.is_empty() {
+                    None
+                } else {
+                    Some(&tools_override_bg)
+                };
+                let resume_args = if parse_dialect == ParseDialect::Goose {
+                    crate::provider::GooseSpawner::default().actor_args(
+                        crate::provider::GooseActorArgs {
+                            provider: &provider_bg,
+                            model: &model_bg,
+                            max_turns: None,
+                            session_name: Some(sid),
+                            resume: true,
+                            extensions: &sublead_extensions_bg,
+                            prompt: new_prompt,
+                        },
+                    )
+                } else {
+                    sublead_spawn_args(
+                        &sublead_id_bg,
+                        new_prompt,
+                        &model_bg,
+                        &mcp_config_path_bg,
+                        Some(sid),
+                        tools_for_resume,
+                        resume_routing,
+                    )
+                };
                 // Env precedence: lead → operator → pitboss defaults
                 // (see compose_sublead_env). Same cwd rationale as the
                 // initial spawn: lead.directory (not lead_cwd) — see
@@ -817,7 +862,9 @@ async fn spawn_sublead_session(
             log_path: log_path.clone(),
             token_usage: total_token_usage,
             provider: provider_bg.clone(),
-            claude_session_id: final_outcome.claude_session_id,
+            claude_session_id: final_outcome
+                .claude_session_id
+                .or_else(|| last_session_id.clone()),
             final_message_preview: final_outcome.final_message_preview,
             final_message: final_outcome.final_message,
             parent_task_id: Some(state_bg.root.lead_id.clone()),

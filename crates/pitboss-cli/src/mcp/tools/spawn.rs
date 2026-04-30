@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use pitboss_core::parser::ParseDialect;
 use pitboss_core::provider::Provider;
 use pitboss_core::store::TaskRecord;
 use uuid::Uuid;
@@ -13,6 +14,10 @@ use uuid::Uuid;
 use super::{layer_for_worker, SpawnWorkerArgs, SpawnWorkerResult};
 use crate::dispatch::layer::LayerState;
 use crate::dispatch::state::{DispatchState, WorkerState};
+
+fn goose_actor_session_name(run_id: uuid::Uuid, task_id: &str) -> String {
+    format!("pitboss-{run_id}-{task_id}")
+}
 
 /// Resolve the `LayerState` into which a new worker should be registered,
 /// based on the caller's role from `_meta`.
@@ -391,7 +396,7 @@ async fn run_worker(
     branch: Option<String>,
     provider: Provider,
     model: String,
-    tools: Vec<String>,
+    _tools: Vec<String>,
     timeout_secs: u64,
     use_worktree: bool,
     cancel: pitboss_core::session::CancelToken,
@@ -477,12 +482,19 @@ async fn run_worker(
         directory.clone()
     };
 
+    let parse_dialect = crate::provider::parse_dialect_for_program(&layer.claude_binary);
+    let worker_session_name = if parse_dialect == ParseDialect::Goose {
+        Some(goose_actor_session_name(layer.run_id, &task_id))
+    } else {
+        None
+    };
+
     // Transition Pending → Running.
     layer.workers.write().await.insert(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
-            session_id: None,
+            session_id: worker_session_name.clone(),
         },
     );
 
@@ -500,7 +512,7 @@ async fn run_worker(
     let worker_mcp_config = worker_task_dir.join("mcp-config.json");
     let socket_path =
         crate::mcp::server::socket_path_for_run(layer.run_id, &layer.manifest.run_dir);
-    let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
+    let _mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
         &worker_mcp_config,
         &socket_path,
         &task_id,
@@ -513,6 +525,20 @@ async fn run_worker(
         Err(e) => {
             tracing::warn!("write worker mcp-config for {task_id}: {e}; proceeding without");
             None
+        }
+    };
+    let worker_extensions = match std::env::current_exe() {
+        Ok(pitboss_exe) => crate::dispatch::hierarchical::build_goose_extension_commands(
+            &pitboss_exe,
+            &socket_path,
+            &task_id,
+            "worker",
+            Some(&worker_token),
+            &layer.manifest.mcp_servers,
+        ),
+        Err(e) => {
+            tracing::warn!("resolve current exe for worker goose extension {task_id}: {e}");
+            Vec::new()
         }
     };
 
@@ -565,13 +591,25 @@ async fn run_worker(
     );
     let cmd = SpawnCmd {
         program: layer.claude_binary.clone(),
-        args: worker_spawn_args(
-            &prompt,
-            &model,
-            &tools,
-            mcp_config_arg.as_deref(),
-            worker_routing,
-        ),
+        args: if parse_dialect == ParseDialect::Goose {
+            crate::provider::GooseSpawner::default().actor_args(crate::provider::GooseActorArgs {
+                provider: &provider,
+                model: &model,
+                max_turns: None,
+                session_name: worker_session_name.as_deref(),
+                resume: false,
+                extensions: &worker_extensions,
+                prompt: &prompt,
+            })
+        } else {
+            worker_spawn_args(
+                &prompt,
+                &model,
+                &_tools,
+                _mcp_config_arg.as_deref(),
+                worker_routing,
+            )
+        },
         cwd: cwd.clone(),
         env: worker_env,
     };
@@ -608,6 +646,7 @@ async fn run_worker(
         let outcome = SessionHandle::new(task_id.clone(), Arc::clone(&layer.spawner), cmd)
             .with_log_path(log_path.clone())
             .with_stderr_log_path(stderr_path.clone())
+            .with_parse_dialect(parse_dialect)
             .with_session_id_tx(session_id_tx)
             .with_pid_slot(pid_slot)
             .run_to_completion(cancel, Duration::from_secs(timeout_secs))
@@ -679,7 +718,9 @@ async fn run_worker(
         log_path,
         token_usage: outcome.token_usage,
         provider: provider.clone(),
-        claude_session_id: outcome.claude_session_id,
+        claude_session_id: outcome
+            .claude_session_id
+            .or_else(|| worker_session_name.clone()),
         final_message_preview: outcome.final_message_preview,
         final_message: outcome.final_message,
         parent_task_id: Some(lead_id.clone()),
@@ -896,7 +937,7 @@ pub async fn spawn_resume_worker(
         .get(&task_id)
         .cloned()
         .unwrap_or_default();
-    let tools: Vec<String> = layer
+    let _tools: Vec<String> = layer
         .manifest
         .lead
         .as_ref()
@@ -964,7 +1005,7 @@ pub async fn spawn_resume_worker(
     let worker_mcp_config_path = worker_task_dir.join("mcp-config.json");
     let socket_path =
         crate::mcp::server::socket_path_for_run(layer.run_id, &layer.manifest.run_dir);
-    let mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
+    let _mcp_config_arg = match crate::dispatch::hierarchical::write_worker_mcp_config(
         &worker_mcp_config_path,
         &socket_path,
         &task_id,
@@ -979,6 +1020,20 @@ pub async fn spawn_resume_worker(
                 "write worker mcp-config for {task_id} (resume): {e}; proceeding without"
             );
             None
+        }
+    };
+    let worker_extensions = match std::env::current_exe() {
+        Ok(pitboss_exe) => crate::dispatch::hierarchical::build_goose_extension_commands(
+            &pitboss_exe,
+            &socket_path,
+            &task_id,
+            "worker",
+            Some(&worker_token),
+            &layer.manifest.mcp_servers,
+        ),
+        Err(e) => {
+            tracing::warn!("resolve current exe for worker goose extension {task_id}: {e}");
+            Vec::new()
         }
     };
 
@@ -996,16 +1051,30 @@ pub async fn spawn_resume_worker(
                 .map(|l| l.permission_routing)
         })
         .unwrap_or_default();
+    let parse_dialect = crate::provider::parse_dialect_for_program(&layer.claude_binary);
     // Build spawn args with --resume.
-    let mut spawn_args_v = worker_spawn_args(
-        &prompt,
-        &model,
-        &tools,
-        mcp_config_arg.as_deref(),
-        resume_routing,
-    );
-    spawn_args_v.insert(0, "--resume".into());
-    spawn_args_v.insert(1, session_id);
+    let spawn_args_v = if parse_dialect == ParseDialect::Goose {
+        crate::provider::GooseSpawner::default().actor_args(crate::provider::GooseActorArgs {
+            provider: &provider,
+            model: &model,
+            max_turns: None,
+            session_name: Some(&session_id),
+            resume: true,
+            extensions: &worker_extensions,
+            prompt: &prompt,
+        })
+    } else {
+        let mut args = worker_spawn_args(
+            &prompt,
+            &model,
+            &_tools,
+            _mcp_config_arg.as_deref(),
+            resume_routing,
+        );
+        args.insert(0, "--resume".into());
+        args.insert(1, session_id.clone());
+        args
+    };
 
     // Resume path mirrors the initial spawn: inherit the parent lead's
     // resolved env so `[defaults.env]` and `[lead.env]` survive a
@@ -1052,6 +1121,7 @@ pub async fn spawn_resume_worker(
         )
         .with_log_path(log_path.clone())
         .with_stderr_log_path(stderr_path.clone())
+        .with_parse_dialect(parse_dialect)
         .with_pid_slot(resume_pid_slot)
         .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
         .await;
@@ -1101,7 +1171,7 @@ pub async fn spawn_resume_worker(
             log_path: log_path.clone(),
             token_usage: outcome.token_usage,
             provider: resume_provider.clone(),
-            claude_session_id: outcome.claude_session_id,
+            claude_session_id: outcome.claude_session_id.or(Some(session_id)),
             final_message_preview: outcome.final_message_preview,
             final_message: outcome.final_message,
             parent_task_id: Some(lead_id_bg.clone()),

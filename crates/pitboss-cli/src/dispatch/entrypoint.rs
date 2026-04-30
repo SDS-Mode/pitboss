@@ -24,15 +24,8 @@ use pitboss_core::store::{RunMeta, SessionStore};
 
 use crate::manifest::resolve::ResolvedManifest;
 
-/// Current dispatch still uses Claude for hierarchical mode and Goose for flat
-/// mode. Keep this in one helper so the v0.10 hierarchical Goose switch has a
-/// single metadata policy to update.
-pub fn dispatch_agent_key(resolved: &ResolvedManifest) -> &'static str {
-    if resolved.lead.is_some() {
-        "claude"
-    } else {
-        "goose"
-    }
+pub fn dispatch_agent_key(_resolved: &ResolvedManifest) -> &'static str {
+    "goose"
 }
 
 pub fn agent_versions_for_run(
