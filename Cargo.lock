@@ -999,6 +999,11 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -1535,6 +1540,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
+dependencies = [
+ "hashbrown 0.17.0",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1895,7 +1909,7 @@ dependencies = [
  "git2",
  "glob",
  "libc",
- "lru 0.16.4",
+ "lru 0.18.0",
  "pitboss-core",
  "pitboss-schema",
  "reqwest",
@@ -1987,7 +2001,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "libc",
- "lru 0.16.4",
+ "lru 0.18.0",
  "mime_guess",
  "pitboss-cli",
  "pitboss-core",
