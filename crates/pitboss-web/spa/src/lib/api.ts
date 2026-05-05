@@ -241,6 +241,8 @@ export interface ActorActivity {
   actor_id: string;
   kv_ops: number;
   lease_ops: number;
+  message_ops?: number;
+  artifact_ops?: number;
 }
 
 /** Snapshot of a sublead derived from `SubleadSpawned` (+ Terminated). */

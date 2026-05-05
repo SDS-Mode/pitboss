@@ -155,6 +155,21 @@ pub fn format_tile_subtitle(state: &crate::state::AppState, idx: usize) -> Strin
     }
 }
 
+/// Render the per-tile activity strip. Always shows `kv:N lease:M`; appends
+/// ` msg:N art:N` only when either is non-zero, so `mode = "disabled"` runs
+/// render without comm clutter while `mode = "parent_child"` runs surface
+/// mailbox/artifact activity as soon as it fires.
+fn format_activity_strip(c: &crate::state::StoreActivityCounters) -> String {
+    if c.message_ops > 0 || c.artifact_ops > 0 {
+        format!(
+            "kv:{} lease:{} msg:{} art:{}",
+            c.kv_ops, c.lease_ops, c.message_ops, c.artifact_ops
+        )
+    } else {
+        format!("kv:{} lease:{}", c.kv_ops, c.lease_ops)
+    }
+}
+
 /// Count tiles that were spawned as workers (i.e. have a `parent_task_id`).
 pub fn workers_spawned(state: &crate::state::AppState) -> usize {
     state
@@ -1064,10 +1079,10 @@ fn render_subtree_worker_tile(
     let activity_line = state
         .store_activity
         .get(&tile.id)
-        .filter(|c| c.kv_ops > 0 || c.lease_ops > 0)
+        .filter(|c| c.kv_ops > 0 || c.lease_ops > 0 || c.message_ops > 0 || c.artifact_ops > 0)
         .map(|c| {
             ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!("kv:{} lease:{}", c.kv_ops, c.lease_ops),
+                format_activity_strip(c),
                 theme::muted_style(),
             ))
         });
@@ -1175,19 +1190,16 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
         },
     );
 
-    // Shared-store activity line: `kv:N lease:M`. Skip when both are 0
-    // (almost all tiles during the first second + the lead in flat-mode
-    // runs), so quiet tiles don't waste a row on a useless "kv:0 lease:0".
+    // Coordination activity line. Skip when all counters are 0 (almost all
+    // tiles during the first second + the lead in flat-mode runs), so quiet
+    // tiles don't waste a row on a useless all-zero line. The msg/art segment
+    // is only appended when at least one is non-zero, so disabled-mode runs
+    // (msg=0 art=0 forever) render `kv:N lease:M` without comm clutter.
     let activity_line = state
         .store_activity
         .get(&tile.id)
-        .filter(|c| c.kv_ops > 0 || c.lease_ops > 0)
-        .map(|c| {
-            Line::from(Span::styled(
-                format!("kv:{} lease:{}", c.kv_ops, c.lease_ops),
-                theme::muted_style(),
-            ))
-        });
+        .filter(|c| c.kv_ops > 0 || c.lease_ops > 0 || c.message_ops > 0 || c.artifact_ops > 0)
+        .map(|c| Line::from(Span::styled(format_activity_strip(c), theme::muted_style())));
 
     let mut lines = vec![
         Line::from(vec![
@@ -2620,5 +2632,84 @@ mod tests {
         ];
         let s = state(tiles);
         assert_eq!(crate::tui::workers_spawned(&s), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Activity strip — kv/lease/msg/art rendering on the per-tile activity
+    // line. Suppresses the msg/art segment when both are zero so disabled-mode
+    // runs don't render `msg:0 art:0` clutter.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_activity_strip_omits_comm_when_zero() {
+        let c = crate::state::StoreActivityCounters {
+            kv_ops: 4,
+            lease_ops: 1,
+            message_ops: 0,
+            artifact_ops: 0,
+        };
+        assert_eq!(crate::tui::format_activity_strip(&c), "kv:4 lease:1");
+    }
+
+    #[test]
+    fn format_activity_strip_includes_comm_when_nonzero() {
+        let c = crate::state::StoreActivityCounters {
+            kv_ops: 4,
+            lease_ops: 1,
+            message_ops: 3,
+            artifact_ops: 2,
+        };
+        assert_eq!(
+            crate::tui::format_activity_strip(&c),
+            "kv:4 lease:1 msg:3 art:2"
+        );
+    }
+
+    #[test]
+    fn format_activity_strip_includes_comm_when_only_one_nonzero() {
+        let c = crate::state::StoreActivityCounters {
+            kv_ops: 0,
+            lease_ops: 0,
+            message_ops: 0,
+            artifact_ops: 1,
+        };
+        assert_eq!(
+            crate::tui::format_activity_strip(&c),
+            "kv:0 lease:0 msg:0 art:1"
+        );
+    }
+
+    #[test]
+    fn render_tile_shows_comm_counters_in_activity_line() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "worker-comm";
+        let mut s = state(vec![tile(task_id, TileStatus::Running, None, 0, 0)]);
+        s.store_activity.insert(
+            task_id.to_string(),
+            crate::state::StoreActivityCounters {
+                kv_ops: 2,
+                lease_ops: 0,
+                message_ops: 5,
+                artifact_ops: 1,
+            },
+        );
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..30)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            rendered.contains("msg:5 art:1"),
+            "tile should render comm counters; got snippet: {:?}",
+            &rendered[..rendered.len().min(400)]
+        );
     }
 }

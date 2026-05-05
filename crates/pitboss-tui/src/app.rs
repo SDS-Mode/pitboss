@@ -955,6 +955,8 @@ fn apply_control_event(state: &mut AppState, ev: pitboss_cli::control::protocol:
                         crate::state::StoreActivityCounters {
                             kv_ops: e.kv_ops,
                             lease_ops: e.lease_ops,
+                            message_ops: e.message_ops,
+                            artifact_ops: e.artifact_ops,
                         },
                     )
                 })

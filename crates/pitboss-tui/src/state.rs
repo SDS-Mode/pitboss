@@ -272,11 +272,11 @@ pub struct AppState {
     /// from the wrong reactor and async I/O would silently hang. `None`
     /// only in tests where no control socket is in play.
     pub runtime_handle: Option<tokio::runtime::Handle>,
-    /// Per-actor shared-store activity counters received via the control
+    /// Per-actor coordination activity counters received via the control
     /// socket's periodic `StoreActivity` broadcast. Rendered as
-    /// `kv:N lease:M` on each grid tile. Keyed by `actor_id` (matches
-    /// `TileState.id` for the lead + each worker). Empty until the first
-    /// broadcast arrives (~1 s after TUI connects).
+    /// `kv:N lease:M msg:N art:N` on each grid tile. Keyed by `actor_id`
+    /// (matches `TileState.id` for the lead + each worker). Empty until
+    /// the first broadcast arrives (~1 s after TUI connects).
     pub store_activity: std::collections::HashMap<String, StoreActivityCounters>,
     /// Bounding rectangles of each tile, populated by `render_tile_grid`
     /// each frame. Used by the mouse-click handler to hit-test which
@@ -332,6 +332,8 @@ pub struct AppState {
 pub struct StoreActivityCounters {
     pub kv_ops: u64,
     pub lease_ops: u64,
+    pub message_ops: u64,
+    pub artifact_ops: u64,
 }
 
 /// Summary of a worker's worktree diff vs its base branch.

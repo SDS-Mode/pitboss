@@ -362,17 +362,39 @@ async fn serve_connection(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let snapshot = state_activity.root.shared_store.activity_snapshot().await;
-            let counters: Vec<crate::control::protocol::ActorActivityEntry> = snapshot
-                .into_iter()
-                .map(
-                    |(actor_id, c)| crate::control::protocol::ActorActivityEntry {
+            let store_snapshot = state_activity.root.shared_store.activity_snapshot().await;
+            let communication_snapshot = state_activity.communication.activity_snapshot().await;
+            let mut by_actor = std::collections::BTreeMap::<
+                String,
+                crate::control::protocol::ActorActivityEntry,
+            >::new();
+            for (actor_id, c) in store_snapshot {
+                by_actor.insert(
+                    actor_id.clone(),
+                    crate::control::protocol::ActorActivityEntry {
                         actor_id,
                         kv_ops: c.kv_ops,
                         lease_ops: c.lease_ops,
+                        message_ops: 0,
+                        artifact_ops: 0,
                     },
-                )
-                .collect();
+                );
+            }
+            for (actor_id, c) in communication_snapshot {
+                let entry = by_actor.entry(actor_id.clone()).or_insert_with(|| {
+                    crate::control::protocol::ActorActivityEntry {
+                        actor_id,
+                        kv_ops: 0,
+                        lease_ops: 0,
+                        message_ops: 0,
+                        artifact_ops: 0,
+                    }
+                });
+                entry.message_ops = c.message_ops;
+                entry.artifact_ops = c.artifact_ops;
+            }
+            let counters: Vec<crate::control::protocol::ActorActivityEntry> =
+                by_actor.into_values().collect();
             // `try_send` — if the queue is full, skip this tick rather
             // than block the activity pump; the next tick re-reads
             // fresh counters anyway.
@@ -1307,6 +1329,60 @@ mod tests {
                 assert_eq!(run_kind, "flat");
             }
             other => panic!("expected Hello, got {other:?}"),
+        }
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn store_activity_includes_communication_counters() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        state.root.shared_store.note_kv_op("lead").await;
+        state.communication.note_message_op("lead").await;
+        state.communication.note_artifact_op("lead").await;
+
+        let sock = dir.path().join("activity.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state,
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let _hello = lines.next_line().await.unwrap().expect("hello line");
+        let activity_line = tokio::time::timeout(
+            std::time::Duration::from_millis(STORE_ACTIVITY_INTERVAL_MS + 500),
+            lines.next_line(),
+        )
+        .await
+        .expect("activity event arrives before timeout")
+        .unwrap()
+        .unwrap();
+        let ev: ControlEvent = serde_json::from_str(&activity_line).unwrap();
+        match ev {
+            ControlEvent::StoreActivity { counters } => {
+                let lead = counters
+                    .iter()
+                    .find(|entry| entry.actor_id == "lead")
+                    .expect("lead activity entry");
+                assert_eq!(lead.kv_ops, 1);
+                assert_eq!(lead.lease_ops, 0);
+                assert_eq!(lead.message_ops, 1);
+                assert_eq!(lead.artifact_ops, 1);
+            }
+            other => panic!("expected StoreActivity, got {other:?}"),
         }
         drop(handle);
     }
