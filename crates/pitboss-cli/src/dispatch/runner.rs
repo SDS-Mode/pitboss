@@ -807,6 +807,20 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
+    // Mailbox/artifact communication tools (v0.10+). Payloads move
+    // through the Pitboss-owned message/artifact stores rather than KV.
+    // Server-side `list_tools` filter hides these when
+    // `[communication].mode = "disabled"` (the default), and every
+    // handler returns `CommunicationError::Disabled` as a back-stop —
+    // listing them here is cosmetic for that mode.
+    "mcp__pitboss__message_send",
+    "mcp__pitboss__message_list",
+    "mcp__pitboss__message_read",
+    "mcp__pitboss__message_ack",
+    "mcp__pitboss__artifact_put",
+    "mcp__pitboss__artifact_list",
+    "mcp__pitboss__artifact_read",
+    "mcp__pitboss__artifact_grant",
     // Run-global leases (v0.6+). For cross-sub-tree resource coordination
     // (e.g., serializing access to an operator-facing filesystem dir).
     "mcp__pitboss__run_lease_acquire",
@@ -849,6 +863,17 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
+    // Mailbox/artifact communication tools (v0.10+). Same opt-in
+    // semantics as PITBOSS_MCP_TOOLS — gated server-side by
+    // `[communication].mode`.
+    "mcp__pitboss__message_send",
+    "mcp__pitboss__message_list",
+    "mcp__pitboss__message_read",
+    "mcp__pitboss__message_ack",
+    "mcp__pitboss__artifact_put",
+    "mcp__pitboss__artifact_list",
+    "mcp__pitboss__artifact_read",
+    "mcp__pitboss__artifact_grant",
     // Run-global leases (v0.6+) for cross-sub-tree resource coordination.
     "mcp__pitboss__run_lease_acquire",
     "mcp__pitboss__run_lease_release",
@@ -1264,6 +1289,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         }
     }
@@ -1409,6 +1435,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
 
@@ -1503,6 +1530,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
 
@@ -1610,6 +1638,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
 

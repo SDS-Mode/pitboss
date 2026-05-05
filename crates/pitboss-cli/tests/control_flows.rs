@@ -54,6 +54,7 @@ async fn pause_op_writes_events_jsonl() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -261,6 +262,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -377,6 +379,7 @@ async fn auto_approve_policy_responds_without_tui() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -440,6 +443,7 @@ async fn auto_reject_policy_responds_without_tui() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -514,6 +518,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

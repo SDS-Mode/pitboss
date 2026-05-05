@@ -1,0 +1,74 @@
+# Parent-child communication demo
+#
+# Demonstrates the Pitboss-owned communication plane for hierarchical runs:
+# one worker publishes an artifact and messages the lead, then the lead grants
+# that artifact to a second worker and sends a directional handoff message.
+#
+# This is the coarse v0.9 communication model:
+#   - workers can message their parent
+#   - leads can read child messages
+#   - artifacts are readable by owner, parent/root, and explicit grantees
+#   - sibling worker transfer requires the parent to call artifact_grant
+#
+# Before running, create the demo directory:
+#   mkdir -p /tmp/pitboss-communication-demo
+#
+# Live run:
+#   pitboss dispatch examples/communication-parent-child-demo.toml
+#
+# Attach TUI in a second terminal after the run starts:
+#   pitboss-tui
+
+[run]
+worktree_cleanup = "never"
+default_approval_policy = "auto_approve"
+
+[communication]
+mode = "parent_child"
+max_message_bytes = 4096
+max_artifact_bytes = 1048576
+max_artifacts_per_actor = 16
+
+[defaults]
+model = "claude-haiku-4-5"
+use_worktree = false
+timeout_secs = 180
+
+[lead]
+id = "communication-demo-lead"
+directory = "/tmp/pitboss-communication-demo"
+max_workers = 2
+budget_usd = 0.50
+lead_timeout_secs = 600
+prompt = """
+You are demonstrating Pitboss parent-child communication. Use the Pitboss MCP
+tools directly. Do not use KV for handoff payloads.
+
+Step 1: spawn worker A. Worker A must:
+- call artifact_put with:
+    name="worker-a-note.txt"
+    mime_type="text/plain"
+    content_base64="cGFyZW50LWNoaWxkIGNvbW11bmljYXRpb24gZGVtbwo="
+- call message_send to "parent" with subject="artifact-ready" and body exactly
+  "artifact_id=<ID>" using the artifact_id returned by artifact_put.
+- final response exactly: WORKER_A_DONE
+
+Step 2: wait_actor for worker A. Then call message_list scope="inbox",
+message_read the artifact-ready message, and extract the artifact_id.
+
+Step 3: spawn worker B. After spawn_worker returns worker B's task_id, call
+artifact_grant with the artifact_id and to=<worker B task_id>. Then call
+message_send to worker B with subject="read-artifact" and body exactly
+"artifact_id=<ID>".
+
+Worker B must:
+- poll message_list scope="inbox" until it sees subject="read-artifact".
+- message_read that message, extract the artifact_id, and call artifact_read.
+- final response exactly:
+    WORKER_B_READ: cGFyZW50LWNoaWxkIGNvbW11bmljYXRpb24gZGVtbwo=
+
+Step 4: wait_actor for worker B.
+
+Final response exactly:
+COMMUNICATION_PARENT_CHILD_DEMO_PASS
+"""

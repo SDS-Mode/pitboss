@@ -350,6 +350,35 @@ All declared servers are injected into all actors (scope = all). Per-actor scopi
 
 **Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
 
+### `[communication]` (v0.10+, opt-in)
+
+Declares the policy for the Pitboss-owned mailbox + artifact MCP tools.
+**Default `mode = "disabled"`** — KV remains the only inter-actor surface
+unless an operator opts in. The mailbox is for short coordination notes
+referencing artifact ids; the artifact store is for binary payloads
+(parents passing context to workers, workers handing back outputs)
+without forcing actors to base64-encode blobs into KV.
+
+```toml
+[communication]
+mode                    = "parent_child"   # "disabled" (default) | "parent_child"
+max_message_bytes       = 8192              # body cap on message_send
+max_artifact_bytes      = 10485760          # decoded payload cap on artifact_put
+max_artifacts_per_actor = 128               # per-actor publish ceiling per run
+```
+
+**`parent_child` semantics:**
+- Root lead reads / sends to every actor.
+- Sub-leads read / send within their own sub-tree; may also message `"root"` upward.
+- Workers may message only their direct parent (via the alias `"parent"`); they may read messages they sent or received.
+- Sibling-worker artifact transfer requires the parent (or root) to call `artifact_grant` — there is no peer-to-peer write channel.
+
+**Artifact storage** lands at `<run_dir>/communication/artifacts/<artifact_id>`. Auto-mounted under `pitboss container-dispatch`; cleaned with the run dir by `pitboss prune --remove`.
+
+**Disabled mode** (the default) hides the 8 tools from `list_tools` and rejects every handler call with `CommunicationError::Disabled`. Tool names still appear in the lead/sublead/worker `--allowedTools` argv (cosmetic only — Claude does not call tools missing from `list_tools`).
+
+See `examples/communication-parent-child-demo.toml` for a full walkthrough.
+
 ### Migration from v0.8 → v0.9
 
 Pre-v0.9 manifests are rejected. `pitboss validate` scans for the migration
@@ -762,6 +791,14 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__run_lease_release` | `{lease_id}` | `{ok: true}` |
 | `mcp__pitboss__analyze_run` | `{run_id}` | `RunAnalysis` — header (id / manifest / mode / status / duration / versions), `cost` rollup (per-model + lead-vs-worker), `failures` grouped by classified `FailureReason::kind`, `tasks` (workers grouped under their lead), `hotspots` (longest / costliest / most-tokens). Read-only triage over a prior run; resolves `run_id` against the canonical runs base directory. |
 | `mcp__pitboss__analyze_recent` | `{limit?, failed_only?}` | `RecentAnalysis { runs, aggregates }` — per-run analyses plus a cross-run aggregate (failure histogram, model usage, top-3 slowest / costliest / most-failed runs). `limit` defaults to 10 and is silently clamped to 50. `failed_only` skips runs with zero failed tasks. |
+| `mcp__pitboss__message_send` | `{to, subject, body, refs?}` | `{message_id}` — opt-in via `[communication] mode = "parent_child"` (default disabled). Workers may target `"parent"` or self; subleads may target `"root"` or workers in their own sub-tree; root may target any actor. Body capped by `max_message_bytes`. |
+| `mcp__pitboss__message_list` | `{scope?}` | `{messages: [...]}` — `scope` defaults to `inbox`. Other scopes: `sent`, `visible`, `all` (root only). |
+| `mcp__pitboss__message_read` | `{message_id}` | `{message}` — parents can read child messages; workers can read only messages they sent or received. |
+| `mcp__pitboss__message_ack` | `{message_id}` | `{ok: true}` |
+| `mcp__pitboss__artifact_put` | `{name, mime_type?, content_base64}` | `{artifact_id, uri, size_bytes, sha256}` — bytes land at `<run_dir>/communication/artifacts/<id>`. Subject to `max_artifact_bytes` and `max_artifacts_per_actor`. |
+| `mcp__pitboss__artifact_list` | `{scope?}` | `{artifacts: [...]}` — `scope` defaults to `visible`. Other scopes: `owned`, `granted`, `all` (root only). |
+| `mcp__pitboss__artifact_read` | `{artifact_id}` | `{artifact, content_base64}` |
+| `mcp__pitboss__artifact_grant` | `{artifact_id, to}` | `{ok: true}` — caller must already be allowed to read the artifact and address the recipient. Used by parents to enable sibling-worker handoffs. Read access only; ownership does not transfer. |
 
 All tool responses returning a collection are wrapped in a record
 (`{workers: [...]}`, `{entries: [...]}`, `{entry: ...}`) — MCP spec

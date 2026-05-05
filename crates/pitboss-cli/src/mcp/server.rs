@@ -1008,6 +1008,118 @@ impl PitbossHandler {
         }))
     }
 
+    #[tool(
+        name = "message_send",
+        description = "Send a small structured message to an actor. Use for coordination notes and artifact refs; use artifact_put for payloads. In parent_child mode workers may address only \"parent\" or their own id, subleads may address \"root\" or workers in their own sub-tree, and the root lead may address any actor. Returns {message_id}. Disabled (returns communication_disabled) when [communication].mode = \"disabled\" — the v0.10 default; opt in via the manifest."
+    )]
+    async fn message_send(
+        &self,
+        Parameters(args): Parameters<crate::communication::MessageSendArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_message_send(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "message_list",
+        description = "List visible message metadata. scope defaults to inbox; valid scopes are inbox, sent, visible, and all (root lead only). Returns {messages: [...]}."
+    )]
+    async fn message_list(
+        &self,
+        Parameters(args): Parameters<crate::communication::MessageListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_message_list(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "message_read",
+        description = "Read a visible message by id. Parents can read child messages; workers can read only messages they sent or received."
+    )]
+    async fn message_read(
+        &self,
+        Parameters(args): Parameters<crate::communication::MessageReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_message_read(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "message_ack",
+        description = "Acknowledge a visible message. Returns {ok:true}."
+    )]
+    async fn message_ack(
+        &self,
+        Parameters(args): Parameters<crate::communication::MessageAckArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_message_ack(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "artifact_put",
+        description = "Publish an artifact owned by the caller. content_base64 carries the payload; Pitboss stores bytes under <run_dir>/communication/artifacts/<id> and returns {artifact_id, uri, size_bytes, sha256}. Subject to [communication].max_artifact_bytes and max_artifacts_per_actor."
+    )]
+    async fn artifact_put(
+        &self,
+        Parameters(args): Parameters<crate::communication::ArtifactPutArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_artifact_put(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "artifact_list",
+        description = "List visible artifact metadata. scope defaults to visible; valid scopes are owned, granted, visible, and all (root lead only). Returns {artifacts: [...]}."
+    )]
+    async fn artifact_list(
+        &self,
+        Parameters(args): Parameters<crate::communication::ArtifactListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_artifact_list(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "artifact_read",
+        description = "Read a visible artifact by id. Returns {artifact, content_base64}."
+    )]
+    async fn artifact_read(
+        &self,
+        Parameters(args): Parameters<crate::communication::ArtifactReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_artifact_read(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
+    #[tool(
+        name = "artifact_grant",
+        description = "Grant a visible artifact to another actor. The caller must already be allowed to read the artifact and address the recipient. The recipient gains read access (no transfer of ownership)."
+    )]
+    async fn artifact_grant(
+        &self,
+        Parameters(args): Parameters<crate::communication::ArtifactGrantArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::communication::handle_artifact_grant(&self.state, args).await {
+            Ok(res) => to_structured_result(&res),
+            Err(e) => Err(communication_err(&e)),
+        }
+    }
+
     /// Path B permission gate. Claude calls this when it encounters a
     /// tool-use that requires operator approval. Only visible (list_tools)
     /// and callable when `[lead] permission_routing = "path_b"` is set.
@@ -1081,6 +1193,8 @@ impl ServerHandler for PitbossHandler {
         let lead = self.state.root.manifest.lead.as_ref();
         let allow_subleads = lead.is_some_and(|l| l.allow_subleads);
         let path_b = lead.is_some_and(|l| l.permission_routing == PermissionRouting::PathB);
+        let communication_enabled = self.state.root.manifest.communication.mode
+            != crate::manifest::schema::CommunicationMode::Disabled;
 
         let tools: Vec<rmcp::model::Tool> = self
             .tool_router
@@ -1088,6 +1202,7 @@ impl ServerHandler for PitbossHandler {
             .into_iter()
             .filter(|t| allow_subleads || !depth::is_root_only_tool(&t.name))
             .filter(|t| path_b || t.name != "permission_prompt")
+            .filter(|t| communication_enabled || !is_communication_tool(&t.name))
             .collect();
 
         Ok(rmcp::model::ListToolsResult::with_all_items(tools))
@@ -1182,6 +1297,42 @@ fn to_structured_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult
     let v = serde_json::to_value(value)
         .map_err(|e| ErrorData::internal_error(format!("serialize: {e}"), None))?;
     Ok(CallToolResult::structured(v))
+}
+
+fn communication_err(e: &crate::communication::CommunicationError) -> ErrorData {
+    use crate::communication::CommunicationError;
+    let (code, msg) = match e {
+        CommunicationError::Disabled => ("communication_disabled", e.to_string()),
+        CommunicationError::MissingIdentity => ("unauthenticated", e.to_string()),
+        CommunicationError::UnknownActor(_) => ("unknown_actor", e.to_string()),
+        CommunicationError::NotFound(_) => ("not_found", e.to_string()),
+        CommunicationError::Forbidden(_) => ("forbidden", e.to_string()),
+        CommunicationError::MessageTooLarge { .. } => ("message_too_large", e.to_string()),
+        CommunicationError::ArtifactTooLarge { .. } => ("artifact_too_large", e.to_string()),
+        CommunicationError::ArtifactCountExceeded { .. } => {
+            ("artifact_count_exceeded", e.to_string())
+        }
+        CommunicationError::InvalidBase64(_) => ("invalid_base64", e.to_string()),
+        CommunicationError::Storage(_) => ("storage_error", e.to_string()),
+        CommunicationError::InvalidScope(_) => ("invalid_scope", e.to_string()),
+    };
+    ErrorData::invalid_request(msg, Some(serde_json::json!({"code": code})))
+}
+
+/// Predicate matching the 8 communication tool names. Used by
+/// `list_tools` to suppress them when `[communication].mode = "disabled"`.
+fn is_communication_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "message_send"
+            | "message_list"
+            | "message_read"
+            | "message_ack"
+            | "artifact_put"
+            | "artifact_list"
+            | "artifact_read"
+            | "artifact_grant"
+    )
 }
 
 fn shared_store_err(e: &crate::shared_store::StoreError) -> ErrorData {
@@ -1450,6 +1601,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -1535,6 +1687,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -1614,6 +1767,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -1760,6 +1914,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

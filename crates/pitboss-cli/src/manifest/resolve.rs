@@ -7,8 +7,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
-    ContainerConfig, Defaults, Effort, Lead, Manifest, SubleadDefaults, Task, Template,
-    WorktreeCleanup,
+    CommunicationConfig, ContainerConfig, Defaults, Effort, Lead, Manifest, SubleadDefaults, Task,
+    Template, WorktreeCleanup,
 };
 
 /// Fully resolved task ready for dispatch.
@@ -159,6 +159,11 @@ pub struct ResolvedManifest {
     pub container: Option<ContainerConfig>,
     #[serde(default)]
     pub mcp_servers: Vec<crate::manifest::schema::McpServerSpec>,
+    /// Pitboss-owned mailbox + artifact policy. `Default` (mode = Disabled)
+    /// when the manifest omits `[communication]`. Pre-v0.10 `resolved.json`
+    /// snapshots without this field also resolve to the disabled default.
+    #[serde(default)]
+    pub communication: CommunicationConfig,
     /// Resolved `[lifecycle]` section. `None` when the manifest omits it
     /// entirely (the common case — pitboss's default semantics apply: dies
     /// with parent, no out-of-band lifecycle notify expected).
@@ -254,6 +259,7 @@ pub fn resolve(
         approval_rules,
         container: manifest.container,
         mcp_servers: manifest.mcp_servers,
+        communication: manifest.communication,
         lifecycle: manifest.lifecycle,
     })
 }

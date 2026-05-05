@@ -79,6 +79,7 @@ fn mk_state(
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(run_dir.to_path_buf()));
@@ -382,6 +383,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -639,6 +641,7 @@ async fn e2e_lead_reprompts_running_worker() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -835,6 +838,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -1137,6 +1141,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

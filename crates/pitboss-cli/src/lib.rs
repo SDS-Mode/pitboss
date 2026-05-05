@@ -8,6 +8,7 @@ pub mod agents_md;
 pub mod analyze;
 pub mod attach;
 pub mod cli;
+pub mod communication;
 pub mod control;
 pub mod diff;
 pub mod dispatch;
