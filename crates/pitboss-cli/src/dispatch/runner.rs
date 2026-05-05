@@ -777,12 +777,15 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     args
 }
 
-/// MCP tool names the lead needs permission to call. Pre-approved via the
-/// lead's `--allowedTools` flag so claude never stalls at the interactive
-/// permission prompt (which can't be answered in `-p` non-interactive mode).
-/// Format: `mcp__<server-name>__<tool>`, where `pitboss` is the server name
-/// we emit in `write_mcp_config`.
-pub const PITBOSS_MCP_TOOLS: &[&str] = &[
+/// MCP tool names the lead needs permission to call when communication is
+/// disabled. Pre-approved via the lead's `--allowedTools` flag so claude
+/// never stalls at the interactive permission prompt (which can't be
+/// answered in `-p` non-interactive mode). Format: `mcp__<server>__<tool>`,
+/// where `pitboss` is the server name emitted by `write_mcp_config`.
+///
+/// Use [`pitboss_mcp_tools`] at spawn sites so the comm tools are appended
+/// only when `[communication].mode != "disabled"`.
+pub const PITBOSS_MCP_TOOLS_BASE: &[&str] = &[
     // Worker orchestration tools (v0.3+).
     "mcp__pitboss__spawn_worker",
     "mcp__pitboss__worker_status",
@@ -807,12 +810,19 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
-    // Mailbox/artifact communication tools (v0.10+). Payloads move
-    // through the Pitboss-owned message/artifact stores rather than KV.
-    // Server-side `list_tools` filter hides these when
-    // `[communication].mode = "disabled"` (the default), and every
-    // handler returns `CommunicationError::Disabled` as a back-stop —
-    // listing them here is cosmetic for that mode.
+    // Run-global leases (v0.6+). For cross-sub-tree resource coordination
+    // (e.g., serializing access to an operator-facing filesystem dir).
+    "mcp__pitboss__run_lease_acquire",
+    "mcp__pitboss__run_lease_release",
+];
+
+/// Mailbox + artifact MCP tools (v0.10+). Listed separately from the
+/// per-actor base allowlists so they can be conditionally appended only
+/// when `[communication].mode != "disabled"`. Server-side `list_tools`
+/// filter and per-handler `ensure_enabled` check provide the runtime
+/// gate; composing these into the spawn argv keeps `pitboss dispatch
+/// --dry-run` honest.
+pub const COMMUNICATION_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__message_send",
     "mcp__pitboss__message_list",
     "mcp__pitboss__message_read",
@@ -821,10 +831,6 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__artifact_list",
     "mcp__pitboss__artifact_read",
     "mcp__pitboss__artifact_grant",
-    // Run-global leases (v0.6+). For cross-sub-tree resource coordination
-    // (e.g., serializing access to an operator-facing filesystem dir).
-    "mcp__pitboss__run_lease_acquire",
-    "mcp__pitboss__run_lease_release",
 ];
 
 /// Sub-lead tools: all root-lead tools EXCEPT root-only entries listed in
@@ -836,12 +842,15 @@ pub const PITBOSS_MCP_TOOLS: &[&str] = &[
 /// both routed through `dispatch::depth`. This CLI allowlist provides
 /// defense-in-depth at the subprocess `--allowedTools` flag level.
 ///
+/// Use [`sublead_mcp_tools`] at spawn sites so [`COMMUNICATION_MCP_TOOLS`]
+/// are appended only when `[communication].mode != "disabled"`.
+///
 /// **If you add a new root-only tool**, append its bare name to
 /// [`crate::dispatch::depth::ROOT_ONLY_TOOLS`] and ensure it is NOT in this
 /// list. The regression test
 /// `dispatch::depth::tests::sublead_allowlist_excludes_all_root_only_tools`
 /// keeps the two in sync.
-pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
+pub const SUBLEAD_MCP_TOOLS_BASE: &[&str] = &[
     // Worker orchestration tools (v0.3+).
     "mcp__pitboss__spawn_worker",
     "mcp__pitboss__worker_status",
@@ -863,22 +872,36 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
-    // Mailbox/artifact communication tools (v0.10+). Same opt-in
-    // semantics as PITBOSS_MCP_TOOLS — gated server-side by
-    // `[communication].mode`.
-    "mcp__pitboss__message_send",
-    "mcp__pitboss__message_list",
-    "mcp__pitboss__message_read",
-    "mcp__pitboss__message_ack",
-    "mcp__pitboss__artifact_put",
-    "mcp__pitboss__artifact_list",
-    "mcp__pitboss__artifact_read",
-    "mcp__pitboss__artifact_grant",
     // Run-global leases (v0.6+) for cross-sub-tree resource coordination.
     "mcp__pitboss__run_lease_acquire",
     "mcp__pitboss__run_lease_release",
     // NOTE: spawn_sublead is intentionally NOT included (depth-2 cap).
 ];
+
+/// Compose the lead's `--allowedTools` set: the base orchestration +
+/// shared-store tools, with [`COMMUNICATION_MCP_TOOLS`] appended when
+/// `mode` enables the comm surface. Mirrors the const + helper split
+/// used by `dispatch::depth::is_root_only_tool`.
+pub fn pitboss_mcp_tools(mode: crate::manifest::schema::CommunicationMode) -> Vec<&'static str> {
+    use crate::manifest::schema::CommunicationMode;
+    let mut out: Vec<&'static str> = PITBOSS_MCP_TOOLS_BASE.to_vec();
+    if mode != CommunicationMode::Disabled {
+        out.extend(COMMUNICATION_MCP_TOOLS.iter().copied());
+    }
+    out
+}
+
+/// Compose a sub-lead's `--allowedTools` set. Same shape as
+/// [`pitboss_mcp_tools`] but uses [`SUBLEAD_MCP_TOOLS_BASE`] (no
+/// `spawn_sublead`).
+pub fn sublead_mcp_tools(mode: crate::manifest::schema::CommunicationMode) -> Vec<&'static str> {
+    use crate::manifest::schema::CommunicationMode;
+    let mut out: Vec<&'static str> = SUBLEAD_MCP_TOOLS_BASE.to_vec();
+    if mode != CommunicationMode::Disabled {
+        out.extend(COMMUNICATION_MCP_TOOLS.iter().copied());
+    }
+    out
+}
 
 /// Builds the argv for spawning the lead subprocess, including the
 /// `--mcp-config` pointer to the generated MCP server config file.
@@ -906,6 +929,7 @@ pub const SUBLEAD_MCP_TOOLS: &[&str] = &[
 pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
     mcp_config: &std::path::Path,
+    communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
     use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
@@ -925,8 +949,8 @@ pub fn lead_spawn_args(
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
     let mut allowed: Vec<String> = lead.tools.clone();
-    for t in PITBOSS_MCP_TOOLS {
-        allowed.push((*t).to_string());
+    for t in pitboss_mcp_tools(communication_mode) {
+        allowed.push(t.to_string());
     }
     // v0.6: when allow_subleads=true, add the depth-2 tools to the allowlist
     // so claude's --allowedTools gate doesn't block them. The MCP server's
@@ -966,6 +990,7 @@ pub fn lead_resume_spawn_args(
     mcp_config: &std::path::Path,
     session_id: &str,
     new_prompt: &str,
+    communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
     use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
@@ -980,8 +1005,8 @@ pub fn lead_resume_spawn_args(
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
     let mut allowed: Vec<String> = lead.tools.clone();
-    for t in PITBOSS_MCP_TOOLS {
-        allowed.push((*t).to_string());
+    for t in pitboss_mcp_tools(communication_mode) {
+        allowed.push(t.to_string());
     }
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
@@ -1026,6 +1051,7 @@ pub fn lead_resume_spawn_args(
 ///   De-duplicated to keep the resulting `--allowedTools` flag tidy.
 /// - `permission_routing`: controls whether `--dangerously-skip-permissions`
 ///   is included and whether `permission_prompt` is pre-allowed.
+#[allow(clippy::too_many_arguments)]
 pub fn sublead_spawn_args(
     _sublead_id: &str,
     prompt: &str,
@@ -1034,6 +1060,7 @@ pub fn sublead_spawn_args(
     resume_session_id: Option<&str>,
     tools_override: Option<&[String]>,
     permission_routing: crate::manifest::schema::PermissionRouting,
+    communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
     use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
@@ -1055,8 +1082,8 @@ pub fn sublead_spawn_args(
         Some(ts) => ts.to_vec(),
         None => Vec::new(),
     };
-    for t in SUBLEAD_MCP_TOOLS {
-        allowed.push((*t).to_string());
+    for t in sublead_mcp_tools(communication_mode) {
+        allowed.push(t.to_string());
     }
     if permission_routing == PermissionRouting::PathB {
         allowed.push("mcp__pitboss__permission_prompt".into());
@@ -1769,16 +1796,17 @@ mod tests {
             sublead_defaults: None,
         };
         let cfg = PathBuf::from("/tmp/cfg.json");
+        let cm = crate::manifest::schema::CommunicationMode::Disabled;
         let cases: Vec<(&str, Vec<String>)> = vec![
             ("flat task", spawn_args(&task)),
-            ("lead", lead_spawn_args(&lead, &cfg)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm)),
             (
                 "lead_resume",
-                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt"),
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm),
             ),
             (
                 "sublead",
-                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None, Default::default()),
+                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None, Default::default(), cm),
             ),
             (
                 "sublead_resume",
@@ -1790,6 +1818,7 @@ mod tests {
                     Some("sess"),
                     None,
                     Default::default(),
+                    cm,
                 ),
             ),
         ];
@@ -1832,7 +1861,11 @@ mod tests {
             max_total_workers: None,
             sublead_defaults: None,
         };
-        let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
+        let args = lead_spawn_args(
+            &lead,
+            &PathBuf::from("/tmp/cfg.json"),
+            crate::manifest::schema::CommunicationMode::Disabled,
+        );
         assert!(args.iter().any(|a| a == "--verbose"));
         assert!(args.iter().any(|a| a == "--mcp-config"));
         assert!(args.iter().any(|a| a == "/tmp/cfg.json"));
@@ -1863,16 +1896,66 @@ mod tests {
             max_total_workers: None,
             sublead_defaults: None,
         };
-        let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
+        let args = lead_spawn_args(
+            &lead,
+            &PathBuf::from("/tmp/cfg.json"),
+            crate::manifest::schema::CommunicationMode::Disabled,
+        );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
         // User-declared tool preserved
         assert!(list.contains("Read"), "expected user tool, got {list}");
-        // All six pitboss MCP tools present under the `mcp__pitboss__` prefix.
-        for t in PITBOSS_MCP_TOOLS {
+        // All base pitboss MCP tools present under the `mcp__pitboss__` prefix.
+        for t in PITBOSS_MCP_TOOLS_BASE {
             assert!(
                 list.contains(t),
                 "expected {t} in allowedTools, got: {list}"
+            );
+        }
+        // Communication tools must NOT be present when mode=disabled.
+        for t in COMMUNICATION_MCP_TOOLS {
+            assert!(
+                !list.contains(t),
+                "communication tool {t} must NOT be in allowedTools when mode=disabled, \
+                 got: {list}"
+            );
+        }
+    }
+
+    #[test]
+    fn lead_spawn_args_includes_comm_tools_when_mode_parent_child() {
+        use crate::manifest::resolve::ResolvedLead;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            permission_routing: Default::default(),
+            allow_subleads: false,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_total_workers: None,
+            sublead_defaults: None,
+        };
+        let args = lead_spawn_args(
+            &lead,
+            &PathBuf::from("/tmp/cfg.json"),
+            crate::manifest::schema::CommunicationMode::ParentChild,
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        for t in COMMUNICATION_MCP_TOOLS {
+            assert!(
+                list.contains(t),
+                "expected comm tool {t} in allowedTools (mode=parent_child), got: {list}"
             );
         }
     }
@@ -1905,7 +1988,11 @@ mod tests {
             max_total_workers: None,
             sublead_defaults: None,
         };
-        let args = lead_spawn_args(&lead, &PathBuf::from("/tmp/cfg.json"));
+        let args = lead_spawn_args(
+            &lead,
+            &PathBuf::from("/tmp/cfg.json"),
+            crate::manifest::schema::CommunicationMode::Disabled,
+        );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
         for t in [
@@ -1944,6 +2031,7 @@ mod tests {
             None,
             None,
             Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1970,6 +2058,7 @@ mod tests {
             None,
             None,
             Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -1986,6 +2075,52 @@ mod tests {
     }
 
     #[test]
+    fn sublead_spawn_args_excludes_comm_tools_when_mode_disabled() {
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            None,
+            Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        for t in COMMUNICATION_MCP_TOOLS {
+            assert!(
+                !list.contains(t),
+                "comm tool {t} must NOT be in sublead allowedTools when mode=disabled, \
+                 got: {list}"
+            );
+        }
+    }
+
+    #[test]
+    fn sublead_spawn_args_includes_comm_tools_when_mode_parent_child() {
+        let args = sublead_spawn_args(
+            "test-sublead-id",
+            "do some work",
+            "claude-opus-4-1",
+            &PathBuf::from("/tmp/sublead-cfg.json"),
+            None,
+            None,
+            Default::default(),
+            crate::manifest::schema::CommunicationMode::ParentChild,
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let list = &args[idx + 1];
+        for t in COMMUNICATION_MCP_TOOLS {
+            assert!(
+                list.contains(t),
+                "expected comm tool {t} in sublead allowedTools (mode=parent_child), \
+                 got: {list}"
+            );
+        }
+    }
+
+    #[test]
     fn sublead_spawn_args_includes_spawn_worker() {
         let args = sublead_spawn_args(
             "test-sublead-id",
@@ -1995,6 +2130,7 @@ mod tests {
             None,
             None,
             Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2015,6 +2151,7 @@ mod tests {
             Some("resume-session-123"),
             None,
             Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
         );
         // Verify the basic arg structure is correct
         assert!(args.contains(&"--output-format".to_string()));
@@ -2041,6 +2178,7 @@ mod tests {
             None,
             Some(&custom),
             Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2067,6 +2205,7 @@ mod tests {
             None,
             Some(&custom),
             Default::default(),
+            crate::manifest::schema::CommunicationMode::Disabled,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2099,7 +2238,11 @@ mod tests {
             sublead_defaults: None,
         };
         let cfg = PathBuf::from("/tmp/cfg.json");
-        let args = lead_spawn_args(&lead, &cfg);
+        let args = lead_spawn_args(
+            &lead,
+            &cfg,
+            crate::manifest::schema::CommunicationMode::Disabled,
+        );
         assert!(
             !args.iter().any(|a| a == "--dangerously-skip-permissions"),
             "Path B lead must NOT have --dangerously-skip-permissions: {args:?}"

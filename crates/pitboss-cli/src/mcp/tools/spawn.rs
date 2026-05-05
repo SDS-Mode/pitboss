@@ -504,6 +504,7 @@ async fn run_worker(
         &std::collections::HashMap::new(),
         worker_routing,
     );
+    let worker_communication_mode = state.root.manifest.communication.mode;
     let cmd = SpawnCmd {
         program: layer.claude_binary.clone(),
         args: worker_spawn_args(
@@ -512,6 +513,7 @@ async fn run_worker(
             &tools,
             mcp_config_arg.as_deref(),
             worker_routing,
+            worker_communication_mode,
         ),
         cwd: cwd.clone(),
         env: worker_env,
@@ -728,12 +730,18 @@ async fn estimate_new_worker_cost_for_layer(layer: &Arc<LayerState>, intended_mo
     costs[costs.len() / 2]
 }
 
-/// MCP tool names workers need permission to call. Narrower than the lead's
-/// `PITBOSS_MCP_TOOLS` — workers only get the shared-store surface, never
-/// the orchestration tools (spawn_worker / cancel_worker / request_approval
-/// / etc.). Pre-approved via `--allowedTools` so claude doesn't stall at
-/// the interactive permission prompt.
-pub const PITBOSS_WORKER_MCP_TOOLS: &[&str] = &[
+/// MCP tool names workers need permission to call when communication is
+/// disabled. Narrower than the lead's [`PITBOSS_MCP_TOOLS_BASE`] — workers
+/// only get the shared-store surface, never the orchestration tools
+/// (spawn_worker / cancel_worker / request_approval / etc.). Pre-approved
+/// via `--allowedTools` so claude doesn't stall at the interactive
+/// permission prompt.
+///
+/// Use [`pitboss_worker_mcp_tools`] at spawn sites so the comm tools are
+/// appended only when `[communication].mode != "disabled"`.
+///
+/// [`PITBOSS_MCP_TOOLS_BASE`]: crate::dispatch::runner::PITBOSS_MCP_TOOLS_BASE
+pub const PITBOSS_WORKER_MCP_TOOLS_BASE: &[&str] = &[
     "mcp__pitboss__kv_get",
     "mcp__pitboss__kv_set",
     "mcp__pitboss__kv_cas",
@@ -741,20 +749,24 @@ pub const PITBOSS_WORKER_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
-    // Mailbox/artifact communication tools (v0.10+). Same opt-in
-    // semantics as the lead/sublead allowlists in `dispatch::runner` —
-    // server-side `list_tools` filter hides them when
-    // `[communication].mode = "disabled"` (the default), and every
-    // handler returns `CommunicationError::Disabled` as a back-stop.
-    "mcp__pitboss__message_send",
-    "mcp__pitboss__message_list",
-    "mcp__pitboss__message_read",
-    "mcp__pitboss__message_ack",
-    "mcp__pitboss__artifact_put",
-    "mcp__pitboss__artifact_list",
-    "mcp__pitboss__artifact_read",
-    "mcp__pitboss__artifact_grant",
 ];
+
+/// Compose a worker's `--allowedTools` set. Returns the base shared-store
+/// tools, plus [`COMMUNICATION_MCP_TOOLS`] when `mode` enables the comm
+/// surface.
+///
+/// [`COMMUNICATION_MCP_TOOLS`]: crate::dispatch::runner::COMMUNICATION_MCP_TOOLS
+pub fn pitboss_worker_mcp_tools(
+    mode: crate::manifest::schema::CommunicationMode,
+) -> Vec<&'static str> {
+    use crate::dispatch::runner::COMMUNICATION_MCP_TOOLS;
+    use crate::manifest::schema::CommunicationMode;
+    let mut out: Vec<&'static str> = PITBOSS_WORKER_MCP_TOOLS_BASE.to_vec();
+    if mode != CommunicationMode::Disabled {
+        out.extend(COMMUNICATION_MCP_TOOLS.iter().copied());
+    }
+    out
+}
 
 pub(super) fn worker_spawn_args(
     prompt: &str,
@@ -762,6 +774,7 @@ pub(super) fn worker_spawn_args(
     tools: &[String],
     mcp_config: Option<&std::path::Path>,
     permission_routing: crate::manifest::schema::PermissionRouting,
+    communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
     use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
@@ -781,8 +794,8 @@ pub(super) fn worker_spawn_args(
     // can't be answered in non-interactive mode.
     let mut allowed: Vec<String> = tools.to_vec();
     if mcp_config.is_some() {
-        for t in PITBOSS_WORKER_MCP_TOOLS {
-            allowed.push((*t).to_string());
+        for t in pitboss_worker_mcp_tools(communication_mode) {
+            allowed.push(t.to_string());
         }
         // Path B: pre-allow permission_prompt so workers can route checks.
         if permission_routing == PermissionRouting::PathB {
@@ -929,6 +942,7 @@ pub async fn spawn_resume_worker(
                 .map(|l| l.permission_routing)
         })
         .unwrap_or_default();
+    let resume_communication_mode = state.root.manifest.communication.mode;
     // Build spawn args with --resume.
     let mut spawn_args_v = worker_spawn_args(
         &prompt,
@@ -936,6 +950,7 @@ pub async fn spawn_resume_worker(
         &tools,
         mcp_config_arg.as_deref(),
         resume_routing,
+        resume_communication_mode,
     );
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);

@@ -7,8 +7,9 @@
 //!
 //! 1. **CLI allowlist** — sub-lead claude subprocesses are launched with
 //!    `--allowedTools` deliberately excluding [`ROOT_ONLY_TOOLS`]
-//!    ([`crate::dispatch::runner::SUBLEAD_MCP_TOOLS`] is the static
-//!    allowlist).
+//!    ([`crate::dispatch::runner::SUBLEAD_MCP_TOOLS_BASE`] is the static
+//!    allowlist; [`crate::dispatch::runner::sublead_mcp_tools`] composes
+//!    it with the optional `[communication]` tool surface).
 //! 2. **MCP `list_tools` filter** — root-only tools are hidden from the
 //!    advertised toolset unless the manifest declares `allow_subleads = true`
 //!    AND the connected actor is the root lead.
@@ -23,7 +24,8 @@
 //! `mcp__pitboss__` prefix) to [`ROOT_ONLY_TOOLS`]. The `list_tools` filter
 //! and [`assert_sublead_toolset_excludes_root_only`] (regression-tested) will
 //! pick it up automatically. You also need to remove it from
-//! [`crate::dispatch::runner::SUBLEAD_MCP_TOOLS`] if it was ever added there.
+//! [`crate::dispatch::runner::SUBLEAD_MCP_TOOLS_BASE`] if it was ever added
+//! there.
 
 use thiserror::Error;
 
@@ -118,7 +120,10 @@ pub fn assert_sublead_toolset_excludes_root_only(sublead_allowlist: &[&str]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::runner::{PITBOSS_MCP_TOOLS, SUBLEAD_MCP_TOOLS};
+    use crate::dispatch::runner::{
+        pitboss_mcp_tools, sublead_mcp_tools, PITBOSS_MCP_TOOLS_BASE, SUBLEAD_MCP_TOOLS_BASE,
+    };
+    use crate::manifest::schema::CommunicationMode;
 
     #[test]
     fn is_root_only_tool_recognises_known_entries() {
@@ -127,38 +132,56 @@ mod tests {
         assert!(!is_root_only_tool("kv_get"));
     }
 
-    /// Regression: the static `SUBLEAD_MCP_TOOLS` allowlist (used to
-    /// construct sub-lead claude subprocess `--allowedTools`) must never
-    /// contain any tool that `ROOT_ONLY_TOOLS` declares as root-only. If
-    /// this fails, a sub-lead would be able to invoke a depth-2-violating
-    /// tool from the CLI side even though the MCP server's `list_tools`
-    /// filter would still hide it (defense-in-depth would degrade to
-    /// single-line-of-defense).
+    /// Regression: the sub-lead allowlist (used to construct sub-lead
+    /// claude subprocess `--allowedTools`) must never contain any tool that
+    /// `ROOT_ONLY_TOOLS` declares as root-only — for ANY communication
+    /// mode. If this fails, a sub-lead would be able to invoke a depth-2-
+    /// violating tool from the CLI side even though the MCP server's
+    /// `list_tools` filter would still hide it (defense-in-depth would
+    /// degrade to single-line-of-defense).
     #[test]
     fn sublead_allowlist_excludes_all_root_only_tools() {
-        let leaks = assert_sublead_toolset_excludes_root_only(SUBLEAD_MCP_TOOLS);
+        let leaks_base = assert_sublead_toolset_excludes_root_only(SUBLEAD_MCP_TOOLS_BASE);
         assert!(
-            leaks.is_empty(),
-            "SUBLEAD_MCP_TOOLS leaks root-only tools: {leaks:?}. \
-             Either remove them from SUBLEAD_MCP_TOOLS or remove them from \
+            leaks_base.is_empty(),
+            "SUBLEAD_MCP_TOOLS_BASE leaks root-only tools: {leaks_base:?}. \
+             Either remove them from SUBLEAD_MCP_TOOLS_BASE or remove them from \
              ROOT_ONLY_TOOLS — they are mutually exclusive by design."
         );
+        // Same invariant must hold once the comm tools are appended.
+        for mode in [CommunicationMode::Disabled, CommunicationMode::ParentChild] {
+            let composed = sublead_mcp_tools(mode);
+            let leaks = assert_sublead_toolset_excludes_root_only(&composed);
+            assert!(
+                leaks.is_empty(),
+                "sublead_mcp_tools({mode:?}) leaks root-only tools: {leaks:?}"
+            );
+        }
     }
 
-    /// Regression: the root-lead base allowlist (`PITBOSS_MCP_TOOLS`) must
-    /// also exclude root-only tools by default. Spawn paths that need to
-    /// permit them (only the root lead, only when `allow_subleads = true`)
-    /// add them explicitly via `runner::root_lead_allowed_tools` — see
-    /// `runner.rs` argv builders. This keeps the static const honest.
+    /// Regression: the root-lead base allowlist must also exclude
+    /// root-only tools by default. Spawn paths that need to permit them
+    /// (only the root lead, only when `allow_subleads = true`) add them
+    /// explicitly in `runner.rs` argv builders. This keeps the static
+    /// const honest.
     #[test]
     fn pitboss_base_allowlist_excludes_root_only_tools() {
-        let leaks = assert_sublead_toolset_excludes_root_only(PITBOSS_MCP_TOOLS);
+        let leaks = assert_sublead_toolset_excludes_root_only(PITBOSS_MCP_TOOLS_BASE);
         assert!(
             leaks.is_empty(),
-            "PITBOSS_MCP_TOOLS unexpectedly contains root-only tools: {leaks:?}. \
+            "PITBOSS_MCP_TOOLS_BASE unexpectedly contains root-only tools: {leaks:?}. \
              Root-only tools must be added conditionally at the spawn site, not \
              baked into the static base."
         );
+        // Same invariant for the composed lead set across both modes.
+        for mode in [CommunicationMode::Disabled, CommunicationMode::ParentChild] {
+            let composed = pitboss_mcp_tools(mode);
+            let leaks = assert_sublead_toolset_excludes_root_only(&composed);
+            assert!(
+                leaks.is_empty(),
+                "pitboss_mcp_tools({mode:?}) leaks root-only tools: {leaks:?}"
+            );
+        }
     }
 
     #[test]

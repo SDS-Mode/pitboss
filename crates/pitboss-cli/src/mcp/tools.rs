@@ -42,7 +42,10 @@ pub use lifecycle::{
     handle_cancel_worker, handle_continue_worker, handle_list_workers, handle_pause_worker,
     handle_reprompt_worker, handle_worker_status,
 };
-pub use spawn::{handle_spawn_worker, spawn_resume_worker, PITBOSS_WORKER_MCP_TOOLS};
+pub use spawn::{
+    handle_spawn_worker, pitboss_worker_mcp_tools, spawn_resume_worker,
+    PITBOSS_WORKER_MCP_TOOLS_BASE,
+};
 pub use wait::{handle_wait_for_actor, handle_wait_for_any, handle_wait_for_worker};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]

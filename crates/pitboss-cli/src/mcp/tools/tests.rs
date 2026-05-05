@@ -25,6 +25,7 @@ fn worker_spawn_args_has_plugin_isolation_flags() {
         &["Read".to_string()],
         Some(&PathBuf::from("/tmp/cfg.json")),
         Default::default(),
+        crate::manifest::schema::CommunicationMode::Disabled,
     );
     assert!(
         argv.iter().any(|a| a == "--strict-mcp-config"),
@@ -143,11 +144,60 @@ fn worker_spawn_args_passes_dangerously_skip_permissions() {
         &["Read".to_string()],
         Some(&PathBuf::from("/tmp/cfg.json")),
         Default::default(),
+        crate::manifest::schema::CommunicationMode::Disabled,
     );
     assert!(
         argv.iter().any(|a| a == "--dangerously-skip-permissions"),
         "worker_spawn_args missing --dangerously-skip-permissions: {argv:?}"
     );
+}
+
+#[test]
+fn worker_spawn_args_excludes_comm_tools_when_mode_disabled() {
+    use crate::dispatch::runner::COMMUNICATION_MCP_TOOLS;
+    use crate::manifest::schema::CommunicationMode;
+    use std::path::PathBuf;
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string()],
+        Some(&PathBuf::from("/tmp/cfg.json")),
+        Default::default(),
+        CommunicationMode::Disabled,
+    );
+    let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    let list = &argv[idx + 1];
+    for t in COMMUNICATION_MCP_TOOLS {
+        assert!(
+            !list.contains(t),
+            "comm tool {t} must NOT be in worker allowedTools when mode=disabled, \
+             got: {list}"
+        );
+    }
+}
+
+#[test]
+fn worker_spawn_args_includes_comm_tools_when_mode_parent_child() {
+    use crate::dispatch::runner::COMMUNICATION_MCP_TOOLS;
+    use crate::manifest::schema::CommunicationMode;
+    use std::path::PathBuf;
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string()],
+        Some(&PathBuf::from("/tmp/cfg.json")),
+        Default::default(),
+        CommunicationMode::ParentChild,
+    );
+    let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    let list = &argv[idx + 1];
+    for t in COMMUNICATION_MCP_TOOLS {
+        assert!(
+            list.contains(t),
+            "expected comm tool {t} in worker allowedTools (mode=parent_child), \
+             got: {list}"
+        );
+    }
 }
 
 #[tokio::test]
