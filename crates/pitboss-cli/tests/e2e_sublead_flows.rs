@@ -79,6 +79,7 @@ fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
@@ -151,6 +152,7 @@ fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
@@ -797,6 +799,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
 

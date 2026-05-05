@@ -344,6 +344,13 @@ pub struct DispatchState {
     /// Run-global lease registry for cross-sub-tree resource coordination.
     /// Distinct from per-layer /leases/* stored in each layer's KvStore.
     pub run_leases: Arc<RunLeaseRegistry>,
+    /// Run-global mailbox + artifact store for the
+    /// [`crate::communication`] MCP tools. One run-wide plane (not
+    /// per-layer) because parent mediation and `artifact_grant` cross
+    /// sub-tree boundaries. Cheap when `[communication].mode = "disabled"`
+    /// — the store still exists, but every handler returns
+    /// `CommunicationError::Disabled` before touching it.
+    pub communication: Arc<crate::communication::CommunicationStore>,
     /// Most-recent approval response per actor id. Populated by the
     /// approval MCP handlers when they return; consulted at actor-
     /// termination time by `approval_driven_termination` to reclassify
@@ -403,6 +410,8 @@ impl DispatchState {
         notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
         shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
     ) -> Self {
+        let communication_config = manifest.communication.clone();
+        let communication_dir = run_subdir.clone();
         let root = Arc::new(LayerState::new(
             run_id,
             manifest,
@@ -426,6 +435,10 @@ impl DispatchState {
             terminated_sublead_layers: RwLock::new(Vec::new()),
             worker_layer_index: RwLock::new(HashMap::new()),
             run_leases: Arc::new(RunLeaseRegistry::new()),
+            communication: Arc::new(crate::communication::CommunicationStore::new(
+                communication_config,
+                communication_dir,
+            )),
             last_approval_response: RwLock::new(HashMap::new()),
             api_health: Arc::new(crate::dispatch::failure_detection::ApiHealth::new()),
             actor_tokens: RwLock::new(HashMap::new()),
@@ -589,6 +602,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

@@ -369,6 +369,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
@@ -460,6 +461,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =

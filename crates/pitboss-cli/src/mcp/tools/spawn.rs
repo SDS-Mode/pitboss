@@ -741,6 +741,19 @@ pub const PITBOSS_WORKER_MCP_TOOLS: &[&str] = &[
     "mcp__pitboss__kv_wait",
     "mcp__pitboss__lease_acquire",
     "mcp__pitboss__lease_release",
+    // Mailbox/artifact communication tools (v0.10+). Same opt-in
+    // semantics as the lead/sublead allowlists in `dispatch::runner` —
+    // server-side `list_tools` filter hides them when
+    // `[communication].mode = "disabled"` (the default), and every
+    // handler returns `CommunicationError::Disabled` as a back-stop.
+    "mcp__pitboss__message_send",
+    "mcp__pitboss__message_list",
+    "mcp__pitboss__message_read",
+    "mcp__pitboss__message_ack",
+    "mcp__pitboss__artifact_put",
+    "mcp__pitboss__artifact_list",
+    "mcp__pitboss__artifact_read",
+    "mcp__pitboss__artifact_grant",
 ];
 
 pub(super) fn worker_spawn_args(

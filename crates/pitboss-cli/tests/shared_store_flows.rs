@@ -464,6 +464,7 @@ async fn lease_released_when_mcp_connection_drops() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store_trait: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().into()));
@@ -606,6 +607,7 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
+        communication: Default::default(),
         lifecycle: None,
     };
     let store_trait: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().into()));

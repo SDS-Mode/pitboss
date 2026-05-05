@@ -26,6 +26,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     }
     validate_lifecycle(resolved)?;
     validate_container(resolved)?;
+    validate_communication(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -37,6 +38,23 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         }
         validate_branch_conflicts(resolved)?;
         validate_ranges(resolved)?;
+    }
+    Ok(())
+}
+
+/// Reject zero ceilings on `[communication]`. Zero would silently disable
+/// the corresponding cap, which is a footgun (a max-bytes value of 0
+/// would reject every send). Operators wanting to disable the surface
+/// entirely set `mode = "disabled"`, not zero ceilings.
+fn validate_communication(r: &ResolvedManifest) -> Result<()> {
+    if r.communication.max_message_bytes == 0 {
+        bail!("[communication].max_message_bytes must be > 0");
+    }
+    if r.communication.max_artifact_bytes == 0 {
+        bail!("[communication].max_artifact_bytes must be > 0");
+    }
+    if r.communication.max_artifacts_per_actor == 0 {
+        bail!("[communication].max_artifacts_per_actor must be > 0");
     }
     Ok(())
 }
@@ -565,6 +583,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         }
     }
@@ -594,6 +613,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         f(&mut m);
@@ -679,6 +699,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let err = validate(&r).unwrap_err().to_string();
@@ -711,6 +732,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         assert!(validate(&r).is_err());
@@ -739,6 +761,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         assert!(validate(&r).is_err());
@@ -772,6 +795,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         (d, r)
@@ -886,6 +910,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let err = validate(&r).unwrap_err().to_string();
@@ -939,6 +964,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         let err = validate(&r).unwrap_err().to_string();
@@ -973,6 +999,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         assert!(validate(&r).is_err());
@@ -1178,6 +1205,7 @@ mod tests {
             approval_rules: vec![],
             container: None,
             mcp_servers: vec![],
+            communication: Default::default(),
             lifecycle: None,
         };
         // Sanity: with skip_dir_check=false the validator rejects (the

@@ -21,6 +21,7 @@
 //! | `[container]`             | `ContainerConfig`     | no       | Enables `pitboss container-dispatch`                  |
 //! | `[[container.mount]]`     | `MountSpec`           | no       | Bind mounts (when `[container]` set)                  |
 //! | `[[mcp_server]]`          | `McpServerSpec`       | no       | External MCP servers injected into all actors        |
+//! | `[communication]`         | `CommunicationConfig` | no       | Mailbox + artifact MCP tools (opt-in, default off)   |
 //! | `[[notification]]`        | `NotificationConfig`  | no       | Notification sinks                                   |
 //! | `[[approval_policy]]`     | `ApprovalRuleSpec`    | no       | Declarative approval rules (matched in order)        |
 //! | `[[template]]`            | `Template`            | no       | Prompt templates referenced by `[[task]]`            |
@@ -205,6 +206,79 @@ pub struct McpServerSpec {
     pub env: HashMap<String, String>,
 }
 
+/// Communication policy mode for the Pitboss-owned mailbox + artifact MCP
+/// tools. Default is [`CommunicationMode::Disabled`] — operators opt in by
+/// declaring `[communication] mode = "parent_child"`. Conservative default
+/// so existing manifests upgrading to v0.10 do not silently grow the worker
+/// tool surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunicationMode {
+    /// `message_*` and `artifact_*` MCP tools are hidden from `list_tools`
+    /// and rejected at the handler with `CommunicationError::Disabled`. The
+    /// shared-store KV surface remains available for coordination.
+    #[default]
+    Disabled,
+    /// Parent-child actor transfer: root reads everything, sub-leads read
+    /// their own sub-tree, workers may message only their direct parent.
+    /// Sibling-worker artifact handoff requires the parent (or root) to
+    /// call `artifact_grant`.
+    ParentChild,
+}
+
+/// Default ceilings for [`CommunicationConfig`].
+pub const DEFAULT_MAX_MESSAGE_BYTES: u64 = 8 * 1024;
+pub const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_ARTIFACTS_PER_ACTOR: u32 = 128;
+
+/// Pitboss-owned directional communication controls for the mailbox and
+/// artifact MCP tools. The public surface is deliberately coarse; the
+/// internal authorization checks can later accept explicit
+/// `[[communication.rule]]` entries without replacing the runtime store.
+///
+/// **Default**: [`CommunicationMode::Disabled`] — opt in via
+/// `[communication] mode = "parent_child"`.
+#[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
+#[serde(default, deny_unknown_fields)]
+pub struct CommunicationConfig {
+    #[field(
+        label = "Mode",
+        help = "Actor communication policy mode. \"disabled\" hides the message_* and artifact_* tools (conservative default). \"parent_child\" enables them with parent/sublead/worker authz.",
+        enum_values = ["disabled", "parent_child"],
+        required = false
+    )]
+    pub mode: CommunicationMode,
+    #[field(
+        label = "Max message bytes",
+        help = "Maximum UTF-8 body size accepted by message_send.",
+        required = false
+    )]
+    pub max_message_bytes: u64,
+    #[field(
+        label = "Max artifact bytes",
+        help = "Maximum decoded artifact payload size accepted by artifact_put.",
+        required = false
+    )]
+    pub max_artifact_bytes: u64,
+    #[field(
+        label = "Max artifacts per actor",
+        help = "Maximum artifacts one actor may publish in a single run.",
+        required = false
+    )]
+    pub max_artifacts_per_actor: u32,
+}
+
+impl Default for CommunicationConfig {
+    fn default() -> Self {
+        Self {
+            mode: CommunicationMode::default(),
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
+            max_artifacts_per_actor: DEFAULT_MAX_ARTIFACTS_PER_ACTOR,
+        }
+    }
+}
+
 /// Top-level manifest. One canonical shape: either flat-mode (`[[task]]`) or
 /// hierarchical-mode (`[lead]`), mutually exclusive.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -240,6 +314,13 @@ pub struct Manifest {
     /// External MCP servers injected into all actor configs.
     #[serde(default, rename = "mcp_server")]
     pub mcp_servers: Vec<McpServerSpec>,
+    /// Optional `[communication]` section: opt in to the Pitboss-owned
+    /// mailbox + artifact MCP tools. Default
+    /// [`CommunicationMode::Disabled`] hides the tools and rejects calls
+    /// at the handler — coordination falls back to the existing
+    /// shared-store KV surface.
+    #[serde(default)]
+    pub communication: CommunicationConfig,
     /// Optional `[lifecycle]` section: declares run-survival semantics and
     /// orchestrator notification expectations. See [`Lifecycle`] for the
     /// coupling rules enforced at validate time.

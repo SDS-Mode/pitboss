@@ -104,6 +104,12 @@ command = "<value>"
 args = []
 env = { EXAMPLE_KEY = "value" }
 
+[communication]
+mode = "disabled"
+max_message_bytes = 0
+max_artifact_bytes = 0
+max_artifacts_per_actor = 0
+
 [[template]]
 id = "<value>"
 prompt = """
