@@ -102,10 +102,20 @@ pub async fn run_hierarchical(
         .clone();
 
     if dry_run {
+        // Use a placeholder mcp-config path — the real path is run-id
+        // dependent and dry-run doesn't allocate a run dir. The argv
+        // structure (allowedTools composition included) is faithful.
+        let placeholder_cfg = PathBuf::from("<run-subdir>/mcp-config.json");
+        let args = crate::dispatch::runner::lead_spawn_args(
+            &lead,
+            &placeholder_cfg,
+            resolved.communication.mode,
+        );
         println!("DRY-RUN lead: {}", lead.id);
         println!(
-            "DRY-RUN command: {} --verbose (mcp socket TBD)",
-            claude_binary.display()
+            "DRY-RUN command: {} {}",
+            claude_binary.display(),
+            args.join(" ")
         );
         return Ok(0);
     }
@@ -306,9 +316,10 @@ pub async fn run_hierarchical(
     //     vs. `sublead_spawn_args`).
     let mut lead_env = lead.env.clone();
     crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
+    let communication_mode = resolved.communication.mode;
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
-        args: crate::dispatch::runner::lead_spawn_args(&lead, &mcp_config_path),
+        args: crate::dispatch::runner::lead_spawn_args(&lead, &mcp_config_path, communication_mode),
         cwd: lead_cwd.clone(),
         env: lead_env,
     };
@@ -336,6 +347,7 @@ pub async fn run_hierarchical(
                     &mcp_config_path,
                     sid,
                     new_prompt,
+                    communication_mode,
                 ),
                 cwd: lead_cwd.clone(),
                 env: resume_env,
@@ -985,8 +997,9 @@ pub async fn write_worker_mcp_config(
     Ok(())
 }
 
-/// Emit a sublead-scoped `--mcp-config` file. Lists only the SUBLEAD_MCP_TOOLS
-/// (no spawn_sublead, no wait_for_sublead — depth-2 cap enforced).
+/// Emit a sublead-scoped `--mcp-config` file. Lists only the sub-lead
+/// tool surface (no `spawn_sublead`, no `wait_for_sublead` — depth-2 cap
+/// enforced) plus the optional `[communication]` tools when `mode != "disabled"`.
 /// The bridge command includes the sublead's actor_id + actor_role=sublead
 /// so the dispatcher can identify the caller and enforce namespace authz.
 ///
@@ -998,8 +1011,9 @@ pub async fn build_sublead_mcp_config(
     run_subdir: &std::path::Path,
     token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
+    communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Result<PathBuf> {
-    use crate::dispatch::runner::SUBLEAD_MCP_TOOLS;
+    use crate::dispatch::runner::sublead_mcp_tools;
 
     let pitboss_exe =
         std::env::current_exe().context("resolve current exe for mcp-bridge subcommand")?;
@@ -1013,7 +1027,7 @@ pub async fn build_sublead_mcp_config(
     );
     let cfg = serde_json::json!({
         "mcpServers": mcp_servers,
-        "allowedTools": SUBLEAD_MCP_TOOLS.iter().collect::<Vec<_>>()
+        "allowedTools": sublead_mcp_tools(communication_mode)
     });
     let bytes = serde_json::to_vec_pretty(&cfg)?;
 

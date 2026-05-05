@@ -485,12 +485,14 @@ async fn spawn_sublead_session(
     // into every tools/call's `_meta.token`, and the server uses the
     // bound identity for authz. Closes #145 for the sublead path.
     let sublead_token = state.mint_token(&sublead_id, "sublead").await;
+    let communication_mode = state.root.manifest.communication.mode;
     let mcp_config_path = build_sublead_mcp_config(
         &sublead_id,
         &socket_path,
         &state.root.run_subdir,
         Some(&sublead_token),
         &state.root.manifest.mcp_servers,
+        communication_mode,
     )
     .await
     .context("build sublead mcp-config")?;
@@ -517,6 +519,7 @@ async fn spawn_sublead_session(
         resume_session_id.as_deref(),
         tools_for_args,
         spawn_routing,
+        communication_mode,
     );
 
     // 4. Task log directory (mirrors workers' layout for consistency).
@@ -646,6 +649,7 @@ async fn spawn_sublead_session(
                     .as_ref()
                     .map(|l| l.permission_routing)
                     .unwrap_or_default();
+                let resume_communication_mode = state_bg.root.manifest.communication.mode;
                 let resume_args = sublead_spawn_args(
                     &sublead_id_bg,
                     new_prompt,
@@ -654,6 +658,7 @@ async fn spawn_sublead_session(
                     Some(sid),
                     tools_for_resume,
                     resume_routing,
+                    resume_communication_mode,
                 );
                 // Env precedence: lead → operator → pitboss defaults
                 // (see compose_sublead_env). Same cwd rationale as the
