@@ -1,0 +1,17 @@
+[package]
+name         = "comm-activity-live-check"
+version      = "0.0.0"
+edition      = "2021"
+rust-version = "1.82"
+publish      = false
+
+[[bin]]
+name = "comm-activity-live-check"
+path = "src/main.rs"
+
+[dependencies]
+tokio                = { workspace = true, features = ["rt-multi-thread","io-util","sync","time","macros","net","process"] }
+anyhow               = { workspace = true }
+serde_json           = { workspace = true }
+fake-control-client  = { path = "../fake-control-client" }
+pitboss-cli          = { path = "../../crates/pitboss-cli" }
