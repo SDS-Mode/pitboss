@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use pitboss_cli::{
-    agents_md, attach, cli, diff, dispatch, list, manifest, mcp, prune, status, tree,
+    agents_md, analyze, attach, cli, diff, dispatch, list, manifest, mcp, prune, status, tree,
 };
 
 use cli::{Cli, Command};
@@ -88,6 +88,28 @@ fn main() -> Result<()> {
             json,
         } => {
             std::process::exit(status::run(&run_id, json, run_dir)?);
+        }
+        Command::Analyze {
+            run_id,
+            recent,
+            failed_only,
+            json,
+            run_dir,
+        } => {
+            let opts = analyze::AnalyzeOpts {
+                run_id,
+                recent,
+                failed_only,
+                json,
+                run_dir,
+            };
+            match analyze::run(opts) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("pitboss analyze: {e:#}");
+                    std::process::exit(1);
+                }
+            }
         }
         Command::McpBridge {
             socket,

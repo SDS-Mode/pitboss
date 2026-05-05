@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::dispatch::layer::LayerState;
 use crate::dispatch::state::{DispatchState, WorkerState};
 
+mod analyze;
 mod approval;
 mod lifecycle;
 mod spawn;
@@ -32,6 +33,7 @@ mod wait;
 #[cfg(test)]
 mod tests;
 
+pub use analyze::{handle_analyze_recent, handle_analyze_run, AnalyzeRecentArgs, AnalyzeRunArgs};
 pub use approval::{
     handle_permission_prompt, handle_propose_plan, handle_request_approval, PermissionPromptArgs,
     PermissionPromptResponse,

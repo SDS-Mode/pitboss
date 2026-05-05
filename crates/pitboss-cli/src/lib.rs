@@ -5,6 +5,7 @@
 //! from this lib crate rather than re-declaring them.
 
 pub mod agents_md;
+pub mod analyze;
 pub mod attach;
 pub mod cli;
 pub mod control;

@@ -760,6 +760,8 @@ populated with these. You (the operator) don't list them explicitly.
 | `mcp__pitboss__spawn_sublead` | `{prompt, model, budget_usd?, max_workers?, lead_timeout_secs?, initial_ref?, read_down?, env?, tools?, resume_session_id?}` | `{sublead_id}` — root lead only; requires `[lead] allow_subleads = true`. `resume_session_id` is used by `pitboss resume` to re-attach a prior sub-lead session; omit for fresh spawns. See Depth-2 section. |
 | `mcp__pitboss__run_lease_acquire` | `{key, ttl_secs, wait_secs?}` | `{lease_id, version, ...}` — run-global; auto-released on actor termination |
 | `mcp__pitboss__run_lease_release` | `{lease_id}` | `{ok: true}` |
+| `mcp__pitboss__analyze_run` | `{run_id}` | `RunAnalysis` — header (id / manifest / mode / status / duration / versions), `cost` rollup (per-model + lead-vs-worker), `failures` grouped by classified `FailureReason::kind`, `tasks` (workers grouped under their lead), `hotspots` (longest / costliest / most-tokens). Read-only triage over a prior run; resolves `run_id` against the canonical runs base directory. |
+| `mcp__pitboss__analyze_recent` | `{limit?, failed_only?}` | `RecentAnalysis { runs, aggregates }` — per-run analyses plus a cross-run aggregate (failure histogram, model usage, top-3 slowest / costliest / most-failed runs). `limit` defaults to 10 and is silently clamped to 50. `failed_only` skips runs with zero failed tasks. |
 
 All tool responses returning a collection are wrapped in a record
 (`{workers: [...]}`, `{entries: [...]}`, `{entry: ...}`) — MCP spec

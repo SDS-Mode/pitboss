@@ -582,6 +582,32 @@ impl PitbossHandler {
     }
 
     #[tool(
+        description = "Triage a single prior run: header (id, manifest, mode, status, duration, versions), estimated USD cost rollup (per-model + lead-vs-worker split), failure groups keyed by classified FailureReason kind (rate_limit / network_error / auth_failure / context_exceeded / invalid_argument / unknown / unclassified), the task tree with workers grouped under their lead, and hot-spots (longest / costliest / token-heaviest task). Use when a worker reports completion, a sibling sublead failed, or you need to summarize a run for the operator without scraping logs. Resolves `run_id` (full UUID or unique prefix) against the dispatcher's standard runs base directory — read-only; no run_dir override (operators with a non-default runs root drive analyze through the CLI). Reads the existing summary.json/jsonl artifacts; pre-v0.11 records lacking cost_usd get recomputed from (model, token_usage). Returns RunAnalysis (header, cost, failures, tasks, hotspots). Cost: one filesystem read per run dir, no API calls."
+    )]
+    async fn analyze_run(
+        &self,
+        Parameters(args): Parameters<crate::mcp::tools::AnalyzeRunArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::mcp::tools::handle_analyze_run(args) {
+            Ok(report) => to_structured_result(&report),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Roll up the most-recent N prior runs (default 10, hard cap 50): per-run analyses plus aggregates — failure histogram across runs (kind + count + most-recent example), model usage (token-weighted with cost contribution), and outliers (top-3 slowest / costliest / most-failed runs). Use when investigating cross-run patterns: are workers hitting the same rate-limit window, is a model unexpectedly expensive, did a recent change introduce a regression. `failed_only=true` skips runs with zero failed tasks. `limit` clamps silently to 50 — agents should not retry with a larger value. Returns RecentAnalysis { runs: [RunAnalysis], aggregates }. Cost: one filesystem read per run dir scanned; bounded by the limit and the contents of the standard runs base directory."
+    )]
+    async fn analyze_recent(
+        &self,
+        Parameters(args): Parameters<crate::mcp::tools::AnalyzeRecentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::mcp::tools::handle_analyze_recent(args) {
+            Ok(report) => to_structured_result(&report),
+            Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
         description = "Cancel an actor (worker or sub-lead) by id. When `reason` is supplied, it is delivered to the actor's parent lead as a synthetic [SYSTEM] reprompt so the lead can adjust its plan without a separate operator round-trip. Existing callers that omit `reason` behave identically to the pre-4.5 cancel path."
     )]
     async fn cancel_worker(
