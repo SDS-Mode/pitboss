@@ -64,8 +64,11 @@
     {/if}
   </div>
   {#if d.activity}
+    {@const msgOps = d.activity.message_ops ?? 0}
+    {@const artOps = d.activity.artifact_ops ?? 0}
     <div class="text-muted-foreground mt-1 text-[9px] tabular-nums">
       kv:{d.activity.kv_ops} lease:{d.activity.lease_ops}
+      {#if msgOps > 0 || artOps > 0}msg:{msgOps} art:{artOps}{/if}
     </div>
   {/if}
   <Handle type="source" position={Position.Bottom} class="!bg-muted-foreground/40" />

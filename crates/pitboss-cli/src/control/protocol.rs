@@ -116,6 +116,10 @@ fn is_default_approval_kind(k: &ApprovalKind) -> bool {
     matches!(k, ApprovalKind::Action)
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 /// An operation sent from the TUI (client) to the dispatcher (server).
 ///
 /// Note: `Eq` is NOT derived — `UpdatePolicy` carries `Vec<ApprovalRule>`,
@@ -231,10 +235,11 @@ pub enum ControlEvent {
     RunFinished {
         summary: RunFinishedSummary,
     },
-    /// Periodic broadcast of per-actor shared-store activity. Emitted
-    /// once per `STORE_ACTIVITY_INTERVAL` (~1 s) while there's an active
-    /// TUI connection. TUI uses this to render `kv:N lease:M` inside
-    /// each grid tile so operators can see store utilization at a glance.
+    /// Periodic broadcast of per-actor shared-store and communication
+    /// activity. Emitted once per `STORE_ACTIVITY_INTERVAL` (~1 s) while
+    /// there's an active TUI connection. TUI/web use this to render
+    /// `kv:N lease:M msg:N art:N` inside each grid tile so operators can
+    /// see coordination activity at a glance.
     StoreActivity {
         counters: Vec<ActorActivityEntry>,
     },
@@ -286,8 +291,14 @@ pub enum ControlEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorActivityEntry {
     pub actor_id: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub kv_ops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub lease_ops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub message_ops: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub artifact_ops: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -644,17 +655,31 @@ mod tests {
                     actor_id: "worker-A".into(),
                     kv_ops: 42,
                     lease_ops: 3,
+                    message_ops: 5,
+                    artifact_ops: 2,
                 },
                 ActorActivityEntry {
                     actor_id: "lead".into(),
                     kv_ops: 7,
                     lease_ops: 0,
+                    message_ops: 0,
+                    artifact_ops: 0,
                 },
             ],
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"event\":\"store_activity\""));
         assert!(s.contains("\"worker-A\""));
+        assert!(s.contains("\"message_ops\":5"));
+        assert!(s.contains("\"artifact_ops\":2"));
+        assert!(
+            !s.contains("\"message_ops\":0"),
+            "zero communication counters should be omitted"
+        );
+        assert!(
+            !s.contains("\"lease_ops\":0"),
+            "zero kv/lease counters should be omitted"
+        );
         assert_eq!(roundtrip_event(&ev), ev);
     }
 }

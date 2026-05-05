@@ -137,7 +137,12 @@
     <div class="text-muted-foreground flex items-center justify-between gap-2 text-[11px]">
       <div class="flex items-center gap-2 tabular-nums">
         {#if activity}
-          <span title="store ops">kv:{activity.kv_ops} lease:{activity.lease_ops}</span>
+          {@const msgOps = activity.message_ops ?? 0}
+          {@const artOps = activity.artifact_ops ?? 0}
+          <span title="coordination ops">
+            kv:{activity.kv_ops} lease:{activity.lease_ops}
+            {#if msgOps > 0 || artOps > 0}msg:{msgOps} art:{artOps}{/if}
+          </span>
         {/if}
         {#if w.started_at}
           <span>{relativeStarted(w.started_at)}</span>
