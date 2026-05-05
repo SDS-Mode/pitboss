@@ -20,7 +20,7 @@ GitHub issue, not here.
 - **No version targeting.** Use GitHub Milestones for release-train
   scheduling. Strategic horizons can stay inline as `parked:` notes.
 
-Last refreshed: v0.9.2 (2026-04-30).
+Last refreshed: v0.9.2 (2026-05-05).
 
 ---
 
@@ -163,10 +163,6 @@ upstream.
   Depth=2 cap is enforced at both the MCP handler and the sub-lead's
   `--allowedTools` list. **Status:** parked: no concrete need that
   can't be served by a wider flat fan-out. **Tracking:** none yet.
-
-- **Full TUI approval-replay on run-switch (#95).** Drain of stale
-  events on `SwitchRun` shipped (#104); replay of pending approvals
-  on re-connect remains. **Status:** scoped. **Tracking:** #95.
 
 ---
 
