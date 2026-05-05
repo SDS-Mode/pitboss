@@ -227,6 +227,53 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Triage a single run or roll up recent runs.
+    ///
+    /// Single-run mode (`pitboss analyze <run-id>`): produces a
+    /// human-readable triage report — header, estimated cost rollup
+    /// (per-model + lead-vs-worker split), failure surface grouped by
+    /// classified `FailureReason`, the task tree (workers indented
+    /// under their lead), and hot-spots (longest / costliest /
+    /// token-heaviest task). Mirrors the `pitboss status` shape but
+    /// adds cost, failure classification, and hot-spots.
+    ///
+    /// Cross-run mode (`pitboss analyze --recent [N]`): walks the most
+    /// recent N runs (default 10, max 50) under the standard runs base
+    /// directory and emits per-run analyses plus aggregates: failure
+    /// histogram across runs, model usage, slowest / costliest /
+    /// most-failed outliers. `--failed-only` narrows the walk to runs
+    /// with at least one non-`Success` task.
+    ///
+    /// Reads the existing per-run artifacts only — no log re-parsing,
+    /// no new disk schema. Pre-v0.11 records that lack `cost_usd` get
+    /// recomputed from `(model, token_usage)` on the fly via
+    /// `pitboss_core::prices::cost_usd`. Tasks whose model is unknown
+    /// to the price table are reported as missing-cost in the rollup.
+    Analyze {
+        /// Run id (full UUID or unique prefix). Mutually exclusive
+        /// with `--recent`.
+        #[arg(conflicts_with_all = ["recent", "failed_only"])]
+        run_id: Option<String>,
+        /// Roll up the last N runs (default 10, hard cap 50). Pass
+        /// `--recent` alone for the default; `--recent 25` for an
+        /// explicit count. Mutually exclusive with `<run-id>`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "10", value_name = "N")]
+        recent: Option<u32>,
+        /// In `--recent` mode, skip runs with zero failed tasks. No
+        /// effect in single-run mode (clap-rejected with a clear error
+        /// instead of being silently ignored).
+        #[arg(long, conflicts_with = "run_id")]
+        failed_only: bool,
+        /// Emit machine-readable JSON instead of a human report. Same
+        /// shape as the `analyze_run` / `analyze_recent` MCP tools.
+        #[arg(long)]
+        json: bool,
+        /// Override the runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs` (or
+        /// `~/Library/Application Support/pitboss/runs` on macOS).
+        #[arg(long, value_name = "PATH")]
+        run_dir: Option<PathBuf>,
+    },
     /// Print shell completion script for the given shell (bash, zsh, fish,
     /// elvish, powershell) to stdout.
     Completions {
@@ -444,6 +491,47 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("--internal-run-id") || msg.contains("--dry-run"),
+            "expected mutual-exclusion error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn analyze_rejects_run_id_with_recent() {
+        let err =
+            Cli::try_parse_from(["pitboss", "analyze", "019dabcd", "--recent", "5"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--recent") || msg.contains("run_id") || msg.contains("run-id"),
+            "expected mutual-exclusion error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn analyze_recent_without_value_parses_as_some_default() {
+        // `--recent` alone should produce Some(10) via default_missing_value.
+        let cli = Cli::try_parse_from(["pitboss", "analyze", "--recent"]).unwrap();
+        match cli.command {
+            Command::Analyze { recent, .. } => assert_eq!(recent, Some(10)),
+            other => panic!("expected Analyze, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analyze_recent_with_explicit_value_overrides_default() {
+        let cli = Cli::try_parse_from(["pitboss", "analyze", "--recent", "25"]).unwrap();
+        match cli.command {
+            Command::Analyze { recent, .. } => assert_eq!(recent, Some(25)),
+            other => panic!("expected Analyze, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analyze_failed_only_rejects_with_run_id() {
+        let err =
+            Cli::try_parse_from(["pitboss", "analyze", "019dabcd", "--failed-only"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--failed-only") || msg.contains("run_id") || msg.contains("run-id"),
             "expected mutual-exclusion error, got: {msg}"
         );
     }
