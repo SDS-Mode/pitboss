@@ -460,18 +460,13 @@ pub async fn handle_artifact_put(
         });
     }
     let per_actor_limit = state.root.manifest.communication.max_artifacts_per_actor as usize;
-    let mut artifacts = state.communication.artifacts.write().await;
-    let current_count = artifacts
-        .values()
-        .filter(|artifact| artifact.metadata.owner == caller.id)
-        .count();
-    if current_count >= per_actor_limit {
-        return Err(CommunicationError::ArtifactCountExceeded {
-            actor_id: caller.id,
-            limit: per_actor_limit,
-        });
-    }
 
+    // Filesystem I/O happens *outside* the artifacts write lock so concurrent
+    // artifact_put calls don't serialize on the lock for the duration of the
+    // disk write. The lock is acquired briefly at the end to re-check the
+    // per-actor count and insert the metadata. If the count check fails after
+    // the bytes are on disk we unlink the orphan; this trades a rare wasted
+    // write on overflow for a non-blocking common path.
     tokio::fs::create_dir_all(&state.communication.artifact_dir)
         .await
         .map_err(|e| CommunicationError::Storage(e.to_string()))?;
@@ -487,7 +482,7 @@ pub async fn handle_artifact_put(
     let metadata = ArtifactMetadata {
         artifact_id: artifact_id.clone(),
         uri: uri.clone(),
-        owner: caller.id,
+        owner: caller.id.clone(),
         name: args.name,
         mime_type: args.mime_type,
         size_bytes: content.len() as u64,
@@ -495,14 +490,31 @@ pub async fn handle_artifact_put(
         created_at: Utc::now(),
         grants: Vec::new(),
     };
-    artifacts.insert(
-        artifact_id.clone(),
-        StoredArtifact {
-            metadata,
-            path,
-            grants: HashSet::new(),
-        },
-    );
+
+    {
+        let mut artifacts = state.communication.artifacts.write().await;
+        let current_count = artifacts
+            .values()
+            .filter(|artifact| artifact.metadata.owner == caller.id)
+            .count();
+        if current_count >= per_actor_limit {
+            drop(artifacts);
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(CommunicationError::ArtifactCountExceeded {
+                actor_id: caller.id,
+                limit: per_actor_limit,
+            });
+        }
+        artifacts.insert(
+            artifact_id.clone(),
+            StoredArtifact {
+                metadata,
+                path,
+                grants: HashSet::new(),
+            },
+        );
+    }
+
     Ok(ArtifactPutResult {
         artifact_id,
         uri,
@@ -1301,6 +1313,70 @@ mod tests {
         assert_eq!(
             on_disk, payload,
             "on-disk bytes must round-trip the payload"
+        );
+    }
+
+    /// Regression for the lock-narrowing refactor in `handle_artifact_put`:
+    /// filesystem I/O happens before the per-actor count is re-checked, so an
+    /// over-limit put writes bytes to disk and must roll the file back when
+    /// `ArtifactCountExceeded` is returned. Otherwise repeated rejected puts
+    /// would accumulate orphan bytes under `<run_dir>/communication/artifacts/`.
+    #[tokio::test]
+    async fn artifact_put_unlinks_orphan_on_count_overflow() {
+        use base64::Engine;
+        let config = CommunicationConfig {
+            mode: CommunicationMode::ParentChild,
+            max_artifacts_per_actor: 1,
+            ..Default::default()
+        };
+        let state = test_state(config).await;
+        add_root_worker(&state, "w1").await;
+
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        handle_artifact_put(
+            &state,
+            ArtifactPutArgs {
+                name: "first.bin".into(),
+                mime_type: None,
+                content_base64: payload.clone(),
+                meta: meta("w1", ActorRole::Worker),
+            },
+        )
+        .await
+        .expect("first put under the limit must succeed");
+
+        let artifacts_dir = state
+            .root
+            .run_subdir
+            .join("communication")
+            .join("artifacts");
+        let after_first = std::fs::read_dir(&artifacts_dir)
+            .expect("artifact dir should exist after first put")
+            .count();
+        assert_eq!(after_first, 1, "first put should leave exactly one file");
+
+        let err = handle_artifact_put(
+            &state,
+            ArtifactPutArgs {
+                name: "second.bin".into(),
+                mime_type: None,
+                content_base64: payload,
+                meta: meta("w1", ActorRole::Worker),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, CommunicationError::ArtifactCountExceeded { .. }),
+            "expected ArtifactCountExceeded, got {err:?}",
+        );
+
+        let after_second = std::fs::read_dir(&artifacts_dir)
+            .expect("artifact dir should still exist after rejected put")
+            .count();
+        assert_eq!(
+            after_second, 1,
+            "rejected put must roll back the orphan file (saw {after_second} files)",
         );
     }
 }
