@@ -99,7 +99,7 @@ impl LeaseRegistryApi for run_leases::LeaseRegistry {
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -307,6 +307,11 @@ const LEASE_NOTIFIER_CAPACITY: usize = 256;
 
 pub struct SharedStore {
     entries: RwLock<HashMap<PathBuf, Entry>>,
+    /// Running sum of value bytes across all entries. Mutated only inside
+    /// the entries write lock so the (entries, total_bytes) pair stays
+    /// consistent. Avoids an O(n_keys) `values().sum()` recompute under
+    /// the lock on every set/cas (audit ISSUE-store-1).
+    total_bytes: AtomicUsize,
     limits: Limits,
     notifier: broadcast::Sender<NotifyEvent>,
     cancel: CancellationToken,
@@ -338,6 +343,7 @@ impl SharedStore {
         let (lease_notifier, _) = broadcast::channel(LEASE_NOTIFIER_CAPACITY);
         Self {
             entries: RwLock::new(HashMap::new()),
+            total_bytes: AtomicUsize::new(0),
             limits,
             notifier,
             cancel: CancellationToken::new(),
@@ -404,7 +410,7 @@ impl SharedStore {
                 which: LimitKind::Count,
             });
         }
-        let current_total: usize = entries.values().map(|e| e.value.len()).sum();
+        let current_total = self.total_bytes.load(Ordering::Relaxed);
         let projected_total = current_total - prev_size + new_size;
         if projected_total > self.limits.max_total_bytes {
             return Err(StoreError::LimitExceeded {
@@ -422,6 +428,7 @@ impl SharedStore {
                 written_at: Utc::now(),
             },
         );
+        self.total_bytes.store(projected_total, Ordering::Relaxed);
         drop(entries);
         let _ = self.notifier.send(NotifyEvent {
             path: notify_key,
@@ -461,7 +468,7 @@ impl SharedStore {
                 which: LimitKind::Count,
             });
         }
-        let current_total: usize = entries.values().map(|e| e.value.len()).sum();
+        let current_total = self.total_bytes.load(Ordering::Relaxed);
         let projected_total = current_total - prev_size + new_size;
         if projected_total > self.limits.max_total_bytes {
             return Err(StoreError::LimitExceeded {
@@ -479,6 +486,7 @@ impl SharedStore {
                 written_at: Utc::now(),
             },
         );
+        self.total_bytes.store(projected_total, Ordering::Relaxed);
         drop(entries);
         let _ = self.notifier.send(NotifyEvent {
             path: notify_key,
@@ -1322,6 +1330,93 @@ mod tests {
         });
         s.set("/ref/a", b"x".to_vec(), "lead").await.unwrap();
         s.set("/ref/a", b"y".to_vec(), "lead").await.unwrap();
+    }
+
+    /// Regression for ISSUE-store-1: total_bytes must shrink when an
+    /// overwrite installs a smaller value, freeing room for a subsequent
+    /// write that would otherwise blow the total cap. The pre-fix code
+    /// recomputed `entries.values().map(...).sum()` from scratch each
+    /// call (O(n_keys) under the write lock); this test would still pass
+    /// against that baseline, so it pins the *contract* the AtomicUsize
+    /// delta path now upholds: limit accounting tracks the live sum, not
+    /// a high-watermark.
+    #[tokio::test]
+    async fn total_bytes_tracks_overwrite_shrink_via_set() {
+        let s = SharedStore::with_limits(Limits {
+            max_value_bytes: 100,
+            max_total_bytes: 100,
+            max_keys: 10,
+        });
+        s.set("/ref/a", vec![0u8; 80], "lead").await.unwrap();
+        // 80 + 30 = 110 > 100 → must reject.
+        let err = s.set("/ref/b", vec![0u8; 30], "lead").await.unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::LimitExceeded {
+                which: LimitKind::Total
+            }
+        ));
+        // Shrink /ref/a to 10 bytes → total drops to 10.
+        s.set("/ref/a", vec![0u8; 10], "lead").await.unwrap();
+        // 10 + 30 = 40 ≤ 100 → must succeed; proves total_bytes was
+        // decremented on the shrinking overwrite, not just monotonically
+        // accumulated.
+        s.set("/ref/b", vec![0u8; 30], "lead").await.unwrap();
+        // And one more set to verify the running total stays accurate.
+        let err = s.set("/ref/c", vec![0u8; 61], "lead").await.unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::LimitExceeded {
+                which: LimitKind::Total
+            }
+        ));
+        s.set("/ref/c", vec![0u8; 60], "lead").await.unwrap();
+    }
+
+    /// Same contract as `total_bytes_tracks_overwrite_shrink_via_set`,
+    /// but exercised through `cas` so both write paths share coverage.
+    #[tokio::test]
+    async fn total_bytes_tracks_overwrite_shrink_via_cas() {
+        let s = SharedStore::with_limits(Limits {
+            max_value_bytes: 100,
+            max_total_bytes: 100,
+            max_keys: 10,
+        });
+        let v_a = s
+            .cas("/ref/a", 0, vec![0u8; 80], "lead")
+            .await
+            .unwrap()
+            .current_version;
+        let err = s.cas("/ref/b", 0, vec![0u8; 30], "lead").await.unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::LimitExceeded {
+                which: LimitKind::Total
+            }
+        ));
+        // Shrink /ref/a to 10 bytes via cas → total drops to 10.
+        s.cas("/ref/a", v_a, vec![0u8; 10], "lead").await.unwrap();
+        s.cas("/ref/b", 0, vec![0u8; 30], "lead").await.unwrap();
+    }
+
+    /// A failed cas (version mismatch) must NOT mutate total_bytes —
+    /// otherwise repeated mismatching cas calls would silently inflate
+    /// the running total and trip LimitKind::Total spuriously.
+    #[tokio::test]
+    async fn failed_cas_does_not_mutate_total_bytes() {
+        let s = SharedStore::with_limits(Limits {
+            max_value_bytes: 100,
+            max_total_bytes: 100,
+            max_keys: 10,
+        });
+        s.set("/ref/a", vec![0u8; 50], "lead").await.unwrap();
+        for _ in 0..50 {
+            let res = s.cas("/ref/a", 999, vec![0u8; 100], "lead").await.unwrap();
+            assert!(!res.ok);
+        }
+        // After 50 mismatching cas attempts, total is still 50, so a
+        // 50-byte write to a new key must still fit.
+        s.set("/ref/b", vec![0u8; 50], "lead").await.unwrap();
     }
 
     #[tokio::test]
