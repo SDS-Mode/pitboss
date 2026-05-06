@@ -276,6 +276,37 @@ fn validate_hierarchical_ranges(r: &ResolvedManifest) -> Result<()> {
             bail!("[lead].lead_timeout_secs must be > 0");
         }
     }
+    // The sub-lead caps below are gates: a value of 0 makes spawn_sublead
+    // fail-closed for every call (e.g. `max_subleads = 0` rejects every
+    // spawn because `current + 1 > 0` is unconditionally true). That's a
+    // non-functional config that the runtime would only surface on the
+    // first spawn attempt — catch it at validate time instead so the
+    // operator sees a typed manifest error. These caps live on the inner
+    // `[lead]` block, not surfaced to the top level like `max_workers` /
+    // `budget_usd` / `lead_timeout_secs`.
+    if let Some(lead) = r.lead.as_ref() {
+        if let Some(ms) = lead.max_subleads {
+            if ms == 0 {
+                bail!("[lead].max_subleads must be > 0 (omit the field to leave uncapped)");
+            }
+        }
+        if let Some(mt) = lead.max_total_workers {
+            if mt == 0 {
+                bail!("[lead].max_total_workers must be > 0 (omit the field to leave uncapped)");
+            }
+        }
+        if let Some(b) = lead.max_sublead_budget_usd {
+            // f64 admits negatives (unlike the u32 caps above where serde
+            // rejects them at parse). The runtime cap check
+            // (`budget_usd > cap`) on a negative cap rejects every positive
+            // requested budget, so the manifest is non-functional.
+            if b <= 0.0 {
+                bail!(
+                    "[lead].max_sublead_budget_usd must be > 0 (omit the field to leave uncapped)"
+                );
+            }
+        }
+    }
     // No `max_parallel_tasks == 0` check here: that's a flat-mode
     // ([[task]]) concurrency cap. In hierarchical mode the lead's own
     // `[lead].max_workers` governs concurrency, and the resolved
@@ -767,6 +798,110 @@ mod tests {
             lifecycle: None,
         };
         assert!(validate(&r).is_err());
+    }
+
+    /// Regression for ISSUE-manifest-2: the sub-lead caps live on the
+    /// inner `[lead]` block (not promoted to ResolvedManifest's top
+    /// level), and `validate_hierarchical_ranges` previously left them
+    /// unchecked — so a config like `max_subleads = 0` parsed cleanly
+    /// but produced a runtime gate that rejected every spawn (because
+    /// `current + 1 > 0` is unconditionally true). Pin the now-explicit
+    /// validate-time error.
+    fn manifest_with_lead_caps(
+        d: &TempDir,
+        max_subleads: Option<u32>,
+        max_total_workers: Option<u32>,
+        max_sublead_budget_usd: Option<f64>,
+    ) -> ResolvedManifest {
+        let mut lead = rl("l", d.path().to_path_buf());
+        lead.max_subleads = max_subleads;
+        lead.max_total_workers = max_total_workers;
+        lead.max_sublead_budget_usd = max_sublead_budget_usd;
+        ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+        }
+    }
+
+    #[test]
+    fn rejects_zero_max_subleads() {
+        let d = with_tmp_repo(true);
+        let r = manifest_with_lead_caps(&d, Some(0), None, None);
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("[lead].max_subleads must be > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_max_total_workers() {
+        let d = with_tmp_repo(true);
+        let r = manifest_with_lead_caps(&d, None, Some(0), None);
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("[lead].max_total_workers must be > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_max_sublead_budget_usd() {
+        let d = with_tmp_repo(true);
+        let r = manifest_with_lead_caps(&d, None, None, Some(0.0));
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("[lead].max_sublead_budget_usd must be > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_negative_max_sublead_budget_usd() {
+        // f64 admits negatives where u32 doesn't — the runtime cap check
+        // would silently accept any positive requested budget against a
+        // negative cap. Validate-time error covers that gap.
+        let d = with_tmp_repo(true);
+        let r = manifest_with_lead_caps(&d, None, None, Some(-1.0));
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("[lead].max_sublead_budget_usd must be > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_omitted_sublead_caps() {
+        // None on all three is the "uncapped" form and must remain valid.
+        let d = with_tmp_repo(true);
+        let r = manifest_with_lead_caps(&d, None, None, None);
+        assert!(validate(&r).is_ok());
+    }
+
+    #[test]
+    fn accepts_positive_sublead_caps() {
+        let d = with_tmp_repo(true);
+        let r = manifest_with_lead_caps(&d, Some(3), Some(16), Some(5.0));
+        assert!(validate(&r).is_ok());
     }
 
     fn hierarchical_with_subleads(
