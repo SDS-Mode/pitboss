@@ -16,24 +16,29 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.9.2** turns the container subsystem into a real toolchain.
-`pitboss container-dispatch` now reads two new manifest fields:
-`[container].extra_apt` for distro packages installed at dispatch
-start (the simple slow path) and `[[container.copy]]` for host
-files baked into a derived image at build time. The new
-`pitboss container-build` subcommand synthesizes a thin Dockerfile
-from those fields and tags the result deterministically as
-`pitboss-derived-<sha>:local`; subsequent dispatches pick up the
-cached tag automatically and drop the apt-at-spin-up cost.
-`pitboss container-prune` sweeps the stale tags that accumulate as
-manifests evolve. Image cadence also gets fixed: the published
-`pitboss-with-claude` rolls forward on every main merge with
-`:main`, `:main-<sha>`, and `:latest` tags instead of stagnating
-between release tags. Cost telemetry persists per-task
-`cost_usd` on `TaskRecord`, and the run-detail page now renders
-per-task and run-total cost estimates client-side. See
-`CHANGELOG.md` for the full per-version history and `AGENTS.md`
-for the MCP tool reference, keybindings, and manifest schema.
+**v0.10.0** lands the communication plane. A lead can now exchange
+typed messages and binary artifacts with its workers via eight new
+MCP tools — `message_send` / `list` / `read` / `ack` for the
+parent-child mailbox and `artifact_put` / `list` / `read` / `grant`
+for the artifact registry. The whole surface is gated behind a new
+`[communication]` manifest section that defaults to
+`mode = "disabled"`, so existing manifests see no behavioural change
+until they opt in with `mode = "parent_child"`. The TUI and web
+console both stream per-actor mailbox and artifact activity as
+first-class operator signals alongside the existing KV and lease
+counters. Failure triage gets its own command:
+`pitboss analyze [--recent N] [--failed-only] [--json]` produces
+single-run and cross-run reports with cost rollups, hotspot
+detection (slowest, costliest, token-heaviest tasks), and
+tokenized failure clustering — and the same engine is exposed as
+`analyze_run` / `analyze_recent` MCP tools so leads can self-triage
+mid-run. A security-relevant fix: spawned worker, lead, and
+sub-lead `--allowedTools` argv lists are now mode-aware
+(`pitboss_mcp_tools(mode)` etc.), so `pitboss dispatch --dry-run`
+output finally matches runtime behaviour when communication is
+disabled. See `CHANGELOG.md` for the full per-version history and
+`AGENTS.md` for the MCP tool reference, keybindings, and manifest
+schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
@@ -137,7 +142,10 @@ pitboss dispatch <manifest>               deal a run; --background detaches & re
 pitboss resume <run-id>                   re-deal a prior run, reusing claude_session_id
 pitboss attach <run-id> <task-id>         follow-mode log viewer for a single worker
 pitboss diff <run-a> <run-b>              compare two runs side-by-side
+pitboss analyze [<run-id>|--recent N]     triage report: cost rollup, failure clusters, hotspots; --json
 pitboss container-dispatch <manifest>     run dispatch inside a Docker/Podman container
+pitboss container-build <manifest>        bake [container] apt + copy entries into a derived image
+pitboss container-prune                   sweep stale derived images
 pitboss status <run-id>                   snapshot task table for any run; supports --json
 pitboss list                              inventory of recent runs; --active narrows to live
 pitboss prune                             sweep orphaned run dirs; dry-run by default, --apply commits

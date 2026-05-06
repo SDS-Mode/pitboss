@@ -10,38 +10,68 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
-## [0.9.2] — 2026-04-30
+## [0.10.0] — 2026-05-06
 
-The container subsystem grows up. Operators iterating against
-`pitboss container-dispatch` get a real toolchain story:
-declare apt packages and host files in the manifest, bake them
-into a derived image once with `pitboss container-build`, and let
-`container-dispatch` pick up the cached tag automatically. Stale
-derived images sweep with `pitboss container-prune`. The published
-`pitboss-with-claude` image now rolls forward on every main merge
-(rolling `:main` and `:main-<sha>` tags) instead of stagnating
-between releases. Plus the usual smaller polish — auto-refresh on
-the runs list and run-detail pages, persisted per-task cost on
-`TaskRecord`, an SSE event-stream filter on the run-detail page,
-and a graceful shutdown contract for `pitboss-web stop`.
+The communication plane lands. A lead can now exchange typed messages
+and binary artifacts with its workers via eight new MCP tools
+(`message_send`/`list`/`read`/`ack` and
+`artifact_put`/`list`/`read`/`grant`), gated by a new `[communication]`
+manifest section that defaults to `mode = "disabled"` — no behavioural
+change for existing manifests. The TUI and web console both render
+mailbox and artifact activity as first-class operator signals. Failure
+triage gets its own command: `pitboss analyze` (and matching MCP tools)
+produces single-run and cross-run reports with cost rollups, hotspot
+detection, and tokenized failure clustering — no more grepping
+`summary.jsonl` to figure out which task burned the budget. Plus a
+security-relevant fix: spawned worker/lead/sublead `--allowedTools` argv
+lists are now mode-aware, so `dispatch --dry-run` output matches runtime
+behaviour when communication is disabled.
 
 Highlights:
 
-- **`[container].extra_apt` + `[[container.copy]]`** — declare
-  apt packages and host-file copies in the manifest. Two paths:
-  install at dispatch start (slow) or `pitboss container-build` to
-  bake into a derived image and amortize across runs.
-- **`pitboss container-build` + `pitboss container-prune`** —
-  deterministic SHA-tagged derived images with idempotent re-runs,
-  and a sweeper for the stale tags that accumulate as manifests
-  evolve.
-- **Image-cadence fix (#258)** — `:main`, `:main-<sha>`, and
-  `:latest` now roll forward on every main merge, ending the
-  "0.9.1 is two days old, my fix is in main, why isn't it in the
-  image" mode that bit operators twice in the post-0.9.1 window.
-- **Cost telemetry** — per-task `cost_usd` now persists on
-  `TaskRecord` at finalize time and the run-detail page renders
-  per-task and run-total cost estimates client-side.
+- **`[communication]` manifest section + 8 new MCP tools** —
+  parent-child mailbox (`message_send` / `list` / `read` / `ack`) and
+  artifact registry (`artifact_put` / `list` / `read` / `grant`) with
+  per-actor quotas, scope-based authorization, and bytes/count caps.
+  Default `mode = "disabled"` keeps the toolset out of every actor's
+  `--allowedTools` unless explicitly enabled.
+- **Phase C operator surfaces** — TUI and web console both stream
+  `StoreActivity` events showing per-actor mailbox and artifact ops
+  alongside the existing KV/lease counters.
+- **`pitboss analyze [--recent N] [--failed-only] [--json]`** —
+  single-run and cross-run triage with `RunAnalysis`, `CostRollup`,
+  and `FailureGroup`. Hotspot detection (slowest, costliest,
+  token-heaviest tasks). Failure clustering by tokenized error
+  patterns. Pre-v0.11 records get opportunistic cost recomputation;
+  v0.11+ uses the stored `cost_usd`. Same engine exposed as MCP tools
+  (`analyze_run`, `analyze_recent`) for in-run lead consumption.
+- **Mode-aware `--allowedTools` (#283)** — `pitboss_mcp_tools(mode)`,
+  `sublead_mcp_tools(mode)`, and `pitboss_worker_mcp_tools(mode)`
+  helpers replace the old static `const` arrays. Communication tools
+  are now omitted from spawned actor argv when `mode = "disabled"`
+  instead of being silently filtered only at runtime — closes a
+  cosmetic-but-operator-confusing gap surfaced via
+  `dispatch --dry-run`.
+
+### Added
+
+- Phase C — surface comm activity in TUI + web consoles ([#285](https://github.com/SDS-Mode/pitboss/pull/285))
+- Add parent-child mailbox + artifact MCP tools ([#281](https://github.com/SDS-Mode/pitboss/pull/281))
+- Add analyze triage command and MCP tools ([#280](https://github.com/SDS-Mode/pitboss/pull/280))
+
+
+### Dependencies
+
+- Bump the rust-minor-and-patch group across 1 directory with 3 updates ([#288](https://github.com/SDS-Mode/pitboss/pull/288))
+- Bump lru from 0.16.4 to 0.18.0 ([#279](https://github.com/SDS-Mode/pitboss/pull/279))
+
+
+### Fixed
+
+- Make worker/lead/sublead --allowedTools mode-aware for [communication] ([#289](https://github.com/SDS-Mode/pitboss/pull/289))
+
+
+## [0.9.2] — 2026-04-30
 
 ### Added
 
@@ -61,7 +91,6 @@ Highlights:
 
 ### Changed
 
-- **Image-cadence fix (#258, [#265](https://github.com/SDS-Mode/pitboss/pull/265))** — `:main`, `:main-<sha>`, and `:latest` on `ghcr.io/sds-mode/pitboss-with-claude` now roll forward on every main merge, not only on release-tag pushes. **Behavior change**: `:latest` strictly tracks main HEAD now, not the most recent release tag. To pin a release, use a version tag (`:0.9.1`, `:0.9`, `:0`); for fixes-since-release use `:main` or `:latest`. Reproducibility: `:main-<short-sha>` is the SHA-pinned alternative.
 - Schema-first matching against API error envelopes (#185 medium) ([#219](https://github.com/SDS-Mode/pitboss/pull/219))
 - Split tools.rs into per-feature submodules (#151 L6) ([#218](https://github.com/SDS-Mode/pitboss/pull/218))
 - SqliteStore migration version table (#149 L11) ([#212](https://github.com/SDS-Mode/pitboss/pull/212))
