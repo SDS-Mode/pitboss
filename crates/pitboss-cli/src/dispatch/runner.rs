@@ -44,9 +44,22 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 /// approval queue rather than bypassing it).
 pub fn apply_pitboss_env_defaults(
     env: &mut std::collections::HashMap<String, String>,
+    run_id: &str,
     permission_routing: crate::manifest::schema::PermissionRouting,
 ) {
     use crate::manifest::schema::PermissionRouting;
+    // #133: every spawned claude subprocess inherits PITBOSS_RUN_ID so any
+    // nested `pitboss dispatch` invoked from inside its session can report the
+    // current run as `parent_run_id` on RunDispatched. Force-overwrite any
+    // operator-supplied value — operator env layers in BEFORE this helper, so
+    // an inherited PITBOSS_RUN_ID from a parent pitboss process would leak
+    // through. The child must see *this* run's id, not its grandparent's.
+    // (#328: replaces the previous parent-process std::env::set_var, which is
+    // UB-leaning under a multi-threaded tokio runtime.)
+    env.insert(
+        crate::notify::parent::RUN_ID_ENV.to_string(),
+        run_id.to_string(),
+    );
     match permission_routing {
         PermissionRouting::PathA => {
             // Path A (default): sdk-ts entrypoint bypasses claude's built-in gate.
@@ -647,7 +660,7 @@ async fn execute_task(
     };
 
     let mut cmd_env = task.env.clone();
-    apply_pitboss_env_defaults(&mut cmd_env, Default::default());
+    apply_pitboss_env_defaults(&mut cmd_env, &run_id.to_string(), Default::default());
     let cmd = SpawnCmd {
         program: claude.to_path_buf(),
         args: spawn_args(task),
@@ -1263,7 +1276,7 @@ mod tests {
     #[test]
     fn apply_pitboss_env_defaults_sets_entrypoint_when_absent() {
         let mut env: HashMap<String, String> = HashMap::new();
-        apply_pitboss_env_defaults(&mut env, Default::default());
+        apply_pitboss_env_defaults(&mut env, "test-run-id", Default::default());
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"sdk-ts".to_string()),
@@ -1275,7 +1288,7 @@ mod tests {
     fn apply_pitboss_env_defaults_honors_operator_override() {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
-        apply_pitboss_env_defaults(&mut env, Default::default());
+        apply_pitboss_env_defaults(&mut env, "test-run-id", Default::default());
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"cli".to_string()),
@@ -1287,11 +1300,31 @@ mod tests {
     fn apply_pitboss_env_defaults_preserves_other_keys() {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        apply_pitboss_env_defaults(&mut env, Default::default());
+        apply_pitboss_env_defaults(&mut env, "test-run-id", Default::default());
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"sdk-ts".to_string())
+        );
+    }
+
+    /// #328 regression: PITBOSS_RUN_ID must be force-overwritten even when
+    /// the operator (or an inherited parent env) supplies a different value.
+    /// Reading PITBOSS_RUN_ID inside a nested `pitboss dispatch` is the
+    /// parent-correlation contract — letting an inherited value win would
+    /// make the child report its grandparent as parent_run_id.
+    #[test]
+    fn apply_pitboss_env_defaults_overrides_inherited_run_id() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert(
+            crate::notify::parent::RUN_ID_ENV.to_string(),
+            "stale-grandparent-id".to_string(),
+        );
+        apply_pitboss_env_defaults(&mut env, "the-real-run-id", Default::default());
+        assert_eq!(
+            env.get(crate::notify::parent::RUN_ID_ENV),
+            Some(&"the-real-run-id".to_string()),
+            "PITBOSS_RUN_ID must be unconditionally overwritten with the current run's id"
         );
     }
 

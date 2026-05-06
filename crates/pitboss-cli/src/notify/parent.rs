@@ -17,11 +17,15 @@
 //!   manifest-declared `[[notification]]` sinks — they don't conflict.
 //!
 //! - `PITBOSS_RUN_ID` — propagated automatically into every spawned
-//!   claude subprocess's env. A nested `pitboss dispatch` from inside that
-//!   subprocess inherits the value and reports it as `parent_run_id` on the
-//!   `RunDispatched` event so the orchestrator can correlate parent ↔ child.
-//!   Top-level dispatches see the var unset and report `parent_run_id =
-//!   None`.
+//!   claude subprocess's env (per-spawn via `Command::env` —
+//!   `apply_pitboss_env_defaults` in `dispatch/runner.rs` is the single
+//!   injection site). A nested `pitboss dispatch` from inside that
+//!   subprocess inherits the value and reports it as `parent_run_id` on
+//!   the `RunDispatched` event so the orchestrator can correlate parent ↔
+//!   child. Top-level dispatches see the var unset and report
+//!   `parent_run_id = None`. Pitboss never mutates its own process env
+//!   for this; doing so would race the multi-threaded tokio runtime
+//!   (issue #328).
 //!
 //! ## Why bypass the SSRF guard
 //!
@@ -86,36 +90,6 @@ pub fn parent_run_id() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Set `PITBOSS_RUN_ID` in the current process env so any pitboss-spawned
-/// claude subprocess (and any nested `pitboss dispatch` invoked from inside
-/// that subprocess) inherits the value. `tokio::process::Command::envs()`
-/// adds keys without clearing the inherited env, so a single set here
-/// propagates through the whole spawn tree without per-site plumbing.
-///
-/// # Safety
-///
-/// `std::env::set_var` is `unsafe` in Rust edition 2024 (and warned in
-/// 2021 since 1.82) because mutating the process env is unsynchronised
-/// with concurrent reads from libc and other threads. Call only:
-///
-/// 1. From the dispatcher entry point, **before** any worker, MCP server,
-///    or notification task is spawned — there are no concurrent env
-///    readers at that point.
-/// 2. Exactly once per process. The value is never re-set after dispatch
-///    starts; nested `pitboss dispatch` invocations get a fresh process
-///    that re-runs this gate from a clean slate.
-///
-/// Both invariants are upheld by the single call site in the dispatcher
-/// runners. Nothing else in pitboss writes to the env after startup.
-pub fn set_run_id_env(run_id: &str) {
-    // SAFETY: see doc-comment above. The dispatcher calls this before any
-    // worker / MCP / notification task is spawned, so there are no
-    // concurrent env readers at this point.
-    unsafe {
-        std::env::set_var(RUN_ID_ENV, run_id);
-    }
 }
 
 /// Build a [`NotificationRouter`] combining manifest `[[notification]]`
