@@ -506,6 +506,7 @@ async fn run_worker(
     let worker_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_worker,
         &std::collections::HashMap::new(),
+        &layer.run_id.to_string(),
         worker_routing,
     );
     let worker_communication_mode = state.root.manifest.communication.mode;
@@ -972,6 +973,7 @@ pub async fn spawn_resume_worker(
     let resume_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_resume,
         &std::collections::HashMap::new(),
+        &layer.run_id.to_string(),
         resume_routing,
     );
     let cmd = pitboss_core::process::SpawnCmd {

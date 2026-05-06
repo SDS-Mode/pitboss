@@ -70,18 +70,20 @@ pub async fn init_run_state(
     pre_minted_run_id: Option<Uuid>,
     run_dir_override: Option<PathBuf>,
 ) -> Result<RunInit> {
-    // Snapshot any `PITBOSS_RUN_ID` already in our env BEFORE we
-    // overwrite it with our own run_id. If we're running under a
-    // parent orchestrator (or as a sub-dispatch the agent triggered
-    // from inside a worktree), the prior value is the parent run id
-    // reported on `RunDispatched`. See the `notify::parent` module for
-    // the full env-var contract introduced for issue #133.
+    // Snapshot any `PITBOSS_RUN_ID` already in our env. If we're running
+    // under a parent orchestrator (or as a sub-dispatch the agent
+    // triggered from inside a worktree), the inherited value is the parent
+    // run id reported on `RunDispatched`. See `notify::parent` for the env
+    // contract introduced for issue #133. Our own run_id is propagated to
+    // spawned claude subprocesses via per-spawn `Command::env` injection
+    // through `apply_pitboss_env_defaults` (closes #328 — pre-fix this was
+    // a parent-process `std::env::set_var`, which is UB-leaning under a
+    // multi-threaded tokio runtime).
     let parent_run_id = crate::notify::parent::parent_run_id();
     // Honor a pre-minted id from `--background` (issue #133-C);
     // otherwise mint fresh. Background pre-mints in the parent so it
     // can announce the id on stdout before the detached child boots.
     let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
-    crate::notify::parent::set_run_id_env(&run_id.to_string());
 
     let run_dir = run_dir_override.unwrap_or_else(|| resolved.run_dir.clone());
     tokio::fs::create_dir_all(&run_dir).await.ok();

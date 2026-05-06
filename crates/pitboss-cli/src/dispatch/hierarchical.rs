@@ -315,7 +315,12 @@ pub async fn run_hierarchical(
     //     lead and sub-lead use different builders (`lead_resume_spawn_args`
     //     vs. `sublead_spawn_args`).
     let mut lead_env = lead.env.clone();
-    crate::dispatch::runner::apply_pitboss_env_defaults(&mut lead_env, lead.permission_routing);
+    let lead_run_id_str = init.run_id.to_string();
+    crate::dispatch::runner::apply_pitboss_env_defaults(
+        &mut lead_env,
+        &lead_run_id_str,
+        lead.permission_routing,
+    );
     let communication_mode = resolved.communication.mode;
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
@@ -338,6 +343,7 @@ pub async fn run_hierarchical(
             let mut resume_env = lead.env.clone();
             crate::dispatch::runner::apply_pitboss_env_defaults(
                 &mut resume_env,
+                &lead_run_id_str,
                 lead.permission_routing,
             );
             pitboss_core::process::SpawnCmd {

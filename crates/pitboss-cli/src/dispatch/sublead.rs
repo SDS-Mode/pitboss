@@ -37,11 +37,12 @@ use pitboss_core::worktree::CleanupPolicy;
 pub fn compose_sublead_env(
     lead_env: &HashMap<String, String>,
     operator_env: &HashMap<String, String>,
+    run_id: &str,
     permission_routing: crate::manifest::schema::PermissionRouting,
 ) -> HashMap<String, String> {
     let mut out = lead_env.clone();
     out.extend(operator_env.clone());
-    crate::dispatch::runner::apply_pitboss_env_defaults(&mut out, permission_routing);
+    crate::dispatch::runner::apply_pitboss_env_defaults(&mut out, run_id, permission_routing);
     out
 }
 
@@ -573,7 +574,12 @@ async fn spawn_sublead_session(
         .as_ref()
         .map(|l| l.permission_routing)
         .unwrap_or_default();
-    let sublead_env = compose_sublead_env(&lead_env, &operator_env, routing);
+    let sublead_env = compose_sublead_env(
+        &lead_env,
+        &operator_env,
+        &sub_layer.run_id.to_string(),
+        routing,
+    );
     let sublead_cwd = state
         .root
         .manifest
@@ -671,8 +677,12 @@ async fn spawn_sublead_session(
                     .as_ref()
                     .map(|l| l.env.clone())
                     .unwrap_or_default();
-                let resume_env =
-                    compose_sublead_env(&lead_env_resume, &operator_env_bg, resume_routing);
+                let resume_env = compose_sublead_env(
+                    &lead_env_resume,
+                    &operator_env_bg,
+                    &sub_layer_bg.run_id.to_string(),
+                    resume_routing,
+                );
                 let resume_cwd = state_bg
                     .root
                     .manifest
@@ -989,7 +999,7 @@ mod env_composition_tests {
             ("ARTIFACTS_DIR", "/run/artifacts"),
             ("ADVENTURE_OUT", "/run/out"),
         ]);
-        let out = compose_sublead_env(&lead, &HashMap::new(), Default::default());
+        let out = compose_sublead_env(&lead, &HashMap::new(), "test-run-id", Default::default());
         assert_eq!(out.get("WORK_DIR").map(String::as_str), Some("/run/work"));
         assert_eq!(
             out.get("ARTIFACTS_DIR").map(String::as_str),
@@ -1007,7 +1017,7 @@ mod env_composition_tests {
         // specific sublead to a different WORK_DIR without editing the manifest.
         let lead = env(&[("WORK_DIR", "/lead/path")]);
         let operator = env(&[("WORK_DIR", "/operator/path")]);
-        let out = compose_sublead_env(&lead, &operator, Default::default());
+        let out = compose_sublead_env(&lead, &operator, "test-run-id", Default::default());
         assert_eq!(
             out.get("WORK_DIR").map(String::as_str),
             Some("/operator/path")
@@ -1019,14 +1029,14 @@ mod env_composition_tests {
         // CLAUDE_CODE_ENTRYPOINT is only set when neither lead nor operator
         // supplied it. If either did, that value wins.
         let empty = HashMap::new();
-        let out = compose_sublead_env(&empty, &empty, Default::default());
+        let out = compose_sublead_env(&empty, &empty, "test-run-id", Default::default());
         assert_eq!(
             out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
             Some("sdk-ts")
         );
 
         let lead = env(&[("CLAUDE_CODE_ENTRYPOINT", "cli")]);
-        let out = compose_sublead_env(&lead, &HashMap::new(), Default::default());
+        let out = compose_sublead_env(&lead, &HashMap::new(), "test-run-id", Default::default());
         assert_eq!(
             out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
             Some("cli"),
@@ -1038,7 +1048,12 @@ mod env_composition_tests {
     fn empty_lead_env_still_applies_pitboss_defaults() {
         // No [defaults.env] and no operator env → sublead still gets
         // CLAUDE_CODE_ENTRYPOINT so the MCP permission bypass engages.
-        let out = compose_sublead_env(&HashMap::new(), &HashMap::new(), Default::default());
+        let out = compose_sublead_env(
+            &HashMap::new(),
+            &HashMap::new(),
+            "test-run-id",
+            Default::default(),
+        );
         assert!(out.contains_key("CLAUDE_CODE_ENTRYPOINT"));
     }
 }
