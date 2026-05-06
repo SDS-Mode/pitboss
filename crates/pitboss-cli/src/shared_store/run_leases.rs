@@ -85,11 +85,15 @@ impl LeaseRegistry {
     /// so callers don't have to roll their own poll loop. (#153 L6)
     ///
     /// Implementation: the inner `Notify` is poked on every release
-    /// path, so waiters wake without polling. Lost wakeups (release
-    /// fires before subscribe) are absorbed by Notify's
-    /// "permit"-style semantics — the first `notified()` after a
-    /// `notify_one` returns immediately. After waking, retries the
-    /// non-blocking `try_acquire`; loops until success or deadline.
+    /// path via `notify_waiters`, so currently-registered waiters wake
+    /// without polling. A release that lands in the gap between our
+    /// first `try_acquire` and the next `notified()` registration is
+    /// NOT absorbed by `Notify` — `notify_waiters` (unlike `notify_one`)
+    /// stores no permit, so a future `notified()` won't immediately
+    /// complete from a missed wake. The recovery mechanism is the final
+    /// `try_acquire` on deadline expiry below: in the worst case we
+    /// burn the full `wait` budget but don't hang, and the caller's
+    /// outer retry resolves any remaining contention. (#347)
     pub async fn acquire_with_wait(
         &self,
         key: &str,

@@ -680,7 +680,21 @@ impl SharedStore {
         wait: Option<std::time::Duration>,
         caller: &CallerIdentity,
     ) -> Result<AcquireResult, StoreError> {
-        // Non-blocking attempt first.
+        // Subscribe BEFORE the fast-path try so we don't miss a release
+        // that lands between our first attempt and the subscribe (#347).
+        // `tokio::sync::broadcast` only delivers events sent after the
+        // subscriber is created, so a release in that gap would otherwise
+        // be silently dropped and the waiter would burn its full deadline
+        // before returning a spurious `acquired: false`.
+        //
+        // The non-blocking case (`wait == None`) doesn't strictly need the
+        // subscriber, but creating it before the early return keeps the
+        // pattern symmetric with `wait()` and is essentially free —
+        // broadcast subscribers are cheap and dropped on early return.
+        let mut rx = self.lease_notifier.subscribe();
+
+        // Non-blocking attempt — also serves as the post-subscribe
+        // fast-path check.
         match self.leases.acquire(name, ttl, caller).await {
             Ok((lease, evicted)) => {
                 self.notify_lease_evictions(&evicted);
@@ -718,10 +732,6 @@ impl SharedStore {
                  silent holder crashes won't wake waiters until their own deadline"
             );
         }
-
-        // Subscribe BEFORE retrying so we don't miss a release that lands
-        // between our first attempt and the subscribe.
-        let mut rx = self.lease_notifier.subscribe();
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
