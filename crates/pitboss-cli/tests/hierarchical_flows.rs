@@ -346,3 +346,55 @@ fn mcp_bridge_accepts_sublead_role_in_meta() {
     assert_eq!(meta["actor_id"], "sublead-1");
     assert_eq!(meta["actor_role"], "sublead");
 }
+
+/// #338: Two concurrent dispatches must use isolated sockets and isolated
+/// in-memory token tables. A token minted in run A must be rejected by
+/// run B's MCP server. Pins the cross-run isolation invariant documented
+/// in AGENTS.md "MCP socket & bridge auth".
+#[tokio::test]
+async fn concurrent_runs_isolate_sockets_and_tokens() {
+    let (_dir_a, state_a) = mk_state();
+    let (_dir_b, state_b) = mk_state();
+
+    let socket_a = socket_path_for_run(state_a.root.run_id, &state_a.root.manifest.run_dir);
+    let socket_b = socket_path_for_run(state_b.root.run_id, &state_b.root.manifest.run_dir);
+    assert_ne!(
+        socket_a, socket_b,
+        "concurrent runs must derive distinct socket paths from their UUIDv7 run_ids"
+    );
+
+    let _server_a = McpServer::start(socket_a.clone(), state_a.clone())
+        .await
+        .unwrap();
+    let _server_b = McpServer::start(socket_b.clone(), state_b.clone())
+        .await
+        .unwrap();
+
+    let token_a = mint_root_token(&state_a).await;
+
+    // Sanity: token_a works against run A.
+    let mut client_a = FakeMcpClient::connect_with_token(&socket_a, "lead", "lead", &token_a)
+        .await
+        .unwrap();
+    client_a
+        .call_tool("list_workers", json!({}))
+        .await
+        .expect("token_a must work against its own run's server");
+    client_a.close().await.unwrap();
+
+    // Cross-run replay: connecting to run B with run A's token must fail
+    // at authenticate_and_rebind. The handshake itself succeeds (rmcp
+    // initialize doesn't hit our auth path), so the failure surfaces on
+    // the first authenticated tools/call.
+    let mut client_cross = FakeMcpClient::connect_with_token(&socket_b, "lead", "lead", &token_a)
+        .await
+        .unwrap();
+    let result = client_cross.call_tool("list_workers", json!({})).await;
+    let err = result.expect_err("cross-run token must be rejected by run B's server");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("invalid actor token"),
+        "expected 'invalid actor token' rejection, got: {msg}"
+    );
+    let _ = client_cross.close().await;
+}

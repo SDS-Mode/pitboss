@@ -765,6 +765,85 @@ Lead records have `parent_task_id: null`. Worker records have
 
 ---
 
+## MCP socket & bridge auth (v0.10+)
+
+Every hierarchical run stands up a per-run unix socket and a per-actor
+auth token. Operators don't normally need to think about either — the
+dispatcher mints, embeds, and tears down both — but agents reading the
+source or debugging connection issues should know the contract.
+
+### Socket
+
+- Path: `$XDG_RUNTIME_DIR/pitboss/<run_id>.sock` (preferred), or fallback
+  `<run_dir>/<run_id>/mcp.sock` if `$XDG_RUNTIME_DIR` is unset or
+  non-writable. Computed by `mcp::socket_path_for_run`
+  (`crates/pitboss-cli/src/mcp/server.rs`).
+- `run_id` is a UUIDv7 → two concurrent runs cannot collide on a path.
+- Containing directory is created with mode `0o700`; the socket file
+  itself is chmod'd to `0o600` immediately after `bind` to close the
+  umask race window.
+- Created by `McpServer::start`; removed by `McpServer::shutdown` and
+  as a best-effort `Drop`. Any stale `.sock` from a crashed prior run
+  is removed pre-bind.
+
+### Token
+
+- Format: UUIDv7 string, minted by
+  `DispatchState::mint_token(actor_id, role)` and stored in-memory in
+  `DispatchState.actor_tokens: HashMap<token, ActorIdentity>`. There is
+  no on-disk authoritative table; the `mcp-config.json` written for the
+  actor is the only on-disk artifact carrying the token.
+- Mint sites (one per actor lifecycle event):
+  - **Root lead** — `dispatch/hierarchical.rs`, at dispatch start.
+  - **Sublead** — `dispatch/sublead.rs`, when `spawn_sublead` is handled.
+  - **Worker** — `mcp/tools/spawn.rs`, at `spawn_worker` and at the
+    resume path.
+- The token is appended to the bridge arg vector (`--token <hex>`)
+  inside the actor's `mcp-config.json` (`build_mcp_servers_json` in
+  `dispatch/hierarchical.rs`). The config file is written with mode
+  `0o600` for the running user.
+- The bridge (`pitboss mcp-bridge --token <hex>`) injects `_meta.token`
+  on every JSON-RPC `tools/call` and forwards to the unix socket.
+- The server validates `_meta.token` against
+  `DispatchState.actor_tokens` in
+  `PitbossHandler::authenticate_and_rebind` (`mcp/server.rs`). On hit
+  it binds the connection's canonical identity from the lookup
+  result (NOT the wire `_meta.actor_id`, which is forge-able) and
+  strips the token before downstream handlers see it. Unknown or
+  forged tokens → `invalid_request("invalid actor token …")`.
+- Tokens are not revoked at actor termination — `actor_tokens` grows
+  monotonically until the dispatcher process exits. This is bounded by
+  process lifetime; a token for a terminated actor cannot be used
+  because that actor's bridge subprocess has also exited. A same-UID
+  process that previously read an actor's `mcp-config.json` could
+  replay the token until the run ends; this is consistent with the
+  same-UID local threat model.
+
+### Invariants
+
+- No two simultaneous runs share a socket path (`run_id` collision is
+  the only way, modulo UUIDv7).
+- Only the running user can `connect()` the socket (`0o600` socket +
+  `0o700` containing dir).
+- A `tools/call` without a valid `_meta.token` is rejected; an
+  `_meta.actor_id` without a token is also rejected (no anonymous
+  fallback — closes #309/#310).
+- Tokens minted in run A's `DispatchState` are unknown to run B's
+  `DispatchState` (in-memory tables are per-process); cross-run replay
+  is rejected at `authenticate_and_rebind`. Pinned by
+  `concurrent_runs_isolate_sockets_and_tokens` in
+  `tests/hierarchical_flows.rs`.
+
+### Threat model
+
+- **In scope:** other local processes under different UIDs, accidental
+  cross-run wiring during refactors.
+- **Out of scope:** same-UID processes with read access to the
+  run_subdir, kernel-level attackers, network attackers (the socket
+  is local-only).
+
+---
+
 ## The MCP tools the lead has
 
 When running hierarchical, the lead's `--allowedTools` is automatically
