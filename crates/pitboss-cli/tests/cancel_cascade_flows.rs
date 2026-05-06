@@ -57,6 +57,21 @@ use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use serde_json::json;
 use uuid::Uuid;
 
+/// Mint an actor token via `state.mint_token` and connect a `FakeMcpClient`
+/// that presents it. Required because `authenticate_and_rebind` rejects
+/// calls that present `_meta.actor_id` without a valid token (#309 fix).
+async fn connect_actor(
+    state: &DispatchState,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+) -> FakeMcpClient {
+    let token = state.mint_token(actor_id, actor_role).await;
+    FakeMcpClient::connect_with_token(socket, actor_id, actor_role, &token)
+        .await
+        .expect("connect_with_token")
+}
+
 /// Build a `DispatchState` with `allow_subleads = true` and budgets
 /// generous enough to cover one sub-lead and one worker. Same shape as
 /// `sublead_flows::mk_state_with_subleads`, kept local so the test file
@@ -154,9 +169,7 @@ async fn sublead_spawned_after_root_drain_inherits_drain() {
     state.root.cancel.drain();
     yield_for_cascade_watcher().await;
 
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -193,9 +206,7 @@ async fn sublead_spawned_after_root_terminate_inherits_terminate() {
     state.root.cancel.terminate();
     yield_for_cascade_watcher().await;
 
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -230,9 +241,7 @@ async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
 
     pitboss_cli::dispatch::signals::install_cascade_cancel_watcher(state.clone());
 
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -251,9 +260,7 @@ async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
     }
     yield_for_cascade_watcher().await;
 
-    let mut sub_client = FakeMcpClient::connect_as(&socket, &sublead_id, "sublead")
-        .await
-        .unwrap();
+    let mut sub_client = connect_actor(&state, &socket, &sublead_id, "sublead").await;
     let spawn_resp = sub_client
         .call_tool("spawn_worker", json!({"prompt": "late worker"}))
         .await
@@ -290,9 +297,7 @@ async fn worker_spawn_after_subtree_terminate_fails_with_unknown_sublead() {
 
     pitboss_cli::dispatch::signals::install_cascade_cancel_watcher(state.clone());
 
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -311,9 +316,7 @@ async fn worker_spawn_after_subtree_terminate_fails_with_unknown_sublead() {
     }
     yield_for_cascade_watcher().await;
 
-    let mut sub_client = FakeMcpClient::connect_as(&socket, &sublead_id, "sublead")
-        .await
-        .unwrap();
+    let mut sub_client = connect_actor(&state, &socket, &sublead_id, "sublead").await;
     let result = sub_client
         .call_tool("spawn_worker", json!({"prompt": "late worker"}))
         .await;

@@ -57,6 +57,7 @@ impl McpClient {
         socket: &Path,
         actor_id: &str,
         actor_role: &str,
+        token: Option<&str>,
     ) -> Result<Self> {
         let mut cmd = Command::new(pitboss_bin);
         cmd.arg("mcp-bridge")
@@ -65,6 +66,9 @@ impl McpClient {
             .arg(actor_id)
             .arg("--actor-role")
             .arg(actor_role);
+        if let Some(t) = token {
+            cmd.arg("--token").arg(t);
+        }
         let transport = TokioChildProcess::new(cmd).with_context(|| {
             format!(
                 "spawn mcp-bridge via {} (sock={}, actor={}/{})",
@@ -92,8 +96,15 @@ impl McpClient {
                 .context("PITBOSS_FAKE_MCP_BRIDGE_CMD set but PITBOSS_FAKE_ACTOR_ID missing")?;
             let actor_role = std::env::var("PITBOSS_FAKE_ACTOR_ROLE")
                 .context("PITBOSS_FAKE_MCP_BRIDGE_CMD set but PITBOSS_FAKE_ACTOR_ROLE missing")?;
-            return Self::connect_via_bridge(&PathBuf::from(cmd), socket, &actor_id, &actor_role)
-                .await;
+            let token = std::env::var("PITBOSS_FAKE_TOKEN").ok();
+            return Self::connect_via_bridge(
+                &PathBuf::from(cmd),
+                socket,
+                &actor_id,
+                &actor_role,
+                token.as_deref(),
+            )
+            .await;
         }
         Self::connect(socket).await
     }

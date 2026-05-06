@@ -36,6 +36,21 @@ use pitboss_core::store::{JsonFileStore, SessionStore};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use uuid::Uuid;
 
+/// Mint an actor token via `state.mint_token` and connect a `FakeMcpClient`
+/// that presents it. Required because `authenticate_and_rebind` rejects
+/// calls that present `_meta.actor_id` without a valid token (#309 fix).
+async fn connect_actor(
+    state: &DispatchState,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+) -> FakeMcpClient {
+    let token = state.mint_token(actor_id, actor_role).await;
+    FakeMcpClient::connect_with_token(socket, actor_id, actor_role, &token)
+        .await
+        .expect("connect_with_token")
+}
+
 /// Build a DispatchState with allow_subleads=true and a root budget of $20.
 /// Worker spawner uses FakeScript that completes cleanly.
 fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
@@ -406,9 +421,7 @@ async fn run_global_lease_serializes_two_subleads() {
         .unwrap();
 
     // Root lead spawns two sub-leads.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
 
     let resp1 = root_client
         .call_tool(
@@ -435,9 +448,7 @@ async fn run_global_lease_serializes_two_subleads() {
         .to_string();
 
     // S1 acquires the run-global lease for "output.json".
-    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &socket, &s1_id, "sublead").await;
     let acq1 = s1_client
         .call_tool(
             "run_lease_acquire",
@@ -451,9 +462,7 @@ async fn run_global_lease_serializes_two_subleads() {
     );
 
     // S2 attempts to acquire the same lease — must be rejected with holder info.
-    let mut s2_client = FakeMcpClient::connect_as(&socket, &s2_id, "sublead")
-        .await
-        .unwrap();
+    let mut s2_client = connect_actor(&state, &socket, &s2_id, "sublead").await;
     let acq2 = s2_client
         .call_tool(
             "run_lease_acquire",
@@ -531,9 +540,7 @@ async fn reject_with_reason_reaches_sublead_session() {
     .unwrap();
 
     // Root lead spawns sub-lead S1.
-    let mut root_client = FakeMcpClient::connect_as(&mcp_sock, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &mcp_sock, "root", "root_lead").await;
     let spawn_resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -591,9 +598,7 @@ async fn reject_with_reason_reaches_sublead_session() {
     });
 
     // Sub-lead S1 calls request_approval.
-    let mut s1_client = FakeMcpClient::connect_as(&mcp_sock, &s1_id, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &mcp_sock, &s1_id, "sublead").await;
     let approval_resp = s1_client
         .call_tool(
             "request_approval",

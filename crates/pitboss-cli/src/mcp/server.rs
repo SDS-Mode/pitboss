@@ -426,13 +426,20 @@ impl PitbossHandler {
             }
         }
 
-        // No bound identity AND no token. The wire might still carry an
-        // unauthenticated actor_id — accept it for backward compatibility
-        // with code paths that don't have a token (none in production,
-        // but tests construct DispatchState directly without minting).
-        // The defense-in-depth `extract_bound_identity` below treats this
-        // as "no bound identity" so downstream authz checks (Phase 3)
-        // still fire correctly.
+        // No bound identity AND no token. If the wire claims an actor_id,
+        // this is a forgery attempt — reject (matches the docstring at
+        // lines 344-348). Production callers always carry a token (root
+        // lead via `--token` in lead-mcp-config.json, workers/sub-leads
+        // via mint at spawn). A bare `{}` _meta with no actor_id is
+        // permitted; per-tool handlers that require identity will reject
+        // via their MetaField extractor.
+        if meta_obj.contains_key("actor_id") {
+            return Err(ErrorData::invalid_request(
+                "_meta.actor_id present without _meta.token; reconnect via pitboss mcp-bridge"
+                    .to_string(),
+                None,
+            ));
+        }
         Ok(())
     }
 
@@ -447,19 +454,23 @@ impl PitbossHandler {
 
     /// Issue #144 — gate a mutating call against `authorize_target`.
     ///
-    /// Resolves the caller from connection-bound identity (Phase 2) when
-    /// available; otherwise treats the connection as the root lead — the
-    /// only legitimate path to a missing bound identity is a legacy
-    /// caller that predates token issuance, which only the operator's
-    /// own root-lead spawn produces (sub-leads and workers always carry
-    /// tokens minted at spawn time).
+    /// Requires the caller to have a bound connection identity (Phase 2).
+    /// Production callers always reach this with a bound identity because
+    /// every actor mints a token at spawn (root lead in `hierarchical.rs`,
+    /// workers in `mcp/tools/spawn.rs`, sub-leads in `dispatch/sublead.rs`)
+    /// and presents it via `_meta.token` through the bridge. An unbound
+    /// caller is therefore a forged direct-socket connection that should
+    /// be rejected outright — the previous behavior of defaulting to
+    /// root-lead authority was a privilege-escalation backdoor (#310).
     async fn authorize(&self, target_id: &str) -> Result<(), ErrorData> {
         let bound = self.connection_identity.lock().await.clone();
-        let (caller_id, caller_role) = match bound {
-            Some(id) => (id.actor_id, id.actor_role),
-            None => (self.state.root.lead_id.clone(), "root_lead".to_string()),
+        let Some(id) = bound else {
+            return Err(ErrorData::invalid_request(
+                "authentication required; reconnect via pitboss mcp-bridge".to_string(),
+                None,
+            ));
         };
-        authorize_target(&self.state, &caller_id, &caller_role, target_id).await
+        authorize_target(&self.state, &id.actor_id, &id.actor_role, target_id).await
     }
 }
 
@@ -1131,6 +1142,24 @@ impl PitbossHandler {
         &self,
         Parameters(args): Parameters<PermissionPromptArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Defense-in-depth: `list_tools` filters this tool unless path_b is
+        // enabled, but a same-UID direct-socket caller could bypass that
+        // filter. Re-check at the handler so the manifest gate is enforced
+        // regardless of how the caller discovered the tool (#311).
+        use crate::manifest::schema::PermissionRouting;
+        let path_b = self
+            .state
+            .root
+            .manifest
+            .lead
+            .as_ref()
+            .is_some_and(|l| l.permission_routing == PermissionRouting::PathB);
+        if !path_b {
+            return Err(ErrorData::invalid_request(
+                "permission_prompt requires [lead].permission_routing = \"path_b\"".to_string(),
+                None,
+            ));
+        }
         match handle_permission_prompt(&self.state, args).await {
             Ok(res) => to_structured_result(&res),
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),

@@ -358,11 +358,37 @@ async fn r2_side_channel(run_dir: PathBuf) -> anyhow::Result<()> {
     wait_for_path(&mcp_sock, Duration::from_secs(30)).await?;
 
     // ── Step 3: connect FakeMcpClient ────────────────────────────────────────
-    // Connect with root_lead identity so cancel_worker is accepted without
-    // role-authz issues (cancel_worker has no role check, but the _meta field
-    // is required by some tool handlers; root_lead is always safe).
-    let mut client =
-        fake_mcp_client::FakeMcpClient::connect_as(&mcp_sock, "r2-operator", "root_lead").await?;
+    // Connect with the lead's actual token by reading it from
+    // `lead-mcp-config.json`. This mirrors what `pitboss mcp-bridge` does
+    // in production. Required since #309 — the server now rejects calls
+    // that present `_meta.actor_id` without a valid token.
+    let cfg_path = run_subdir.join("lead-mcp-config.json");
+    let cfg_bytes = tokio::fs::read(&cfg_path).await?;
+    let cfg: serde_json::Value = serde_json::from_slice(&cfg_bytes)?;
+    let args = cfg["mcpServers"]["pitboss"]["args"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("lead-mcp-config.json missing args array"))?;
+    let mut token: Option<String> = None;
+    let mut actor_id: Option<String> = None;
+    let mut actor_role: Option<String> = None;
+    for w in args.windows(2) {
+        match w[0].as_str() {
+            Some("--token") => token = w[1].as_str().map(str::to_string),
+            Some("--actor-id") => actor_id = w[1].as_str().map(str::to_string),
+            Some("--actor-role") => actor_role = w[1].as_str().map(str::to_string),
+            _ => {}
+        }
+    }
+    let token = token.ok_or_else(|| anyhow::anyhow!("--token absent in lead-mcp-config"))?;
+    let actor_id = actor_id.unwrap_or_else(|| "lead".into());
+    let actor_role = actor_role.unwrap_or_else(|| "lead".into());
+    let mut client = fake_mcp_client::FakeMcpClient::connect_with_token(
+        &mcp_sock,
+        &actor_id,
+        &actor_role,
+        &token,
+    )
+    .await?;
 
     // ── Step 4: poll list_workers until a non-lead worker appears ─────────────
     let worker_id = wait_for_first_worker_via_mcp(&mut client, Duration::from_secs(90)).await?;

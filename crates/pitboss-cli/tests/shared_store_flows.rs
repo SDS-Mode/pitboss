@@ -493,14 +493,17 @@ async fn lease_released_when_mcp_connection_drops() {
 
     // Session A: acquire with a very long TTL so only the connection-drop
     // cleanup can release it within the test timeframe.
-    let mut client_a = FakeMcpClient::connect(&socket).await.unwrap();
+    let token_a = state.mint_token("worker-A", "worker").await;
+    let token_b = state.mint_token("worker-B", "worker").await;
+    let mut client_a = FakeMcpClient::connect_with_token(&socket, "worker-A", "worker", &token_a)
+        .await
+        .unwrap();
     let acq_a = client_a
         .call_tool(
             "lease_acquire",
             json!({
                 "name": "job-1",
                 "ttl_secs": 3600,
-                "_meta": { "actor_id": "worker-A", "actor_role": "worker" }
             }),
         )
         .await
@@ -519,14 +522,15 @@ async fn lease_released_when_mcp_connection_drops() {
 
     // Session B: should be able to take the lease — it's free because A
     // disconnected, not because 3600s elapsed.
-    let mut client_b = FakeMcpClient::connect(&socket).await.unwrap();
+    let mut client_b = FakeMcpClient::connect_with_token(&socket, "worker-B", "worker", &token_b)
+        .await
+        .unwrap();
     let acq_b = client_b
         .call_tool(
             "lease_acquire",
             json!({
                 "name": "job-1",
                 "ttl_secs": 60,
-                "_meta": { "actor_id": "worker-B", "actor_role": "worker" }
             }),
         )
         .await
@@ -636,14 +640,17 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
 
     // Session A: acquire with a very long TTL so only the connection-drop
     // cleanup can release it within the test timeframe.
-    let mut client_a = FakeMcpClient::connect(&socket).await.unwrap();
+    let token_a = state.mint_token("worker-A", "worker").await;
+    let token_b = state.mint_token("worker-B", "worker").await;
+    let mut client_a = FakeMcpClient::connect_with_token(&socket, "worker-A", "worker", &token_a)
+        .await
+        .unwrap();
     let acq_a = client_a
         .call_tool(
             "run_lease_acquire",
             json!({
                 "key": "r-job-1",
                 "ttl_secs": 3600,
-                "_meta": { "actor_id": "worker-A", "actor_role": "worker" }
             }),
         )
         .await
@@ -662,14 +669,15 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
 
     // Session B: should be able to take the lease — it's free because A
     // disconnected, not because 3600s elapsed.
-    let mut client_b = FakeMcpClient::connect(&socket).await.unwrap();
+    let mut client_b = FakeMcpClient::connect_with_token(&socket, "worker-B", "worker", &token_b)
+        .await
+        .unwrap();
     let acq_b = client_b
         .call_tool(
             "run_lease_acquire",
             json!({
                 "key": "r-job-1",
                 "ttl_secs": 60,
-                "_meta": { "actor_id": "worker-B", "actor_role": "worker" }
             }),
         )
         .await
