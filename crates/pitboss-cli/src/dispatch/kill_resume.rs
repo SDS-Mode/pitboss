@@ -133,14 +133,14 @@ pub async fn run_kill_resume_loop(
         // kill+restart this iteration without terminating the whole
         // tree.
         let proc_cancel = CancelToken::new();
-        {
+        let bridge = {
             let tree_cancel = layer.cancel.clone();
             let proc = proc_cancel.clone();
             tokio::spawn(async move {
                 tree_cancel.await_terminate().await;
                 proc.terminate();
-            });
-        }
+            })
+        };
 
         let outcome = SessionHandle::new(
             actor_id.clone(),
@@ -152,6 +152,14 @@ pub async fn run_kill_resume_loop(
         .with_session_id_tx(session_id_tx)
         .run_to_completion(proc_cancel, args.timeout)
         .await;
+
+        // The bridge task awaits `tree_cancel.await_terminate()` which
+        // does not fire until the run ends. Without this abort, every
+        // iteration leaks a task holding a CancelToken clone — N
+        // resumes accumulates N orphans bounded only by run lifetime.
+        // The session has already returned, so the bridge has nothing
+        // useful left to do regardless of cancel state.
+        bridge.abort();
 
         // Capture session_id from the per-iteration channel (preferred,
         // fires on the `system{subtype:"init"}` event so it's available
