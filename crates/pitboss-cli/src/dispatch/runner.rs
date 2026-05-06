@@ -1156,6 +1156,22 @@ async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
     }
 }
 
+/// Whole seconds elapsed between `created_at` and `now`, clamped at 0.
+///
+/// #301: pre-fix, both the approval-queue and approval-bridge expiry
+/// scans cast `chrono::Duration::num_seconds()` (`i64`) directly to `u64`.
+/// A backward wall-clock jump (NTP step, VM resume) makes the difference
+/// negative, the cast wraps to ~2^64-1, every TTL'd entry compares as
+/// expired, and every fallback fires immediately. Clamping the signed
+/// result at 0 before the unsigned cast treats the entry as "not yet
+/// aged" — TTL expiry resumes naturally once the wall clock catches up.
+fn clamped_age_secs(
+    now: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    (now - created_at).num_seconds().max(0) as u64
+}
+
 async fn expire_layer_approvals(
     state: &Arc<crate::dispatch::state::DispatchState>,
     layer: &Arc<crate::dispatch::layer::LayerState>,
@@ -1173,7 +1189,7 @@ async fn expire_layer_approvals(
     while i < queue.len() {
         let expired_now = match queue[i].ttl_secs {
             Some(ttl_secs) => {
-                let age = (now - queue[i].created_at).num_seconds() as u64;
+                let age = clamped_age_secs(now, queue[i].created_at);
                 let fallback = queue[i].fallback.unwrap_or(ApprovalFallback::Block);
                 age >= ttl_secs && !matches!(fallback, ApprovalFallback::Block)
             }
@@ -1224,7 +1240,7 @@ async fn expire_layer_approvals(
                 if matches!(fallback, ApprovalFallback::Block) {
                     return None;
                 }
-                let age = (now - entry.created_at).num_seconds() as u64;
+                let age = clamped_age_secs(now, entry.created_at);
                 if age >= ttl {
                     Some(id.clone())
                 } else {
@@ -1306,6 +1322,32 @@ mod tests {
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"sdk-ts".to_string())
         );
+    }
+
+    /// #301 regression: a `created_at` in the future (i.e. wall-clock
+    /// ran backward since the entry was queued) must NOT wrap to a
+    /// giant unsigned age. Pre-fix, both expiry scans cast a negative
+    /// `i64` directly to `u64`, forcing every TTL'd entry to fire its
+    /// fallback on the next sweep. Pin the `.max(0)` clamp.
+    #[test]
+    fn clamped_age_secs_returns_zero_on_backward_clock_jump() {
+        let now = chrono::Utc::now();
+        let future = now + chrono::Duration::seconds(60);
+        // created_at is "after" now — i.e. clock jumped backward
+        // between queue insertion and this expiry scan.
+        let age = clamped_age_secs(now, future);
+        assert_eq!(
+            age, 0,
+            "negative duration must clamp to 0, not wrap to a u64 max"
+        );
+    }
+
+    /// Sanity: positive elapsed time still passes through correctly.
+    #[test]
+    fn clamped_age_secs_passes_through_positive_durations() {
+        let now = chrono::Utc::now();
+        let earlier = now - chrono::Duration::seconds(45);
+        assert_eq!(clamped_age_secs(now, earlier), 45);
     }
 
     /// #328 regression: PITBOSS_RUN_ID must be force-overwritten even when
