@@ -126,13 +126,16 @@ async fn run_fake_claude_lead(
 /// Variant of `run_fake_claude_lead` that wires fake-claude through a
 /// spawned `pitboss mcp-bridge` subprocess instead of connecting to the
 /// socket directly. `actor_id` / `actor_role` get injected into every
-/// `tools/call` via `_meta` by the bridge.
+/// `tools/call` via `_meta` by the bridge. `token` is required post-#309
+/// for the bridge to authenticate.
+#[allow(clippy::too_many_arguments)]
 async fn run_fake_claude_lead_via_bridge(
     cwd: &std::path::Path,
     script_path: &std::path::Path,
     mcp_sock: &std::path::Path,
     actor_id: &str,
     actor_role: &str,
+    token: &str,
     cancel: CancelToken,
     timeout: Duration,
 ) -> SessionOutcome {
@@ -144,6 +147,7 @@ async fn run_fake_claude_lead_via_bridge(
             support::pitboss_binary(),
             actor_id.into(),
             actor_role.into(),
+            token.into(),
         )),
         cancel,
         timeout,
@@ -155,7 +159,7 @@ async fn run_fake_claude_lead_impl(
     cwd: &std::path::Path,
     script_path: &std::path::Path,
     mcp_sock: &std::path::Path,
-    bridge: Option<(PathBuf, String, String)>,
+    bridge: Option<(PathBuf, String, String, String)>,
     cancel: CancelToken,
     timeout: Duration,
 ) -> SessionOutcome {
@@ -168,13 +172,14 @@ async fn run_fake_claude_lead_impl(
         "PITBOSS_FAKE_MCP_SOCKET".to_string(),
         mcp_sock.to_string_lossy().to_string(),
     );
-    if let Some((pitboss_bin, actor_id, actor_role)) = bridge {
+    if let Some((pitboss_bin, actor_id, actor_role, token)) = bridge {
         env.insert(
             "PITBOSS_FAKE_MCP_BRIDGE_CMD".to_string(),
             pitboss_bin.to_string_lossy().to_string(),
         );
         env.insert("PITBOSS_FAKE_ACTOR_ID".to_string(), actor_id);
         env.insert("PITBOSS_FAKE_ACTOR_ROLE".to_string(), actor_role);
+        env.insert("PITBOSS_FAKE_TOKEN".to_string(), token);
     }
     let cmd = SpawnCmd {
         program: fake_claude_path(),
@@ -421,10 +426,17 @@ async fn e2e_lead_cancels_worker_mid_flight() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
-    let outcome = run_fake_claude_lead(
+    // cancel_worker is gated by `authorize` which now hard-rejects unbound
+    // callers (#310). Route through the bridge with a minted token to
+    // mirror the production lead's auth path.
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )
@@ -688,10 +700,16 @@ async fn e2e_lead_reprompts_running_worker() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
-    let outcome = run_fake_claude_lead(
+    // reprompt_worker is gated by `authorize` (#310 fix). Route through
+    // the bridge with a minted token.
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )
@@ -1003,12 +1021,14 @@ async fn e2e_lead_through_mcp_bridge_injects_meta() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
+    let token = state.mint_token("lead", "lead").await;
     let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &sock,
         "lead", // actor_id the bridge will inject
         "lead", // actor_role
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )
@@ -1190,10 +1210,16 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
-    let outcome = run_fake_claude_lead(
+    // pause/continue/cancel_worker are all gated by `authorize` (#310 fix).
+    // Route through the bridge with a minted token.
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &mcp_sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )

@@ -48,6 +48,21 @@ use pitboss_core::store::{JsonFileStore, SessionStore};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use uuid::Uuid;
 
+/// Mint an actor token via `state.mint_token` and connect a `FakeMcpClient`
+/// that presents it. Required because `authenticate_and_rebind` rejects
+/// calls that present `_meta.actor_id` without a valid token (#309 fix).
+async fn connect_actor(
+    state: &DispatchState,
+    socket: &std::path::Path,
+    actor_id: &str,
+    actor_role: &str,
+) -> FakeMcpClient {
+    let token = state.mint_token(actor_id, actor_role).await;
+    FakeMcpClient::connect_with_token(socket, actor_id, actor_role, &token)
+        .await
+        .expect("connect_with_token")
+}
+
 /// Build a DispatchState with allow_subleads=true for in-process spotlights.
 ///
 /// Duplicated from `sublead_flows.rs::mk_state_with_subleads` to keep
@@ -302,9 +317,7 @@ async fn dogfood_isolation_strict_tree() {
         .unwrap();
 
     // ── Act as root lead and spawn two sub-leads ──────────────────────────────
-    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
 
     let s1_resp = root
         .call_tool(
@@ -341,12 +354,8 @@ async fn dogfood_isolation_strict_tree() {
         .to_string();
 
     // Each sub-lead connects to the MCP server with its own identity.
-    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
-        .await
-        .unwrap();
-    let mut s2_client = FakeMcpClient::connect_as(&socket, &s2_id, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &socket, &s1_id, "sublead").await;
+    let mut s2_client = connect_actor(&state, &socket, &s2_id, "sublead").await;
 
     // ── Each sub-lead writes progress to its own /shared/progress ─────────────
     // Values are UTF-8 bytes for the string content.
@@ -420,9 +429,7 @@ async fn dogfood_isolation_strict_tree() {
     // W2 attempts to read it — must be rejected with a strict-peer-visibility
     // error. (Workers are the correct actors here; see test docstring for why
     // sub-leads are not used for this assertion.)
-    let mut worker1 = FakeMcpClient::connect_as(&socket, "worker-W1", "worker")
-        .await
-        .unwrap();
+    let mut worker1 = connect_actor(&state, &socket, "worker-W1", "worker").await;
     worker1
         .call_tool(
             "kv_set",
@@ -434,9 +441,7 @@ async fn dogfood_isolation_strict_tree() {
         .await
         .unwrap();
 
-    let mut worker2 = FakeMcpClient::connect_as(&socket, "worker-W2", "worker")
-        .await
-        .unwrap();
+    let mut worker2 = connect_actor(&state, &socket, "worker-W2", "worker").await;
     let sibling_read = worker2
         .call_tool("kv_get", json!({ "path": "/peer/worker-W1/status" }))
         .await;
@@ -525,9 +530,7 @@ async fn dogfood_kill_cascade_drain() {
     pitboss_cli::dispatch::signals::install_cascade_cancel_watcher(state.clone());
 
     // ── Spawn two sub-leads via MCP ───────────────────────────────────────────
-    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
 
     let s1_resp = root
         .call_tool(
@@ -663,9 +666,7 @@ async fn dogfood_run_lease_contention() {
         .unwrap();
 
     // ── Spawn two sub-leads via MCP ───────────────────────────────────────────
-    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
 
     let s1_resp = root
         .call_tool(
@@ -702,9 +703,7 @@ async fn dogfood_run_lease_contention() {
         .to_string();
 
     // ── STEP 1: S1 acquires the lease ────────────────────────────────────────
-    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &socket, &s1_id, "sublead").await;
     let acq1 = s1_client
         .call_tool(
             "run_lease_acquire",
@@ -727,9 +726,7 @@ async fn dogfood_run_lease_contention() {
     );
 
     // ── STEP 2: S2 tries to acquire the same lease — should be blocked ──────
-    let mut s2_client = FakeMcpClient::connect_as(&socket, &s2_id, "sublead")
-        .await
-        .unwrap();
+    let mut s2_client = connect_actor(&state, &socket, &s2_id, "sublead").await;
     let acq2 = s2_client
         .call_tool(
             "run_lease_acquire",
@@ -802,9 +799,7 @@ async fn dogfood_policy_auto_filter() {
         .unwrap();
 
     // ── Spawn two sub-leads via MCP ──────────────────────────────────────
-    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
 
     let s1_resp = root
         .call_tool(
@@ -868,9 +863,7 @@ async fn dogfood_policy_auto_filter() {
 
     // ── ACT 1: S1 requests routine tool-use approval ──────────────────────
     // Expected: auto-approved by Rule 1, no queue entry
-    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &socket, &s1_id, "sublead").await;
     let s1_approval = s1_client
         .call_tool(
             "request_approval",
@@ -908,10 +901,9 @@ async fn dogfood_policy_auto_filter() {
     // so we can let it hang briefly while we verify the queue state.
     let socket_2 = socket.clone();
     let s2_id_clone = s2_id.clone();
+    let state_for_s2 = state.clone();
     let s2_approval_handle = tokio::spawn(async move {
-        let mut s2_client = FakeMcpClient::connect_as(&socket_2, &s2_id_clone, "sublead")
-            .await
-            .unwrap();
+        let mut s2_client = connect_actor(&state_for_s2, &socket_2, &s2_id_clone, "sublead").await;
         s2_client
             .call_tool(
                 "request_approval",
@@ -944,10 +936,9 @@ async fn dogfood_policy_auto_filter() {
     // Expected: blocked by Rule 2 (all Plan approvals require operator), queued
     let socket_3 = socket.clone();
     let s1_id_clone = s1_id.clone();
+    let state_for_s1 = state.clone();
     let plan_req_handle = tokio::spawn(async move {
-        let mut s1_client = FakeMcpClient::connect_as(&socket_3, &s1_id_clone, "sublead")
-            .await
-            .unwrap();
+        let mut s1_client = connect_actor(&state_for_s1, &socket_3, &s1_id_clone, "sublead").await;
         s1_client
             .call_tool(
                 "propose_plan",
@@ -1078,9 +1069,7 @@ async fn dogfood_envelope_cap_rejection() {
         .await
         .unwrap();
 
-    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
 
     // ── Act 1: Root attempts to spawn sub-lead with budget_usd = 5.0 ────────
     // Expected: rejected with "exceeds per-sublead cap" error, no state change

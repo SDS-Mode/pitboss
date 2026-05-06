@@ -2,7 +2,7 @@
 //! pitboss MCP server using fake-mcp-client, mirroring the
 //! hierarchical_flows.rs pattern.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -18,6 +18,22 @@ use pitboss_core::session::CancelToken;
 use pitboss_core::store::{JsonFileStore, SessionStore};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use uuid::Uuid;
+
+/// Mint an actor token via `state.mint_token` and connect a `FakeMcpClient`
+/// that presents it. Mirrors what `pitboss mcp-bridge --token` does in
+/// production. Required because `authenticate_and_rebind` rejects calls
+/// that present `_meta.actor_id` without a valid token (#309 fix).
+async fn connect_actor(
+    state: &DispatchState,
+    socket: &Path,
+    actor_id: &str,
+    actor_role: &str,
+) -> FakeMcpClient {
+    let token = state.mint_token(actor_id, actor_role).await;
+    FakeMcpClient::connect_with_token(socket, actor_id, actor_role, &token)
+        .await
+        .expect("connect_with_token")
+}
 
 /// Same shape as hierarchical_flows::mk_state but with allow_subleads
 /// enabled on the lead. Used by every test in this file.
@@ -176,9 +192,7 @@ async fn sublead_kv_writes_isolated_from_root() {
         .unwrap();
 
     // Root lead spawns a sub-lead.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -192,9 +206,7 @@ async fn sublead_kv_writes_isolated_from_root() {
         .to_string();
 
     // Sub-lead writes /shared/key = "from_sub" into its own sub-tree layer.
-    let mut sub_client = FakeMcpClient::connect_as(&socket, &sublead_id, "sublead")
-        .await
-        .unwrap();
+    let mut sub_client = connect_actor(&state, &socket, &sublead_id, "sublead").await;
     sub_client
         .call_tool(
             "kv_set",
@@ -248,9 +260,7 @@ async fn sublead_workers_cannot_read_sibling_peer_slots() {
 
     // Worker A writes its peer slot.
     // (worker_meta uses ActorRole::Worker → "worker" role → root layer)
-    let mut worker_a = FakeMcpClient::connect_as(&socket, "worker-A", "worker")
-        .await
-        .unwrap();
+    let mut worker_a = connect_actor(&state, &socket, "worker-A", "worker").await;
     worker_a
         .call_tool(
             "kv_set",
@@ -261,9 +271,7 @@ async fn sublead_workers_cannot_read_sibling_peer_slots() {
 
     // Worker B tries to read Worker A's peer slot — must be rejected.
     // (strict peer visibility: only worker-A itself or the layer lead can read /peer/worker-A/*)
-    let mut worker_b = FakeMcpClient::connect_as(&socket, "worker-B", "worker")
-        .await
-        .unwrap();
+    let mut worker_b = connect_actor(&state, &socket, "worker-B", "worker").await;
     let result = worker_b
         .call_tool("kv_get", json!({"path": "/peer/worker-A/status"}))
         .await;
@@ -293,9 +301,7 @@ async fn sublead_workers_cannot_wait_on_sibling_peer_slots() {
     // Worker A will write its peer slot asynchronously.
     // Worker B tries to wait on Worker A's peer slot — must be rejected.
     // (strict peer visibility: only worker-A itself or the layer lead can wait on /peer/worker-A/*)
-    let mut worker_b = FakeMcpClient::connect_as(&socket, "worker-B", "worker")
-        .await
-        .unwrap();
+    let mut worker_b = connect_actor(&state, &socket, "worker-B", "worker").await;
     let result = worker_b
         .call_tool(
             "kv_wait",
@@ -323,7 +329,7 @@ async fn spawn_sublead_tool_is_exposed_to_root() {
         .await
         .unwrap();
 
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let mut client = connect_actor(&state, &socket, "root", "root_lead").await;
     let tools = client.list_tools().await.unwrap();
     assert!(
         tools.iter().any(|t| t.name == "spawn_sublead"),
@@ -342,7 +348,7 @@ async fn spawn_sublead_creates_isolated_layer() {
         .unwrap();
 
     // Plain connect() defaults to root_lead identity, which passes the role check.
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let mut client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = client
         .call_tool(
             "spawn_sublead",
@@ -401,9 +407,7 @@ async fn root_cancel_cascades_to_sublead_workers() {
     // called inside run_hierarchical after the MCP server starts).
     pitboss_cli::dispatch::signals::install_cascade_cancel_watcher(state.clone());
 
-    let mut client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = client
         .call_tool(
             "spawn_sublead",
@@ -461,9 +465,7 @@ async fn sublead_cannot_call_spawn_sublead() {
 
     // Connect as a sub-lead actor (the fake client simulates what mcp-bridge
     // would do in production, injecting _meta into the call_tool request).
-    let mut client = FakeMcpClient::connect_as(&socket, "sublead-x", "sublead")
-        .await
-        .unwrap();
+    let mut client = connect_actor(&state, &socket, "sublead-x", "sublead").await;
     let result = client
         .call_tool(
             "spawn_sublead",
@@ -549,9 +551,7 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
         .await
         .unwrap();
 
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp1 = root_client
         .call_tool(
             "spawn_sublead",
@@ -576,9 +576,7 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
         .to_string();
 
     // S1 acquires the lease
-    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &socket, &s1, "sublead").await;
     let acq1 = s1_client
         .call_tool(
             "run_lease_acquire",
@@ -588,9 +586,7 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
     assert!(acq1.is_ok(), "s1 should acquire");
 
     // S2 tries the same key — must fail with holder info
-    let mut s2_client = FakeMcpClient::connect_as(&socket, &s2, "sublead")
-        .await
-        .unwrap();
+    let mut s2_client = connect_actor(&state, &socket, &s2, "sublead").await;
     let acq2 = s2_client
         .call_tool(
             "run_lease_acquire",
@@ -746,9 +742,7 @@ async fn policy_auto_approves_sublead_actor() {
         .unwrap();
 
     // Root lead spawns sub-lead S1.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let spawn_resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -784,9 +778,7 @@ async fn policy_auto_approves_sublead_actor() {
     // Sub-lead S1 calls request_approval. FakeMcpClient::connect_as with role
     // "sublead" causes _meta injection of {actor_id: s1_id, actor_role: "sublead"},
     // which build_caller_identity converts to actor_path "root→<s1_id>".
-    let mut s1_client = FakeMcpClient::connect_as(&socket, &s1_id, "sublead")
-        .await
-        .unwrap();
+    let mut s1_client = connect_actor(&state, &socket, &s1_id, "sublead").await;
     let result = s1_client
         .call_tool(
             "request_approval",
@@ -940,9 +932,7 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
         .unwrap();
 
     // Root lead spawns sub-lead S1.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -1083,9 +1073,7 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
-    let mut root = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
 
     let result = root
         .call_tool(
@@ -1306,9 +1294,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
         .unwrap();
 
     // Root lead spawns a sub-lead.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -1323,9 +1309,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
 
     // Sub-lead calls spawn_worker. FakeMcpClient::connect_as injects
     // _meta = {actor_id: sublead_id, actor_role: "sublead"}.
-    let mut sub_client = FakeMcpClient::connect_as(&socket, &sublead_id, "sublead")
-        .await
-        .unwrap();
+    let mut sub_client = connect_actor(&state, &socket, &sublead_id, "sublead").await;
     let spawn_resp = sub_client
         .call_tool("spawn_worker", json!({"prompt": "sub-task 1"}))
         .await
@@ -1378,9 +1362,7 @@ async fn worker_cannot_spawn_worker() {
         .unwrap();
 
     // Connect as a worker actor.
-    let mut worker_client = FakeMcpClient::connect_as(&socket, "worker-xyz", "worker")
-        .await
-        .unwrap();
+    let mut worker_client = connect_actor(&state, &socket, "worker-xyz", "worker").await;
     let result = worker_client
         .call_tool("spawn_worker", json!({"prompt": "nested spawn attempt"}))
         .await;
@@ -1457,9 +1439,7 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
         .unwrap();
 
     // Root lead spawns sub-lead S1.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -1553,9 +1533,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
         .unwrap();
 
     // Root lead spawns sub-lead S1.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     let resp = root_client
         .call_tool(
             "spawn_sublead",
@@ -1769,9 +1747,7 @@ async fn kill_with_reason_delivers_to_root_lead() {
     state.root.set_reprompt_tx(reprompt_tx).await;
 
     // Operator (acting as root lead) kills worker-root-1 with a reason.
-    let mut root_client = FakeMcpClient::connect_as(&socket, "root", "root_lead")
-        .await
-        .unwrap();
+    let mut root_client = connect_actor(&state, &socket, "root", "root_lead").await;
     root_client
         .call_tool(
             "cancel_worker",

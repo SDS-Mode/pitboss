@@ -19,6 +19,14 @@ use pitboss_core::store::{JsonFileStore, SessionStore};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 use uuid::Uuid;
 
+/// Mint a root-lead token for `state` matching what `hierarchical.rs`
+/// does in production. Returned alongside the state so tests can call
+/// `FakeMcpClient::connect_with_token(&socket, "lead", "lead", &token)`
+/// and pass `authenticate_and_rebind` post-#309-fix.
+async fn mint_root_token(state: &DispatchState) -> String {
+    state.mint_token(&state.root.lead_id, "lead").await
+}
+
 fn mk_state() -> (TempDir, Arc<DispatchState>) {
     let dir = TempDir::new().unwrap();
     // Lead with use_worktree=false so background worker spawns don't require
@@ -99,7 +107,10 @@ async fn mcp_spawn_and_list_round_trip() {
         .await
         .unwrap();
 
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let token = mint_root_token(&state).await;
+    let mut client = FakeMcpClient::connect_with_token(&socket, "lead", "lead", &token)
+        .await
+        .unwrap();
     let spawn_result = client
         .call_tool(
             "spawn_worker",
@@ -129,7 +140,10 @@ async fn mcp_spawn_over_max_workers_returns_error() {
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let token = mint_root_token(&state).await;
+    let mut client = FakeMcpClient::connect_with_token(&socket, "lead", "lead", &token)
+        .await
+        .unwrap();
 
     for i in 0..4 {
         client
@@ -173,7 +187,10 @@ async fn mcp_spawn_over_budget_returns_error() {
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let token = mint_root_token(&state).await;
+    let mut client = FakeMcpClient::connect_with_token(&socket, "lead", "lead", &token)
+        .await
+        .unwrap();
 
     let err = client
         .call_tool("spawn_worker", json!({"prompt": "p"}))
@@ -206,7 +223,10 @@ async fn mcp_spawn_while_draining_returns_error() {
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let token = mint_root_token(&state).await;
+    let mut client = FakeMcpClient::connect_with_token(&socket, "lead", "lead", &token)
+        .await
+        .unwrap();
 
     let err = client
         .call_tool("spawn_worker", json!({"prompt": "p"}))
@@ -249,7 +269,10 @@ async fn wait_actor_alias_resolves_worker_id() {
         .await
         .unwrap();
 
-    let mut client = FakeMcpClient::connect(&socket).await.unwrap();
+    let token = mint_root_token(&state).await;
+    let mut client = FakeMcpClient::connect_with_token(&socket, "lead", "lead", &token)
+        .await
+        .unwrap();
     let spawn_result = client
         .call_tool(
             "spawn_worker",
