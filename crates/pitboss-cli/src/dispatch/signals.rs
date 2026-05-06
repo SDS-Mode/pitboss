@@ -359,7 +359,7 @@ mod tests {
         let manifest = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 1,
+            max_parallel_tasks: Some(1),
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -448,7 +448,7 @@ mod tests {
         let manifest = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 1,
+            max_parallel_tasks: Some(1),
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -537,7 +537,7 @@ mod tests {
         let manifest = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 1,
+            max_parallel_tasks: Some(1),
             halt_on_failure: false,
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,

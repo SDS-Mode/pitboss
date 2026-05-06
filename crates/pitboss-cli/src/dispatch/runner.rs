@@ -270,7 +270,13 @@ async fn setup_run_harness(
         table.lock().await.register(&t.id);
     }
 
-    let semaphore = Arc::new(Semaphore::new(resolved.max_parallel_tasks as usize));
+    // #320: max_parallel_tasks is None in hierarchical mode; this path
+    // only ever runs for flat manifests (resolved.tasks above), so
+    // expect-fail rather than substitute a default.
+    let max_parallel = resolved
+        .max_parallel_tasks
+        .expect("flat-mode dispatch requires resolved.max_parallel_tasks");
+    let semaphore = Arc::new(Semaphore::new(max_parallel as usize));
     let cancel = CancelToken::new();
     crate::dispatch::signals::install_ctrl_c_watcher(cancel.clone());
     let wt_mgr = Arc::new(WorktreeManager::new());
@@ -1374,7 +1380,7 @@ mod tests {
         ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 1,
+            max_parallel_tasks: Some(1),
             halt_on_failure: false,
             run_dir: PathBuf::from("/tmp/pitboss-test"),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::OnSuccess,
@@ -1493,7 +1499,7 @@ mod tests {
         let resolved = crate::manifest::resolve::ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 2,
+            max_parallel_tasks: Some(2),
             halt_on_failure: false,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
@@ -1615,7 +1621,7 @@ mod tests {
         let resolved = crate::manifest::resolve::ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 1, // serialize so ordering is deterministic
+            max_parallel_tasks: Some(1), // serialize so ordering is deterministic
             halt_on_failure: true,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
@@ -1696,7 +1702,7 @@ mod tests {
         let resolved = crate::manifest::resolve::ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 1,
+            max_parallel_tasks: Some(1),
             halt_on_failure: false,
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,

@@ -123,10 +123,17 @@ pub struct ResolvedManifest {
     /// the field.
     #[serde(default)]
     pub name: Option<String>,
-    /// Renamed from `max_parallel` in v0.9 to match the TOML field name.
-    /// `alias` keeps pre-v0.9 `resolved.json` snapshots resumable.
-    #[serde(alias = "max_parallel")]
-    pub max_parallel_tasks: u32,
+    /// Concurrency cap for `[[task]]` flat-mode runs. `None` in
+    /// hierarchical mode (the lead's `max_workers` plays this role; the
+    /// flat-mode semaphore at `runner.rs` is never constructed). Renamed
+    /// from `max_parallel` in v0.9 to match the TOML field name; `alias`
+    /// keeps pre-v0.9 `resolved.json` snapshots resumable.
+    ///
+    /// #320: pre-fix this was always `Some(DEFAULT_MAX_PARALLEL_TASKS)`
+    /// even for hierarchical manifests, which made `resolved.json` lie
+    /// about the run's actual concurrency model.
+    #[serde(alias = "max_parallel", skip_serializing_if = "Option::is_none")]
+    pub max_parallel_tasks: Option<u32>,
     pub halt_on_failure: bool,
     pub run_dir: PathBuf,
     pub worktree_cleanup: WorktreeCleanup,
@@ -212,11 +219,21 @@ pub fn resolve(
         None
     };
 
-    let max_parallel_tasks = manifest
-        .run
-        .max_parallel_tasks
-        .or(env_max_parallel_tasks)
-        .unwrap_or(DEFAULT_MAX_PARALLEL_TASKS);
+    // #320: max_parallel_tasks is flat-mode-only. Hierarchical mode caps
+    // concurrency via `lead.max_workers`; a default applied here would
+    // surface in `resolved.json` as a misleading non-zero value the
+    // dispatcher never reads.
+    let max_parallel_tasks = if resolved_lead.is_some() {
+        None
+    } else {
+        Some(
+            manifest
+                .run
+                .max_parallel_tasks
+                .or(env_max_parallel_tasks)
+                .unwrap_or(DEFAULT_MAX_PARALLEL_TASKS),
+        )
+    };
 
     let run_dir = manifest.run.run_dir.unwrap_or_else(default_run_dir);
 
@@ -597,7 +614,52 @@ mod tests {
         "#);
         let r = resolve(m, None).unwrap();
         assert_eq!(r.tasks[0].prompt, "hi");
-        assert_eq!(r.max_parallel_tasks, 4);
+        assert_eq!(r.max_parallel_tasks, Some(4));
+    }
+
+    /// #320: hierarchical manifests do NOT use `max_parallel_tasks`
+    /// (lead.max_workers caps concurrency there). Resolving such a
+    /// manifest must leave the field as `None` rather than the flat-mode
+    /// default — otherwise `resolved.json` carries a misleading value
+    /// the dispatcher never reads.
+    #[test]
+    fn hierarchical_manifest_resolves_max_parallel_tasks_to_none() {
+        let m = man(r#"
+            [lead]
+            id = "lead"
+            directory = "/tmp"
+            prompt = "p"
+            allow_subleads = false
+            max_workers = 4
+            budget_usd = 5.0
+        "#);
+        let r = resolve(m, None).unwrap();
+        assert!(
+            r.lead.is_some(),
+            "fixture must produce a hierarchical manifest"
+        );
+        assert_eq!(
+            r.max_parallel_tasks, None,
+            "hierarchical mode must leave max_parallel_tasks unset; pre-fix it was Some(4)"
+        );
+    }
+
+    /// Even when an env-var override is supplied, hierarchical mode
+    /// still resolves to `None` — the env var only applies to flat-mode
+    /// `[[task]]` runs.
+    #[test]
+    fn hierarchical_manifest_ignores_env_max_parallel_override() {
+        let m = man(r#"
+            [lead]
+            id = "lead"
+            directory = "/tmp"
+            prompt = "p"
+            allow_subleads = false
+            max_workers = 4
+            budget_usd = 5.0
+        "#);
+        let r = resolve(m, Some(64)).unwrap();
+        assert_eq!(r.max_parallel_tasks, None);
     }
 
     #[test]
@@ -656,7 +718,7 @@ mod tests {
             prompt = "p"
         "#);
         let r = resolve(m, Some(16)).unwrap();
-        assert_eq!(r.max_parallel_tasks, 16);
+        assert_eq!(r.max_parallel_tasks, Some(16));
     }
 
     #[test]
@@ -670,7 +732,7 @@ mod tests {
             prompt = "p"
         "#);
         let r = resolve(m, Some(16)).unwrap();
-        assert_eq!(r.max_parallel_tasks, 2);
+        assert_eq!(r.max_parallel_tasks, Some(2));
     }
 
     #[test]
@@ -938,7 +1000,8 @@ category = "tool_use"
             "snapshot without the field must default to 0 (legacy)"
         );
         assert_eq!(
-            r.max_parallel_tasks, 7,
+            r.max_parallel_tasks,
+            Some(7),
             "alias `max_parallel` must populate max_parallel_tasks"
         );
         assert!(

@@ -37,7 +37,7 @@ async fn pause_op_writes_events_jsonl() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -245,7 +245,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -362,7 +362,7 @@ async fn auto_approve_policy_responds_without_tui() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -426,7 +426,7 @@ async fn auto_reject_policy_responds_without_tui() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -501,7 +501,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,

@@ -355,10 +355,12 @@ fn run_validate(manifest: &std::path::Path) -> i32 {
             r.budget_usd.unwrap_or(0.0)
         );
     } else {
+        // #320: max_parallel_tasks is guaranteed Some here (we're in the
+        // flat-mode branch — `r.lead.is_none()`).
         println!(
             "OK — {} tasks, max_parallel={}",
             r.tasks.len(),
-            r.max_parallel_tasks
+            r.max_parallel_tasks.unwrap_or(0)
         );
     }
     0

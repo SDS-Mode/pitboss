@@ -62,7 +62,7 @@ fn mk_state(
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: run_dir.to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -371,7 +371,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -636,7 +636,7 @@ async fn e2e_lead_reprompts_running_worker() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -839,7 +839,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -1144,7 +1144,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
