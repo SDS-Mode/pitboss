@@ -172,36 +172,57 @@ pub async fn task_detail(
 }
 
 /// `GET /api/runs/:id/tasks/:task_id/log` — task `stdout.log`.
+///
+/// Streams only the requested window into memory rather than the whole
+/// file. #340: pre-fix, `tokio::fs::read` slurped the entire log before
+/// slicing to `limit`, so a 100 MiB log from a long worker allocated
+/// 100 MiB on the server even though the response cap is 8 MiB. Now we
+/// open the file, consult metadata for `total_size`, seek to either
+/// `total_size - limit` (tail) or 0 (head), and read at most `limit`
+/// bytes from there. The `X-Total-Size` header still reports the full
+/// file size so the SPA's "showing last X of Y" UX is unchanged.
 pub async fn task_log(
     State(state): State<AppState>,
     AxPath((run_id, task_id)): AxPath<(String, String)>,
     Query(q): Query<LogQuery>,
 ) -> ApiResult<Response> {
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
     let run_dir = run_dir(state.runs_dir(), &run_id)?;
     let task_seg = sanitize_id(&task_id)?;
     let path = run_dir.join("tasks").join(task_seg).join("stdout.log");
     let limit = q.limit.unwrap_or(1 << 20).min(8 << 20) as usize;
     let tail = q.tail.unwrap_or(true);
 
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(b) => b,
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ApiError::NotFound),
         Err(e) => return Err(e.into()),
     };
-    let slice = if bytes.len() > limit {
-        if tail {
-            &bytes[bytes.len() - limit..]
-        } else {
-            &bytes[..limit]
-        }
+    let total_size = file.metadata().await?.len();
+    let limit_u64 = limit as u64;
+
+    let read_offset = if tail && total_size > limit_u64 {
+        total_size - limit_u64
     } else {
-        &bytes[..]
+        0
     };
+    // saturating_sub: log may be truncated between metadata() and the
+    // seek; if so we read whatever's left, no underflow.
+    let bytes_to_read = total_size.saturating_sub(read_offset).min(limit_u64) as usize;
+
+    if read_offset > 0 {
+        file.seek(SeekFrom::Start(read_offset)).await?;
+    }
+    let mut buf = vec![0u8; bytes_to_read];
+    file.read_exact(&mut buf).await?;
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header("X-Total-Size", bytes.len().to_string())
-        .body(Body::from(slice.to_vec()))
+        .header("X-Total-Size", total_size.to_string())
+        .body(Body::from(buf))
         .expect("log response"))
 }
 
@@ -444,6 +465,134 @@ mod tests {
         let resp = task_detail(
             State(state),
             AxPath((run_id.to_string(), "worker-Z".to_string())),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    // ── #340: task_log streaming reads ─────────────────────────────────────
+
+    /// Build a run dir with a synthetic `tasks/<task_id>/stdout.log`
+    /// of the given byte content.
+    fn build_run_with_task_log(run_id: &str, task_id: &str, content: &[u8]) -> (TempDir, AppState) {
+        let tmp = TempDir::new().unwrap();
+        let runs_dir = tmp.path().to_path_buf();
+        let task_dir = runs_dir.join(run_id).join("tasks").join(task_id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("stdout.log"), content).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(runs_dir, manifests_dir, None);
+        (tmp, state)
+    }
+
+    /// File smaller than `limit`: tail returns the whole file.
+    #[tokio::test]
+    async fn task_log_small_file_returns_full_content() {
+        let run_id = "01950000-0000-7000-8000-000000000010";
+        let content = b"hello world\n";
+        let (_tmp, state) = build_run_with_task_log(run_id, "worker-A", content);
+
+        let resp = task_log(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+            Query(LogQuery {
+                limit: Some(1024),
+                tail: Some(true),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("X-Total-Size").unwrap(),
+            &content.len().to_string()
+        );
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(body.as_ref(), content);
+    }
+
+    /// File larger than `limit` with tail=true: only the last `limit`
+    /// bytes load into memory; X-Total-Size still reports the full file
+    /// size so the SPA can render "showing last N of M".
+    #[tokio::test]
+    async fn task_log_large_file_tail_returns_only_window() {
+        let run_id = "01950000-0000-7000-8000-000000000011";
+        // 64 KiB file, request last 1 KiB. Tests the seek+read_exact path.
+        let mut content = Vec::with_capacity(64 * 1024);
+        for i in 0..(64u32 * 1024) {
+            content.push((i % 256) as u8);
+        }
+        let (_tmp, state) = build_run_with_task_log(run_id, "worker-A", &content);
+
+        let resp = task_log(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+            Query(LogQuery {
+                limit: Some(1024),
+                tail: Some(true),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resp.headers().get("X-Total-Size").unwrap(),
+            &content.len().to_string(),
+            "X-Total-Size must report full file size, not window size"
+        );
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(body.len(), 1024);
+        assert_eq!(
+            body.as_ref(),
+            &content[content.len() - 1024..],
+            "tail must contain the last `limit` bytes verbatim"
+        );
+    }
+
+    /// File larger than `limit` with tail=false: returns the first
+    /// `limit` bytes (head). Same byte-budget guarantee.
+    #[tokio::test]
+    async fn task_log_large_file_head_returns_only_window() {
+        let run_id = "01950000-0000-7000-8000-000000000012";
+        let mut content = Vec::with_capacity(64 * 1024);
+        for i in 0..(64u32 * 1024) {
+            content.push((i % 256) as u8);
+        }
+        let (_tmp, state) = build_run_with_task_log(run_id, "worker-A", &content);
+
+        let resp = task_log(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+            Query(LogQuery {
+                limit: Some(1024),
+                tail: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(body.len(), 1024);
+        assert_eq!(body.as_ref(), &content[..1024]);
+    }
+
+    /// Missing log file → 404 (existing contract; the streaming refactor
+    /// must preserve it).
+    #[tokio::test]
+    async fn task_log_returns_404_when_log_missing() {
+        let run_id = "01950000-0000-7000-8000-000000000013";
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(run_id).join("tasks").join("worker-A")).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(tmp.path().to_path_buf(), manifests_dir, None);
+
+        let resp = task_log(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+            Query(LogQuery {
+                limit: None,
+                tail: None,
+            }),
         )
         .await;
         assert!(matches!(resp, Err(ApiError::NotFound)));
