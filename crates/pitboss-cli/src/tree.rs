@@ -340,12 +340,15 @@ fn render_envelope(out: &mut String, m: &ResolvedManifest) {
 }
 
 fn render_flat(out: &mut String, m: &ResolvedManifest) {
+    // #320: render_flat is gated on `m.lead.is_none()` by the caller, so
+    // max_parallel_tasks is guaranteed to be Some here.
+    let max_parallel = m.max_parallel_tasks.unwrap_or(0);
     let _ = writeln!(
         out,
         "Flat mode ({} task{}, max_parallel_tasks={})",
         m.tasks.len(),
         if m.tasks.len() == 1 { "" } else { "s" },
-        m.max_parallel_tasks,
+        max_parallel,
     );
     let _ = writeln!(out);
     for t in &m.tasks {

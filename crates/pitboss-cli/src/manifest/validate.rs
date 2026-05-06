@@ -346,7 +346,9 @@ fn validate_branch_conflicts(r: &ResolvedManifest) -> Result<()> {
 }
 
 fn validate_ranges(r: &ResolvedManifest) -> Result<()> {
-    if r.max_parallel_tasks == 0 {
+    // #320: max_parallel_tasks is None in hierarchical mode (the lead's
+    // max_workers caps concurrency there). Only validate when present.
+    if let Some(0) = r.max_parallel_tasks {
         bail!("[run].max_parallel_tasks must be > 0");
     }
     for t in &r.tasks {
@@ -566,7 +568,7 @@ mod tests {
         ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -596,7 +598,7 @@ mod tests {
         let mut m = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -665,7 +667,7 @@ mod tests {
     fn rejects_zero_max_parallel_tasks() {
         let d = with_tmp_repo(true);
         let mut r = rm(vec![rt("a", d.path().to_path_buf(), false, None)]);
-        r.max_parallel_tasks = 0;
+        r.max_parallel_tasks = Some(0);
         assert!(validate(&r).is_err());
     }
 
@@ -682,7 +684,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -715,7 +717,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -744,7 +746,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -778,7 +780,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -893,7 +895,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -947,7 +949,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -982,7 +984,7 @@ mod tests {
         let r = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -1188,7 +1190,7 @@ mod tests {
         let mut m = ResolvedManifest {
             manifest_schema_version: 0,
             name: None,
-            max_parallel_tasks: 4,
+            max_parallel_tasks: Some(4),
             halt_on_failure: false,
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,

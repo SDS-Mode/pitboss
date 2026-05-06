@@ -78,7 +78,7 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -600,7 +600,7 @@ async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchS
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -1448,7 +1448,7 @@ async fn handle_request_approval_auto_approves() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -1543,7 +1543,7 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -1647,7 +1647,7 @@ async fn mk_plan_state(
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,

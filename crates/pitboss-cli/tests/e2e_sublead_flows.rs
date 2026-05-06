@@ -77,7 +77,7 @@ fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -150,7 +150,7 @@ fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
@@ -787,7 +787,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
     let manifest = ResolvedManifest {
         manifest_schema_version: 0,
         name: None,
-        max_parallel_tasks: 4,
+        max_parallel_tasks: Some(4),
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
