@@ -404,6 +404,10 @@ async fn run_worker(
                     .write()
                     .await
                     .insert(task_id.clone(), WorkerState::Done(rec));
+                // Mirror the normal-exit cleanup at spawn.rs:674 — without
+                // this, a worker whose worktree prep failed leaks its entry
+                // in worker_layer_index for the lifetime of the run (#344).
+                state.worker_layer_index.write().await.remove(&task_id);
                 // Fan out to root so cross-layer wait_actor subscribers wake
                 // even on early-exit paths like SpawnFailed. Same rationale
                 // as the normal-exit fan-out below.
@@ -1077,6 +1081,14 @@ pub async fn spawn_resume_worker(
             .write()
             .await
             .insert(task_id_bg.clone(), WorkerState::Done(rec));
+        // Mirror the normal-exit cleanup at spawn.rs:674 — without this,
+        // every paused-then-resumed worker leaks its entry in
+        // worker_layer_index on completion (#344).
+        state_bg
+            .worker_layer_index
+            .write()
+            .await
+            .remove(&task_id_bg);
         let _ = layer_bg.done_tx.send(task_id_bg);
     });
 
