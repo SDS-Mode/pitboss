@@ -385,7 +385,12 @@ fn task_row(rec: &TaskRecord, model_map: &HashMap<String, String>) -> TaskRow {
 /// `(model, token_usage)` for pre-v0.11 records that never had the
 /// field populated. Returns `None` only when both the stored value and
 /// the model are unavailable.
-fn effective_cost(rec: &TaskRecord, model: Option<&str>) -> Option<f64> {
+///
+/// Shared with `diff.rs` so `pitboss diff` and `pitboss analyze` agree
+/// on a run's cost. Without this shared helper, diff would always
+/// recompute from current price tables, producing a different number
+/// from analyze whenever prices have changed since the run was recorded.
+pub(crate) fn effective_cost(rec: &TaskRecord, model: Option<&str>) -> Option<f64> {
     if let Some(c) = rec.cost_usd {
         return Some(c);
     }

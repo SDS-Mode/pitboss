@@ -5,8 +5,6 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use pitboss_core::parser::TokenUsage;
-use pitboss_core::prices;
 use pitboss_core::store::RunSummary;
 use serde::Serialize;
 
@@ -210,17 +208,10 @@ pub struct DiffReport {
 // ---------------------------------------------------------------------------
 
 fn task_metrics(rec: &pitboss_core::store::TaskRecord, model: Option<&str>) -> TaskMetrics {
-    let cost = model.and_then(|m| {
-        prices::cost_usd(
-            m,
-            &TokenUsage {
-                input: rec.token_usage.input,
-                output: rec.token_usage.output,
-                cache_read: rec.token_usage.cache_read,
-                cache_creation: rec.token_usage.cache_creation,
-            },
-        )
-    });
+    // Prefer the cost stored on the record so `pitboss diff` agrees with
+    // `pitboss analyze`. Falls back to recomputation only for pre-v0.11
+    // records that never had the field populated. See analyze::effective_cost.
+    let cost = crate::analyze::effective_cost(rec, model);
     TaskMetrics {
         status: format!("{:?}", rec.status),
         duration_ms: rec.duration_ms,
@@ -244,18 +235,9 @@ fn run_totals(summary: &RunSummary, models: &HashMap<String, String>) -> RunTota
         token_out += rec.token_usage.output;
         cache_read += rec.token_usage.cache_read;
         cache_write += rec.token_usage.cache_creation;
-        if let Some(model) = models.get(&rec.task_id) {
-            if let Some(c) = prices::cost_usd(
-                model,
-                &TokenUsage {
-                    input: rec.token_usage.input,
-                    output: rec.token_usage.output,
-                    cache_read: rec.token_usage.cache_read,
-                    cache_creation: rec.token_usage.cache_creation,
-                },
-            ) {
-                cost_usd += c;
-            }
+        let model = models.get(&rec.task_id).map(String::as_str);
+        if let Some(c) = crate::analyze::effective_cost(rec, model) {
+            cost_usd += c;
         }
     }
 
@@ -657,5 +639,38 @@ mod tests {
         assert!(loaded.was_interrupted, "fallback path sets was_interrupted");
         assert_eq!(loaded.tasks.len(), 1);
         assert_eq!(loaded.tasks[0].task_id, "task-x");
+    }
+
+    /// Regression: `pitboss diff` and `pitboss analyze` must agree on a
+    /// run's cost. Both go through `analyze::effective_cost`, which
+    /// prefers `rec.cost_usd` over recomputing from the current price
+    /// table. Pin that preference here — without it, a price-table
+    /// change between record-time and report-time would silently produce
+    /// different cost numbers in `diff` vs `analyze` for the same run.
+    #[test]
+    fn diff_prefers_stored_cost_over_recomputed() {
+        // Stored cost is deliberately wrong vs the price table
+        // (1M+1M haiku tokens recompute to $4.80 — see test 3 above).
+        // diff should still report the stored value, not recompute.
+        let mut rec = make_task("t1", TaskStatus::Success, 1000, 1_000_000, 1_000_000);
+        rec.cost_usd = Some(0.42);
+        let summary = make_summary(vec![rec]);
+
+        let mut models = HashMap::new();
+        models.insert("t1".to_string(), "claude-haiku-4-5".to_string());
+
+        // run_totals path (used by diff's run summary block).
+        let totals = run_totals(&summary, &models);
+        assert!(
+            (totals.cost_usd - 0.42).abs() < 1e-9,
+            "run_totals must trust stored cost_usd, got {}",
+            totals.cost_usd,
+        );
+
+        // task_metrics path (used by diff's per-task block).
+        let report = build_report(&summary, &models, &summary, &models);
+        let pair = report.per_task.iter().find(|p| p.task_id == "t1").unwrap();
+        assert_eq!(pair.a.cost_usd, Some(0.42));
+        assert_eq!(pair.b.cost_usd, Some(0.42));
     }
 }
