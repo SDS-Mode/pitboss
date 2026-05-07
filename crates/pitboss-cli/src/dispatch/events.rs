@@ -34,6 +34,14 @@ pub enum DeniedReasonKind {
     /// `OperatorRejected` so audit logs reflect what actually decided
     /// the denial. (#373)
     DeniedByPolicy,
+    /// The caller's `[[worker_type]]` / `[[sublead_type]]` profile
+    /// does not list the requested tool in its `tools` allowlist.
+    /// The manifest is the consent signal — anything not declared on
+    /// the profile auto-denies without an operator round-trip (#252).
+    /// Distinguished from `DeniedByRule` so operators can tell at audit
+    /// time whether a deny came from the cross-cutting rule machinery
+    /// or from a per-class profile cap.
+    DeniedByProfile,
     /// Operator (TUI / web console) responded with reject.
     OperatorRejected,
     /// TTL on the queued approval expired and the fallback fired.
@@ -44,6 +52,11 @@ impl DeniedReasonKind {
     /// Short, model-readable explanation. Phrasing follows the
     /// convention "denied: <kind> ..." so a Claude session can detect
     /// the prefix and adapt without parsing structured fields.
+    ///
+    /// `DeniedByProfile` returns a generic message; callers with a
+    /// concrete actor-type id should prefer
+    /// [`Self::profile_message`] for the more specific
+    /// "not in worker_type 'X' allowlist" phrasing the plan called for.
     pub fn message(self, tool_name: &str) -> String {
         match self {
             Self::DeniedByRule => {
@@ -52,6 +65,9 @@ impl DeniedReasonKind {
             Self::DeniedByPolicy => {
                 format!("denied: tool '{tool_name}' blocked by default approval policy")
             }
+            Self::DeniedByProfile => {
+                format!("denied: tool '{tool_name}' not in actor profile allowlist")
+            }
             Self::OperatorRejected => {
                 format!("denied: tool '{tool_name}' rejected by operator")
             }
@@ -59,6 +75,15 @@ impl DeniedReasonKind {
                 format!("denied: tool '{tool_name}' approval timed out before operator response")
             }
         }
+    }
+
+    /// Specific phrasing for [`Self::DeniedByProfile`] when the caller
+    /// knows the profile id and role (worker / sublead). The model
+    /// sees the type id and can reason about which profile to comply
+    /// with — `denied: tool 'Bash' not in worker_type 'extraction'
+    /// allowlist`.
+    pub fn profile_message(tool_name: &str, role: &str, type_id: &str) -> String {
+        format!("denied: tool '{tool_name}' not in {role}_type '{type_id}' allowlist")
     }
 }
 
@@ -115,6 +140,21 @@ pub enum TaskEvent {
         /// either the canned per-kind message or, when the operator
         /// declined with a free-form comment, the operator's text.
         reason: String,
+    },
+    /// A Path-B `permission_prompt` returned `behavior = "allow"` via
+    /// the typed-profile short-circuit (#252) — the requested tool was
+    /// in the caller's `[[worker_type]]` / `[[sublead_type]]` `tools`
+    /// allowlist, so pitboss approved without prompting the operator.
+    /// Symmetric to `ToolDenied` so audit logs show both sides of the
+    /// profile-driven gate, not only the rejections.
+    ToolAutoApproved {
+        at: DateTime<Utc>,
+        /// Tool the model invoked (e.g. `"Read"`, `"Glob"`).
+        tool_name: String,
+        /// Caller actor id (sublead / worker; lead is never typed).
+        actor_id: String,
+        /// Resolved profile id (`worker_type` or `sublead_type`).
+        actor_type: String,
     },
 }
 
