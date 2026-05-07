@@ -25,27 +25,39 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         );
     }
 
-    let records = if summary_json.exists() {
+    // `notify_failures` only exists on a finalized `summary.json`; the
+    // in-flight `summary.jsonl` is per-task records and never carries
+    // run-scoped fields. Operators reading status during a live run see
+    // no notify count — that's correct (the count is only authoritative
+    // at finalize), and the journaled `notifications.jsonl` is still
+    // available for live debugging.
+    let (records, notify_failures) = if summary_json.exists() {
         let bytes = std::fs::read(&summary_json)
             .with_context(|| format!("read {}", summary_json.display()))?;
         let summary: serde_json::Value = serde_json::from_slice(&bytes)?;
-        summary
+        let notify_failures = summary
+            .get("notify_failures")
+            .and_then(|v| v.as_u64())
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+        let recs = summary
             .get("tasks")
             .and_then(|t| t.as_array())
             .cloned()
             .unwrap_or_default()
             .into_iter()
             .map(serde_json::from_value::<pitboss_core::store::TaskRecord>)
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        (recs, notify_failures)
     } else {
         let content = std::fs::read_to_string(&summary_jsonl)
             .with_context(|| format!("read {}", summary_jsonl.display()))?;
-        content
+        let recs = content
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(serde_json::from_str::<pitboss_core::store::TaskRecord>)
             .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("parse {}", summary_jsonl.display()))?
+            .with_context(|| format!("parse {}", summary_jsonl.display()))?;
+        (recs, None)
     };
 
     if json {
@@ -59,7 +71,22 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| run_dir.display().to_string());
-    writeln!(stdout, "Run: {run_name}")?;
+    render_status(&mut stdout, &run_name, &records, notify_failures)?;
+
+    Ok(0)
+}
+
+/// Pure rendering helper, separated from I/O setup so the table + footer
+/// can be exercised by tests without driving the binary or capturing
+/// stdout. The non-positive-failure path (no router OR `Some(0)`) must
+/// not emit a footer line — callers depend on the absence as a signal.
+pub(crate) fn render_status<W: Write>(
+    out: &mut W,
+    run_name: &str,
+    records: &[pitboss_core::store::TaskRecord],
+    notify_failures: Option<u32>,
+) -> Result<()> {
+    writeln!(out, "Run: {run_name}")?;
 
     // Size the TASK_ID column to fit the widest id (with a floor of 30 and
     // ceiling of 60) instead of a hard-coded 30-pad that silently overflows
@@ -75,13 +102,13 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
     let sep_width = task_id_width + 1 + 16 + 1 + 10 + 1 + 24 + 1 + 6;
 
     writeln!(
-        stdout,
+        out,
         "{:<task_id_width$} {:<16} {:>10} {:<24} {:>6}",
         "TASK_ID", "STATUS", "DURATION", "STARTED", "EXIT",
     )?;
-    writeln!(stdout, "{}", "-".repeat(sep_width))?;
+    writeln!(out, "{}", "-".repeat(sep_width))?;
 
-    for rec in &records {
+    for rec in records {
         let status = status_label(&rec.status);
         let duration = pitboss_core::fmt::format_duration_ms(rec.duration_ms);
         let started = rec.started_at.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -91,24 +118,34 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
             .unwrap_or_else(|| "—".to_string());
         let task_id = pitboss_core::fmt::truncate_ellipsis(&rec.task_id, task_id_width);
         writeln!(
-            stdout,
+            out,
             "{task_id:<task_id_width$} {status:<16} {duration:>10} {started:<24} {exit:>6}",
         )?;
     }
 
     if records.is_empty() {
-        writeln!(stdout, "(no tasks recorded yet)")?;
+        writeln!(out, "(no tasks recorded yet)")?;
     } else {
         let total = records.len();
         let failed = records
             .iter()
             .filter(|r| !matches!(r.status, TaskStatus::Success))
             .count();
-        writeln!(stdout, "{}", "-".repeat(sep_width))?;
-        writeln!(stdout, "Total: {total}  Failed: {failed}")?;
+        writeln!(out, "{}", "-".repeat(sep_width))?;
+        writeln!(out, "Total: {total}  Failed: {failed}")?;
     }
 
-    Ok(0)
+    // Surface notification emit failures only when the count is positive —
+    // the common case (no router or no failures) stays uncluttered.
+    // Operators who see this line should consult
+    // `<run_dir>/notifications.jsonl` for the failing sink + error.
+    if let Some(n) = notify_failures {
+        if n > 0 {
+            writeln!(out, "Notification failures: {n} (see notifications.jsonl)")?;
+        }
+    }
+
+    Ok(())
 }
 
 fn status_label(s: &TaskStatus) -> &'static str {
@@ -220,5 +257,50 @@ mod tests {
 
         let result = run(run_id, true, Some(tmp.path().to_path_buf()));
         assert_eq!(result.unwrap(), 0);
+    }
+
+    /// `notify_failures` > 0 must surface as a footer line so operators
+    /// see it without `cat`-ing notifications.jsonl by hand. This is the
+    /// observability gap that #329 (ISSUE-notify-prior-4) flagged.
+    #[test]
+    fn render_status_emits_notify_failures_footer_when_positive() {
+        let recs = vec![make_record("w-1", TaskStatus::Success)];
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, Some(3)).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Notification failures: 3 (see notifications.jsonl)"),
+            "footer missing in:\n{out}"
+        );
+    }
+
+    /// Zero failures with a wired router must not clutter the output —
+    /// the footer is reserved for actionable signal. `Some(0)` is the
+    /// "router was active and saw nothing" case.
+    #[test]
+    fn render_status_omits_notify_failures_footer_when_zero() {
+        let recs = vec![make_record("w-1", TaskStatus::Success)];
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, Some(0)).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Notification failures"),
+            "spurious footer for zero count:\n{out}"
+        );
+    }
+
+    /// `None` is the back-compat path (no router OR pre-`notify_failures`
+    /// summary) and must produce identical output to `Some(0)` so that
+    /// reading an old run doesn't print misleading text.
+    #[test]
+    fn render_status_omits_notify_failures_footer_when_unknown() {
+        let recs = vec![make_record("w-1", TaskStatus::Success)];
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Notification failures"),
+            "spurious footer for None:\n{out}"
+        );
     }
 }

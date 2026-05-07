@@ -119,6 +119,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         tasks_total: tasks.len(),
         tasks_failed,
         was_interrupted: true,
+        notify_failures: None,
         tasks,
     })
 }
@@ -542,6 +543,7 @@ mod tests {
             tasks_total: total,
             tasks_failed: failed,
             was_interrupted: false,
+            notify_failures: None,
             tasks,
         }
     }

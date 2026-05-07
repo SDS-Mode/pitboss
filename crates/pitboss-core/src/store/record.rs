@@ -137,6 +137,14 @@ pub struct RunSummary {
     pub tasks_total: usize,
     pub tasks_failed: usize,
     pub was_interrupted: bool,
+    /// Count of notification emit failures observed during the run (after
+    /// retries). `None` when no notification router was active OR when the
+    /// summary was written by a pre-`notify_failures` build — operators
+    /// should read both as "no signal" and fall back to the per-run
+    /// `notifications.jsonl` audit file. `Some(0)` is a positive assertion
+    /// that a router was wired and saw zero terminal failures.
+    #[serde(default)]
+    pub notify_failures: Option<u32>,
     pub tasks: Vec<TaskRecord>,
 }
 
@@ -411,6 +419,7 @@ mod tests {
             tasks_total: 0,
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![],
         };
         let json = serde_json::to_string(&summary).unwrap();
@@ -437,6 +446,11 @@ mod tests {
         }"#;
         let s: RunSummary = serde_json::from_str(old).unwrap();
         assert!(s.manifest_name.is_none());
+        // Pre-`notify_failures` summaries must keep loading; the field is
+        // `#[serde(default)]` so missing == None, which the renderer
+        // interprets as "no router was wired" and falls back to the
+        // notifications.jsonl audit file.
+        assert!(s.notify_failures.is_none());
     }
 
     #[test]

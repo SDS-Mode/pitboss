@@ -806,6 +806,10 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
         tasks_total,
         tasks_failed,
         was_interrupted,
+        // TODO: SQLite backend doesn't persist notify_failures — same
+        // pattern as manifest_name above. Add a column + binding when
+        // SqliteStore moves out of test-only use.
+        notify_failures: None,
         tasks,
     })
 }
@@ -1132,6 +1136,7 @@ mod sqlite_tests {
             tasks_total: 2,
             tasks_failed: 1,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
         };
         store.finalize_run(&summary).await.unwrap();
@@ -1227,6 +1232,7 @@ mod sqlite_tests {
             tasks_total: 1,
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![rec.clone()],
         };
         store.finalize_run(&summary).await.unwrap();
@@ -1319,6 +1325,7 @@ mod sqlite_tests {
             tasks_total: 1,
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![rec.clone()],
         };
         store.finalize_run(&summary).await.unwrap();
