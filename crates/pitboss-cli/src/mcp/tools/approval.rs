@@ -418,31 +418,52 @@ pub struct PermissionPromptArgs {
     pub meta: Option<crate::shared_store::tools::MetaField>,
 }
 
-/// Response shape matching Claude Code's permission gate contract.
+/// Response shape matching Claude Code's `--permission-prompt-tool`
+/// contract — the `PermissionResult` SDK type. Internally tagged on
+/// `behavior` so `{"behavior": "allow", ...}` / `{"behavior": "deny", ...}`
+/// JSON round-trips cleanly. (#368)
+///
+/// Pre-#368 this struct used `decision` / `behavior: "allow_once"` /
+/// `reason`, which Claude's gate parser silently rejected at the wire
+/// level — every Path B permission check failed with "Permission prompt
+/// tool returned an invalid result," and the model treated denials as
+/// generic tool errors rather than structured allow/deny.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PermissionPromptResponse {
-    /// `"allow"` or `"deny"`.
-    pub decision: String,
-    /// Present when `decision == "allow"`. `"allow_once"` keeps the gate
-    /// active for future tool calls.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub behavior: Option<String>,
-    /// Operator/policy/profile-supplied explanation surfaced back to the
-    /// model on `decision == "deny"` so it can adapt without an operator
-    /// round-trip. The upstream `--permission-prompt-tool` contract
-    /// expects denial messages under `message`; we additionally serialize
-    /// this as `reason` to match pitboss's internal vocabulary. Whether
-    /// claude consumes the field is open question 1.2 in the plan; the
-    /// reason is also written to the per-task `events.jsonl` regardless.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+#[serde(tag = "behavior", rename_all = "lowercase")]
+pub enum PermissionPromptResponse {
+    /// Permit the tool call. `updated_input` lets the gate edit the
+    /// input claude proposed; pitboss currently passes the input through
+    /// unchanged (no operator-side editing surface yet).
+    Allow {
+        #[serde(
+            rename = "updatedInput",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        updated_input: Option<serde_json::Value>,
+    },
+    /// Deny the tool call. `message` is surfaced to the model so it can
+    /// adapt (e.g. switch tools) without an operator round-trip.
+    /// `interrupt` requests claude halt the current turn entirely;
+    /// pitboss leaves it `false` so the model can keep working through
+    /// non-denied tools.
+    Deny {
+        message: String,
+        #[serde(default, skip_serializing_if = "is_default_false")]
+        interrupt: bool,
+    },
 }
 
-/// Why a `permission_prompt` ended in `decision == "deny"`. Surfaced to
-/// the requesting actor via `PermissionPromptResponse.reason` and also
-/// recorded as a `TaskEvent::ToolDenied` on the per-task `events.jsonl`
-/// audit log so an operator sees what was attempted-and-blocked even
-/// when the lead silently routes around it.
+fn is_default_false(b: &bool) -> bool {
+    !b
+}
+
+/// Why a `permission_prompt` returned `behavior == "deny"`. Surfaced
+/// to the requesting actor as the `message` field of
+/// `PermissionPromptResponse::Deny` and also recorded as a
+/// `TaskEvent::ToolDenied` on the per-task `events.jsonl` audit log
+/// so an operator sees what was attempted-and-blocked even when the
+/// lead silently routes around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionDenialReason {
     /// An operator-declared `[[approval_policy]]` rule matched with
@@ -526,10 +547,8 @@ pub async fn handle_permission_prompt(
                         .await;
                     crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
                     crate::mcp::approval::record_approval_outcome(state, &caller_id, true).await;
-                    return Ok(PermissionPromptResponse {
-                        decision: "allow".into(),
-                        behavior: Some("allow_once".into()),
-                        reason: None,
+                    return Ok(PermissionPromptResponse::Allow {
+                        updated_input: args.tool_input.clone(),
                     });
                 }
                 Some(crate::mcp::policy::ApprovalAction::AutoReject) => {
@@ -552,10 +571,9 @@ pub async fn handle_permission_prompt(
                         .await;
                     crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
                     crate::mcp::approval::record_approval_outcome(state, &caller_id, false).await;
-                    return Ok(PermissionPromptResponse {
-                        decision: "deny".into(),
-                        behavior: None,
-                        reason: Some(reason),
+                    return Ok(PermissionPromptResponse::Deny {
+                        message: reason,
+                        interrupt: false,
                     });
                 }
                 Some(crate::mcp::policy::ApprovalAction::Block) | None => {}
@@ -587,10 +605,8 @@ pub async fn handle_permission_prompt(
             state
                 .record_last_approval_response(&caller_id, true, resp.from_ttl)
                 .await;
-            Ok(PermissionPromptResponse {
-                decision: "allow".into(),
-                behavior: Some("allow_once".into()),
-                reason: None,
+            Ok(PermissionPromptResponse::Allow {
+                updated_input: args.tool_input.clone(),
             })
         }
         Ok(resp) => {
@@ -613,10 +629,9 @@ pub async fn handle_permission_prompt(
             state
                 .record_last_approval_response(&caller_id, false, resp.from_ttl)
                 .await;
-            Ok(PermissionPromptResponse {
-                decision: "deny".into(),
-                behavior: None,
-                reason: Some(reason),
+            Ok(PermissionPromptResponse::Deny {
+                message: reason,
+                interrupt: false,
             })
         }
         Err(e) => anyhow::bail!("permission_prompt failed: {e}"),
