@@ -97,6 +97,9 @@ fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
     let worker_script = FakeScript::new()
@@ -171,6 +174,9 @@ fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
     let hold_script = FakeScript::new().hold_until_signal();
@@ -228,6 +234,7 @@ async fn root_spawns_sublead_which_completes() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -322,6 +329,7 @@ async fn root_kill_cascades_to_sublead_workers() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -678,6 +686,7 @@ async fn budget_envelope_returns_to_root_pool() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -809,6 +818,9 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
 
     let store: std::sync::Arc<dyn pitboss_core::store::SessionStore> = std::sync::Arc::new(
@@ -879,6 +891,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await

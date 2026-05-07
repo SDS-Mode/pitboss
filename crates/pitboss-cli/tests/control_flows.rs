@@ -57,6 +57,9 @@ async fn pause_op_writes_events_jsonl() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -266,6 +269,9 @@ async fn block_policy_queue_drains_on_tui_connect() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -384,6 +390,9 @@ async fn auto_approve_policy_responds_without_tui() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -449,6 +458,9 @@ async fn auto_reject_policy_responds_without_tui() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -525,6 +537,9 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -555,6 +570,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
             tools: None,
             timeout_secs: None,
             model: None,
+            worker_type: None,
             meta: None,
         },
     )
@@ -660,6 +676,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
             tools: None,
             timeout_secs: None,
             model: None,
+            worker_type: None,
             meta: None,
         },
     )

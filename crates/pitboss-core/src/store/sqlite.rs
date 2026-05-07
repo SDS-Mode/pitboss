@@ -699,6 +699,7 @@ impl TaskRow {
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok()),
             cost_usd: self.cost_usd,
+            actor_type: None,
         })
     }
 }
@@ -1104,6 +1105,7 @@ mod sqlite_tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         }
     }
 

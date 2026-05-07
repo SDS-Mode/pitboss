@@ -712,6 +712,9 @@ async fn execute_task(
                     model: Some(task.model.clone()),
                     failure_reason: None,
                     cost_usd,
+                    // Flat-mode tasks don't carry profile attribution
+                    // today (#252 covers hierarchical only).
+                    actor_type: None,
                 };
             }
         }
@@ -790,6 +793,9 @@ async fn execute_task(
         model: Some(task.model.clone()),
         failure_reason,
         cost_usd,
+        // Flat-mode tasks don't carry profile attribution today
+        // (#252 covers hierarchical only).
+        actor_type: None,
     }
 }
 
@@ -1442,6 +1448,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         }
     }
 
@@ -1589,6 +1598,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -1685,6 +1697,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -1794,6 +1809,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
 
         let spawner = Arc::new(CyclingFake(

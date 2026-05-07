@@ -181,6 +181,21 @@ pub struct ResolvedManifest {
     /// with parent, no out-of-band lifecycle notify expected).
     #[serde(default)]
     pub lifecycle: Option<crate::manifest::schema::Lifecycle>,
+    /// Typed worker profiles (`[[worker_type]]`). Looked up by id in
+    /// `handle_spawn_worker` to enforce per-class capability caps.
+    /// Empty in v0.11 manifests that pre-date this surface.
+    /// (#252)
+    #[serde(default)]
+    pub worker_types: Vec<crate::manifest::schema::WorkerType>,
+    /// Typed sub-lead profiles (`[[sublead_type]]`). Looked up by id in
+    /// the `spawn_sublead` MCP handler. (#252)
+    #[serde(default)]
+    pub sublead_types: Vec<crate::manifest::schema::SubleadType>,
+    /// When true, every `spawn_worker` / `spawn_sublead` call MUST name
+    /// a profile; type-less spawns are rejected. Default `false` for
+    /// back-compat. (#252)
+    #[serde(default)]
+    pub require_actor_type: bool,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -284,6 +299,9 @@ pub fn resolve(
         mcp_servers: manifest.mcp_servers,
         communication: manifest.communication,
         lifecycle: manifest.lifecycle,
+        worker_types: manifest.worker_types,
+        sublead_types: manifest.sublead_types,
+        require_actor_type: manifest.run.require_actor_type,
     })
 }
 

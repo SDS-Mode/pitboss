@@ -81,6 +81,9 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -154,6 +157,9 @@ fn mk_state_without_subleads() -> (TempDir, Arc<DispatchState>) {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -225,6 +231,9 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -613,6 +622,7 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = pitboss_cli::dispatch::sublead::spawn_sublead(&state, req)
         .await
@@ -1226,6 +1236,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1287,6 +1298,7 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1369,6 +1381,7 @@ async fn wait_actor_still_handles_worker_back_compat() {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
@@ -1505,6 +1518,7 @@ async fn v0_5_back_compat_no_meta_routes_to_root() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None, // Explicitly absent — the v0.5 compat path
     };
     let result = handle_spawn_worker(&state, args)
@@ -1708,6 +1722,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
             model: Some("claude-haiku-4-5".into()),
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         sub.workers.write().await.insert(
             s1.clone(),
@@ -1764,6 +1779,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         env: Default::default(),
         tools: Default::default(),
         resume_session_id: None,
+        sublead_type: None,
     };
     let sublead_id = spawn_sublead(&state, req)
         .await
@@ -1781,6 +1797,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
         tools: None,
         timeout_secs: None,
         model: Some("claude-haiku-4-5".into()),
+        worker_type: None,
         meta: Some(MetaField {
             actor_id: sublead_id.clone(),
             actor_role: ActorRole::Sublead,

@@ -349,6 +349,7 @@ mod tests {
             model: Some("claude-haiku-4-5".to_string()),
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         serde_json::to_string(&rec).unwrap()
     }

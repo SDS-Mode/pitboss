@@ -98,6 +98,9 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -368,6 +371,7 @@ async fn spawn_worker_adds_entry_to_state() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let result = handle_spawn_worker(&state, args).await.unwrap();
@@ -404,6 +408,7 @@ async fn spawn_worker_refuses_when_max_workers_reached() {
             tools: None,
             timeout_secs: None,
             model: None,
+            worker_type: None,
             meta: None,
         };
         handle_spawn_worker(&state, args).await.unwrap();
@@ -416,6 +421,7 @@ async fn spawn_worker_refuses_when_max_workers_reached() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -433,6 +439,7 @@ async fn spawn_worker_refuses_when_budget_exceeded() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -459,6 +466,7 @@ async fn spawn_worker_refuses_when_api_rate_limited() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -480,6 +488,7 @@ async fn spawn_worker_refuses_when_api_auth_failed() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -500,6 +509,7 @@ async fn spawn_worker_refuses_when_draining() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let err = handle_spawn_worker(&state, args).await.unwrap_err();
@@ -516,6 +526,7 @@ async fn worker_status_reads_state() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
@@ -549,6 +560,7 @@ async fn cancel_worker_sets_cancelled_state() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
@@ -601,6 +613,7 @@ async fn wait_for_worker_returns_outcome_on_completion() {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert(task_id_clone.clone(), WorkerState::Done(rec));
@@ -676,6 +689,7 @@ async fn wait_for_any_returns_first_completed() {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert("w-b".into(), WorkerState::Done(rec));
@@ -748,6 +762,9 @@ async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchS
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -792,6 +809,7 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
         tools: None,
         timeout_secs: None,
         model: None, // falls back to lead model (claude-haiku-4-5)
+        worker_type: None,
         meta: None,
     };
 
@@ -862,6 +880,7 @@ async fn burst_spawn_is_budget_capped_via_reservation() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
 
@@ -907,6 +926,7 @@ async fn reservation_released_on_worker_completion() {
             tools: None,
             timeout_secs: None,
             model: None,
+            worker_type: None,
             meta: None,
         },
     )
@@ -964,6 +984,7 @@ async fn running_worker_state_gets_session_id_after_init() {
         tools: None,
         timeout_secs: None,
         model: None,
+        worker_type: None,
         meta: None,
     };
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
@@ -1295,6 +1316,7 @@ async fn handle_reprompt_worker_from_done_errors() {
         model: None,
         failure_reason: None,
         cost_usd: None,
+        actor_type: None,
     };
     state
         .root
@@ -1597,6 +1619,9 @@ async fn handle_request_approval_auto_approves() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1693,6 +1718,9 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1815,6 +1843,9 @@ async fn mk_plan_state_with_termination_policy(
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1855,6 +1886,7 @@ async fn spawn_worker_blocks_when_plan_not_approved() {
             tools: None,
             timeout_secs: None,
             model: None,
+            worker_type: None,
             meta: None,
         },
     )
@@ -1883,6 +1915,7 @@ async fn spawn_worker_allowed_when_require_plan_approval_off() {
             tools: None,
             timeout_secs: None,
             model: None,
+            worker_type: None,
             meta: None,
         },
     )
@@ -2715,5 +2748,237 @@ async fn propose_plan_auto_reject_leaves_flag_false() {
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire),
         "rejected plan must not flip plan_approved — lead should be able to retry"
+    );
+}
+
+// ----------------------------------------------------------------------
+// #252 — typed worker profiles, dispatcher-side enforcement
+// ----------------------------------------------------------------------
+
+/// Build a `DispatchState` with the given worker_types profiles and
+/// `require_actor_type` flag. Mirrors `test_state` but lets the caller
+/// inject typed profile config without forking the whole helper.
+async fn test_state_with_worker_types(
+    worker_types: Vec<crate::manifest::schema::WorkerType>,
+    require_actor_type: bool,
+) -> Arc<DispatchState> {
+    use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+    use crate::manifest::schema::{Effort, WorktreeCleanup};
+    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use pitboss_core::process::ProcessSpawner;
+    use pitboss_core::session::CancelToken;
+    use pitboss_core::store::{JsonFileStore, SessionStore};
+    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    let dir = TempDir::new().unwrap();
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "lead prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+        permission_routing: Default::default(),
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_total_workers: None,
+        sublead_defaults: None,
+    };
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(5.0),
+        lead_timeout_secs: None,
+        default_approval_policy: None,
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types,
+        sublead_types: vec![],
+        require_actor_type,
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let run_id = Uuid::now_v7();
+    let script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    let dir_path = dir.path().to_path_buf();
+    std::mem::forget(dir);
+    let _ = dir_path;
+    Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+    ))
+}
+
+fn extraction_profile() -> crate::manifest::schema::WorkerType {
+    crate::manifest::schema::WorkerType {
+        id: "extraction".into(),
+        tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
+        allowed_models: vec!["claude-haiku-4-5".into()],
+        max_timeout_secs: Some(900),
+    }
+}
+
+#[tokio::test]
+async fn spawn_worker_rejects_unknown_worker_type() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    let args = SpawnWorkerArgs {
+        prompt: "p".into(),
+        worker_type: Some("nope".into()),
+        ..Default::default()
+    };
+    let err = handle_spawn_worker(&state, args).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("unknown worker_type"), "{msg}");
+    assert!(msg.contains("extraction"), "{msg}");
+}
+
+#[tokio::test]
+async fn spawn_worker_rejects_tool_outside_profile() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    let args = SpawnWorkerArgs {
+        prompt: "p".into(),
+        worker_type: Some("extraction".into()),
+        tools: Some(vec!["Read".into(), "Bash".into()]),
+        ..Default::default()
+    };
+    let err = handle_spawn_worker(&state, args).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("\"Bash\""), "{msg}");
+    assert!(msg.contains("worker_type \"extraction\""), "{msg}");
+}
+
+#[tokio::test]
+async fn spawn_worker_rejects_model_outside_allowlist() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    let args = SpawnWorkerArgs {
+        prompt: "p".into(),
+        worker_type: Some("extraction".into()),
+        model: Some("claude-opus-4-7".into()),
+        ..Default::default()
+    };
+    let err = handle_spawn_worker(&state, args).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("claude-opus-4-7"), "{msg}");
+    assert!(msg.contains("allowed_models"), "{msg}");
+}
+
+#[tokio::test]
+async fn spawn_worker_rejects_typeless_when_required() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], true).await;
+    let args = SpawnWorkerArgs {
+        prompt: "p".into(),
+        worker_type: None,
+        ..Default::default()
+    };
+    let err = handle_spawn_worker(&state, args).await.unwrap_err();
+    assert!(err.to_string().contains("require_actor_type"));
+}
+
+#[tokio::test]
+async fn spawn_worker_typed_subset_succeeds() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], true).await;
+    let args = SpawnWorkerArgs {
+        prompt: "investigate".into(),
+        directory: Some("/tmp".into()),
+        worker_type: Some("extraction".into()),
+        tools: Some(vec!["Read".into(), "Glob".into()]),
+        model: Some("claude-haiku-4-5".into()),
+        ..Default::default()
+    };
+    let res = handle_spawn_worker(&state, args).await.unwrap();
+    assert!(res.task_id.starts_with("worker-"));
+}
+
+/// End-to-end check that `actor_type` reaches the persisted record.
+/// The helper's `FakeSpawner` holds workers in Running until signaled;
+/// we drive the worker to Done by terminating its cancel token, then
+/// poll briefly for the `WorkerState::Done(rec)` whose `actor_type`
+/// is the source of truth for `summary.jsonl` and downstream
+/// consumers. Earlier rejection tests only prove the guard rejects
+/// invalid spawns; this is the test that pins the spawn →
+/// `run_worker` → `TaskRecord` plumbing.
+#[tokio::test]
+async fn spawn_worker_typed_persists_actor_type_on_record() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], true).await;
+    let args = SpawnWorkerArgs {
+        prompt: "investigate".into(),
+        directory: Some("/tmp".into()),
+        worker_type: Some("extraction".into()),
+        tools: Some(vec!["Read".into(), "Glob".into()]),
+        model: Some("claude-haiku-4-5".into()),
+        ..Default::default()
+    };
+    let res = handle_spawn_worker(&state, args).await.unwrap();
+
+    // Drive the worker to terminate so `run_worker` writes the record.
+    // The helper's FakeSpawner is `hold_until_signal`; without this,
+    // the worker stays Running and the test would just timeout.
+    for _ in 0..50 {
+        if let Some(tok) = state
+            .root
+            .worker_cancels
+            .read()
+            .await
+            .get(&res.task_id)
+            .cloned()
+        {
+            tok.terminate();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Bounded poll for the Done(rec). If the writer ever silently
+    // failed to land the record, we want the test to fail loudly
+    // rather than retry forever.
+    let mut found_actor_type: Option<String> = None;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let Some(WorkerState::Done(rec)) = state.root.workers.read().await.get(&res.task_id) {
+            found_actor_type = rec.actor_type.clone();
+            break;
+        }
+    }
+    assert_eq!(
+        found_actor_type.as_deref(),
+        Some("extraction"),
+        "TaskRecord.actor_type must reflect the resolved [[worker_type]] id"
     );
 }

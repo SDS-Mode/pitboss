@@ -73,6 +73,9 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         mcp_servers: vec![],
         communication: Default::default(),
         lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -312,6 +315,7 @@ async fn wait_actor_alias_resolves_worker_id() {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));

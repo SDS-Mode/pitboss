@@ -1,3 +1,4 @@
+pub mod actor_type;
 pub mod error;
 pub mod example_doc;
 pub mod init_template;

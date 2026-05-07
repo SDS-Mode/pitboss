@@ -451,6 +451,7 @@ pub async fn run_hierarchical(
             }
         }),
         cost_usd: lead_cost_usd,
+        actor_type: None,
     };
 
     // Cleanup worktree per policy. Surface the result via tracing
@@ -629,6 +630,12 @@ pub async fn run_hierarchical(
             model,
             failure_reason: None,
             cost_usd,
+            // Cancellation records are synthesized post-hoc when the lead
+            // exits while workers are still running; the original spawn's
+            // actor_type was lost when the prior TaskRecord (if any) was
+            // overwritten. Phase 1.5 will preserve the attribution on this
+            // path by reading the prior record before synthesizing.
+            actor_type: None,
         }
     };
     {
@@ -1099,6 +1106,9 @@ mod await_drained_tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1250,6 +1260,7 @@ mod await_drained_tests {
                     model: None,
                     failure_reason: None,
                     cost_usd: None,
+                    actor_type: None,
                 }),
             );
             workers.insert("running-root".into(), WorkerState::Pending);
@@ -1303,6 +1314,7 @@ mod summary_jsonl_aggregation_tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         }
     }
 

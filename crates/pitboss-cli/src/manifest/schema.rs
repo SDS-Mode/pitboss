@@ -314,6 +314,19 @@ pub struct Manifest {
     /// External MCP servers injected into all actor configs.
     #[serde(default, rename = "mcp_server")]
     pub mcp_servers: Vec<McpServerSpec>,
+    /// Typed worker profiles. Each entry caps the capability surface for
+    /// `spawn_worker(worker_type = "<id>")` calls. The lead can never
+    /// widen these caps — `tools` arg must be a subset of the profile's
+    /// allowlist; `model` must be in `allowed_models`; `timeout_secs`
+    /// only clamps downward. See [`WorkerType`]. (#252)
+    #[serde(default, rename = "worker_type")]
+    pub worker_types: Vec<WorkerType>,
+    /// Typed sub-lead profiles. Same semantics as `[[worker_type]]`,
+    /// applied to `spawn_sublead(sublead_type = "<id>")`. Adds a
+    /// `max_budget_usd` cap that clamps the sub-tree's envelope.
+    /// (#252)
+    #[serde(default, rename = "sublead_type")]
+    pub sublead_types: Vec<SubleadType>,
     /// Optional `[communication]` section: opt in to the Pitboss-owned
     /// mailbox + artifact MCP tools. Default
     /// [`CommunicationMode::Disabled`] hides the tools and rejects calls
@@ -540,6 +553,17 @@ pub struct RunConfig {
         help = "When true, spawn_worker is blocked until propose_plan has been approved."
     )]
     pub require_plan_approval: bool,
+    /// When true, every `spawn_worker` and `spawn_sublead` call MUST name
+    /// a `worker_type` / `sublead_type` declared in the manifest;
+    /// type-less spawns are rejected at the dispatcher. Default `false`
+    /// for back-compat with manifests that pre-date typed profiles
+    /// (#252).
+    #[serde(default)]
+    #[field(
+        label = "Require actor type",
+        help = "When true, every spawn_worker and spawn_sublead call must name a declared [[worker_type]]/[[sublead_type]]. Default false."
+    )]
+    pub require_actor_type: bool,
 }
 
 impl Default for RunConfig {
@@ -555,6 +579,7 @@ impl Default for RunConfig {
             denial_termination_policy: None,
             dump_shared_store: false,
             require_plan_approval: false,
+            require_actor_type: false,
         }
     }
 }
@@ -569,6 +594,93 @@ pub enum WorktreeCleanup {
     Always,
     OnSuccess,
     Never,
+}
+
+/// Typed worker profile (`[[worker_type]]`). Caps the capability
+/// surface a `spawn_worker(worker_type = "<id>")` call may request.
+/// The lead-supplied `tools` arg must be a subset of `tools`;
+/// `model` must be in `allowed_models` (when set); `timeout_secs`
+/// is clamped *down* to `max_timeout_secs` (never up). When the
+/// caller omits `tools`, the spawn gets the profile's full
+/// allowlist — explicitly, not the lead's `[lead].tools` cascade.
+/// (#252)
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerType {
+    /// Unique id referenced by `spawn_worker(worker_type = "<id>")`.
+    /// Must match `^[A-Za-z0-9_-]+$` (validate-time check).
+    #[field(
+        label = "Worker type id",
+        help = "Unique id used in spawn_worker(worker_type = \"<id>\"). Match: ^[A-Za-z0-9_-]+$."
+    )]
+    pub id: String,
+    /// Allowed tool surface for this worker class. Lead must request a
+    /// subset; omit-on-spawn means "give me the whole allowlist."
+    #[serde(default)]
+    #[field(
+        label = "Tools",
+        help = "Allowed tool surface for this worker class. Lead's spawn_worker(tools=...) must be a subset; omit means \"give me the whole allowlist.\""
+    )]
+    pub tools: Vec<String>,
+    /// When non-empty, the lead's `model` arg must appear in this list.
+    /// Empty = no model restriction (any model the lead can pay for).
+    #[serde(default)]
+    #[field(
+        label = "Allowed models",
+        help = "When non-empty, spawn_worker(model=...) must be in this list. Empty means any model."
+    )]
+    pub allowed_models: Vec<String>,
+    /// Hard cap on `spawn_worker(timeout_secs = ...)`. Lead values larger
+    /// than this clamp DOWN; smaller values are honored.
+    #[serde(default)]
+    #[field(
+        label = "Max timeout (seconds)",
+        help = "Hard cap on spawn_worker(timeout_secs=...). Lead values clamp DOWN; smaller values pass through."
+    )]
+    pub max_timeout_secs: Option<u64>,
+}
+
+/// Typed sub-lead profile (`[[sublead_type]]`). Same enforcement model
+/// as [`WorkerType`] with an additional `max_budget_usd` clamp on the
+/// sub-tree's spawn-time budget. (#252)
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
+#[serde(deny_unknown_fields)]
+pub struct SubleadType {
+    /// Unique id referenced by `spawn_sublead(sublead_type = "<id>")`.
+    /// Must match `^[A-Za-z0-9_-]+$` (validate-time check).
+    #[field(
+        label = "Sub-lead type id",
+        help = "Unique id used in spawn_sublead(sublead_type = \"<id>\"). Match: ^[A-Za-z0-9_-]+$."
+    )]
+    pub id: String,
+    /// Allowed tool surface for this sub-lead class.
+    #[serde(default)]
+    #[field(
+        label = "Tools",
+        help = "Allowed tool surface for this sub-lead class. spawn_sublead(tools=...) must be a subset; empty means \"give me the whole allowlist.\""
+    )]
+    pub tools: Vec<String>,
+    /// When non-empty, the caller's `model` arg must appear in this list.
+    #[serde(default)]
+    #[field(
+        label = "Allowed models",
+        help = "When non-empty, spawn_sublead(model=...) must be in this list."
+    )]
+    pub allowed_models: Vec<String>,
+    /// Hard cap on `spawn_sublead(lead_timeout_secs = ...)`. Clamps DOWN.
+    #[serde(default)]
+    #[field(
+        label = "Max lead timeout (seconds)",
+        help = "Hard cap on spawn_sublead(lead_timeout_secs=...). Clamps DOWN."
+    )]
+    pub max_timeout_secs: Option<u64>,
+    /// Hard cap on `spawn_sublead(budget_usd = ...)`. Clamps DOWN.
+    #[serde(default)]
+    #[field(
+        label = "Max budget (USD)",
+        help = "Hard cap on spawn_sublead(budget_usd=...). Clamps DOWN."
+    )]
+    pub max_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
