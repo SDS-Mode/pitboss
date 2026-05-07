@@ -1050,18 +1050,32 @@ mod env_composition_tests {
     }
 
     #[test]
-    fn pitboss_defaults_fill_gaps_only() {
+    fn pitboss_defaults_fill_gaps_only_under_path_a() {
         // CLAUDE_CODE_ENTRYPOINT is only set when neither lead nor operator
         // supplied it. If either did, that value wins.
+        //
+        // Pinned to Path A explicitly because v0.12 flipped the default to
+        // Path B which deliberately leaves the entrypoint unset (claude's
+        // gate must be active under Path B).
         let empty = HashMap::new();
-        let out = compose_sublead_env(&empty, &empty, "test-run-id", Default::default());
+        let out = compose_sublead_env(
+            &empty,
+            &empty,
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathA,
+        );
         assert_eq!(
             out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
             Some("sdk-ts")
         );
 
         let lead = env(&[("CLAUDE_CODE_ENTRYPOINT", "cli")]);
-        let out = compose_sublead_env(&lead, &HashMap::new(), "test-run-id", Default::default());
+        let out = compose_sublead_env(
+            &lead,
+            &HashMap::new(),
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathA,
+        );
         assert_eq!(
             out.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
             Some("cli"),
@@ -1070,14 +1084,15 @@ mod env_composition_tests {
     }
 
     #[test]
-    fn empty_lead_env_still_applies_pitboss_defaults() {
+    fn empty_lead_env_still_applies_pitboss_defaults_under_path_a() {
         // No [defaults.env] and no operator env → sublead still gets
         // CLAUDE_CODE_ENTRYPOINT so the MCP permission bypass engages.
+        // Path-A-specific (see `pitboss_defaults_fill_gaps_only_under_path_a`).
         let out = compose_sublead_env(
             &HashMap::new(),
             &HashMap::new(),
             "test-run-id",
-            Default::default(),
+            crate::manifest::schema::PermissionRouting::PathA,
         );
         assert!(out.contains_key("CLAUDE_CODE_ENTRYPOINT"));
     }

@@ -46,20 +46,25 @@ use serde::{Deserialize, Serialize};
 
 /// How the pitboss-spawned claude handles its built-in per-tool permission gate.
 ///
-/// **`PathA`** (default) sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts`, which tells claude
-/// it is running inside an SDK that manages permissions externally. Claude never
-/// prompts; pitboss is the sole permission authority via its own approval queue / TUI.
+/// **`PathB`** (default since v0.12) leaves the entrypoint unset so claude's own
+/// permission gate is active, and pitboss registers a `permission_prompt` MCP tool.
+/// Each per-tool check the model wants outside its `--allowedTools` routes through
+/// pitboss's approval queue. With a declared `[[worker_type]]` / `[[sublead_type]]`,
+/// the call fast-paths via the profile's `tools` allowlist (#388); without one, it
+/// routes through the operator approval bridge unless `[run].untyped_actor_policy
+/// = "block"` opts into auto-deny via the synthesized empty profile (#392).
 ///
-/// **`PathB`** leaves the entrypoint unset (claude's own permission gate is active),
-/// but pitboss registers a `permission_prompt` MCP tool. When claude asks for
-/// permission to use a tool, it calls `permission_prompt`; pitboss routes the request
-/// through its approval queue and TUI. The calling actor blocks until an operator
-/// (or an `[[approval_policy]]` rule) responds.
+/// **`PathA`** sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` plus
+/// `--dangerously-skip-permissions`, which together bypass claude's gate entirely.
+/// Pitboss becomes the sole permission authority via its own approval queue / TUI
+/// — operator-declared `[[approval_policy]]` rules are the only enforcement.
+/// Useful for runs that want to opt out of per-tool gating (e.g., trusted internal
+/// scripts), but loses the defense-in-depth that Path B provides.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionRouting {
-    #[default]
     PathA,
+    #[default]
     PathB,
 }
 

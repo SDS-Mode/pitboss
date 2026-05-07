@@ -17,33 +17,22 @@ use uuid::Uuid;
 use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 
 /// Seed an env map with pitboss's own defaults for spawned claude subprocesses.
-/// Currently: set `CLAUDE_CODE_ENTRYPOINT=sdk-ts` if not already present.
+/// Sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` if not already present AND the
+/// caller is on Path A.
 ///
-/// Rationale: pitboss is the external permission authority (via
-/// `approval_policy`, `[[approval_policy]]` rules, and the TUI). Claude's
-/// own interactive permission gate is redundant under pitboss orchestration
-/// and causes silent stalls in headless dispatch when no operator is
-/// present to answer each prompt. The `sdk-ts` value tells claude "you're
-/// running under an SDK runtime that manages permissions externally."
+/// As of v0.12 the default routing is **Path B**: claude's own gate is
+/// active and per-tool checks route through
+/// `mcp__pitboss__permission_prompt`. Under Path B this helper does NOT
+/// set the sdk-ts entrypoint — doing so would bypass the gate we want
+/// to route. Path A is the explicit opt-out for operators who want the
+/// pre-v0.12 "pitboss is the sole permission authority" behavior; under
+/// Path A this helper sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` and the
+/// hierarchical spawn args carry `--dangerously-skip-permissions`,
+/// together closing claude's permission surface.
 ///
-/// **Companion flag**: every pitboss-spawned claude (lead, sub-lead, worker)
-/// also launches with `--dangerously-skip-permissions`. Together the env
-/// var and the flag close the full permission surface (MCP tools, file I/O,
-/// bash-with-`$VAR`, bash-with-`&&`). See `lead_spawn_args` for the
-/// detailed trust-model writeup.
-///
-/// Operators who want claude's own gate back for a specific actor can
-/// either (a) override `CLAUDE_CODE_ENTRYPOINT` via `[defaults.env]`,
-/// `[lead.env]`, `[[task]].env`, or the `env` field on `spawn_sublead`
-/// to disable Path A's sdk-ts bypass, or (b) opt in to Path B by setting
-/// `[lead].permission_routing = "path_b"`. Under Path B the
-/// `--dangerously-skip-permissions` CLI flag is dropped from every
-/// hierarchical spawn variant and `--permission-prompt-tool
-/// mcp__pitboss__permission_prompt` is added so claude routes each
-/// per-tool check through pitboss's MCP server (see
-/// `mcp::tools::approval::handle_permission_prompt` for the routing
-/// semantics, including how denials are surfaced to the model and
-/// audited via `events.jsonl::TaskEvent::ToolDenied`).
+/// See `mcp::tools::approval::handle_permission_prompt` for the Path B
+/// routing semantics — how denials are surfaced to the model and
+/// audited via `events.jsonl::TaskEvent::ToolDenied`.
 pub fn apply_pitboss_env_defaults(
     env: &mut std::collections::HashMap<String, String>,
     run_id: &str,
@@ -64,27 +53,29 @@ pub fn apply_pitboss_env_defaults(
     );
     match permission_routing {
         PermissionRouting::PathA => {
-            // Path A (default): sdk-ts entrypoint bypasses claude's built-in gate.
+            // Path A (opt-out, pre-v0.12 default): sdk-ts entrypoint
+            // bypasses claude's built-in gate.
             env.entry("CLAUDE_CODE_ENTRYPOINT".to_string())
                 .or_insert_with(|| "sdk-ts".to_string());
         }
         PermissionRouting::PathB => {
-            // Path B: leave the entrypoint unset so claude's gate is active.
-            // Pitboss registers `permission_prompt` MCP tool to intercept checks.
-            // Do NOT set sdk-ts — that would bypass the gate we want to route.
+            // Path B (default since v0.12): leave the entrypoint unset
+            // so claude's gate is active. Pitboss registers
+            // `permission_prompt` MCP tool to intercept checks. Do NOT
+            // set sdk-ts — that would bypass the gate we want to route.
         }
     }
 }
 
 /// Push the per-route permission CLI args.
 ///
-/// - Path A (default): `--dangerously-skip-permissions`. Pitboss is the
-///   sole permission authority via its own approval queue.
-/// - Path B: `--permission-prompt-tool mcp__pitboss__permission_prompt`.
-///   Claude's gate stays active and every per-tool check routes through
-///   pitboss's MCP server. Without this flag the gate falls back to the
-///   interactive prompt, which can't be answered under `-p` and silently
-///   stalls.
+/// - Path B (default since v0.12): `--permission-prompt-tool
+///   mcp__pitboss__permission_prompt`. Claude's gate stays active and
+///   every per-tool check routes through pitboss's MCP server. Without
+///   this flag the gate falls back to the interactive prompt, which
+///   can't be answered under `-p` and silently stalls.
+/// - Path A (opt-out): `--dangerously-skip-permissions`. Pitboss is
+///   the sole permission authority via its own approval queue.
 ///
 /// Extracted in #370 (item 5) so the four hierarchical spawn variants
 /// (lead, lead_resume, sublead, worker) share one implementation. A
@@ -1345,12 +1336,20 @@ mod tests {
 
     #[test]
     fn apply_pitboss_env_defaults_sets_entrypoint_when_absent() {
+        // Path A explicitly: this test pins the sdk-ts entrypoint
+        // injection that closes claude's MCP-tool prompt under Path A.
+        // Path B leaves the entrypoint unset; the assertion would not
+        // hold against the v0.12 default routing.
         let mut env: HashMap<String, String> = HashMap::new();
-        apply_pitboss_env_defaults(&mut env, "test-run-id", Default::default());
+        apply_pitboss_env_defaults(
+            &mut env,
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathA,
+        );
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"sdk-ts".to_string()),
-            "default should be applied to an empty env"
+            "Path A must inject sdk-ts entrypoint"
         );
     }
 
@@ -1358,7 +1357,11 @@ mod tests {
     fn apply_pitboss_env_defaults_honors_operator_override() {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
-        apply_pitboss_env_defaults(&mut env, "test-run-id", Default::default());
+        apply_pitboss_env_defaults(
+            &mut env,
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathA,
+        );
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"cli".to_string()),
@@ -1370,7 +1373,11 @@ mod tests {
     fn apply_pitboss_env_defaults_preserves_other_keys() {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
-        apply_pitboss_env_defaults(&mut env, "test-run-id", Default::default());
+        apply_pitboss_env_defaults(
+            &mut env,
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathA,
+        );
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(
             env.get("CLAUDE_CODE_ENTRYPOINT"),
@@ -1900,16 +1907,25 @@ mod tests {
     }
 
     #[test]
-    fn every_spawn_variant_has_all_isolation_flags() {
-        // Canary for all three hardening flags every pitboss-spawned claude
-        // must carry:
-        //   - `--dangerously-skip-permissions`: pitboss is the permission
-        //     authority; without this, headless dispatch silently stalls on
-        //     bash-with-`$VAR`, write-outside-cwd, etc.
-        //   - `--strict-mcp-config` + `--disable-slash-commands`: prevents
-        //     operator's ~/.claude/ plugins (skills, MCP servers, agents)
-        //     from bleeding into spawned subprocesses.
+    fn every_spawn_variant_has_all_isolation_flags_under_path_a() {
+        // Canary for the three hardening flags every Path-A spawn must
+        // carry. Pinned to Path A explicitly because v0.12 flipped the
+        // default to Path B (#392+), which omits
+        // `--dangerously-skip-permissions` by design — claude's gate
+        // is active under Path B and routes through pitboss's
+        // `permission_prompt`. The Path-B path is covered by
+        // `path_b_emits_permission_prompt_tool_in_all_hierarchical_variants`.
+        //
+        // The flags pinned here:
+        //   - `--dangerously-skip-permissions`: bypasses claude's gate;
+        //     pitboss becomes the sole permission authority.
+        //   - `--strict-mcp-config` + `--disable-slash-commands`:
+        //     prevents operator's ~/.claude/ plugins (skills, MCP
+        //     servers, agents) from bleeding into spawned
+        //     subprocesses. These two flags are emitted under BOTH
+        //     paths.
         use crate::manifest::resolve::{ResolvedLead, ResolvedTask};
+        use crate::manifest::schema::PermissionRouting;
         use std::path::PathBuf;
 
         let task = ResolvedTask {
@@ -1937,7 +1953,7 @@ mod tests {
             use_worktree: false,
             env: Default::default(),
             resume_session_id: None,
-            permission_routing: Default::default(),
+            permission_routing: PermissionRouting::PathA,
             allow_subleads: true,
             max_subleads: None,
             max_sublead_budget_usd: None,
@@ -1955,7 +1971,16 @@ mod tests {
             ),
             (
                 "sublead",
-                sublead_spawn_args("sl-id", "p", "m", &cfg, None, None, Default::default(), cm),
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    None,
+                    None,
+                    PermissionRouting::PathA,
+                    cm,
+                ),
             ),
             (
                 "sublead_resume",
@@ -1966,7 +1991,7 @@ mod tests {
                     &cfg,
                     Some("sess"),
                     None,
-                    Default::default(),
+                    PermissionRouting::PathA,
                     cm,
                 ),
             ),

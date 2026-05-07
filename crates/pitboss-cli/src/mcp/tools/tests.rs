@@ -136,24 +136,27 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
 }
 
 #[test]
-fn worker_spawn_args_passes_dangerously_skip_permissions() {
+fn worker_spawn_args_passes_dangerously_skip_permissions_under_path_a() {
     // Companion to the runner-side test: worker spawns are emitted from
-    // a different module and must independently pass the flag. Without
-    // it, headless workers stall on bash-with-`$VAR` and write-outside-
-    // cwd gates that have no `-p`-mode answer — the failure mode is
-    // silent (worker exits "successfully" having written nothing).
+    // a different module and must independently pass the flag under
+    // Path A. Pinned to Path A explicitly because v0.12 flipped the
+    // default to Path B, which deliberately omits
+    // `--dangerously-skip-permissions` (claude's gate routes through
+    // `mcp__pitboss__permission_prompt`). The Path-B path is covered
+    // by `path_b_worker_emits_permission_prompt_tool` below.
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
     use std::path::PathBuf;
     let argv = worker_spawn_args(
         "p",
         "claude-haiku-4-5",
         &["Read".to_string()],
         Some(&PathBuf::from("/tmp/cfg.json")),
-        Default::default(),
-        crate::manifest::schema::CommunicationMode::Disabled,
+        PermissionRouting::PathA,
+        CommunicationMode::Disabled,
     );
     assert!(
         argv.iter().any(|a| a == "--dangerously-skip-permissions"),
-        "worker_spawn_args missing --dangerously-skip-permissions: {argv:?}"
+        "Path-A worker_spawn_args missing --dangerously-skip-permissions: {argv:?}"
     );
 }
 
