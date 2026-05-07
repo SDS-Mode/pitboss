@@ -2762,6 +2762,15 @@ async fn test_state_with_worker_types(
     worker_types: Vec<crate::manifest::schema::WorkerType>,
     require_actor_type: bool,
 ) -> Arc<DispatchState> {
+    test_state_with_worker_types_and_policy(worker_types, require_actor_type, ApprovalPolicy::Block)
+        .await
+}
+
+async fn test_state_with_worker_types_and_policy(
+    worker_types: Vec<crate::manifest::schema::WorkerType>,
+    require_actor_type: bool,
+    approval_policy: ApprovalPolicy,
+) -> Arc<DispatchState> {
     use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
     use crate::manifest::schema::{Effort, WorktreeCleanup};
     use pitboss_core::process::fake::{FakeScript, FakeSpawner};
@@ -2840,7 +2849,7 @@ async fn test_state_with_worker_types(
         wt_mgr,
         CleanupPolicy::Never,
         run_subdir,
-        ApprovalPolicy::Block,
+        approval_policy,
         None,
         std::sync::Arc::new(crate::shared_store::SharedStore::new()),
     ))
@@ -2980,5 +2989,279 @@ async fn spawn_worker_typed_persists_actor_type_on_record() {
         found_actor_type.as_deref(),
         Some("extraction"),
         "TaskRecord.actor_type must reflect the resolved [[worker_type]] id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Profile-driven Path-B short-circuit (#252).
+// ---------------------------------------------------------------------------
+//
+// `handle_permission_prompt` consults the caller's `[[worker_type]]` /
+// `[[sublead_type]]` profile after any `[[approval_policy]]` rule has
+// run: rule auto-reject / auto-approve still wins (operator override),
+// but on `Block | None` the profile's `tools` allowlist becomes the
+// deciding signal — membership ⇒ Allow, absence ⇒ Deny — without an
+// operator round-trip. Untyped callers (lead, or pre-#252 manifests)
+// fall through to the bridge unchanged.
+
+/// Helper for the profile tests below: inserts a typed worker entry
+/// into the root layer's `worker_actor_types` map. Mirrors what
+/// `handle_spawn_worker` does on a real spawn, without driving the
+/// FakeSpawner — the approval path only reads the maps.
+async fn insert_typed_worker(state: &Arc<DispatchState>, worker_id: &str, worker_type_id: &str) {
+    state
+        .root
+        .worker_actor_types
+        .write()
+        .await
+        .insert(worker_id.to_string(), worker_type_id.to_string());
+    // Mark as a root-layer worker for the layer-index lookup.
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert(worker_id.to_string(), None);
+}
+
+fn worker_meta(worker_id: &str) -> crate::shared_store::tools::MetaField {
+    crate::shared_store::tools::MetaField {
+        actor_id: worker_id.to_string(),
+        actor_role: crate::shared_store::ActorRole::Worker,
+    }
+}
+
+#[tokio::test]
+async fn permission_prompt_profile_auto_approves_tool_in_allowlist() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    insert_typed_worker(&state, "worker-1", "extraction").await;
+
+    // `Read` is in `extraction_profile()` → Allow without bridge.
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-1")),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "profile-allowlisted tool must auto-approve: {resp:?}"
+    );
+
+    // Counters bumped — symmetric with rule-driven AutoApprove (#367).
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("worker-1")
+        .expect("profile auto-approve must bump approval counters");
+    assert_eq!(entry.approvals_requested, 1);
+    assert_eq!(entry.approvals_approved, 1);
+    assert_eq!(entry.approvals_rejected, 0);
+}
+
+#[tokio::test]
+async fn permission_prompt_profile_auto_denies_tool_outside_allowlist() {
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    insert_typed_worker(&state, "worker-1", "extraction").await;
+
+    // `Bash` is NOT in `extraction_profile()` → Deny + DeniedByProfile.
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-1")),
+        },
+    )
+    .await
+    .unwrap();
+    let PermissionPromptResponse::Deny { message, .. } = resp else {
+        panic!("profile-disallowed tool must auto-deny");
+    };
+    assert!(
+        message.contains("not in worker_type 'extraction' allowlist"),
+        "model-facing reason must name the profile so claude can adapt: {message}"
+    );
+
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("worker-1")
+        .expect("profile auto-deny must bump approval counters");
+    assert_eq!(entry.approvals_requested, 1);
+    assert_eq!(entry.approvals_approved, 0);
+    assert_eq!(entry.approvals_rejected, 1);
+}
+
+/// Untyped workers (no entry in `worker_actor_types`) MUST fall through
+/// to the bridge so back-compat with v0.9 manifests is preserved.
+/// Verified by setting the bridge's default policy to AutoApprove and
+/// confirming the call returns Allow — if the profile path had
+/// mistakenly fired, the call would have hit the lead-caller fallthrough
+/// and either been auto-rejected or stalled on the bridge with no TUI.
+#[tokio::test]
+async fn permission_prompt_untyped_worker_falls_through_to_bridge() {
+    let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, false).await;
+    // Note: NOT calling insert_typed_worker. Caller is treated as the
+    // root lead by build_caller_identity (no _meta) — same un-typed code
+    // path as a Lead caller.
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "untyped caller must reach the bridge AutoApprove path: {resp:?}"
+    );
+}
+
+/// Lead callers MUST NOT short-circuit on profile, even when typed
+/// `[[worker_type]]` entries exist in the manifest. The root lead is
+/// never typed (#252 Phase 1.5: "Root lead is never typed") and an
+/// off-by-one that wired `worker_actor_types` lookups for `ActorRole::Lead`
+/// would silently apply a worker profile's caps to the lead — which
+/// would forbid orchestration tools the lead must always have.
+#[tokio::test]
+async fn permission_prompt_lead_caller_never_uses_profile_path() {
+    // AutoApprove policy so the bridge fast-paths to Allow instead of
+    // waiting for the (no-TUI) operator response and TTL'ing — the
+    // assertion is about which arm the caller takes, not the wait.
+    let state = test_state_with_worker_types_and_policy(
+        vec![extraction_profile()],
+        false,
+        ApprovalPolicy::AutoApprove,
+    )
+    .await;
+    // Typed worker entries exist but the caller's role is Lead — the
+    // profile lookup must short-circuit at the `ActorRole::Lead` arm.
+    // If it didn't, looking up `"lead"` in `worker_actor_types` would
+    // find the planted "extraction" entry and apply a worker profile
+    // to the lead — forbidding orchestration tools the lead must
+    // always have.
+    state
+        .root
+        .worker_actor_types
+        .write()
+        .await
+        .insert("lead".into(), "extraction".into());
+
+    let lead_meta = crate::shared_store::tools::MetaField {
+        actor_id: "lead".into(),
+        actor_role: crate::shared_store::ActorRole::Lead,
+    };
+
+    // `Bash` is NOT in `extraction_profile()`. If lead were treated as
+    // typed, this would auto-deny via DeniedByProfile. Instead the
+    // ActorRole::Lead arm of `caller_profile` returns None and the
+    // call falls through to the bridge AutoApprove fast-path → Allow.
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(lead_meta),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "lead caller must skip profile lookup and reach bridge fast-path: {resp:?}"
+    );
+}
+
+/// Order-of-evaluation contract: an operator-declared `[[approval_policy]]
+/// action = "auto_reject"` rule must fire BEFORE the profile short-circuit,
+/// so an operator can ban a tool globally regardless of any profile that
+/// would otherwise allow it. Without this guarantee, a permissive profile
+/// silently widens the operator's safety belt.
+#[tokio::test]
+async fn permission_prompt_rule_auto_reject_beats_profile_allow() {
+    use crate::mcp::policy::{ApprovalAction, ApprovalRule, PolicyMatcher};
+
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    insert_typed_worker(&state, "worker-1", "extraction").await;
+    state
+        .root
+        .set_policy_matcher(PolicyMatcher::new(vec![ApprovalRule {
+            r#match: crate::mcp::policy::ApprovalMatch {
+                tool_name: Some("Read".into()),
+                ..Default::default()
+            },
+            action: ApprovalAction::AutoReject,
+        }]))
+        .await;
+
+    // `Read` IS in the profile (would Allow), but the rule auto-rejects
+    // first → Deny + DeniedByRule (NOT DeniedByProfile).
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-1")),
+        },
+    )
+    .await
+    .unwrap();
+    let PermissionPromptResponse::Deny { message, .. } = resp else {
+        panic!("rule auto-reject must beat profile allow");
+    };
+    assert!(
+        message.contains("[[approval_policy]] rule"),
+        "denial must be attributed to the rule, not the profile: {message}"
+    );
+}
+
+/// Symmetric to `rule_auto_reject_beats_profile_allow`: an operator
+/// `auto_approve` rule beats a profile that would deny. This is the
+/// cross-cutting "operator can widen if they explicitly want" path —
+/// rare in practice, but the rule machinery has been the override
+/// surface since pre-#252 and we don't quietly take it away.
+#[tokio::test]
+async fn permission_prompt_rule_auto_approve_beats_profile_deny() {
+    use crate::mcp::policy::{ApprovalAction, ApprovalRule, PolicyMatcher};
+
+    let state = test_state_with_worker_types(vec![extraction_profile()], false).await;
+    insert_typed_worker(&state, "worker-1", "extraction").await;
+    state
+        .root
+        .set_policy_matcher(PolicyMatcher::new(vec![ApprovalRule {
+            r#match: crate::mcp::policy::ApprovalMatch {
+                tool_name: Some("Bash".into()),
+                ..Default::default()
+            },
+            action: ApprovalAction::AutoApprove,
+        }]))
+        .await;
+
+    // `Bash` is NOT in the profile (would Deny), but the rule
+    // auto-approves first → Allow.
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-1")),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "rule auto-approve must beat profile deny: {resp:?}"
     );
 }

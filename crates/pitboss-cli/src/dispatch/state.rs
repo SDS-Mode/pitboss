@@ -401,6 +401,17 @@ pub struct DispatchState {
     /// on every tools/call and uses the bound identity (NOT the wire
     /// `_meta.actor_id`) for authz. Closes issue #145.
     pub actor_tokens: RwLock<HashMap<String, ActorIdentity>>,
+    /// Sub-lead id → resolved `[[sublead_type]]` profile id, populated
+    /// by `handle_spawn_sublead` after the sub-lead's `LayerState` is
+    /// registered (#252). Run-global (only the root layer hosts
+    /// sub-leads — depth-2 cap), so it lives on `DispatchState` rather
+    /// than mirroring the per-layer `worker_actor_types` map.
+    ///
+    /// Read by `handle_permission_prompt` to look up a sub-lead
+    /// caller's profile when applying the typed-profile auto-approve /
+    /// auto-deny short-circuit. `None`/missing entry means the sub-lead
+    /// was spawned untyped — the bridge fallback runs as before.
+    pub sublead_actor_types: RwLock<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for DispatchState {
@@ -472,6 +483,7 @@ impl DispatchState {
             last_approval_response: RwLock::new(HashMap::new()),
             api_health: Arc::new(crate::dispatch::failure_detection::ApiHealth::new()),
             actor_tokens: RwLock::new(HashMap::new()),
+            sublead_actor_types: RwLock::new(HashMap::new()),
         }
     }
 

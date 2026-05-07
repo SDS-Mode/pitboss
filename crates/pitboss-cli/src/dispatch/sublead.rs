@@ -352,6 +352,20 @@ pub async fn spawn_sublead(
             .register_sublead(sublead_id.clone(), sub_layer.clone())
             .await;
 
+        // Persist the resolved sublead_type for the typed-profile
+        // approval short-circuit (#252). Mirror of the per-worker map
+        // population in `handle_spawn_worker` — read at
+        // `permission_prompt` time to look up `tools` allowlist.
+        // Untyped spawns (no sublead_type) skip the insert so the map
+        // stays a positive signal: presence ⇒ profile cap applies.
+        if let Some(stype) = req.sublead_type.as_deref() {
+            state
+                .sublead_actor_types
+                .write()
+                .await
+                .insert(sublead_id.clone(), stype.to_string());
+        }
+
         // Emit SubleadSpawned lifecycle event to the control plane.
         {
             let (budget_usd_val, max_workers_val) = match &envelope {

@@ -541,6 +541,49 @@ pub async fn handle_permission_prompt(
         }
     }
 
+    // Typed-profile short-circuit (#252). Order vs. operator rules above
+    // is deliberate: rule auto-reject / auto-approve already short-circuited
+    // earlier, so an operator's `[[approval_policy]]` retains the
+    // cross-cutting override. When no rule decided (`Block` or no match)
+    // and the caller has a resolved `[[worker_type]]` / `[[sublead_type]]`,
+    // the profile's `tools` allowlist becomes the deciding signal:
+    // membership ⇒ auto-approve; absence ⇒ auto-deny without an operator
+    // round-trip. Untyped callers (lead, or pre-#252 manifests) fall
+    // through to the bridge unchanged.
+    if let Some((type_id, role_label, profile_tools)) =
+        caller_profile(state, &caller_id, args.meta.as_ref()).await
+    {
+        if profile_tools.iter().any(|t| t == &args.tool_name) {
+            record_permission_auto_approved(state, &caller_id, &args.tool_name, &type_id).await;
+            state
+                .record_last_approval_response(&caller_id, true, false)
+                .await;
+            crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
+            crate::mcp::approval::record_approval_outcome(state, &caller_id, true).await;
+            return Ok(PermissionPromptResponse::Allow {
+                updated_input: args.tool_input.clone(),
+            });
+        }
+        let reason = PermissionDenialReason::profile_message(&args.tool_name, role_label, &type_id);
+        record_permission_denied(
+            state,
+            &caller_id,
+            &args.tool_name,
+            PermissionDenialReason::DeniedByProfile,
+            &reason,
+        )
+        .await;
+        state
+            .record_last_approval_response(&caller_id, false, false)
+            .await;
+        crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
+        crate::mcp::approval::record_approval_outcome(state, &caller_id, false).await;
+        return Ok(PermissionPromptResponse::Deny {
+            message: reason,
+            interrupt: false,
+        });
+    }
+
     let ttl_secs = state.root.manifest.lead_timeout_secs.unwrap_or(3600);
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
@@ -639,5 +682,108 @@ async fn record_permission_denied(
             error = %e,
             "failed to append ToolDenied event; the denial still propagated to claude"
         );
+    }
+}
+
+/// Symmetric to [`record_permission_denied`] for the typed-profile
+/// auto-approve path (#252). Logged so post-hoc audit shows both sides
+/// of the profile-driven gate — without it, only rejections would land
+/// on `events.jsonl` and an operator reading the file couldn't tell
+/// whether the silence on the approve side meant "nothing was attempted"
+/// or "every Read/Glob/etc. quietly passed via the profile allowlist."
+async fn record_permission_auto_approved(
+    state: &Arc<DispatchState>,
+    actor_id: &str,
+    tool_name: &str,
+    actor_type: &str,
+) {
+    let event = crate::dispatch::events::TaskEvent::ToolAutoApproved {
+        at: chrono::Utc::now(),
+        tool_name: tool_name.to_string(),
+        actor_id: actor_id.to_string(),
+        actor_type: actor_type.to_string(),
+    };
+    if let Err(e) =
+        crate::dispatch::events::append_event(&state.root.run_subdir, actor_id, &event).await
+    {
+        tracing::warn!(
+            actor_id,
+            tool_name,
+            actor_type,
+            error = %e,
+            "failed to append ToolAutoApproved event; the approval still propagated to claude"
+        );
+    }
+}
+
+/// Resolve a permission_prompt caller to its `(type_id, role_label,
+/// profile_tools)` triple, looking up the profile from the manifest.
+///
+/// Returns `None` for the lead (root lead is never typed), for untyped
+/// callers (no entry in the per-layer / sublead actor-type maps), and
+/// when a typed caller's id is unknown to the manifest's profile list
+/// (shouldn't happen post-spawn; rejected by `actor_type::resolve_*`
+/// at spawn time, but defensive against state corruption).
+///
+/// `role_label` is the lowercase string `"worker"` or `"sublead"` used
+/// to format the `not in <role>_type '<id>' allowlist` model-facing
+/// denial message — matching the plan's convention exactly so a Claude
+/// session can pattern-match and adapt.
+async fn caller_profile(
+    state: &Arc<DispatchState>,
+    caller_id: &str,
+    meta: Option<&crate::shared_store::tools::MetaField>,
+) -> Option<(String, &'static str, Vec<String>)> {
+    use crate::shared_store::ActorRole;
+
+    let m = meta?;
+    let manifest = &state.root.manifest;
+    match m.actor_role {
+        ActorRole::Lead => None,
+        ActorRole::Sublead => {
+            let type_id = state
+                .sublead_actor_types
+                .read()
+                .await
+                .get(caller_id)
+                .cloned()?;
+            let profile = manifest.sublead_types.iter().find(|st| st.id == type_id)?;
+            Some((type_id, "sublead", profile.tools.clone()))
+        }
+        ActorRole::Worker => {
+            // Same dispatch as `build_caller_identity`: which sub-tree
+            // owns this worker? `None` / `Some(None)` is a root-layer
+            // worker; `Some(Some(sublead_id))` routes to the sub-layer.
+            let layer_opt = state
+                .worker_layer_index
+                .read()
+                .await
+                .get(caller_id)
+                .cloned();
+            let type_id = match layer_opt {
+                None | Some(None) => state
+                    .root
+                    .worker_actor_types
+                    .read()
+                    .await
+                    .get(caller_id)
+                    .cloned()?,
+                Some(Some(sublead_id)) => {
+                    // Clone the sub-layer Arc out before awaiting on its
+                    // own RwLock — holding `subs` (a guard on
+                    // `state.subleads`) across the second `.await` would
+                    // pin the outer lock for the duration of the inner
+                    // read.
+                    let sub = {
+                        let subs = state.subleads.read().await;
+                        subs.get(&sublead_id).cloned()?
+                    };
+                    let map = sub.worker_actor_types.read().await;
+                    map.get(caller_id).cloned()?
+                }
+            };
+            let profile = manifest.worker_types.iter().find(|wt| wt.id == type_id)?;
+            Some((type_id, "worker", profile.tools.clone()))
+        }
     }
 }
