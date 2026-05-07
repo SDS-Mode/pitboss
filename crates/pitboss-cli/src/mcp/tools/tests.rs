@@ -1983,6 +1983,178 @@ async fn permission_prompt_cost_over_rule_denies_when_estimate_exceeds() {
         body.contains("\"tool_name\":\"Bash\""),
         "events.jsonl missing tool_name=Bash: {body}"
     );
+
+    // #367: the rule short-circuit must also record approval state so
+    // counters and `approval_driven_termination` work under Path B.
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("lead")
+        .expect("rule-driven deny must bump approval counters for caller");
+    assert_eq!(
+        entry.approvals_requested, 1,
+        "approvals_requested must be 1"
+    );
+    assert_eq!(entry.approvals_rejected, 1, "approvals_rejected must be 1");
+    assert_eq!(
+        entry.approvals_approved, 0,
+        "approvals_approved must stay 0"
+    );
+    drop(counters);
+    assert_eq!(
+        state.approval_driven_termination("lead").await,
+        Some(crate::dispatch::state::ApprovalTerminationKind::Rejected),
+        "rule-driven deny must register a rejected last_approval_response so a \
+         fast-exit worker reclassifies as ApprovalRejected (not Success)"
+    );
+}
+
+/// #367 regression: the policy-matcher AutoApprove path in
+/// `handle_permission_prompt` must record the response and bump
+/// approval counters, mirroring `handle_request_approval`. Pre-fix
+/// the path returned `decision="allow"` without touching either,
+/// silently undercounting Path B approvals.
+#[tokio::test]
+async fn permission_prompt_rule_auto_approve_records_state_and_counters() {
+    use crate::mcp::policy::{ApprovalAction, ApprovalRule, PolicyMatcher};
+
+    // Default Block so the matcher's verdict is the only resolution path.
+    let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::Block, false).await;
+    state
+        .root
+        .set_policy_matcher(PolicyMatcher::new(vec![ApprovalRule {
+            r#match: crate::mcp::policy::ApprovalMatch {
+                tool_name: Some("Read".into()),
+                ..Default::default()
+            },
+            action: ApprovalAction::AutoApprove,
+        }]))
+        .await;
+
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.decision, "allow");
+    assert_eq!(resp.behavior.as_deref(), Some("allow_once"));
+
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("lead")
+        .expect("rule-driven approve must bump approval counters for caller");
+    assert_eq!(entry.approvals_requested, 1);
+    assert_eq!(entry.approvals_approved, 1);
+    assert_eq!(entry.approvals_rejected, 0);
+    drop(counters);
+    // approve → no termination reclassification.
+    assert_eq!(state.approval_driven_termination("lead").await, None);
+}
+
+/// #367 regression: the bridge AutoApprove path in
+/// `handle_permission_prompt` must record `last_approval_response` so
+/// `approval_driven_termination` sees the recent positive decision.
+/// The bridge bumps the counters itself; the handler owns the last-
+/// response record (mirrors `handle_request_approval`).
+#[tokio::test]
+async fn permission_prompt_default_policy_auto_approve_records_last_response() {
+    let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, false).await;
+
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.decision, "allow");
+
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("lead")
+        .expect("bridge AutoApprove must bump approval counters");
+    assert_eq!(entry.approvals_requested, 1);
+    assert_eq!(entry.approvals_approved, 1);
+    assert_eq!(entry.approvals_rejected, 0);
+    drop(counters);
+    assert_eq!(
+        state.approval_driven_termination("lead").await,
+        None,
+        "approve outcome must not register as a termination-driving rejection"
+    );
+}
+
+/// #367 regression: the bridge AutoReject path in
+/// `handle_permission_prompt` must record a rejected
+/// `last_approval_response` so a worker that exits silently after the
+/// deny reclassifies as `ApprovalRejected` (not `Success`). Also
+/// asserts that the canned `OperatorRejected` message is the fallback
+/// when the bridge response carries no operator-supplied reason.
+#[tokio::test]
+async fn permission_prompt_default_policy_auto_reject_records_last_response() {
+    let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoReject, false).await;
+
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.decision, "deny");
+    assert!(resp.behavior.is_none());
+    let reason = resp
+        .reason
+        .as_deref()
+        .expect("bridge-driven deny must carry a reason for the model");
+    assert!(
+        reason.contains("Bash"),
+        "reason should name the tool: {reason}"
+    );
+
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("lead")
+        .expect("bridge AutoReject must bump approval counters");
+    assert_eq!(entry.approvals_requested, 1);
+    assert_eq!(entry.approvals_rejected, 1);
+    assert_eq!(entry.approvals_approved, 0);
+    drop(counters);
+    assert_eq!(
+        state.approval_driven_termination("lead").await,
+        Some(crate::dispatch::state::ApprovalTerminationKind::Rejected),
+        "bridge-driven deny must register a rejected last_approval_response"
+    );
+
+    // Per-actor events.jsonl audit row should also be present, since
+    // the deny goes through `record_permission_denied` regardless of
+    // origin (rule vs bridge).
+    let events_path = state
+        .root
+        .run_subdir
+        .join("tasks")
+        .join("lead")
+        .join("events.jsonl");
+    let body = tokio::fs::read_to_string(&events_path)
+        .await
+        .unwrap_or_else(|e| panic!("expected {events_path:?} to exist: {e}"));
+    assert!(
+        body.contains("\"reason_kind\":\"operator_rejected\""),
+        "events.jsonl missing operator_rejected kind: {body}"
+    );
 }
 
 #[tokio::test]
