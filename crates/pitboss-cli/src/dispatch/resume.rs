@@ -13,6 +13,15 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask, CURRENT_MANIFEST_
 /// snapshots whose `manifest_schema_version` exceeds what this build
 /// supports. Older / unversioned snapshots (`< CURRENT`, including the
 /// pre-v0.9.2 era where the field is absent) are accepted.
+///
+/// Notifications are NOT carried in `resolved.json` (#346 — they
+/// would persist post-substitution webhook tokens to disk). After
+/// parsing the JSON, this function re-loads `manifest.snapshot.toml`
+/// from the same run directory and re-runs `apply_env_substitution`
+/// to reconstruct the `notifications` field. If the resuming process
+/// is missing env vars referenced by the snapshot, substitution
+/// fails with a clear message naming the missing var — recoverable
+/// by re-exporting the var and retrying.
 fn read_resolved_manifest(path: &Path) -> Result<ResolvedManifest> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let raw: serde_json::Value = serde_json::from_slice(&bytes)
@@ -28,8 +37,79 @@ fn read_resolved_manifest(path: &Path) -> Result<ResolvedManifest> {
         }
         .into());
     }
-    serde_json::from_value(raw)
-        .with_context(|| format!("parsing {} as ResolvedManifest", path.display()))
+    let mut resolved: ResolvedManifest = serde_json::from_value(raw)
+        .with_context(|| format!("parsing {} as ResolvedManifest", path.display()))?;
+    // Reconstruct notifications from the placeholder-form snapshot so
+    // resumed runs see the same router config as the original dispatch
+    // — without ever writing post-substitution secrets to disk (#346).
+    let run_dir = path.parent().ok_or_else(|| {
+        anyhow!(
+            "resolved.json path has no parent directory: {}",
+            path.display()
+        )
+    })?;
+    resolved.notifications = reconstruct_notifications(run_dir).with_context(|| {
+        format!(
+            "reconstructing notifications from manifest.snapshot.toml at {}",
+            run_dir.display()
+        )
+    })?;
+    Ok(resolved)
+}
+
+/// Re-load `manifest.snapshot.toml` from `run_dir` and re-run
+/// `apply_env_substitution` to produce the post-substitution
+/// `notifications` array. Used only by `read_resolved_manifest` —
+/// pulled out as a free function to make the test surface for the
+/// resume-with-missing-env failure mode explicit.
+///
+/// Returns an empty Vec if the manifest declared no `[[notification]]`
+/// blocks. Returns an error (NOT empty Vec) if substitution fails —
+/// silent fallback would disable notifications on resume, which is
+/// the failure mode #346 is fixing in the first place.
+fn reconstruct_notifications(
+    run_dir: &Path,
+) -> Result<Vec<crate::notify::config::NotificationConfig>> {
+    let snapshot_path = run_dir.join("manifest.snapshot.toml");
+    if !snapshot_path.exists() {
+        // Every dispatch since v0.9 writes manifest.snapshot.toml at
+        // run-init time, BEFORE resolved.json (see entrypoint.rs's
+        // init_run_artifacts). A run dir that has resolved.json but
+        // not the snapshot is therefore either an artifact from a
+        // pre-v0.9 build OR a partially-deleted run dir. Either way
+        // we can't reconstruct notifications safely — silent
+        // fallback to empty would re-create the silent-disable
+        // failure mode #346 is closing.
+        bail!(
+            "cannot resume: {} is missing.\n\
+             Pitboss writes this snapshot before resolved.json on every \
+             dispatch since v0.9, so its absence means the run dir is \
+             from a pre-v0.9 pitboss or has been partially cleaned. \
+             Notifications cannot be reconstructed without it; resume \
+             would silently run without notifications. Re-dispatch the \
+             original manifest instead.",
+            snapshot_path.display()
+        );
+    }
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .with_context(|| format!("reading {}", snapshot_path.display()))?;
+    let manifest: crate::manifest::schema::Manifest =
+        toml::from_str(&snapshot).with_context(|| {
+            format!(
+                "parsing {} as a manifest (it should match the format the original dispatch saw)",
+                snapshot_path.display()
+            )
+        })?;
+    let mut notifications = manifest.notification;
+    for cfg in &mut notifications {
+        crate::notify::config::apply_env_substitution(cfg).with_context(|| {
+            "resume failed: a notification URL references an env var that is not set in this \
+             process. Export the same `PITBOSS_NOTIFY_*` vars the original dispatch used and \
+             retry."
+                .to_string()
+        })?;
+    }
+    Ok(notifications)
 }
 
 /// Max length for a `claude --resume <id>` value. Real Claude session IDs
@@ -308,6 +388,16 @@ mod tests {
         assert!(validate_session_id(&too_long).is_err());
     }
 
+    /// Write a minimal `manifest.snapshot.toml` next to the test's
+    /// hand-crafted `resolved.json`. `read_resolved_manifest` reloads
+    /// the snapshot to reconstruct `notifications` (#346); without
+    /// the file it errors out before the test can exercise its
+    /// real assertion.
+    fn write_snapshot_stub(dir: &Path) {
+        let stub = "[run]\n\n[[task]]\nid = \"stub\"\ndirectory = \".\"\nprompt = \"stub\"\n";
+        std::fs::write(dir.join("manifest.snapshot.toml"), stub).unwrap();
+    }
+
     fn write_resolved(dir: &Path, tasks: &[(&str, &str)]) {
         // tasks: [(id, prompt)]
         let resolved_tasks: Vec<serde_json::Value> = tasks
@@ -341,6 +431,7 @@ mod tests {
             serde_json::to_vec_pretty(&resolved).unwrap(),
         )
         .unwrap();
+        write_snapshot_stub(dir);
     }
 
     fn write_summary(dir: &Path, task_records: &[(&str, Option<&str>, TaskStatus)]) {
@@ -430,6 +521,7 @@ mod tests {
             serde_json::to_vec_pretty(&resolved).unwrap(),
         )
         .unwrap();
+        write_snapshot_stub(tmp.path());
         write_summary(tmp.path(), &[("a", Some("sess_a"), TaskStatus::Success)]);
 
         let manifest = build_resume_manifest(tmp.path()).unwrap();
@@ -551,6 +643,7 @@ mod tests {
             serde_json::to_vec_pretty(&old_resolved).unwrap(),
         )
         .unwrap();
+        write_snapshot_stub(tmp.path());
         write_summary(tmp.path(), &[("x", Some("sess_x"), TaskStatus::Success)]);
 
         let manifest = build_resume_manifest(tmp.path()).unwrap();
@@ -623,6 +716,7 @@ mod tests {
             serde_json::to_vec_pretty(&resolved).unwrap(),
         )
         .unwrap();
+        write_snapshot_stub(run_dir);
 
         // Synthesize summary.json with the lead's record including a session id.
         let lead_record = TaskRecord {
@@ -742,6 +836,7 @@ mod tests {
             serde_json::to_vec_pretty(&resolved).unwrap(),
         )
         .unwrap();
+        write_snapshot_stub(run_dir);
 
         // Lead record points at a worktree path that does NOT exist — as
         // if cleanup fired and removed it.
@@ -864,6 +959,7 @@ mod tests {
             serde_json::to_vec_pretty(&resolved).unwrap(),
         )
         .unwrap();
+        write_snapshot_stub(run_dir);
 
         let lead_record = TaskRecord {
             task_id: "root-lead".into(),
@@ -957,6 +1053,7 @@ mod tests {
             "tasks": []
         });
         std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        write_snapshot_stub(tmp.path());
         let m = read_resolved_manifest(&path).expect("legacy snapshot must load");
         assert_eq!(m.manifest_schema_version, 0);
     }
@@ -992,5 +1089,203 @@ mod tests {
                 assert_eq!(*supported, CURRENT_MANIFEST_SCHEMA_VERSION);
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // #346 — `resolved.json` must NOT carry post-substituted webhook
+    // tokens. Notifications round-trip through `manifest.snapshot.toml`
+    // (placeholder form) on resume; substitution re-runs at read time.
+    // -----------------------------------------------------------------
+
+    /// Round-trip serialization gate: `notifications` must be absent
+    /// from the JSON body. If a future change drops the
+    /// `#[serde(skip)]` attribute, this test fails loudly — and the
+    /// fix isn't "update the test," it's "stop leaking secrets."
+    #[test]
+    fn resolved_json_serialization_omits_notifications() {
+        use crate::manifest::resolve::ResolvedManifest;
+        use crate::manifest::schema::WorktreeCleanup;
+        use crate::notify::config::{NotificationConfig, SinkKind};
+        use crate::notify::Severity;
+
+        let m = ResolvedManifest {
+            manifest_schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+            name: None,
+            max_parallel_tasks: Some(1),
+            halt_on_failure: false,
+            run_dir: std::path::PathBuf::from("/tmp"),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: None,
+            budget_usd: None,
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![NotificationConfig {
+                kind: SinkKind::Slack,
+                url: Some("https://hooks.slack.com/services/T00/B00/SECRETxxxxxxxxxxxxxxxx".into()),
+                events: None,
+                severity_min: Severity::Info,
+                request_timeout_secs: None,
+            }],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("notifications"),
+            "ResolvedManifest must skip `notifications` from JSON to keep webhook \
+             tokens off disk; got: {json}"
+        );
+        assert!(
+            !json.contains("SECRET"),
+            "webhook URL leaked into resolved.json: {json}"
+        );
+    }
+
+    /// Resume must reconstruct `notifications` from the placeholder-
+    /// form `manifest.snapshot.toml` so the resumed router behaves the
+    /// same as the original dispatch's router. The placeholder uses a
+    /// var prefixed `PITBOSS_NOTIFY_` (only such vars are substitutable).
+    #[test]
+    fn read_resolved_manifest_repopulates_notifications_from_snapshot() {
+        let tmp = TempDir::new().unwrap();
+
+        let snapshot = r#"
+[run]
+
+[[task]]
+id = "t1"
+directory = "."
+prompt = "p"
+
+[[notification]]
+kind = "slack"
+url = "https://hooks.slack.com/services/T00/B00/${PITBOSS_NOTIFY_SLACK_TOKEN}"
+"#;
+        std::fs::write(tmp.path().join("manifest.snapshot.toml"), snapshot).unwrap();
+
+        // Write a resolved.json that intentionally has NO notifications
+        // field — this is the post-#346 wire shape.
+        let v = serde_json::json!({
+            "manifest_schema_version": CURRENT_MANIFEST_SCHEMA_VERSION,
+            "max_parallel_tasks": 1,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": [],
+        });
+        let path = tmp.path().join("resolved.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+        // Set the env var so substitution succeeds.
+        // SAFETY: tests run single-threaded in this binary by default;
+        // if cross-test races become an issue, gate with the existing
+        // ENV_GUARD pattern from notify::parent::tests.
+        std::env::set_var("PITBOSS_NOTIFY_SLACK_TOKEN", "RECONSTRUCTED");
+
+        let m = read_resolved_manifest(&path).expect("must reload");
+        assert_eq!(m.notifications.len(), 1, "expected one notification");
+        let url = m.notifications[0].url.as_deref().unwrap();
+        assert!(
+            url.contains("RECONSTRUCTED"),
+            "notification URL should have placeholder substituted; got {url}"
+        );
+        assert!(
+            !url.contains("${"),
+            "notification URL should not still contain the placeholder; got {url}"
+        );
+
+        std::env::remove_var("PITBOSS_NOTIFY_SLACK_TOKEN");
+    }
+
+    /// A run dir with `resolved.json` but no `manifest.snapshot.toml`
+    /// must surface an explicit, operator-comprehensible error rather
+    /// than a generic IO context. (Production runs since v0.9 always
+    /// have both; this protects pre-v0.9 artifacts and partially-
+    /// cleaned run dirs from silently resuming with notifications
+    /// disabled.)
+    #[test]
+    fn read_resolved_manifest_explains_missing_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let v = serde_json::json!({
+            "manifest_schema_version": CURRENT_MANIFEST_SCHEMA_VERSION,
+            "max_parallel_tasks": 1,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": [],
+        });
+        let path = tmp.path().join("resolved.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        // Deliberately do NOT write manifest.snapshot.toml.
+
+        let err = read_resolved_manifest(&path).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("manifest.snapshot.toml is missing"),
+            "error must call out the missing snapshot file by name; got: {chain}"
+        );
+        assert!(
+            chain.contains("pre-v0.9") || chain.contains("partially cleaned"),
+            "error should hint at the legacy / partial-cleanup cause; got: {chain}"
+        );
+    }
+
+    /// When the snapshot references an env var that the resuming
+    /// process does not have set, `read_resolved_manifest` must fail
+    /// loudly. Silent fallback to empty notifications would re-create
+    /// the silent-disable failure mode #346 is closing.
+    #[test]
+    fn read_resolved_manifest_fails_clearly_when_env_var_missing() {
+        let tmp = TempDir::new().unwrap();
+
+        let snapshot = r#"
+[run]
+
+[[task]]
+id = "t1"
+directory = "."
+prompt = "p"
+
+[[notification]]
+kind = "slack"
+url = "https://hooks.slack.com/services/T00/B00/${PITBOSS_NOTIFY_MISSING_FOR_TEST}"
+"#;
+        std::fs::write(tmp.path().join("manifest.snapshot.toml"), snapshot).unwrap();
+
+        let v = serde_json::json!({
+            "manifest_schema_version": CURRENT_MANIFEST_SCHEMA_VERSION,
+            "max_parallel_tasks": 1,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": [],
+        });
+        let path = tmp.path().join("resolved.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+        std::env::remove_var("PITBOSS_NOTIFY_MISSING_FOR_TEST");
+
+        let err = read_resolved_manifest(&path).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("PITBOSS_NOTIFY_MISSING_FOR_TEST")
+                || chain.contains("env var is not set"),
+            "error must name the missing env var; got: {chain}"
+        );
     }
 }
