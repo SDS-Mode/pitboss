@@ -12,6 +12,23 @@ use serde::Serialize;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
+/// Why a Path-B `permission_prompt` ended in `decision = "deny"`.
+/// Mirrors `crate::mcp::tools::approval::PermissionDenialReason` but
+/// lives in the events module so the audit log file owns its own
+/// serialization shape (independent of any future refactor of the
+/// MCP-side enum).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeniedReasonKind {
+    /// An operator-declared `[[approval_policy]]` rule with
+    /// `action = "auto_reject"` matched.
+    DeniedByRule,
+    /// Operator (TUI / web console) responded with reject.
+    OperatorRejected,
+    /// TTL on the queued approval expired and the fallback fired.
+    TtlExpired,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskEvent {
@@ -46,6 +63,24 @@ pub enum TaskEvent {
         sink_id: String,
         event_kind: String,
         error: String,
+    },
+    /// A Path-B `permission_prompt` returned `decision = "deny"`. The
+    /// model receives a denial it can adapt to without an operator
+    /// round-trip; this row gives the operator post-hoc visibility into
+    /// what was attempted-and-blocked.
+    ToolDenied {
+        at: DateTime<Utc>,
+        /// Name of the claude tool the model wanted to invoke
+        /// (e.g. `"Bash"`, `"Write"`).
+        tool_name: String,
+        /// Caller actor id (lead / sublead / worker).
+        actor_id: String,
+        /// Categorical reason for the denial.
+        reason_kind: DeniedReasonKind,
+        /// Free-form text returned to claude (and to the model). Carries
+        /// either the canned per-kind message or, when the operator
+        /// declined with a free-form comment, the operator's text.
+        reason: String,
     },
 }
 

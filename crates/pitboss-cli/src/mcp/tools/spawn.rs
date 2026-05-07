@@ -789,6 +789,13 @@ pub(super) fn worker_spawn_args(
     ];
     if permission_routing == PermissionRouting::PathA {
         args.push("--dangerously-skip-permissions".into());
+    } else {
+        // Path B: route claude's per-tool gate through pitboss's MCP
+        // permission_prompt (see runner::lead_spawn_args doc). Without
+        // this flag the gate falls back to the interactive prompt,
+        // which can't be answered under `-p` and silently stalls.
+        args.push("--permission-prompt-tool".into());
+        args.push("mcp__pitboss__permission_prompt".into());
     }
     // Plugin/skill isolation (see runner::lead_spawn_args doc).
     args.push("--strict-mcp-config".into());

@@ -427,11 +427,66 @@ pub struct PermissionPromptResponse {
     /// active for future tool calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior: Option<String>,
+    /// Operator/policy/profile-supplied explanation surfaced back to the
+    /// model on `decision == "deny"` so it can adapt without an operator
+    /// round-trip. The upstream `--permission-prompt-tool` contract
+    /// expects denial messages under `message`; we additionally serialize
+    /// this as `reason` to match pitboss's internal vocabulary. Whether
+    /// claude consumes the field is open question 1.2 in the plan; the
+    /// reason is also written to the per-task `events.jsonl` regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Why a `permission_prompt` ended in `decision == "deny"`. Surfaced to
+/// the requesting actor via `PermissionPromptResponse.reason` and also
+/// recorded as a `TaskEvent::ToolDenied` on the per-task `events.jsonl`
+/// audit log so an operator sees what was attempted-and-blocked even
+/// when the lead silently routes around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDenialReason {
+    /// An operator-declared `[[approval_policy]]` rule matched with
+    /// `action = "auto_reject"`.
+    DeniedByRule,
+    /// The operator's TUI / web console responded with reject.
+    OperatorRejected,
+    /// The TTL on the queued approval expired and the fallback fired.
+    TtlExpired,
+}
+
+impl PermissionDenialReason {
+    /// Short, model-readable explanation. Phrasing follows the convention
+    /// "denied: <kind> ..." so a Claude session can detect the prefix and
+    /// adapt without parsing structured fields.
+    pub fn message(self, tool_name: &str) -> String {
+        match self {
+            Self::DeniedByRule => {
+                format!("denied: tool '{tool_name}' rejected by [[approval_policy]] rule")
+            }
+            Self::OperatorRejected => {
+                format!("denied: tool '{tool_name}' rejected by operator")
+            }
+            Self::TtlExpired => format!(
+                "denied: tool '{tool_name}' approval timed out before operator response"
+            ),
+        }
+    }
+}
+
+impl From<PermissionDenialReason> for crate::dispatch::events::DeniedReasonKind {
+    fn from(r: PermissionDenialReason) -> Self {
+        match r {
+            PermissionDenialReason::DeniedByRule => Self::DeniedByRule,
+            PermissionDenialReason::OperatorRejected => Self::OperatorRejected,
+            PermissionDenialReason::TtlExpired => Self::TtlExpired,
+        }
+    }
 }
 
 /// Handle Path B `permission_prompt`: routes claude's per-tool permission
 /// check through pitboss's approval queue and TUI. Returns the Claude Code
-/// permission gate response shape (`decision` + `behavior`).
+/// permission gate response shape (`decision` + `behavior` + optional
+/// `reason` for denials).
 pub async fn handle_permission_prompt(
     state: &Arc<DispatchState>,
     args: PermissionPromptArgs,
@@ -465,12 +520,23 @@ pub async fn handle_permission_prompt(
                     return Ok(PermissionPromptResponse {
                         decision: "allow".into(),
                         behavior: Some("allow_once".into()),
+                        reason: None,
                     });
                 }
                 Some(crate::mcp::policy::ApprovalAction::AutoReject) => {
+                    let reason = PermissionDenialReason::DeniedByRule.message(&args.tool_name);
+                    record_permission_denied(
+                        state,
+                        &caller_id,
+                        &args.tool_name,
+                        PermissionDenialReason::DeniedByRule,
+                        &reason,
+                    )
+                    .await;
                     return Ok(PermissionPromptResponse {
                         decision: "deny".into(),
                         behavior: None,
+                        reason: Some(reason),
                     });
                 }
                 Some(crate::mcp::policy::ApprovalAction::Block) | None => {}
@@ -482,7 +548,7 @@ pub async fn handle_permission_prompt(
     let bridge = crate::mcp::approval::ApprovalBridge::new(Arc::clone(state));
     match bridge
         .request(
-            caller_id,
+            caller_id.clone(),
             summary,
             None,
             crate::control::protocol::ApprovalKind::Action,
@@ -495,11 +561,58 @@ pub async fn handle_permission_prompt(
         Ok(resp) if resp.approved => Ok(PermissionPromptResponse {
             decision: "allow".into(),
             behavior: Some("allow_once".into()),
+            reason: None,
         }),
-        Ok(_) => Ok(PermissionPromptResponse {
-            decision: "deny".into(),
-            behavior: None,
-        }),
+        Ok(resp) => {
+            let kind = if resp.from_ttl {
+                PermissionDenialReason::TtlExpired
+            } else {
+                PermissionDenialReason::OperatorRejected
+            };
+            // Prefer the operator-supplied reason if present (e.g. a
+            // free-form rejection comment); otherwise fall back to the
+            // canned per-kind message so the model still sees something
+            // actionable.
+            let reason = resp.reason.unwrap_or_else(|| kind.message(&args.tool_name));
+            record_permission_denied(state, &caller_id, &args.tool_name, kind, &reason).await;
+            Ok(PermissionPromptResponse {
+                decision: "deny".into(),
+                behavior: None,
+                reason: Some(reason),
+            })
+        }
         Err(e) => anyhow::bail!("permission_prompt failed: {e}"),
+    }
+}
+
+/// Append a `TaskEvent::ToolDenied` to the requesting actor's
+/// `events.jsonl` audit trail. Logs a warning on append failure but
+/// otherwise swallows the error — the deny still flows back to claude
+/// so a missing audit row must not stall the model. The path is
+/// `<run_dir>/tasks/<actor_id>/events.jsonl`, which mirrors the
+/// approval-request audit shape used by `handle_request_approval`.
+async fn record_permission_denied(
+    state: &Arc<DispatchState>,
+    actor_id: &str,
+    tool_name: &str,
+    reason_kind: PermissionDenialReason,
+    reason_text: &str,
+) {
+    let event = crate::dispatch::events::TaskEvent::ToolDenied {
+        at: chrono::Utc::now(),
+        tool_name: tool_name.to_string(),
+        actor_id: actor_id.to_string(),
+        reason_kind: reason_kind.into(),
+        reason: reason_text.to_string(),
+    };
+    if let Err(e) =
+        crate::dispatch::events::append_event(&state.root.run_subdir, actor_id, &event).await
+    {
+        tracing::warn!(
+            actor_id,
+            tool_name,
+            error = %e,
+            "failed to append ToolDenied event; the denial still propagated to claude"
+        );
     }
 }

@@ -153,6 +153,45 @@ fn worker_spawn_args_passes_dangerously_skip_permissions() {
 }
 
 #[test]
+fn path_b_worker_emits_permission_prompt_tool() {
+    // Path B counterpart to `worker_spawn_args_passes_dangerously_skip_permissions`.
+    // When `permission_routing = "path_b"`, the worker must NOT carry
+    // `--dangerously-skip-permissions` and MUST carry
+    // `--permission-prompt-tool mcp__pitboss__permission_prompt`. Without
+    // the flag claude falls back to its interactive gate — which can't
+    // be answered under `-p` — and the worker silently stalls.
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
+    use std::path::PathBuf;
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string()],
+        Some(&PathBuf::from("/tmp/cfg.json")),
+        PermissionRouting::PathB,
+        CommunicationMode::Disabled,
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+        "Path B worker must NOT have --dangerously-skip-permissions: {argv:?}"
+    );
+    let ppt_idx = argv
+        .iter()
+        .position(|a| a == "--permission-prompt-tool")
+        .unwrap_or_else(|| panic!("Path B worker missing --permission-prompt-tool: {argv:?}"));
+    assert_eq!(
+        argv.get(ppt_idx + 1).map(String::as_str),
+        Some("mcp__pitboss__permission_prompt"),
+        "Path B worker --permission-prompt-tool target wrong: {argv:?}"
+    );
+    let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    let list = &argv[idx + 1];
+    assert!(
+        list.contains("mcp__pitboss__permission_prompt"),
+        "Path B worker allowedTools must include permission_prompt: {list}"
+    );
+}
+
+#[test]
 fn worker_spawn_args_excludes_comm_tools_when_mode_disabled() {
     use crate::dispatch::runner::COMMUNICATION_MCP_TOOLS;
     use crate::manifest::schema::CommunicationMode;
@@ -1909,6 +1948,41 @@ async fn permission_prompt_cost_over_rule_denies_when_estimate_exceeds() {
         "cost_estimate=7.5 over threshold=2 must yield deny"
     );
     assert!(resp.behavior.is_none(), "deny carries no behavior field");
+    let reason = resp
+        .reason
+        .as_deref()
+        .expect("rule-driven deny must carry a reason for the model");
+    assert!(
+        reason.contains("Bash") && reason.contains("rule"),
+        "reason should name the tool and the rule path: {reason}"
+    );
+
+    // Verify the denial was logged to events.jsonl so an operator has
+    // post-hoc visibility even though the model silently routes around it.
+    // Path: <run_subdir>/tasks/<actor_id>/events.jsonl. caller_id is the
+    // root lead id ("lead") because PermissionPromptArgs.meta is None and
+    // build_caller_identity falls through to the root identity.
+    let events_path = state
+        .root
+        .run_subdir
+        .join("tasks")
+        .join("lead")
+        .join("events.jsonl");
+    let body = tokio::fs::read_to_string(&events_path)
+        .await
+        .unwrap_or_else(|e| panic!("expected {events_path:?} to exist: {e}"));
+    assert!(
+        body.contains("\"kind\":\"tool_denied\""),
+        "events.jsonl missing tool_denied row: {body}"
+    );
+    assert!(
+        body.contains("\"reason_kind\":\"denied_by_rule\""),
+        "events.jsonl missing denied_by_rule kind: {body}"
+    );
+    assert!(
+        body.contains("\"tool_name\":\"Bash\""),
+        "events.jsonl missing tool_name=Bash: {body}"
+    );
 }
 
 #[tokio::test]

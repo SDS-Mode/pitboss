@@ -33,15 +33,17 @@ use crate::manifest::resolve::{ResolvedManifest, ResolvedTask};
 /// detailed trust-model writeup.
 ///
 /// Operators who want claude's own gate back for a specific actor can
-/// override `CLAUDE_CODE_ENTRYPOINT` via `[defaults.env]`, `[lead.env]`,
-/// `[[task]].env`, or the `env` field on `spawn_sublead` — but the
-/// `--dangerously-skip-permissions` CLI flag is set unconditionally and
-/// is not env-overridable. Operators who need the claude gate fully back
-/// should not use pitboss's headless dispatch.
-///
-/// See `docs/superpowers/specs/2026-04-20-path-b-permission-prompt-routing-pin.md`
-/// for the deferred alternative (routing claude's gate through pitboss's
-/// approval queue rather than bypassing it).
+/// either (a) override `CLAUDE_CODE_ENTRYPOINT` via `[defaults.env]`,
+/// `[lead.env]`, `[[task]].env`, or the `env` field on `spawn_sublead`
+/// to disable Path A's sdk-ts bypass, or (b) opt in to Path B by setting
+/// `[lead].permission_routing = "path_b"`. Under Path B the
+/// `--dangerously-skip-permissions` CLI flag is dropped from every
+/// hierarchical spawn variant and `--permission-prompt-tool
+/// mcp__pitboss__permission_prompt` is added so claude routes each
+/// per-tool check through pitboss's MCP server (see
+/// `mcp::tools::approval::handle_permission_prompt` for the routing
+/// semantics, including how denials are surfaced to the model and
+/// audited via `events.jsonl::TaskEvent::ToolDenied`).
 pub fn apply_pitboss_env_defaults(
     env: &mut std::collections::HashMap<String, String>,
     run_id: &str,
@@ -780,6 +782,12 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
     // claude CLI requires --verbose when combining -p (print mode) with
     // --output-format stream-json. Without it, claude rejects the invocation
     // with "When using --print, --output-format=stream-json requires --verbose".
+    // TODO(path-b/flat-mode): flat-task dispatch is Path-A-only today —
+    // `ResolvedTask` has no `permission_routing` field, so every flat task
+    // gets `--dangerously-skip-permissions`. When a future flat-mode
+    // permission_routing lands, mirror the lead/sublead/worker branches
+    // and gate `--permission-prompt-tool mcp__pitboss__permission_prompt`
+    // here.
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -969,6 +977,13 @@ pub fn lead_spawn_args(
     // Path B: leave gate active; permission_prompt MCP tool routes each check.
     if lead.permission_routing == PermissionRouting::PathA {
         args.push("--dangerously-skip-permissions".into());
+    } else {
+        // Path B: tell claude to route each tool-permission check through
+        // pitboss's MCP `permission_prompt` tool. Without this flag the
+        // gate falls back to the interactive prompt, which can't be
+        // answered under `-p` and silently stalls.
+        args.push("--permission-prompt-tool".into());
+        args.push("mcp__pitboss__permission_prompt".into());
     }
     // Plugin/skill isolation: prevent operator's ~/.claude/ plugins
     // (skills, MCP servers, agents, hooks) from bleeding in.
@@ -1028,6 +1043,11 @@ pub fn lead_resume_spawn_args(
     ];
     if lead.permission_routing == PermissionRouting::PathA {
         args.push("--dangerously-skip-permissions".into());
+    } else {
+        // Path B: route claude's per-tool gate through pitboss's MCP
+        // permission_prompt (see lead_spawn_args doc).
+        args.push("--permission-prompt-tool".into());
+        args.push("mcp__pitboss__permission_prompt".into());
     }
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
@@ -1098,6 +1118,11 @@ pub fn sublead_spawn_args(
     ];
     if permission_routing == PermissionRouting::PathA {
         args.push("--dangerously-skip-permissions".into());
+    } else {
+        // Path B: route claude's per-tool gate through pitboss's MCP
+        // permission_prompt (see lead_spawn_args doc).
+        args.push("--permission-prompt-tool".into());
+        args.push("mcp__pitboss__permission_prompt".into());
     }
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
@@ -2337,11 +2362,118 @@ mod tests {
             !args.iter().any(|a| a == "--dangerously-skip-permissions"),
             "Path B lead must NOT have --dangerously-skip-permissions: {args:?}"
         );
+        // Path B must pass --permission-prompt-tool so claude knows to
+        // route per-tool permission checks through the MCP server.
+        let ppt_idx = args
+            .iter()
+            .position(|a| a == "--permission-prompt-tool")
+            .unwrap_or_else(|| {
+                panic!("Path B lead must have --permission-prompt-tool: {args:?}")
+            });
+        assert_eq!(
+            args.get(ppt_idx + 1).map(String::as_str),
+            Some("mcp__pitboss__permission_prompt"),
+            "Path B lead --permission-prompt-tool must point at MCP permission_prompt: {args:?}"
+        );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
         assert!(
             list.contains("mcp__pitboss__permission_prompt"),
             "Path B lead allowedTools must include permission_prompt: {list}"
         );
+    }
+
+    #[test]
+    fn path_b_emits_permission_prompt_tool_in_all_hierarchical_variants() {
+        // Companion to `every_spawn_variant_has_all_isolation_flags`: when
+        // `permission_routing = "path_b"` is set, every hierarchical spawn
+        // variant (lead, lead_resume, sublead, sublead_resume, worker) must
+        // pass `--permission-prompt-tool mcp__pitboss__permission_prompt`
+        // and must NOT pass `--dangerously-skip-permissions`. Without the
+        // CLI flag claude falls back to its interactive gate, which can't
+        // be answered under `-p` and silently stalls.
+        use crate::manifest::resolve::ResolvedLead;
+        use crate::manifest::schema::PermissionRouting;
+        use std::path::PathBuf;
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            permission_routing: PermissionRouting::PathB,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_total_workers: None,
+            sublead_defaults: None,
+        };
+        let cfg = PathBuf::from("/tmp/cfg.json");
+        let cm = crate::manifest::schema::CommunicationMode::Disabled;
+        // NOTE: worker_spawn_args lives in `mcp::tools::spawn` and is
+        // `pub(super)`. Its Path-B variant is asserted in
+        // `mcp::tools::spawn::tests::path_b_worker_emits_permission_prompt_tool`.
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            ("lead", lead_spawn_args(&lead, &cfg, cm)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    None,
+                    None,
+                    PermissionRouting::PathB,
+                    cm,
+                ),
+            ),
+            (
+                "sublead_resume",
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    Some("sess"),
+                    None,
+                    PermissionRouting::PathB,
+                    cm,
+                ),
+            ),
+        ];
+        for (name, argv) in cases {
+            assert!(
+                !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+                "{name} (Path B) must NOT have --dangerously-skip-permissions: {argv:?}"
+            );
+            let ppt_idx = argv
+                .iter()
+                .position(|a| a == "--permission-prompt-tool")
+                .unwrap_or_else(|| {
+                    panic!("{name} (Path B) missing --permission-prompt-tool: {argv:?}")
+                });
+            assert_eq!(
+                argv.get(ppt_idx + 1).map(String::as_str),
+                Some("mcp__pitboss__permission_prompt"),
+                "{name} (Path B) --permission-prompt-tool wrong target: {argv:?}"
+            );
+            let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
+            let list = &argv[idx + 1];
+            assert!(
+                list.contains("mcp__pitboss__permission_prompt"),
+                "{name} (Path B) allowedTools must include permission_prompt: {list}"
+            );
+        }
     }
 }
