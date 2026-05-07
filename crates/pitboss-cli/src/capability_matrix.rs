@@ -16,6 +16,7 @@
 
 use crate::dispatch::hierarchical::mcp_server_scope_admits;
 use crate::manifest::resolve::ResolvedManifest;
+use serde::Serialize;
 
 /// Which class of actor a [`MatrixRow`] represents.
 ///
@@ -24,7 +25,12 @@ use crate::manifest::resolve::ResolvedManifest;
 /// `(untyped / root)`. Programmatic consumers (TUI Detail view,
 /// `pitboss-web` manifest panel) use the kind directly to pick which
 /// row matches a focused tile's `actor_type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized as snake_case strings (`"untyped"` / `"worker_type"` /
+/// `"sublead_type"`) on the wire, so the SPA's TypeScript stays
+/// idiomatic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RowKind {
     /// Root lead and any un-profiled (`actor_type = None`) spawn.
     Untyped,
@@ -43,7 +49,7 @@ pub enum RowKind {
 ///
 /// `server_ids` is in manifest declaration order so two manifests
 /// producing the same matrix shape compare stable diff-wise.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixRow {
     /// Display label as the CLI formatter emits it (`(untyped / root)`,
     /// `worker_type:writer`, `sublead_type:planner`).
@@ -357,6 +363,43 @@ mod tests {
 
         assert_eq!(rs[3].kind, RowKind::SubleadType);
         assert_eq!(rs[3].actor_type.as_deref(), Some("planner"));
+    }
+
+    /// `MatrixRow` ships over the `pitboss-web` validate endpoint's
+    /// JSON response. Pin the wire shape so the SPA's TypeScript
+    /// `MatrixRow` interface and any future external consumer don't
+    /// silently drift when fields are renamed or `RowKind` variants
+    /// are reshuffled. Snake-case `kind` discrimination is the
+    /// contract; flipping to PascalCase would break the SPA.
+    #[test]
+    fn matrix_row_serialises_with_stable_field_and_kind_names() {
+        let row = MatrixRow {
+            label: "worker_type:writer".to_string(),
+            actor_type: Some("writer".to_string()),
+            kind: RowKind::WorkerType,
+            server_ids: vec!["pitboss".to_string(), "fs-writer".to_string()],
+        };
+        let json = serde_json::to_value(&row).expect("serialise");
+        assert_eq!(json["label"], "worker_type:writer");
+        assert_eq!(json["actor_type"], "writer");
+        assert_eq!(json["kind"], "worker_type");
+        assert_eq!(
+            json["server_ids"],
+            serde_json::json!(["pitboss", "fs-writer"])
+        );
+
+        // Untyped row also pins the `null` shape for actor_type and the
+        // `"untyped"` kind discriminant so SPA TS code can branch on
+        // either field.
+        let untyped = MatrixRow {
+            label: "(untyped / root)".to_string(),
+            actor_type: None,
+            kind: RowKind::Untyped,
+            server_ids: vec![],
+        };
+        let json = serde_json::to_value(&untyped).expect("serialise untyped");
+        assert!(json["actor_type"].is_null());
+        assert_eq!(json["kind"], "untyped");
     }
 
     /// `rows_from_parts` lets the TUI compute the matrix from a

@@ -268,9 +268,38 @@ export interface ManifestEntry {
   mtime_unix: number;
 }
 
+/**
+ * Mirror of `pitboss_cli::capability_matrix::RowKind`. Snake-case wire
+ * shape; the Rust `#[serde(rename_all = "snake_case")]` is the contract.
+ */
+export type RowKind = 'untyped' | 'worker_type' | 'sublead_type';
+
+/**
+ * Mirror of `pitboss_cli::capability_matrix::MatrixRow`. One row of the
+ * actor-type × MCP-server matrix returned by `validateManifest` when
+ * validation succeeds. Matches the wire shape pinned by
+ * `matrix_row_serialises_with_stable_field_and_kind_names` (#391 slice 3).
+ */
+export interface MatrixRow {
+  /** Display label as the CLI text formatter emits it. */
+  label: string;
+  /** `null` for the untyped row, the type id for declared profiles. */
+  actor_type: string | null;
+  kind: RowKind;
+  /** MCP server ids that scope-admit, in manifest declaration order. */
+  server_ids: string[];
+}
+
 export interface ValidateResult {
   ok: boolean;
   errors: string[];
+  /**
+   * Capability matrix rows when validation succeeds; absent on failure.
+   * Always populated on success — even for manifests with no
+   * `[[mcp_server]]` declarations, so the UI can render the untyped
+   * row's `(none)` cell rather than guess from a missing field.
+   */
+  capability_matrix?: MatrixRow[];
 }
 
 export interface DispatchDescriptor {
