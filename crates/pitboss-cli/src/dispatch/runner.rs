@@ -464,6 +464,14 @@ async fn finalize_run(
         .count();
 
     let ended_at = Utc::now();
+    // Snapshot notify failure count BEFORE the RunFinished emit below; a
+    // failure of RunFinished itself can't be in our own summary anyway,
+    // and capturing this here keeps the field tied to a concrete
+    // wall-clock point. `None` when no router was wired.
+    let notify_failures = harness
+        .notification_router_for_emit
+        .as_ref()
+        .map(|r| u32::try_from(r.failed_emits_total()).unwrap_or(u32::MAX));
     let summary = RunSummary {
         run_id: init.run_id,
         manifest_path: manifest_path.to_path_buf(),
@@ -480,6 +488,7 @@ async fn finalize_run(
         tasks_failed,
         was_interrupted: (harness.cancel.is_draining() || harness.cancel.is_terminated())
             && !halt_drained.load(Ordering::Acquire),
+        notify_failures,
         tasks: records,
     };
     harness.store.finalize_run(&summary).await?;

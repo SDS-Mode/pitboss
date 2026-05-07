@@ -78,6 +78,119 @@ prompt = "p"
     assert_eq!(s["tasks_total"].as_u64().unwrap(), 3);
 }
 
+/// Wiring regression for #329 (ISSUE-notify-prior-4): a misconfigured
+/// webhook (DNS that never resolves) must surface in `summary.json` as
+/// `notify_failures > 0` so operators can see the gap without scraping
+/// `notifications.jsonl`.
+///
+/// This pins the contract that flat-mode `dispatch::runner::finalize_run`
+/// reads `router.failed_emits_total()` into the summary. If a future
+/// refactor drifts that wiring (the same drift class as #221 / #227
+/// across runner.rs and hierarchical.rs), this test fails. The summary
+/// is the single durable artifact the operator-facing `pitboss status`
+/// footer reads from.
+///
+/// Why `.invalid`: RFC 6761 reserves it as a guaranteed-non-resolving
+/// TLD, so no real DNS server can ever return a hit. The webhook URL
+/// passes manifest-time validation (https + non-loopback name) and
+/// fails at emit-time `tokio::net::lookup_host`, which counts as a
+/// retried emit failure.
+///
+/// Why `sleep_ms: 1500`: the emit retry budget is ~400ms (100+300ms
+/// inter-attempt delays plus three failing attempts). Holding the
+/// dispatch open longer than that ensures `RunDispatched`'s retry
+/// chain has exhausted and incremented `failed_emits_total` BEFORE
+/// `finalize_run` snapshots the count.
+#[test]
+fn webhook_dns_failure_surfaces_in_summary_notify_failures() {
+    ensure_built();
+    let repo = TempDir::new().unwrap();
+    init_git_repo(repo.path());
+    let run_dir = TempDir::new().unwrap();
+    let scripts_dir = TempDir::new().unwrap();
+
+    // Slow script: a single sleep_ms entry at the top so the dispatch
+    // wall-clock exceeds the retry budget.
+    let script_path = scripts_dir.path().join("slow_success.jsonl");
+    std::fs::write(
+        &script_path,
+        r#"{"sleep_ms": 1500}
+{"stdout":"{\"type\":\"system\",\"subtype\":\"init\"}"}
+{"stdout":"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}"}
+{"stdout":"{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"s1\",\"result\":\"done\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}"}
+"#,
+    )
+    .unwrap();
+
+    let manifest_path = repo.path().join("pitboss.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[run]
+max_parallel_tasks = 1
+run_dir = "{run_dir}"
+worktree_cleanup = "always"
+
+[defaults]
+use_worktree = false
+
+[[notification]]
+kind = "webhook"
+url  = "https://pitboss-test-never-resolves.invalid/x"
+events = ["run_dispatched", "run_finished"]
+severity_min = "info"
+
+[[task]]
+id = "ok1"
+directory = "{repo}"
+prompt = "p"
+"#,
+            run_dir = run_dir.path().display(),
+            repo = repo.path().display()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(pitboss_binary());
+    cmd.arg("dispatch").arg(&manifest_path);
+    cmd.env("PITBOSS_CLAUDE_BINARY", fake_claude_path());
+    cmd.env("PITBOSS_FAKE_SCRIPT", &script_path);
+    cmd.env("PITBOSS_FAKE_EXIT_CODE", "0");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut run_dirs = std::fs::read_dir(run_dir.path()).unwrap();
+    let rd = run_dirs.next().unwrap().unwrap().path();
+    let summary = rd.join("summary.json");
+    let s: serde_json::Value = serde_json::from_slice(&std::fs::read(&summary).unwrap()).unwrap();
+    let nf = s["notify_failures"].as_u64().unwrap_or_else(|| {
+        panic!(
+            "summary.json must contain notify_failures as a number; got {:?}",
+            s.get("notify_failures")
+        )
+    });
+    assert!(
+        nf >= 1,
+        "expected notify_failures >= 1 (RunDispatched retries should have exhausted before finalize); got {nf}. Full summary: {s:#}"
+    );
+
+    // The journal must also exist with the matching event so operators
+    // who follow the footer's pointer find at least one row.
+    let journal = rd.join("notifications.jsonl");
+    let journal_body = std::fs::read_to_string(&journal)
+        .expect("notifications.jsonl must exist when notify_failures > 0");
+    assert!(
+        journal_body.contains("notification_failed"),
+        "journal missing notification_failed entry: {journal_body}"
+    );
+}
+
 #[test]
 fn halt_on_failure_stops_remaining_tasks() {
     ensure_built();

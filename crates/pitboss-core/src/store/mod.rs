@@ -86,6 +86,7 @@ mod integration_tests {
             tasks_total: 2,
             tasks_failed: 1,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
         };
         store.finalize_run(&summary).await.unwrap();

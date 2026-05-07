@@ -385,6 +385,7 @@ mod tests {
             tasks_total: tasks.len(),
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks,
         };
         std::fs::write(
@@ -654,6 +655,7 @@ mod tests {
             tasks_total: 1,
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![lead_record],
         };
         std::fs::write(
@@ -770,6 +772,7 @@ mod tests {
             tasks_total: 1,
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![lead_record],
         };
         std::fs::write(
@@ -882,6 +885,7 @@ mod tests {
             tasks_total: 1,
             tasks_failed: 0,
             was_interrupted: false,
+            notify_failures: None,
             tasks: vec![lead_record],
         };
         std::fs::write(

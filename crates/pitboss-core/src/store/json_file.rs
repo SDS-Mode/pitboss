@@ -143,6 +143,7 @@ impl SessionStore for JsonFileStore {
             tasks_total: tasks.len(),
             tasks_failed,
             was_interrupted: true,
+            notify_failures: None,
             tasks,
         })
     }

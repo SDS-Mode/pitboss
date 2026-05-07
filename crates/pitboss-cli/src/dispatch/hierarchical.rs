@@ -699,6 +699,11 @@ pub async fn run_hierarchical(
         resolved.name.as_deref(),
         &manifest_path,
     );
+    // Snapshot notify failure count BEFORE the RunFinished emit below.
+    // See the equivalent comment in `dispatch::runner::finalize_run`.
+    let notify_failures = notification_router
+        .as_ref()
+        .map(|r| u32::try_from(r.failed_emits_total()).unwrap_or(u32::MAX));
     let summary = RunSummary {
         run_id,
         manifest_path,
@@ -711,6 +716,7 @@ pub async fn run_hierarchical(
         tasks_total: all_records.len(),
         tasks_failed,
         was_interrupted,
+        notify_failures,
         tasks: all_records,
     };
     store.finalize_run(&summary).await?;

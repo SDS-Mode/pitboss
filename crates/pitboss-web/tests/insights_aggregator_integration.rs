@@ -42,6 +42,7 @@ fn write_summary(runs_dir: &Path, name: Option<&str>, manifest_path: &str, tasks
         tasks_total: total,
         tasks_failed: failed,
         was_interrupted: false,
+        notify_failures: None,
         tasks,
     };
     let bytes = serde_json::to_vec_pretty(&summary).unwrap();

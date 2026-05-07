@@ -1092,6 +1092,7 @@ mod tests {
             tasks_total: tasks.len(),
             tasks_failed,
             was_interrupted: false,
+            notify_failures: None,
             tasks,
         }
     }
