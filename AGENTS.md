@@ -325,7 +325,7 @@ Pushes to main rebuild the image regardless of whether the commit touched code p
 
 ### `[[mcp_server]]` (v0.9+)
 
-Declare external MCP servers to inject into **every actor's** `--mcp-config` (lead, sub-leads, and workers). This is the native alternative to the KV-bridge workaround for giving all actors access to tools like context7.
+Declare external MCP servers to inject into actors' `--mcp-config`. By default servers are injected into **every actor** (lead, sub-leads, and workers); the optional `scope` field narrows injection to actors of a typed profile (#252 Phase 1.5, v0.12+).
 
 ```toml
 [[mcp_server]]
@@ -338,6 +338,11 @@ id      = "my-tool"
 command = "/usr/local/bin/my-mcp-server"
 args    = ["--port", "3000"]
 env     = { MY_TOKEN = "abc" }
+
+[[mcp_server]]
+id      = "fs-writer"
+command = "/usr/local/bin/fs-mcp"
+scope   = "type:writer"   # only injected into worker_type/sublead_type "writer"
 ```
 
 | Key | Required? | Notes |
@@ -346,8 +351,7 @@ env     = { MY_TOKEN = "abc" }
 | `command` | yes | Executable to launch (e.g. `"npx"`, `"uvx"`, absolute path). |
 | `args` | no | Arguments passed to the command. Default `[]`. |
 | `env` | no | Environment variables injected into the server process. Default `{}`. |
-
-All declared servers are injected into all actors (scope = all). Per-actor scoping is deferred — see roadmap.
+| `scope` | no | Optional injection scope. Form `"type:<id>"` references a `[[worker_type]]` or `[[sublead_type]]`. Validated at manifest load — unknown ids are rejected. Untyped actors (no `worker_type` / `sublead_type` arg on spawn) NEVER receive scoped servers. Unset (default) = inject into all actors. |
 
 **Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
 
@@ -386,11 +390,11 @@ Set `[run].require_actor_type = true` to make every `spawn_worker` / `spawn_subl
 
 The resolved profile id is persisted to each `TaskRecord.actor_type`, surfaced in `summary.json` / `summary.jsonl` so the TUI, `pitboss-web`, and `pitboss status` can group actors by class without re-deriving from the manifest snapshot.
 
-**v0.12 limitations (Phase 1, follow-ups in #252 backlog):**
-- Per-actor MCP server scoping (`[[mcp_server].scope = "type:<id>"`) is deferred.
-- Resumed workers (`continue_worker` / `reprompt_worker`) drop `actor_type` on the appended record; the original spawn's record retains the type.
-- Synthesized cancellation records on lead-exit cleanup also drop `actor_type`.
-- SQLite-backed runs lose `actor_type` on round-trip (JsonFileStore preserves it).
+**Phase 1.5 (v0.12, landed):**
+- Per-actor MCP server scoping via `[[mcp_server]].scope = "type:<id>"` — see the `[[mcp_server]]` section above.
+- Resumed workers (`continue_worker` / `reprompt_worker`) preserve `actor_type` on the appended record via the in-memory `worker_actor_types` map populated at spawn.
+- Synthesized cancellation records on lead-exit cleanup keep `actor_type` from the same map.
+- SQLite-backed runs round-trip `actor_type` (migration v10 adds the column; both backends are now at parity with `JsonFileStore`).
 
 ### `[communication]` (v0.10+, opt-in)
 

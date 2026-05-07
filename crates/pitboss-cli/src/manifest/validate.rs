@@ -28,6 +28,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_container(resolved)?;
     validate_communication(resolved)?;
     validate_actor_types(resolved)?;
+    validate_mcp_server_scopes(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -119,6 +120,64 @@ fn validate_actor_types(r: &ResolvedManifest) -> Result<()> {
                  or `[[sublead_type]]` declared; the flag would reject every \
                  spawn call. Declare at least one profile or set \
                  require_actor_type = false."
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate `[[mcp_server]].scope` strings against the declared profile
+/// catalogue (#252 Phase 1.5).
+///
+/// - Unset → always valid (server injects into all actors, the legacy
+///   v0.11 default).
+/// - Set → must parse as `type:<id>` exactly. The `<id>` must reference
+///   either a `[[worker_type]]` or a `[[sublead_type]]`. Any other prefix
+///   form is reserved for future expansion (`role:`, `actor:`, ...) and
+///   rejected today.
+///
+/// We reject loudly at validate time because a typo here would silently
+/// strip the server from every typed actor (the runtime filter would
+/// fail-closed against an unknown id), and operators would see "MCP
+/// server X never injected" with no obvious cause.
+fn validate_mcp_server_scopes(r: &ResolvedManifest) -> Result<()> {
+    let mut known: HashSet<&str> = HashSet::new();
+    for wt in &r.worker_types {
+        known.insert(&wt.id);
+    }
+    for st in &r.sublead_types {
+        known.insert(&st.id);
+    }
+
+    for s in &r.mcp_servers {
+        let Some(raw) = s.scope.as_deref() else {
+            continue;
+        };
+        let Some(target) = raw.strip_prefix("type:") else {
+            bail!(
+                "[[mcp_server]].scope {:?} on server {:?}: only the \
+                 \"type:<id>\" form is currently supported",
+                raw,
+                s.id
+            );
+        };
+        if target.is_empty() {
+            bail!(
+                "[[mcp_server]].scope {:?} on server {:?}: empty id \
+                 after \"type:\" prefix",
+                raw,
+                s.id
+            );
+        }
+        if !known.contains(target) {
+            bail!(
+                "[[mcp_server]].scope {:?} on server {:?}: id {:?} does \
+                 not match any `[[worker_type]]` or `[[sublead_type]]`. \
+                 Declare the profile or fix the typo.",
+                raw,
+                s.id,
+                target
             );
         }
     }
@@ -1882,5 +1941,93 @@ mod tests {
             max_budget_usd: Some(2.0),
         }];
         validate(&m).expect("declared profiles without require flag must validate");
+    }
+
+    fn mcp(id: &str, scope: Option<&str>) -> crate::manifest::schema::McpServerSpec {
+        crate::manifest::schema::McpServerSpec {
+            id: id.into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            env: Default::default(),
+            scope: scope.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn rejects_mcp_server_scope_with_unknown_prefix() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp("ctx", Some("role:lead"))];
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("type:<id>"), "{err}");
+        assert!(err.contains("ctx"), "{err}");
+    }
+
+    #[test]
+    fn rejects_mcp_server_scope_with_empty_id() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp("ctx", Some("type:"))];
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("empty id"), "{err}");
+    }
+
+    #[test]
+    fn rejects_mcp_server_scope_with_unknown_id() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.worker_types = vec![WorkerType {
+                id: "writer".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+            m.mcp_servers = vec![mcp("ctx", Some("type:rdr"))];
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("rdr"), "{err}");
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn accepts_mcp_server_scope_referencing_worker_type() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.worker_types = vec![WorkerType {
+                id: "writer".into(),
+                tools: vec!["Read".into(), "Write".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+            m.mcp_servers = vec![mcp("ctx", Some("type:writer"))];
+        });
+        validate_skip_dir_check(&r)
+            .expect("scope referencing a declared worker_type must validate");
+    }
+
+    #[test]
+    fn accepts_mcp_server_scope_referencing_sublead_type() {
+        use crate::manifest::schema::SubleadType;
+        let r = rm_with(|m| {
+            m.sublead_types = vec![SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+            }];
+            m.mcp_servers = vec![mcp("ctx", Some("type:planner"))];
+        });
+        validate_skip_dir_check(&r)
+            .expect("scope referencing a declared sublead_type must validate");
+    }
+
+    #[test]
+    fn accepts_unscoped_mcp_server_with_no_profiles() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp("ctx", None)];
+        });
+        validate_skip_dir_check(&r)
+            .expect("unscoped server is the legacy default and must validate");
     }
 }

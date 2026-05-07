@@ -105,6 +105,7 @@ id = "<value>"
 command = "<value>"
 args = []
 env = { EXAMPLE_KEY = "value" }
+scope = "<value>"
 
 [[worker_type]]
 id = "<value>"

@@ -165,11 +165,10 @@ pub struct CopySpec {
     pub container: PathBuf,
 }
 
-/// An external MCP server to inject into every actor's `--mcp-config`.
-/// Declared as `[[mcp_server]]` in the manifest. All actors (lead, sub-lead,
-/// and workers) receive the server so they can call its tools directly.
-///
-/// Per-actor scope granularity is deferred — see roadmap.
+/// An external MCP server to inject into actors' `--mcp-config`.
+/// Declared as `[[mcp_server]]` in the manifest. By default all actors
+/// (lead, sub-lead, and workers) receive the server. The optional `scope`
+/// narrows injection to actors of a given typed profile (#252 Phase 1.5).
 ///
 /// Example:
 /// ```toml
@@ -177,6 +176,11 @@ pub struct CopySpec {
 /// id      = "context7"
 /// command = "npx"
 /// args    = ["-y", "@upstash/context7-mcp"]
+///
+/// [[mcp_server]]
+/// id      = "fs-writer"
+/// command = "/usr/local/bin/fs-mcp"
+/// scope   = "type:writer"   # only injected into worker_type/sublead_type "writer"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, FieldMetadata)]
 #[serde(deny_unknown_fields)]
@@ -204,6 +208,19 @@ pub struct McpServerSpec {
         help = "Environment variables injected into the MCP server process."
     )]
     pub env: HashMap<String, String>,
+    /// Optional injection scope. Currently the only supported form is
+    /// `"type:<id>"`, where `<id>` references a `[[worker_type]]` or
+    /// `[[sublead_type]]`. When set, the server is injected ONLY into
+    /// actors spawned under that type — including untyped actors when
+    /// no profiles are required is NOT supported (`require_actor_type`
+    /// still respects its own gate). Unset means inject into all actors
+    /// (the v0.11 behaviour). (#252 Phase 1.5)
+    #[serde(default)]
+    #[field(
+        label = "Scope",
+        help = "Optional injection scope. Form: \"type:<id>\" — narrows this server to actors spawned under that worker_type/sublead_type. Unset = inject into all actors."
+    )]
+    pub scope: Option<String>,
 }
 
 /// Communication policy mode for the Pitboss-owned mailbox + artifact MCP

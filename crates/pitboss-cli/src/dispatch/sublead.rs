@@ -497,6 +497,7 @@ async fn spawn_sublead_session(
         &sublead_id,
         &socket_path,
         &state.root.run_subdir,
+        sublead_type.as_deref(),
         Some(&sublead_token),
         &state.root.manifest.mcp_servers,
         communication_mode,

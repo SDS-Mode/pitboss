@@ -275,6 +275,17 @@ pub async fn handle_spawn_worker(
         .await
         .insert(task_id.clone(), worker_model.clone());
 
+    // Track the worker's resolved actor_type (typed-profile id) so
+    // resume paths can rebuild the scoped mcp-config.json correctly and
+    // reattach the type to appended TaskRecords. (#252 Phase 1.5)
+    if let Some(t) = resolved_worker_type_id.as_deref() {
+        target_layer
+            .worker_actor_types
+            .write()
+            .await
+            .insert(task_id.clone(), t.to_string());
+    }
+
     // Resolve the worker's directory and worktree-use, falling back through:
     //   1. `args.directory` / per-args overrides — operator's spawn_worker call
     //   2. target_layer's lead — set for root-lead callers, NOT for sub-leads
@@ -521,6 +532,7 @@ async fn run_worker(
         &worker_mcp_config,
         &socket_path,
         &task_id,
+        actor_type.as_deref(),
         Some(&worker_token),
         &layer.manifest.mcp_servers,
     )
@@ -939,6 +951,11 @@ pub async fn spawn_resume_worker(
         .get(&task_id)
         .cloned()
         .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    // Resolve the worker's typed-profile id (if any) so the rebuilt
+    // mcp-config.json scopes correctly and the appended TaskRecord
+    // keeps its profile attribution. (#252 Phase 1.5)
+    let resumed_actor_type: Option<String> =
+        layer.worker_actor_types.read().await.get(&task_id).cloned();
     let tools: Vec<String> = layer
         .manifest
         .lead
@@ -1011,6 +1028,7 @@ pub async fn spawn_resume_worker(
         &worker_mcp_config_path,
         &socket_path,
         &task_id,
+        resumed_actor_type.as_deref(),
         Some(&worker_token),
         &layer.manifest.mcp_servers,
     )
@@ -1079,6 +1097,7 @@ pub async fn spawn_resume_worker(
     let log_path = task_dir.join("stdout.log");
     let stderr_path = task_dir.join("stderr.log");
     let resume_model = model.clone();
+    let resumed_actor_type_bg = resumed_actor_type.clone();
     // Register a pid slot for the resumed subprocess too, so
     // freeze-pause works across continue_worker boundaries.
     let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -1157,11 +1176,11 @@ pub async fn spawn_resume_worker(
                 Some(&stderr_path),
             ),
             cost_usd,
-            // TODO(#252 Phase 1.5): plumb actor_type through resume so a
-            // continue/reprompt of a typed worker keeps its profile
-            // attribution on the appended record. For now Phase 1 drops it
-            // on resume — the original spawn record retains the type.
-            actor_type: None,
+            // Preserve the typed-profile attribution across resume so the
+            // appended record carries the same `actor_type` as the original
+            // spawn — read from the in-memory `worker_actor_types` map at
+            // resume entry. (#252 Phase 1.5)
+            actor_type: resumed_actor_type_bg.clone(),
         };
         let _ = layer_bg.store.append_record(layer_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {
