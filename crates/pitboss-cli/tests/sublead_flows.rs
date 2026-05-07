@@ -105,6 +105,78 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
     (dir, state)
 }
 
+/// Inverse of `mk_state_with_subleads`: `allow_subleads = false`. Used
+/// by `spawn_sublead_tool_hidden_when_allow_subleads_false` (#336) to
+/// drive the `list_tools` filter for the case where root-only tools
+/// must be hidden across the wire.
+fn mk_state_without_subleads() -> (TempDir, Arc<DispatchState>) {
+    let dir = TempDir::new().unwrap();
+    let lead = ResolvedLead {
+        id: "root".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "root prompt".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 3600,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+        permission_routing: Default::default(),
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_total_workers: None,
+        sublead_defaults: None,
+    };
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(8),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(20),
+        budget_usd: Some(20.0),
+        lead_timeout_secs: None,
+        default_approval_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let run_id = Uuid::now_v7();
+    let script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_subdir = dir.path().join(run_id.to_string());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "root".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    (dir, state)
+}
+
 /// Like `mk_state_with_subleads` but with `max_sublead_budget_usd` set to
 /// `cap`. Used by tests that need to verify budget-cap rejection.
 fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
@@ -334,6 +406,42 @@ async fn spawn_sublead_tool_is_exposed_to_root() {
     assert!(
         tools.iter().any(|t| t.name == "spawn_sublead"),
         "spawn_sublead should be in the root lead's MCP toolset"
+    );
+}
+
+/// Mirror of `spawn_sublead_tool_is_exposed_to_root`: when the manifest
+/// declares `allow_subleads = false`, `list_tools` must hide every tool
+/// in `dispatch::depth::ROOT_ONLY_TOOLS` (currently `spawn_sublead`).
+/// This is the layer-2 end-to-end check the audit asked for (#336): it
+/// drives a real `McpServer` over the unix socket, so a regression in
+/// the `list_tools` filter at `mcp/server.rs:1232` would surface here.
+///
+/// NOTE: the filter today is keyed on `manifest.lead.allow_subleads`,
+/// not on the connecting actor's role. The audit's "as a sublead"
+/// phrasing implies a per-actor filter that does not exist; that
+/// would be a behavioral change beyond "add a test." If it lands
+/// later, this test still applies (root_lead is the toughest case to
+/// pass — if even the root lead is correctly filtered out when
+/// `allow_subleads = false`, sub-leads are too).
+#[tokio::test]
+async fn spawn_sublead_tool_hidden_when_allow_subleads_false() {
+    let (_dir, state) = mk_state_without_subleads();
+    let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
+    let _server = McpServer::start(socket.clone(), state.clone())
+        .await
+        .unwrap();
+
+    let mut client = connect_actor(&state, &socket, "root", "root_lead").await;
+    let tools = client.list_tools().await.unwrap();
+    let leaks: Vec<&str> = pitboss_cli::dispatch::depth::ROOT_ONLY_TOOLS
+        .iter()
+        .copied()
+        .filter(|bare| tools.iter().any(|t| t.name == *bare))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "list_tools must hide every ROOT_ONLY_TOOLS entry when \
+         allow_subleads = false; leaks: {leaks:?}"
     );
 }
 
