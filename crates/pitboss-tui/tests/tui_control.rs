@@ -175,6 +175,7 @@ fn empty_grid_cells_are_cleared() {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None,
+            denials_count: 0,
         }
     }
 
@@ -242,6 +243,7 @@ fn focus_log_content_does_not_bleed_into_tile_grid() {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None,
+            denials_count: 0,
         }
     }
 
