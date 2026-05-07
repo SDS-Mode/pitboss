@@ -517,6 +517,15 @@ pub async fn handle_permission_prompt(
             // never matched for permission_prompt.
             match matcher.evaluate(&pending, Some(&args.tool_name), args.cost_estimate) {
                 Some(crate::mcp::policy::ApprovalAction::AutoApprove) => {
+                    // Mirror `handle_request_approval`'s rule short-circuit:
+                    // record the response so `approval_driven_termination`
+                    // can see a recent decision, and bump both counters
+                    // because the bridge is bypassed on this path. (#367)
+                    state
+                        .record_last_approval_response(&caller_id, true, false)
+                        .await;
+                    crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
+                    crate::mcp::approval::record_approval_outcome(state, &caller_id, true).await;
                     return Ok(PermissionPromptResponse {
                         decision: "allow".into(),
                         behavior: Some("allow_once".into()),
@@ -533,6 +542,16 @@ pub async fn handle_permission_prompt(
                         &reason,
                     )
                     .await;
+                    // Same trio as the AutoApprove path. Without these,
+                    // `approvals_requested` / `approvals_rejected` undercount
+                    // and a worker that exits silently after a rule-driven
+                    // deny is misclassified as `Success` instead of
+                    // `ApprovalRejected`. (#367)
+                    state
+                        .record_last_approval_response(&caller_id, false, false)
+                        .await;
+                    crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
+                    crate::mcp::approval::record_approval_outcome(state, &caller_id, false).await;
                     return Ok(PermissionPromptResponse {
                         decision: "deny".into(),
                         behavior: None,
@@ -558,11 +577,22 @@ pub async fn handle_permission_prompt(
         )
         .await
     {
-        Ok(resp) if resp.approved => Ok(PermissionPromptResponse {
-            decision: "allow".into(),
-            behavior: Some("allow_once".into()),
-            reason: None,
-        }),
+        Ok(resp) if resp.approved => {
+            // Bridge already bumped `approvals_requested` and
+            // `approvals_approved` (or those will land via the
+            // operator-response path in `respond()`). The handler is
+            // still responsible for `record_last_approval_response`
+            // so `approval_driven_termination` can see the outcome —
+            // mirrors `handle_request_approval`. (#367)
+            state
+                .record_last_approval_response(&caller_id, true, resp.from_ttl)
+                .await;
+            Ok(PermissionPromptResponse {
+                decision: "allow".into(),
+                behavior: Some("allow_once".into()),
+                reason: None,
+            })
+        }
         Ok(resp) => {
             let kind = if resp.from_ttl {
                 PermissionDenialReason::TtlExpired
@@ -575,6 +605,14 @@ pub async fn handle_permission_prompt(
             // actionable.
             let reason = resp.reason.unwrap_or_else(|| kind.message(&args.tool_name));
             record_permission_denied(state, &caller_id, &args.tool_name, kind, &reason).await;
+            // Same as the approve arm: bridge owns the counter bumps,
+            // handler owns the last-response record so a fast-exit
+            // worker is reclassified by `approval_driven_termination`
+            // as `ApprovalRejected` (or `ApprovalTimedOut` when
+            // `from_ttl=true`) instead of `Success`. (#367)
+            state
+                .record_last_approval_response(&caller_id, false, resp.from_ttl)
+                .await;
             Ok(PermissionPromptResponse {
                 decision: "deny".into(),
                 behavior: None,
