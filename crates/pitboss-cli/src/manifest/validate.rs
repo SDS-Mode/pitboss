@@ -355,33 +355,17 @@ fn validate_block_untyped_requires_profiles(r: &ResolvedManifest) -> Result<()> 
 fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     let lead = r.lead.as_ref().unwrap();
 
-    // Path B permission routing is selectable but in soak. The
-    // `--permission-prompt-tool` CLI flag is wired in every hierarchical
-    // spawn variant (lead, lead_resume, sublead, worker) and
-    // `permission_prompt` returns the canonical `PermissionResult` SDK
-    // shape (#368) with a `tool_denied` row on per-actor `events.jsonl`
-    // for every denial. Remaining unknowns are queue-flood ergonomics
-    // under real workloads and the `auto_reject`-vs-operator-rejection
-    // misclassification (#373); emit a one-line stderr warning instead
-    // of bailing so operators can opt in and surface real-world issues.
+    // Path B is the default routing as of v0.12. The migration warning
+    // still fires (#389) when no profiles are declared, since that's
+    // the actionable advisory — operators see "you're on Path B
+    // without profiles, here's how to declare them" exactly when they
+    // need it. The previous "Path B is in soak" warning was retired
+    // when Path B became the default; it would have fired on every
+    // run.
     if matches!(
         lead.permission_routing,
         crate::manifest::schema::PermissionRouting::PathB
     ) {
-        // #370 (item 6): switched from `eprintln!` to `tracing::warn!`
-        // for consistency with the rest of the codebase. Subscriber
-        // defaults to info-level on stderr (see `init_tracing` in
-        // main.rs), so operators running `pitboss validate` still see
-        // this; structured-log consumers and CI pipelines that filter
-        // on RUST_LOG can suppress it explicitly.
-        tracing::warn!(
-            "`permission_routing = \"path_b\"` is in soak. Each per-tool \
-             permission check routes through pitboss's MCP `permission_prompt`. \
-             Denials are non-terminating — claude receives \
-             {{behavior: \"deny\", message: ...}} and adapts; the row lands on \
-             <run_dir>/tasks/<actor>/events.jsonl. File issues at \
-             https://github.com/SDS-Mode/pitboss/issues"
-        );
         if let Some(msg) = path_b_profile_migration_warning(r) {
             tracing::warn!("{msg}");
         }
