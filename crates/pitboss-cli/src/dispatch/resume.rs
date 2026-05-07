@@ -710,6 +710,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -830,6 +831,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -953,6 +955,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -1140,6 +1143,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(

@@ -204,6 +204,12 @@ pub struct ResolvedManifest {
     /// back-compat. (#252)
     #[serde(default)]
     pub require_actor_type: bool,
+    /// Path-B-only policy for un-typed actors reaching
+    /// `permission_prompt`. Default `Bridge` preserves pre-#252
+    /// behavior; `Block` synthesizes an empty profile so the call
+    /// auto-denies via `denied_by_profile`. (#252)
+    #[serde(default)]
+    pub untyped_actor_policy: crate::manifest::schema::UntypedActorPolicy,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -310,6 +316,7 @@ pub fn resolve(
         worker_types: manifest.worker_types,
         sublead_types: manifest.sublead_types,
         require_actor_type: manifest.run.require_actor_type,
+        untyped_actor_policy: manifest.run.untyped_actor_policy,
     })
 }
 

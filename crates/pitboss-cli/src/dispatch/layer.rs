@@ -472,6 +472,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(FakeScript::new()));

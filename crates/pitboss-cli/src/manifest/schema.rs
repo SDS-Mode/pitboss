@@ -581,6 +581,38 @@ pub struct RunConfig {
         help = "When true, every spawn_worker and spawn_sublead call must name a declared [[worker_type]]/[[sublead_type]]. Default false."
     )]
     pub require_actor_type: bool,
+    /// What happens when a `spawn_worker` / `spawn_sublead` call
+    /// reaches `permission_prompt` for an actor that has no declared
+    /// `[[worker_type]]` / `[[sublead_type]]`. Only meaningful under
+    /// `permission_routing = "path_b"`. Default `bridge` preserves
+    /// pre-#252 behavior (route to the operator approval bridge);
+    /// `block` synthesizes an empty profile so anything outside
+    /// `--allowedTools` auto-denies via `denied_by_profile` without
+    /// an operator round-trip — the strict counterpart to declaring
+    /// every actor's profile, useful for headless production runs
+    /// once the operator has migrated their manifests.
+    #[serde(default)]
+    #[field(
+        label = "Untyped actor policy",
+        help = "Path-B-only behavior for un-typed callers reaching permission_prompt. `bridge` (default) routes to the operator queue; `block` auto-denies via a synthesized empty profile.",
+        enum_values = ["bridge", "block"]
+    )]
+    pub untyped_actor_policy: UntypedActorPolicy,
+}
+
+/// What pitboss does when an un-typed Worker / Sublead reaches
+/// `permission_prompt` under Path B (#252). See the field doc on
+/// `RunConfig::untyped_actor_policy` for the full semantics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntypedActorPolicy {
+    /// Route to the operator approval bridge (pre-#252 behavior).
+    #[default]
+    Bridge,
+    /// Auto-deny via a synthesized empty profile so the model receives
+    /// `denied_by_profile` without an operator round-trip. Pairs with
+    /// declared profiles to make the manifest the consent signal.
+    Block,
 }
 
 impl Default for RunConfig {
@@ -597,6 +629,7 @@ impl Default for RunConfig {
             dump_shared_store: false,
             require_plan_approval: false,
             require_actor_type: false,
+            untyped_actor_policy: UntypedActorPolicy::Bridge,
         }
     }
 }

@@ -32,6 +32,7 @@ denial_termination_policy = "adapt"
 dump_shared_store = false
 require_plan_approval = false
 require_actor_type = false
+untyped_actor_policy = "bridge"
 
 [defaults]
 model = "<value>"

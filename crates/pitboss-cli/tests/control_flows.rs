@@ -60,6 +60,7 @@ async fn pause_op_writes_events_jsonl() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -272,6 +273,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -393,6 +395,7 @@ async fn auto_approve_policy_responds_without_tui() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -461,6 +464,7 @@ async fn auto_reject_policy_responds_without_tui() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -540,6 +544,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

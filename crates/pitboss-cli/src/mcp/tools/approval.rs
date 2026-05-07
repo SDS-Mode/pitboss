@@ -716,14 +716,31 @@ async fn record_permission_auto_approved(
     }
 }
 
+/// Sentinel `type_id` returned by [`caller_profile`] when the synthetic-
+/// default fallback fires (i.e. an un-typed Worker / Sublead under
+/// `untyped_actor_policy = "block"`). Audit consumers reading
+/// `events.jsonl` see this string in `tool_denied.actor_type` and
+/// `tool_auto_approved.actor_type` and can distinguish synthesized
+/// denials from declared-profile denials. Kept as a `<...>` token so
+/// it can never collide with a valid manifest profile id (validate
+/// rejects `<` in ids).
+const SYNTHETIC_PROFILE_ID: &str = "<synthetic>";
+
 /// Resolve a permission_prompt caller to its `(type_id, role_label,
 /// profile_tools)` triple, looking up the profile from the manifest.
 ///
-/// Returns `None` for the lead (root lead is never typed), for untyped
-/// callers (no entry in the per-layer / sublead actor-type maps), and
-/// when a typed caller's id is unknown to the manifest's profile list
-/// (shouldn't happen post-spawn; rejected by `actor_type::resolve_*`
+/// Returns `None` for the lead (root lead is never typed), for the
+/// pre-#252 un-typed bridge fallback (when
+/// `[run].untyped_actor_policy = "bridge"`, which is the default),
+/// and when a typed caller's id is unknown to the manifest's profile
+/// list (shouldn't happen post-spawn; rejected by `actor_type::resolve_*`
 /// at spawn time, but defensive against state corruption).
+///
+/// When `[run].untyped_actor_policy = "block"`, an un-typed caller
+/// receives a SYNTHESIZED profile with [`SYNTHETIC_PROFILE_ID`] and an
+/// empty `tools` list. The downstream short-circuit then auto-denies
+/// every call (because no tool is in the empty allowlist) — the
+/// "manifest is the consent signal" policy enacted at runtime.
 ///
 /// `role_label` is the lowercase string `"worker"` or `"sublead"` used
 /// to format the `not in <role>_type '<id>' allowlist` model-facing
@@ -734,10 +751,12 @@ async fn caller_profile(
     caller_id: &str,
     meta: Option<&crate::shared_store::tools::MetaField>,
 ) -> Option<(String, &'static str, Vec<String>)> {
+    use crate::manifest::schema::UntypedActorPolicy;
     use crate::shared_store::ActorRole;
 
     let m = meta?;
     let manifest = &state.root.manifest;
+    let block_untyped = matches!(manifest.untyped_actor_policy, UntypedActorPolicy::Block);
     match m.actor_role {
         ActorRole::Lead => None,
         ActorRole::Sublead => {
@@ -746,9 +765,17 @@ async fn caller_profile(
                 .read()
                 .await
                 .get(caller_id)
-                .cloned()?;
-            let profile = manifest.sublead_types.iter().find(|st| st.id == type_id)?;
-            Some((type_id, "sublead", profile.tools.clone()))
+                .cloned();
+            match type_id {
+                Some(id) => {
+                    let profile = manifest.sublead_types.iter().find(|st| st.id == id)?;
+                    Some((id, "sublead", profile.tools.clone()))
+                }
+                None if block_untyped => {
+                    Some((SYNTHETIC_PROFILE_ID.to_string(), "sublead", Vec::new()))
+                }
+                None => None,
+            }
         }
         ActorRole::Worker => {
             // Same dispatch as `build_caller_identity`: which sub-tree
@@ -760,14 +787,14 @@ async fn caller_profile(
                 .await
                 .get(caller_id)
                 .cloned();
-            let type_id = match layer_opt {
+            let type_id_opt: Option<String> = match layer_opt {
                 None | Some(None) => state
                     .root
                     .worker_actor_types
                     .read()
                     .await
                     .get(caller_id)
-                    .cloned()?,
+                    .cloned(),
                 Some(Some(sublead_id)) => {
                     // Clone the sub-layer Arc out before awaiting on its
                     // own RwLock — holding `subs` (a guard on
@@ -776,14 +803,27 @@ async fn caller_profile(
                     // read.
                     let sub = {
                         let subs = state.subleads.read().await;
-                        subs.get(&sublead_id).cloned()?
+                        subs.get(&sublead_id).cloned()
                     };
-                    let map = sub.worker_actor_types.read().await;
-                    map.get(caller_id).cloned()?
+                    match sub {
+                        Some(sub) => {
+                            let map = sub.worker_actor_types.read().await;
+                            map.get(caller_id).cloned()
+                        }
+                        None => None,
+                    }
                 }
             };
-            let profile = manifest.worker_types.iter().find(|wt| wt.id == type_id)?;
-            Some((type_id, "worker", profile.tools.clone()))
+            match type_id_opt {
+                Some(type_id) => {
+                    let profile = manifest.worker_types.iter().find(|wt| wt.id == type_id)?;
+                    Some((type_id, "worker", profile.tools.clone()))
+                }
+                None if block_untyped => {
+                    Some((SYNTHETIC_PROFILE_ID.to_string(), "worker", Vec::new()))
+                }
+                None => None,
+            }
         }
     }
 }

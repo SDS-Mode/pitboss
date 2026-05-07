@@ -101,6 +101,7 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -765,6 +766,7 @@ async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchS
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -1622,6 +1624,7 @@ async fn handle_request_approval_auto_approves() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1721,6 +1724,7 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1846,6 +1850,7 @@ async fn mk_plan_state_with_termination_policy(
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -2762,14 +2767,34 @@ async fn test_state_with_worker_types(
     worker_types: Vec<crate::manifest::schema::WorkerType>,
     require_actor_type: bool,
 ) -> Arc<DispatchState> {
-    test_state_with_worker_types_and_policy(worker_types, require_actor_type, ApprovalPolicy::Block)
-        .await
+    test_state_with_worker_types_full(
+        worker_types,
+        require_actor_type,
+        ApprovalPolicy::Block,
+        crate::manifest::schema::UntypedActorPolicy::Bridge,
+    )
+    .await
 }
 
 async fn test_state_with_worker_types_and_policy(
     worker_types: Vec<crate::manifest::schema::WorkerType>,
     require_actor_type: bool,
     approval_policy: ApprovalPolicy,
+) -> Arc<DispatchState> {
+    test_state_with_worker_types_full(
+        worker_types,
+        require_actor_type,
+        approval_policy,
+        crate::manifest::schema::UntypedActorPolicy::Bridge,
+    )
+    .await
+}
+
+async fn test_state_with_worker_types_full(
+    worker_types: Vec<crate::manifest::schema::WorkerType>,
+    require_actor_type: bool,
+    approval_policy: ApprovalPolicy,
+    untyped_actor_policy: crate::manifest::schema::UntypedActorPolicy,
 ) -> Arc<DispatchState> {
     use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
     use crate::manifest::schema::{Effort, WorktreeCleanup};
@@ -2828,6 +2853,7 @@ async fn test_state_with_worker_types_and_policy(
         worker_types,
         sublead_types: vec![],
         require_actor_type,
+        untyped_actor_policy,
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -3263,5 +3289,141 @@ async fn permission_prompt_rule_auto_approve_beats_profile_deny() {
     assert!(
         matches!(resp, PermissionPromptResponse::Allow { .. }),
         "rule auto-approve must beat profile deny: {resp:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic-default profile under [run].untyped_actor_policy = "block".
+// ---------------------------------------------------------------------------
+//
+// The block policy converts the un-typed bridge fallback (today's
+// pre-#252 default) into auto-deny via a synthesized empty profile.
+// Behavior matrix:
+//
+//   actor typed?  policy=bridge  policy=block
+//   ------------  -------------  ----------------
+//   yes           profile fires  profile fires
+//   no            bridge         synthetic deny
+
+/// Helper for `block`-policy tests. Mirrors
+/// `test_state_with_worker_types` but pivots the manifest's
+/// `untyped_actor_policy` to `Block`. Validate-time rejects the
+/// empty-profiles + block combination, so every test reaching this
+/// helper declares at least one profile.
+async fn test_state_block_untyped(
+    worker_types: Vec<crate::manifest::schema::WorkerType>,
+) -> Arc<DispatchState> {
+    test_state_with_worker_types_full(
+        worker_types,
+        false,
+        ApprovalPolicy::Block,
+        crate::manifest::schema::UntypedActorPolicy::Block,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn permission_prompt_synthetic_default_blocks_untyped_worker() {
+    let state = test_state_block_untyped(vec![extraction_profile()]).await;
+    // No `insert_typed_worker` call — the worker is un-typed, so the
+    // synthetic empty profile must fire.
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert("worker-untyped".into(), None);
+
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-untyped")),
+        },
+    )
+    .await
+    .unwrap();
+    let PermissionPromptResponse::Deny { message, .. } = resp else {
+        panic!("untyped worker under block policy must auto-deny: {resp:?}");
+    };
+    // The sentinel id `<synthetic>` shows up in the message so an
+    // operator reading the model-facing reason knows this denial
+    // came from the synthesized profile, not a declared one.
+    assert!(
+        message.contains("worker_type '<synthetic>'"),
+        "synthetic denial must name the sentinel profile id: {message}"
+    );
+
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("worker-untyped")
+        .expect("synthetic auto-deny must bump approval counters");
+    assert_eq!(entry.approvals_requested, 1);
+    assert_eq!(entry.approvals_rejected, 1);
+}
+
+/// Declared profiles still win under `block`. Strict mode is meant to
+/// close the un-typed escape hatch — it must not perturb the typed
+/// fast-path that #388 shipped.
+#[tokio::test]
+async fn permission_prompt_synthetic_default_does_not_override_declared_profile() {
+    let state = test_state_block_untyped(vec![extraction_profile()]).await;
+    insert_typed_worker(&state, "worker-typed", "extraction").await;
+
+    // `Read` is in `extraction_profile()` → Allow via declared profile,
+    // not the synthetic empty one.
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-typed")),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "declared profile's allowlist must still fire under block: {resp:?}"
+    );
+}
+
+/// Bridge policy (the default) preserves the pre-#252 un-typed fallback
+/// — un-typed callers route through the bridge instead of auto-denying.
+/// Symmetric with `permission_prompt_untyped_worker_falls_through_to_bridge`,
+/// but anchored in the synthetic-default test block so a future
+/// refactor that flips the default catches the regression.
+#[tokio::test]
+async fn permission_prompt_bridge_policy_keeps_untyped_bridge_fallback() {
+    let state = test_state_with_worker_types_and_policy(
+        vec![extraction_profile()],
+        false,
+        ApprovalPolicy::AutoApprove,
+    )
+    .await;
+    // Default `untyped_actor_policy = Bridge` — the helper does NOT
+    // patch it.
+    state
+        .worker_layer_index
+        .write()
+        .await
+        .insert("worker-untyped".into(), None);
+
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Read".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: Some(worker_meta("worker-untyped")),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "bridge policy must still route un-typed callers to the bridge: {resp:?}"
     );
 }

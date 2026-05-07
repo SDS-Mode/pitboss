@@ -46,6 +46,11 @@ pub fn render() -> String {
 #      the caps at spawn; the lead can never widen them.
 #   4) Once every spawn site is typed, set
 #      `[run].require_actor_type = true` to lock out type-less spawns.
+#   5) For headless runs that must never round-trip to an operator,
+#      add `[run].untyped_actor_policy = "block"` so any un-typed call
+#      reaching permission_prompt auto-denies via `denied_by_profile`
+#      instead of routing through the bridge. Requires step 1+ —
+#      validate rejects `block` when no profiles are declared.
 
 [[worker_type]]
 id    = "default"

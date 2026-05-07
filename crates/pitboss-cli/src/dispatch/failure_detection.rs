@@ -375,6 +375,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -471,6 +472,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

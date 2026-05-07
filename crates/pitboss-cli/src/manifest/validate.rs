@@ -28,6 +28,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_container(resolved)?;
     validate_communication(resolved)?;
     validate_actor_types(resolved)?;
+    validate_block_untyped_requires_profiles(resolved)?;
     validate_mcp_server_scopes(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
@@ -323,6 +324,32 @@ pub(crate) fn path_b_profile_migration_warning(r: &ResolvedManifest) -> Option<S
          Run `pitboss schema --format=migration` for a starter scaffold."
             .to_string(),
     )
+}
+
+/// Reject `[run].untyped_actor_policy = "block"` when no profiles are
+/// declared. The combination is self-defeating: every un-typed call
+/// site (which under `block` is also every spawn unless every spawn
+/// names a profile) would auto-deny via the synthetic empty profile,
+/// so the lead can spawn nothing useful. Bailing at validate time
+/// saves a confused operator from a dispatch that produces only
+/// `denied_by_profile` events.
+fn validate_block_untyped_requires_profiles(r: &ResolvedManifest) -> Result<()> {
+    use crate::manifest::schema::UntypedActorPolicy;
+    if !matches!(r.untyped_actor_policy, UntypedActorPolicy::Block) {
+        return Ok(());
+    }
+    if r.worker_types.is_empty() && r.sublead_types.is_empty() {
+        bail!(
+            "[run].untyped_actor_policy = \"block\" requires at least one \
+             `[[worker_type]]` or `[[sublead_type]]` profile to be declared. \
+             Without any profiles, every spawn_worker / spawn_sublead call \
+             would auto-deny via `denied_by_profile`. Either declare a \
+             profile (run `pitboss schema --format=migration` for a \
+             starter) or set `untyped_actor_policy = \"bridge\"` (the \
+             default) to keep the operator approval bridge in the loop."
+        );
+    }
+    Ok(())
 }
 
 fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
@@ -812,6 +839,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         }
     }
 
@@ -846,6 +874,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         f(&mut m);
         m
@@ -936,6 +965,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -973,6 +1003,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         assert!(validate(&r).is_err());
     }
@@ -1006,6 +1037,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         assert!(validate(&r).is_err());
     }
@@ -1053,6 +1085,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         }
     }
 
@@ -1152,6 +1185,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         (d, r)
     }
@@ -1271,6 +1305,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");
@@ -1329,6 +1364,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -1368,6 +1404,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         assert!(validate(&r).is_err());
     }
@@ -1578,6 +1615,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         // Sanity: with skip_dir_check=false the validator rejects (the
         // host-side path is bogus).
@@ -1770,6 +1808,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         validate(&r).expect("path_b must validate (in soak); pre-#368 this bailed");
     }
@@ -1806,6 +1845,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         validate(&r).expect("path_a is the default and must validate");
     }
@@ -1919,6 +1959,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         m.require_actor_type = true;
         m.worker_types = vec![WorkerType {
@@ -1960,6 +2001,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
         m.worker_types = vec![WorkerType {
             id: "extraction".into(),
@@ -2131,5 +2173,71 @@ mod tests {
             path_b_profile_migration_warning(&r).is_none(),
             "sublead_type alone must suppress the warning"
         );
+    }
+
+    /// `untyped_actor_policy = "block"` with no profiles is
+    /// self-defeating: every spawn would auto-deny via the synthetic
+    /// empty profile. Validate must reject the manifest before
+    /// dispatch so a confused operator doesn't run a session that
+    /// produces only `denied_by_profile` events.
+    #[test]
+    fn validate_rejects_block_untyped_when_no_profiles() {
+        let mut r = rm_with(|_| {});
+        r.untyped_actor_policy = crate::manifest::schema::UntypedActorPolicy::Block;
+
+        let err = validate_skip_dir_check(&r)
+            .expect_err("block policy without any profiles must fail validate");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("untyped_actor_policy = \"block\""),
+            "error must name the offending field: {msg}"
+        );
+        assert!(
+            msg.contains("[[worker_type]]") || msg.contains("[[sublead_type]]"),
+            "error must point operators at the missing profile section: {msg}"
+        );
+    }
+
+    /// One profile is enough — block + any declared profile is a
+    /// coherent manifest. Mirrors the migration-warning test's
+    /// "either profile suffices" property; this one is stricter
+    /// because it checks both arms of the OR.
+    #[test]
+    fn validate_accepts_block_untyped_with_at_least_one_profile() {
+        // worker_type only.
+        let mut r = rm_with(|m| {
+            m.worker_types = vec![crate::manifest::schema::WorkerType {
+                id: "extraction".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        r.untyped_actor_policy = crate::manifest::schema::UntypedActorPolicy::Block;
+        validate_skip_dir_check(&r)
+            .expect("worker_type alone must satisfy block-policy validation");
+
+        // sublead_type only.
+        let mut r = rm_with(|m| {
+            m.sublead_types = vec![crate::manifest::schema::SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+            }];
+        });
+        r.untyped_actor_policy = crate::manifest::schema::UntypedActorPolicy::Block;
+        validate_skip_dir_check(&r)
+            .expect("sublead_type alone must satisfy block-policy validation");
+    }
+
+    /// `bridge` (default) without profiles is fine — that's pre-#252
+    /// behavior and the migration warning is the only signal.
+    #[test]
+    fn validate_accepts_bridge_policy_without_profiles() {
+        let r = rm_with(|_| {});
+        // Default `untyped_actor_policy = Bridge`; no profiles declared.
+        validate_skip_dir_check(&r).expect("bridge policy without profiles must pass validate");
     }
 }
