@@ -20,7 +20,7 @@ GitHub issue, not here.
 - **No version targeting.** Use GitHub Milestones for release-train
   scheduling. Strategic horizons can stay inline as `parked:` notes.
 
-Last refreshed: v0.9.2 (2026-05-05).
+Last refreshed: v0.12.0 (2026-05-07).
 
 ---
 
@@ -60,17 +60,6 @@ the existing single-run view and the new compare route.
 **Status:** scoped.
 **Tracking:** #250.
 
-### Typed worker/sublead profiles
-
-Operator-declared `[[worker_type]]` / `[[sublead_type]]` profiles
-with tool allowlists, model allowlists, and timeout/budget caps the
-dispatcher enforces at spawn-arg validation time — a belt-and-
-suspenders against prompt drift. Folds in per-actor MCP server
-scoping as a sub-task.
-
-**Status:** scoped — high-impact safety primitive.
-**Tracking:** #252.
-
 ### Lead+sublead budget accounting
 
 Today `[run].budget_usd` accounts only for `spawn_worker` spend; the
@@ -79,7 +68,7 @@ into the same `spent_usd` mutex, add an optional `lead_budget_usd`
 separate cap, and surface running lead-spend live in
 `worker_status`. Backstop for runaway-lead failure modes.
 
-**Status:** scoped — sibling to #252.
+**Status:** scoped — sibling to the typed-profiles work that landed in v0.12 (#252).
 **Tracking:** #253.
 
 ### Non-Anthropic model support (v1.0 destination)

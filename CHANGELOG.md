@@ -10,21 +10,63 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
-## [0.11.0] — 2026-05-07
+## [0.12.0] — 2026-05-07
 
-Path B permission routing graduates from "shipped but bumpy" to
-production-ready. v0.10.0 made Path B the default; v0.11.0 fixes the
-five issues that surfaced during soak — wire-shape mismatch with the
-Claude Code SDK (#376), audit-log misattribution (#375), state-tracking
-gaps that caused counter undercounts (#374), denied-by-policy events
-mislabeled as operator rejections (#378), and a recovery path that
-silently pointed at an unreachable MCP endpoint (#381). Plus a new
-`[run].denial_termination_policy` knob (#379) — defaulting to `adapt`
-— so a single tool denial no longer fails the whole worker; the model
-sees a structured `{behavior:"deny",message,interrupt:false}` reply
-and adapts. Operators who relied on `ApprovalRejected` as a CI signal
-should set `denial_termination_policy = "reclassify"` to preserve the
-v0.10.0 behavior.
+Pitboss v0.12 lands the **typed worker/sublead profiles** arc (#252) and
+makes **Path B permission routing the default**. Together they shift
+pitboss from "claude is fully trusted, pitboss audits after the fact" to
+"every tool call gates through pitboss with a typed allowlist" — defense
+in depth against prompt-injected leads and drifting workers, with
+per-actor MCP server scoping and a capability matrix you can audit
+before dispatch.
+
+Highlights:
+
+- **Typed actor profiles (#252)** — declare `[[worker_type]]` /
+  `[[sublead_type]]` blocks with their own tool allowlists, MCP server
+  scopes, and budget caps. The dispatcher enforces caps; Path B
+  fast-paths typed callers via `permission_prompt` short-circuit.
+- **Path B is the new default** — `[lead].permission_routing` defaults
+  to `"path_b"`. Spawned claude subprocesses now have their built-in
+  permission gate active; tool calls outside `--allowedTools` route
+  through `mcp__pitboss__permission_prompt` instead of being silently
+  approved via `--dangerously-skip-permissions`.
+- **Capability matrix (`pitboss validate --capability-matrix`)** —
+  prints the actor-type × MCP-server table so operators can audit
+  declared scopes before dispatch.
+- **Approvals visibility everywhere** — aggregate approvals counters
+  in `pitboss status` (#386), per-tile denial counter in the TUI
+  (#387), `tool_denied` events in `summary.jsonl` (#388).
+
+### Breaking changes
+
+- **Flip `[lead].permission_routing` default to `path_b`** ([#393](https://github.com/SDS-Mode/pitboss/pull/393)).
+  Existing manifests that relied on the implicit `"path_a"` default get
+  a behavior change at upgrade time. Migration paths: set
+  `permission_routing = "path_a"` to keep pre-v0.12 behavior; declare
+  `[[worker_type]]` / `[[sublead_type]]` profiles to fast-path common
+  tools (see `pitboss schema --format=migration`); or set
+  `[run].default_approval_policy = "auto_approve"` for trusted headless
+  runs.
+
+### Added
+
+- Synthetic-default profile for un-typed Path-B callers ([#392](https://github.com/SDS-Mode/pitboss/pull/392))
+- Emit (actor-type → MCP servers) capability matrix ([#390](https://github.com/SDS-Mode/pitboss/pull/390))
+- Nudge Path-B operators toward typed profiles ([#389](https://github.com/SDS-Mode/pitboss/pull/389))
+- Profile-driven Path-B short-circuit ([#388](https://github.com/SDS-Mode/pitboss/pull/388))
+- Surface Path-B tool-denial counter on each actor tile ([#387](https://github.com/SDS-Mode/pitboss/pull/387))
+- Surface aggregate approvals counters in run footer ([#386](https://github.com/SDS-Mode/pitboss/pull/386))
+- Per-actor MCP scoping + actor_type persistence (#252 Phase 1.5) ([#384](https://github.com/SDS-Mode/pitboss/pull/384))
+- Typed worker/sublead profiles with dispatcher caps ([#382](https://github.com/SDS-Mode/pitboss/pull/382))
+
+
+### Fixed
+
+- Keep substituted webhook tokens out of resolved.json ([#383](https://github.com/SDS-Mode/pitboss/pull/383))
+
+
+## [0.11.0] — 2026-05-07
 
 ### Added
 

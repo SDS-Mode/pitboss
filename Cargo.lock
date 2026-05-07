@@ -1895,7 +1895,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pitboss-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-schema"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "pitboss-schema-derive",
  "serde",
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-schema-derive"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-tui"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "pitboss-web"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "axum",
