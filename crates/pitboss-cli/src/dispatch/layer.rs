@@ -77,6 +77,13 @@ pub struct LayerState {
     pub worker_prompts: RwLock<HashMap<String, String>>,
     /// Per-worker resolved model, keyed by task_id.
     pub worker_models: RwLock<HashMap<String, String>>,
+    /// Per-worker resolved `actor_type` (matches a `[[worker_type]].id` from
+    /// the manifest), keyed by task_id. Populated at spawn time when the
+    /// caller resolves to `WorkerProfileResolution::Typed`. Read on resume
+    /// (continue/reprompt) so the rebuilt `mcp-config.json` can scope MCP
+    /// servers and the appended `TaskRecord` keeps its profile attribution.
+    /// (#252 Phase 1.5)
+    pub worker_actor_types: RwLock<HashMap<String, String>>,
     /// Per-worker reserved cost (USD) at spawn time.
     pub worker_reservations: RwLock<HashMap<String, f64>>,
     /// Dependencies needed to actually launch worker subprocesses.
@@ -209,6 +216,7 @@ impl LayerState {
             worker_cancels: RwLock::new(HashMap::new()),
             worker_prompts: RwLock::new(HashMap::new()),
             worker_models: RwLock::new(HashMap::new()),
+            worker_actor_types: RwLock::new(HashMap::new()),
             worker_reservations: RwLock::new(HashMap::new()),
             spawner,
             claude_binary,

@@ -264,6 +264,9 @@ pub async fn run_hierarchical(
         &socket,
         &lead.id,
         "lead",
+        // Root lead is never typed (no `[[lead_type]]` concept); scoped
+        // servers therefore never reach the root. (#252 Phase 1.5)
+        None,
         Some(&lead_token),
         &resolved.mcp_servers,
     )
@@ -605,42 +608,44 @@ pub async fn run_hierarchical(
     // would still see the worker as Running).
     let now = Utc::now();
     let mut cancelled_records: Vec<pitboss_core::store::TaskRecord> = Vec::new();
-    let make_cancelled = |id: &str, parent_id: &str, model: Option<String>| {
-        let token_usage = pitboss_core::parser::TokenUsage::default();
-        let cost_usd = pitboss_core::prices::cost_usd(model.as_deref().unwrap_or(""), &token_usage);
-        pitboss_core::store::TaskRecord {
-            task_id: id.to_string(),
-            status: pitboss_core::store::TaskStatus::Cancelled,
-            exit_code: None,
-            started_at: now,
-            ended_at: now,
-            duration_ms: 0,
-            worktree_path: None,
-            log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
-            token_usage,
-            claude_session_id: None,
-            final_message_preview: Some("cancelled when lead exited".into()),
-            final_message: None,
-            parent_task_id: Some(parent_id.to_string()),
-            pause_count: 0,
-            reprompt_count: 0,
-            approvals_requested: 0,
-            approvals_approved: 0,
-            approvals_rejected: 0,
-            model,
-            failure_reason: None,
-            cost_usd,
-            // Cancellation records are synthesized post-hoc when the lead
-            // exits while workers are still running; the original spawn's
-            // actor_type was lost when the prior TaskRecord (if any) was
-            // overwritten. Phase 1.5 will preserve the attribution on this
-            // path by reading the prior record before synthesizing.
-            actor_type: None,
-        }
-    };
+    let make_cancelled =
+        |id: &str, parent_id: &str, model: Option<String>, actor_type: Option<String>| {
+            let token_usage = pitboss_core::parser::TokenUsage::default();
+            let cost_usd =
+                pitboss_core::prices::cost_usd(model.as_deref().unwrap_or(""), &token_usage);
+            pitboss_core::store::TaskRecord {
+                task_id: id.to_string(),
+                status: pitboss_core::store::TaskStatus::Cancelled,
+                exit_code: None,
+                started_at: now,
+                ended_at: now,
+                duration_ms: 0,
+                worktree_path: None,
+                log_path: run_subdir.join("tasks").join(id).join("stdout.log"),
+                token_usage,
+                claude_session_id: None,
+                final_message_preview: Some("cancelled when lead exited".into()),
+                final_message: None,
+                parent_task_id: Some(parent_id.to_string()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
+                model,
+                failure_reason: None,
+                cost_usd,
+                // Preserve the typed-profile attribution on synthesized
+                // cancellations: the in-memory `worker_actor_types` map
+                // still has the original spawn's id even though no
+                // TaskRecord was appended yet. (#252 Phase 1.5)
+                actor_type,
+            }
+        };
     {
         let workers = state.root.workers.read().await;
         let worker_models = state.root.worker_models.read().await;
+        let worker_actor_types = state.root.worker_actor_types.read().await;
         for (id, w) in workers.iter() {
             if id == &lead.id || existing_ids.contains(id) {
                 continue;
@@ -650,6 +655,7 @@ pub async fn run_hierarchical(
                     id,
                     &lead.id,
                     worker_models.get(id).cloned(),
+                    worker_actor_types.get(id).cloned(),
                 ));
             }
         }
@@ -659,6 +665,7 @@ pub async fn run_hierarchical(
         for (sublead_id, sub) in subleads.iter() {
             let workers = sub.workers.read().await;
             let worker_models = sub.worker_models.read().await;
+            let worker_actor_types = sub.worker_actor_types.read().await;
             for (id, w) in workers.iter() {
                 // Sub-lead layers register the sub-lead itself as a
                 // "worker" entry (the claude subprocess). Filter by the
@@ -673,6 +680,7 @@ pub async fn run_hierarchical(
                         id,
                         sublead_id,
                         worker_models.get(id).cloned(),
+                        worker_actor_types.get(id).cloned(),
                     ));
                 }
             }
@@ -885,11 +893,17 @@ async fn refresh_in_flight_from_maps(
 /// `DispatchState::mint_token`). When `Some`, it is appended as
 /// `--token <hex>` to the bridge args; the server then validates it and
 /// binds the connection identity. Closes #145.
+///
+/// `actor_type` is the actor's resolved typed profile id (worker_type or
+/// sublead_type) for #252 Phase 1.5 scoping. Servers with
+/// `scope = "type:<id>"` are injected only when `actor_type == Some(<id>)`.
+/// Untyped actors (`actor_type = None`) never receive scoped servers.
 fn build_mcp_servers_json(
     pitboss_exe: &std::path::Path,
     socket: &std::path::Path,
     actor_id: &str,
     actor_role: &str,
+    actor_type: Option<&str>,
     token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -914,6 +928,9 @@ fn build_mcp_servers_json(
         }),
     );
     for s in extra_servers {
+        if !mcp_server_scope_admits(s.scope.as_deref(), actor_type) {
+            continue;
+        }
         let mut entry = serde_json::Map::new();
         entry.insert("command".into(), s.command.clone().into());
         entry.insert(
@@ -933,11 +950,34 @@ fn build_mcp_servers_json(
     servers
 }
 
+/// Returns true when an MCP server with the given `scope` should be
+/// injected into an actor with the given `actor_type` (#252 Phase 1.5).
+///
+/// Rules:
+/// - `scope = None` → always inject (back-compat default).
+/// - `scope = Some("type:<id>")` and `actor_type = Some(<id>)` → inject.
+/// - Otherwise → exclude (untyped actor never gets scoped servers; a
+///   different type never gets a server scoped to a sibling type).
+///
+/// Validation rejects malformed `scope` strings at manifest load time, so
+/// here a value that doesn't parse as `type:<id>` simply excludes (defence
+/// in depth — should never happen on a validated manifest).
+fn mcp_server_scope_admits(scope: Option<&str>, actor_type: Option<&str>) -> bool {
+    let Some(raw) = scope else {
+        return true;
+    };
+    let Some(target) = raw.strip_prefix("type:") else {
+        return false;
+    };
+    actor_type == Some(target)
+}
+
 async fn write_mcp_config(
     path: &std::path::Path,
     socket: &std::path::Path,
     actor_id: &str,
     actor_role: &str, // "lead" or "worker"
+    actor_type: Option<&str>,
     token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<()> {
@@ -950,6 +990,7 @@ async fn write_mcp_config(
         socket,
         actor_id,
         actor_role,
+        actor_type,
         token,
         extra_servers,
     );
@@ -979,6 +1020,7 @@ pub async fn write_worker_mcp_config(
     path: &std::path::Path,
     socket: &std::path::Path,
     worker_id: &str,
+    actor_type: Option<&str>,
     token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Result<()> {
@@ -989,6 +1031,7 @@ pub async fn write_worker_mcp_config(
         socket,
         worker_id,
         "worker",
+        actor_type,
         token,
         extra_servers,
     );
@@ -1028,6 +1071,7 @@ pub async fn build_sublead_mcp_config(
     sublead_id: &str,
     socket: &std::path::Path,
     run_subdir: &std::path::Path,
+    actor_type: Option<&str>,
     token: Option<&str>,
     extra_servers: &[crate::manifest::schema::McpServerSpec],
     communication_mode: crate::manifest::schema::CommunicationMode,
@@ -1041,6 +1085,7 @@ pub async fn build_sublead_mcp_config(
         socket,
         sublead_id,
         "sublead",
+        actor_type,
         token,
         extra_servers,
     );
@@ -1411,5 +1456,80 @@ mod summary_jsonl_aggregation_tests {
             err.to_string().contains("read summary.jsonl"),
             "context attached: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_scope_tests {
+    use super::*;
+    use crate::manifest::schema::McpServerSpec;
+    use std::path::PathBuf;
+
+    fn srv(id: &str, scope: Option<&str>) -> McpServerSpec {
+        McpServerSpec {
+            id: id.into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            env: Default::default(),
+            scope: scope.map(str::to_string),
+        }
+    }
+
+    fn build(actor_type: Option<&str>, servers: &[McpServerSpec]) -> Vec<String> {
+        let json = build_mcp_servers_json(
+            &PathBuf::from("/usr/bin/pitboss"),
+            &PathBuf::from("/tmp/sock"),
+            "actor-1",
+            "worker",
+            actor_type,
+            None,
+            servers,
+        );
+        json.keys().cloned().collect()
+    }
+
+    #[test]
+    fn scope_admits_helper_matrix() {
+        // Unscoped: always admits.
+        assert!(mcp_server_scope_admits(None, None));
+        assert!(mcp_server_scope_admits(None, Some("writer")));
+        // Scoped + matching type: admits.
+        assert!(mcp_server_scope_admits(Some("type:writer"), Some("writer")));
+        // Scoped + mismatched type: rejects.
+        assert!(!mcp_server_scope_admits(
+            Some("type:writer"),
+            Some("reader")
+        ));
+        // Scoped + untyped actor: rejects (untyped never gets scoped servers).
+        assert!(!mcp_server_scope_admits(Some("type:writer"), None));
+        // Malformed scope: defence-in-depth, rejects.
+        assert!(!mcp_server_scope_admits(Some("role:lead"), Some("lead")));
+    }
+
+    #[test]
+    fn build_mcp_servers_json_excludes_scoped_for_untyped_actor() {
+        let servers = vec![srv("ctx7", None), srv("fs", Some("type:writer"))];
+        let mut keys = build(None, &servers);
+        keys.sort();
+        assert_eq!(keys, vec!["ctx7".to_string(), "pitboss".to_string()]);
+    }
+
+    #[test]
+    fn build_mcp_servers_json_includes_scoped_for_matching_actor() {
+        let servers = vec![srv("ctx7", None), srv("fs", Some("type:writer"))];
+        let mut keys = build(Some("writer"), &servers);
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["ctx7".to_string(), "fs".to_string(), "pitboss".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_mcp_servers_json_excludes_scoped_for_other_typed_actor() {
+        let servers = vec![srv("fs", Some("type:writer"))];
+        let mut keys = build(Some("reader"), &servers);
+        keys.sort();
+        assert_eq!(keys, vec!["pitboss".to_string()]);
     }
 }

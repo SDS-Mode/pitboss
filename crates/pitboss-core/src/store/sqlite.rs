@@ -160,6 +160,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "cost_usd",
         apply: migrate_cost_usd,
     },
+    Migration {
+        version: 10,
+        name: "actor_type",
+        apply: migrate_actor_type,
+    },
 ];
 
 /// Apply every entry in [`MIGRATIONS`] whose version is not yet
@@ -308,6 +313,15 @@ fn migrate_final_message(conn: &rusqlite::Connection) -> Result<(), StoreError> 
 /// keep `NULL` and consumers render "—".
 fn migrate_cost_usd(conn: &rusqlite::Connection) -> Result<(), StoreError> {
     add_column_if_missing(conn, "task_records", "cost_usd", "REAL NULL")
+}
+
+/// Idempotent migration: add the v0.12 `actor_type` column (#252 Phase 1.5).
+/// Stores the resolved `[[worker_type]]` / `[[sublead_type]]` id as `TEXT
+/// NULL` so untyped spawns and pre-Phase-1 records stay `NULL`. Round-trips
+/// through `JsonFileStore` were already wired in Phase 1; this brings the
+/// `SQLite` backend to parity.
+fn migrate_actor_type(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    add_column_if_missing(conn, "task_records", "actor_type", "TEXT NULL")
 }
 
 /// Idempotent migration: add v0.4 counter columns to `task_records` if missing.
@@ -526,6 +540,7 @@ fn init_schema(conn: &rusqlite::Connection) -> Result<(), StoreError> {
             failure_reason        TEXT NULL,
             final_message         TEXT NULL,
             cost_usd              REAL NULL,
+            actor_type            TEXT NULL,
             PRIMARY KEY (run_id, task_id)
         );
         ",
@@ -632,6 +647,7 @@ struct TaskRow {
     failure_reason: Option<String>,
     final_message: Option<String>,
     cost_usd: Option<f64>,
+    actor_type: Option<String>,
 }
 
 impl TaskRow {
@@ -661,6 +677,7 @@ impl TaskRow {
             failure_reason: row.get("failure_reason").unwrap_or(None),
             final_message: row.get("final_message").unwrap_or(None),
             cost_usd: row.get("cost_usd").unwrap_or(None),
+            actor_type: row.get("actor_type").unwrap_or(None),
         })
     }
 
@@ -699,7 +716,7 @@ impl TaskRow {
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok()),
             cost_usd: self.cost_usd,
-            actor_type: None,
+            actor_type: self.actor_type,
         })
     }
 }
@@ -738,7 +755,7 @@ fn fetch_task_records(
                   claude_session_id, final_message_preview, parent_task_id, \
                   pause_count, reprompt_count, approvals_requested, \
                   approvals_approved, approvals_rejected, model, failure_reason, \
-                  final_message, cost_usd \
+                  final_message, cost_usd, actor_type \
              FROM task_records WHERE run_id = ?1 ORDER BY rowid",
         )
         .map_err(|e| StoreError::Incomplete(format!("task query prepare: {e}")))?;
@@ -886,9 +903,9 @@ impl SessionStore for SqliteStore {
                       claude_session_id, final_message_preview, parent_task_id, \
                       pause_count, reprompt_count, approvals_requested, \
                       approvals_approved, approvals_rejected, model, failure_reason, \
-                      final_message, cost_usd) \
+                      final_message, cost_usd, actor_type) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                     rusqlite::params![
                         run_id_str,
                         record.task_id,
@@ -921,6 +938,7 @@ impl SessionStore for SqliteStore {
                             .and_then(|fr| serde_json::to_string(fr).ok()),
                         record.final_message,
                         record.cost_usd,
+                        record.actor_type.as_deref(),
                     ],
                 )
                 .map_err(|e| StoreError::Incomplete(format!("append_record insert: {e}")))?;
@@ -1207,6 +1225,36 @@ mod sqlite_tests {
         );
         // Second append (Failed) wins since it was an OR REPLACE.
         assert!(matches!(loaded.tasks[0].status, TaskStatus::Failed));
+    }
+
+    #[tokio::test]
+    async fn sqlite_stores_actor_type() {
+        // #252 Phase 1.5: actor_type round-trips via INSERT and SELECT.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("runs.db");
+        let store = SqliteStore::new(db_path.clone()).unwrap();
+
+        let run_id = Uuid::now_v7();
+        store.init_run(&meta(run_id, dir.path())).await.unwrap();
+
+        let mut typed = rec("worker-typed", TaskStatus::Success);
+        typed.actor_type = Some("writer".into());
+        store.append_record(run_id, &typed).await.unwrap();
+
+        let untyped = rec("worker-untyped", TaskStatus::Success);
+        store.append_record(run_id, &untyped).await.unwrap();
+
+        let back = store.load_run(run_id).await.unwrap();
+        let by_id: std::collections::HashMap<_, _> = back
+            .tasks
+            .iter()
+            .map(|t| (t.task_id.clone(), t.actor_type.clone()))
+            .collect();
+        assert_eq!(
+            by_id.get("worker-typed").unwrap().as_deref(),
+            Some("writer")
+        );
+        assert_eq!(by_id.get("worker-untyped").unwrap().as_deref(), None);
     }
 
     #[tokio::test]
