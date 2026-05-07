@@ -56,12 +56,38 @@ struct ResolvedLead {
     pub model: Option<String>,
 }
 
+/// Minimal MCP server shape — we only need id + scope for the
+/// capability matrix. The full `[[mcp_server]]` schema (command, args,
+/// env) lives in `pitboss-cli`'s `ResolvedManifest`; deserializing
+/// only what we render here keeps the TUI's resolved.json parser
+/// independent of full-schema churn.
+#[derive(Debug, Deserialize)]
+struct ResolvedMcpServer {
+    pub id: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// Minimal `[[worker_type]]` / `[[sublead_type]]` shape — only the id
+/// drives the matrix. Other fields (`tools`, `allowed_models`, caps)
+/// are enforced upstream by the dispatcher.
+#[derive(Debug, Deserialize)]
+struct ResolvedActorType {
+    pub id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ResolvedManifest {
     #[serde(default)]
     pub tasks: Vec<ResolvedTask>,
     #[serde(default)]
     pub lead: Option<ResolvedLead>,
+    #[serde(default)]
+    pub mcp_servers: Vec<ResolvedMcpServer>,
+    #[serde(default)]
+    pub worker_types: Vec<ResolvedActorType>,
+    #[serde(default)]
+    pub sublead_types: Vec<ResolvedActorType>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,10 +139,18 @@ pub fn watch(
 // ---------------------------------------------------------------------------
 
 fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
-    // 1. Read resolved.json → get static task ids, models, and lead (if any).
-    let (resolved_tasks, resolved_lead) = read_resolved_manifest(run_dir);
-    let model_map = build_model_map(&resolved_tasks, resolved_lead.as_ref());
-    let static_ids = collect_static_ids(&resolved_tasks, resolved_lead.as_ref());
+    // 1. Read resolved.json → get static task ids, models, lead (if any),
+    //    plus the MCP servers + actor-type ids needed for the capability
+    //    matrix shown in Detail view.
+    let resolved = read_resolved_manifest(run_dir);
+    let model_map = build_model_map(&resolved.tasks, resolved.lead.as_ref());
+    let static_ids = collect_static_ids(&resolved.tasks, resolved.lead.as_ref());
+    let resolved_lead = resolved.lead;
+    let matrix_rows = build_matrix_rows(
+        &resolved.mcp_servers,
+        &resolved.worker_types,
+        &resolved.sublead_types,
+    );
 
     // 2. Gather completed task records. Prefer summary.json (written on clean
     //    finalize) since summary.jsonl may be empty or truncated after
@@ -192,20 +226,51 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
         focus_log,
         failed_count,
         run_started_at,
+        matrix_rows,
     }
 }
 
-/// Read and parse `resolved.json`, returning the static tasks and optional
-/// lead. Missing or malformed files yield empty values.
-fn read_resolved_manifest(run_dir: &Path) -> (Vec<ResolvedTask>, Option<ResolvedLead>) {
+/// Read and parse `resolved.json` into the lightweight TUI subset.
+/// Missing or malformed files yield an empty manifest so the TUI keeps
+/// rendering against an in-flight or partially-written run.
+fn read_resolved_manifest(run_dir: &Path) -> ResolvedManifest {
     let resolved_path = run_dir.join("resolved.json");
     match std::fs::read(&resolved_path) {
-        Ok(bytes) => match serde_json::from_slice::<ResolvedManifest>(&bytes) {
-            Ok(m) => (m.tasks, m.lead),
-            Err(_) => (Vec::new(), None),
+        Ok(bytes) => serde_json::from_slice::<ResolvedManifest>(&bytes).unwrap_or_else(|_| {
+            ResolvedManifest {
+                tasks: Vec::new(),
+                lead: None,
+                mcp_servers: Vec::new(),
+                worker_types: Vec::new(),
+                sublead_types: Vec::new(),
+            }
+        }),
+        Err(_) => ResolvedManifest {
+            tasks: Vec::new(),
+            lead: None,
+            mcp_servers: Vec::new(),
+            worker_types: Vec::new(),
+            sublead_types: Vec::new(),
         },
-        Err(_) => (Vec::new(), None),
     }
+}
+
+/// Build the capability matrix from the parsed resolved.json subset.
+/// Delegates to `pitboss_cli::capability_matrix::rows_from_parts` so the
+/// TUI and the CLI `--capability-matrix` formatter cannot disagree on
+/// row shape (#391).
+fn build_matrix_rows(
+    servers: &[ResolvedMcpServer],
+    worker_types: &[ResolvedActorType],
+    sublead_types: &[ResolvedActorType],
+) -> Vec<pitboss_cli::capability_matrix::MatrixRow> {
+    let server_parts: Vec<(String, Option<String>)> = servers
+        .iter()
+        .map(|s| (s.id.clone(), s.scope.clone()))
+        .collect();
+    let wt_ids: Vec<String> = worker_types.iter().map(|w| w.id.clone()).collect();
+    let st_ids: Vec<String> = sublead_types.iter().map(|s| s.id.clone()).collect();
+    pitboss_cli::capability_matrix::rows_from_parts(&server_parts, &wt_ids, &st_ids)
 }
 
 /// Build a map from task/lead id → model for quick lookup when constructing
@@ -318,6 +383,7 @@ fn build_tile(
                 .or_else(|| log_path.parent().and_then(read_worktree_sidecar)),
             completed_at: Some(rec.ended_at),
             denials_count,
+            actor_type: rec.actor_type.clone(),
         }
     } else {
         // Decide between Pending and Running by checking log freshness.
@@ -361,6 +427,15 @@ fn build_tile(
             },
             completed_at: None,
             denials_count,
+            // In-flight tiles haven't settled a `TaskRecord` yet, so we
+            // don't know the resolved actor_type. Defaults to None →
+            // Detail view falls back to the "(untyped / root)" matrix
+            // row. A typed worker therefore shows the untyped row mid-
+            // flight, then flips to its typed row once its record
+            // lands. TODO(#391-followup): plumb actor_type through an
+            // events.jsonl spawn event so the typed row appears
+            // immediately on spawn instead of on settle.
+            actor_type: None,
         }
     }
 }
@@ -948,6 +1023,165 @@ mod tests {
         );
         let live_tile = snap.tasks.iter().find(|t| t.id == "worker-live").unwrap();
         assert_eq!(live_tile.parent_task_id.as_deref(), Some("lead"));
+    }
+
+    /// resolved.json's `mcp_servers` + `worker_types` + `sublead_types`
+    /// flow through to the snapshot's `matrix_rows`. The Detail view
+    /// picks rows from this list to populate the MCP-SERVERS section,
+    /// so a missing or mis-shaped `matrix_rows` would silently drop the
+    /// section regardless of how `resolved.json` was authored. (#391)
+    #[test]
+    fn watcher_emits_capability_matrix_rows_from_resolved_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+
+        let resolved = serde_json::json!({
+            "max_parallel": 4,
+            "halt_on_failure": false,
+            "run_dir": run_dir.to_str(),
+            "worktree_cleanup": "OnSuccess",
+            "emit_event_stream": false,
+            "tasks": [],
+            "lead": {"id": "lead", "model": "claude-haiku-4-5"},
+            "max_workers": 4,
+            "budget_usd": 5.0,
+            "lead_timeout_secs": 900,
+            "mcp_servers": [
+                {"id": "pitboss", "command": "/bin/true", "args": [], "env": {}},
+                {"id": "fs-writer", "command": "/bin/true", "args": [], "env": {}, "scope": "type:writer"}
+            ],
+            "worker_types": [
+                {"id": "writer", "tools": [], "allowed_models": []}
+            ],
+            "sublead_types": []
+        });
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        let snap = build_snapshot(&run_dir, None);
+        // Untyped row + worker_type:writer = 2 rows.
+        assert_eq!(snap.matrix_rows.len(), 2, "expected untyped + writer rows");
+        let writer = snap
+            .matrix_rows
+            .iter()
+            .find(|r| r.actor_type.as_deref() == Some("writer"))
+            .expect("writer row missing");
+        assert!(
+            writer.server_ids.iter().any(|s| s == "fs-writer"),
+            "writer row should admit fs-writer (scope=type:writer)"
+        );
+    }
+
+    /// `TaskRecord.actor_type` (Phase 1.5 #384) flows onto the tile so
+    /// the Detail view can pick the matching matrix row. Without this,
+    /// even a fully-resolved manifest would always render the untyped
+    /// fallback row for every settled worker tile. (#391)
+    #[test]
+    fn watcher_propagates_actor_type_from_task_record_to_tile() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+
+        let resolved = serde_json::json!({
+            "max_parallel": 4,
+            "halt_on_failure": false,
+            "run_dir": run_dir.to_str(),
+            "worktree_cleanup": "OnSuccess",
+            "emit_event_stream": false,
+            "tasks": [],
+            "lead": {"id": "lead", "model": "claude-haiku-4-5"},
+            "max_workers": 4,
+            "budget_usd": 5.0,
+            "lead_timeout_secs": 900
+        });
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        let worker_rec = serde_json::json!({
+            "task_id": "worker-typed",
+            "status": "Success",
+            "exit_code": 0,
+            "started_at": "2026-04-17T00:00:00Z",
+            "ended_at": "2026-04-17T00:00:30Z",
+            "duration_ms": 30000,
+            "worktree_path": null,
+            "log_path": run_dir.join("tasks/worker-typed/stdout.log").to_str(),
+            "token_usage": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0},
+            "claude_session_id": null,
+            "final_message_preview": null,
+            "parent_task_id": "lead",
+            "actor_type": "writer"
+        });
+        let mut jsonl_line = serde_json::to_vec(&worker_rec).unwrap();
+        jsonl_line.push(b'\n');
+        std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
+
+        let snap = build_snapshot(&run_dir, None);
+        let tile = snap
+            .tasks
+            .iter()
+            .find(|t| t.id == "worker-typed")
+            .expect("typed worker tile missing");
+        assert_eq!(tile.actor_type.as_deref(), Some("writer"));
+    }
+
+    /// Sub-lead tiles flow through the same `TaskRecord.actor_type`
+    /// path. Pin parity with the worker case so a future refactor that
+    /// special-cased one but not the other would fail loudly. (#391)
+    #[test]
+    fn watcher_propagates_sublead_actor_type_from_task_record() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+
+        let resolved = serde_json::json!({
+            "max_parallel": 4,
+            "halt_on_failure": false,
+            "run_dir": run_dir.to_str(),
+            "worktree_cleanup": "OnSuccess",
+            "emit_event_stream": false,
+            "tasks": [],
+            "lead": {"id": "lead", "model": "claude-haiku-4-5"},
+            "max_workers": 4,
+            "budget_usd": 5.0,
+            "lead_timeout_secs": 900
+        });
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        let sublead_rec = serde_json::json!({
+            "task_id": "sublead-planner",
+            "status": "Success",
+            "exit_code": 0,
+            "started_at": "2026-04-17T00:00:00Z",
+            "ended_at": "2026-04-17T00:01:00Z",
+            "duration_ms": 60000,
+            "worktree_path": null,
+            "log_path": run_dir.join("tasks/sublead-planner/stdout.log").to_str(),
+            "token_usage": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0},
+            "claude_session_id": null,
+            "final_message_preview": null,
+            "parent_task_id": "lead",
+            "actor_type": "planner"
+        });
+        let mut jsonl_line = serde_json::to_vec(&sublead_rec).unwrap();
+        jsonl_line.push(b'\n');
+        std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
+
+        let snap = build_snapshot(&run_dir, None);
+        let tile = snap
+            .tasks
+            .iter()
+            .find(|t| t.id == "sublead-planner")
+            .expect("sublead tile missing");
+        assert_eq!(tile.actor_type.as_deref(), Some("planner"));
     }
 
     #[test]

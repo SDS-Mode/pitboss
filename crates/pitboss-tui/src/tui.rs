@@ -1726,9 +1726,69 @@ fn render_detail_metadata(
             theme::muted_style(),
         )));
     }
+    lines.push(Line::from(""));
+
+    // --- MCP servers (capability matrix row for this actor) ---
+    // Picks the row whose `actor_type` matches the focused tile and
+    // lists the MCP server ids pitboss would inject. Falls back to the
+    // untyped row when the tile has no actor_type yet (in-flight,
+    // pre-#252 record, or root lead). Nothing renders when
+    // `resolved.json` declared no MCP servers — common for flat-mode
+    // manifests, no value in showing an empty section. (#391)
+    let matrix_row = matrix_row_for_tile(&state.matrix_rows, tile);
+    if let Some(row) = matrix_row {
+        lines.push(Line::from(Span::styled(
+            "MCP SERVERS",
+            theme::secondary_style().add_modifier(Modifier::BOLD),
+        )));
+        let actor_label = match tile.actor_type.as_deref() {
+            Some(t) => format!("(profile: {t})"),
+            None => "(untyped / root)".to_string(),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {actor_label}"),
+            theme::muted_style(),
+        )));
+        if row.server_ids.is_empty() {
+            lines.push(Line::from(Span::styled("  (none)", theme::muted_style())));
+        } else {
+            for id in &row.server_ids {
+                lines.push(Line::from(Span::styled(
+                    format!("  • {id}"),
+                    theme::muted_style(),
+                )));
+            }
+        }
+    }
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// Pick the matrix row that applies to a given tile.
+///
+/// 1. If the tile has an `actor_type`, find the row whose
+///    `row.actor_type` matches.
+/// 2. Otherwise fall back to the untyped row (the root lead and any
+///    pre-#252 / in-flight tile).
+/// 3. Returns `None` when `matrix_rows` is empty — the caller skips the
+///    section so we don't paint a "(none)" row when the manifest had
+///    no MCP servers to begin with (would surprise operators reading
+///    Detail on a flat-mode run that never declared `[[mcp_server]]`).
+fn matrix_row_for_tile<'a>(
+    rows: &'a [pitboss_cli::capability_matrix::MatrixRow],
+    tile: &crate::state::TileState,
+) -> Option<&'a pitboss_cli::capability_matrix::MatrixRow> {
+    if rows.is_empty() {
+        return None;
+    }
+    if let Some(t) = tile.actor_type.as_deref() {
+        if let Some(row) = rows.iter().find(|r| r.actor_type.as_deref() == Some(t)) {
+            return Some(row);
+        }
+    }
+    rows.iter()
+        .find(|r| matches!(r.kind, pitboss_cli::capability_matrix::RowKind::Untyped))
 }
 
 /// Right-pane scrollable log. Scroll unit is VISUAL ROWS post-wrap, not
@@ -2346,6 +2406,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            actor_type: None,
         }
     }
 
@@ -2381,6 +2442,7 @@ mod tests {
             completed_after_secs: crate::state::COMPLETED_COOLDOWN_DEFAULT_SECS,
             compact_tiles: false,
             focus_lost_notice: None,
+            matrix_rows: Vec::new(),
         }
     }
 
@@ -2563,6 +2625,195 @@ mod tests {
             rendered.contains("first log line"),
             "rendered output should contain log content; got snippet: {:?}",
             &rendered[..rendered.len().min(200)]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // capability matrix lookup + Detail rendering (#391)
+    // -----------------------------------------------------------------------
+
+    fn matrix_row(
+        label: &str,
+        actor_type: Option<&str>,
+        kind: pitboss_cli::capability_matrix::RowKind,
+        servers: &[&str],
+    ) -> pitboss_cli::capability_matrix::MatrixRow {
+        pitboss_cli::capability_matrix::MatrixRow {
+            label: label.to_string(),
+            actor_type: actor_type.map(str::to_string),
+            kind,
+            server_ids: servers.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    /// Tile with `actor_type = Some("writer")` selects the
+    /// `worker_type:writer` row over the untyped one. Pin this so the
+    /// Detail view never silently falls back to untyped when the typed
+    /// row exists.
+    #[test]
+    fn matrix_row_for_tile_picks_typed_row_when_actor_type_matches() {
+        use pitboss_cli::capability_matrix::RowKind;
+        let rows = vec![
+            matrix_row("(untyped / root)", None, RowKind::Untyped, &["pitboss"]),
+            matrix_row(
+                "worker_type:writer",
+                Some("writer"),
+                RowKind::WorkerType,
+                &["pitboss", "fs-writer"],
+            ),
+        ];
+        let mut t = tile("w1", TileStatus::Running, None, 0, 0);
+        t.actor_type = Some("writer".to_string());
+        let picked = matrix_row_for_tile(&rows, &t).expect("expected a row");
+        assert_eq!(picked.actor_type.as_deref(), Some("writer"));
+    }
+
+    /// In-flight tile (no `actor_type` yet) and the root lead both fall back
+    /// to the untyped row. Without this fallback, Detail would render an
+    /// empty MCP-SERVERS section for the lead, which is the operator's
+    /// most common focus.
+    #[test]
+    fn matrix_row_for_tile_falls_back_to_untyped_when_actor_type_is_none() {
+        use pitboss_cli::capability_matrix::RowKind;
+        let rows = vec![
+            matrix_row("(untyped / root)", None, RowKind::Untyped, &["pitboss"]),
+            matrix_row(
+                "worker_type:writer",
+                Some("writer"),
+                RowKind::WorkerType,
+                &["pitboss", "fs-writer"],
+            ),
+        ];
+        let t = tile("lead", TileStatus::Running, None, 0, 0);
+        let picked = matrix_row_for_tile(&rows, &t).expect("expected fallback");
+        assert!(matches!(picked.kind, RowKind::Untyped));
+    }
+
+    /// Empty matrix (resolved.json had no `[[mcp_server]]`) returns `None`
+    /// so the Detail-view caller skips rendering the section entirely.
+    /// Pinning this prevents an "(none)" row from appearing on flat-mode
+    /// runs that never declared MCP servers.
+    #[test]
+    fn matrix_row_for_tile_returns_none_when_matrix_is_empty() {
+        let rows: Vec<pitboss_cli::capability_matrix::MatrixRow> = Vec::new();
+        let t = tile("anything", TileStatus::Running, None, 0, 0);
+        assert!(matrix_row_for_tile(&rows, &t).is_none());
+    }
+
+    /// Detail view renders the MCP-SERVERS section with the focused
+    /// tile's profile label and its admitted server ids. The section
+    /// should be visible without scrolling on a normal-sized terminal.
+    #[test]
+    fn detail_view_renders_mcp_servers_section_for_typed_tile() {
+        use crate::state::Mode;
+        use pitboss_cli::capability_matrix::RowKind;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "writer-1";
+        let mut t = tile(task_id, TileStatus::Running, None, 0, 0);
+        t.actor_type = Some("writer".to_string());
+
+        let mut s = state(vec![t]);
+        s.matrix_rows = vec![
+            matrix_row("(untyped / root)", None, RowKind::Untyped, &["pitboss"]),
+            matrix_row(
+                "worker_type:writer",
+                Some("writer"),
+                RowKind::WorkerType,
+                &["pitboss", "fs-writer"],
+            ),
+        ];
+        s.mode = Mode::Detail {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(Mode::Normal),
+        };
+
+        // Tall terminal so the MCP-SERVERS section lands within the
+        // metadata pane regardless of whether the tile renders all
+        // upstream sections.
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..60)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            rendered.contains("MCP SERVERS"),
+            "MCP SERVERS heading should be visible"
+        );
+        assert!(
+            rendered.contains("profile: writer"),
+            "should show profile label for typed tile"
+        );
+        assert!(
+            rendered.contains("fs-writer"),
+            "writer-scoped server should appear in the list"
+        );
+    }
+
+    /// Untyped path: the lead (and any in-flight tile whose record
+    /// hasn't settled) shows the `(untyped / root)` label and only the
+    /// unscoped servers — not the writer-scoped one. This is the most
+    /// common Detail view operators see in hierarchical runs (the lead
+    /// is the default focus), so pin the rendering separately from the
+    /// typed branch.
+    #[test]
+    fn detail_view_renders_mcp_servers_section_for_lead_under_untyped_row() {
+        use crate::state::Mode;
+        use pitboss_cli::capability_matrix::RowKind;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "lead";
+        // Lead tile has actor_type = None (it's the root, never typed).
+        let t = tile(task_id, TileStatus::Running, None, 0, 0);
+
+        let mut s = state(vec![t]);
+        s.matrix_rows = vec![
+            matrix_row("(untyped / root)", None, RowKind::Untyped, &["pitboss"]),
+            matrix_row(
+                "worker_type:writer",
+                Some("writer"),
+                RowKind::WorkerType,
+                &["pitboss", "fs-writer"],
+            ),
+        ];
+        s.mode = Mode::Detail {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(Mode::Normal),
+        };
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..60)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(rendered.contains("MCP SERVERS"), "heading should appear");
+        assert!(
+            rendered.contains("(untyped / root)"),
+            "lead should render the untyped fallback label"
+        );
+        assert!(
+            rendered.contains("pitboss"),
+            "unscoped server should appear in the list"
+        );
+        assert!(
+            !rendered.contains("fs-writer"),
+            "writer-scoped server must not appear under the untyped row"
         );
     }
 
