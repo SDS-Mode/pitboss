@@ -157,7 +157,15 @@ pub struct ResolvedManifest {
     /// (#377)
     #[serde(default)]
     pub denial_termination_policy: Option<crate::dispatch::state::DenialTerminationPolicy>,
-    #[serde(default)]
+    /// Post-substitution notification configs. Skipped from serde
+    /// (#346) — `apply_env_substitution` expands `${PITBOSS_NOTIFY_*}`
+    /// placeholders into their literal values (Slack tokens, Discord
+    /// webhook ids, `?token=...` query params), and serializing those
+    /// to `resolved.json` would persist secrets to a long-lived
+    /// on-disk artifact. Resume reads `manifest.snapshot.toml` (which
+    /// stores the placeholder form) and re-runs substitution to
+    /// repopulate this field — see [`crate::dispatch::resume`].
+    #[serde(skip)]
     pub notifications: Vec<crate::notify::config::NotificationConfig>,
     #[serde(default)]
     pub dump_shared_store: bool,
