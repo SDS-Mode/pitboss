@@ -215,6 +215,18 @@ fn build_entry(field: &syn::Field) -> syn::Result<Option<TokenStream2>> {
         infer_form_type(&field.ty)
     };
     let form_type_str = form_type.unwrap_or_else(|| inferred.to_string());
+
+    // `enum_select` form-type without `enum_values` produces an empty
+    // dropdown in the wizard at runtime — discoverable only by opening
+    // the manifest wizard. Catch the gap at macro-expand time.
+    if form_type_str == "enum_select" && enum_values.is_empty() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`#[field(form_type = \"enum_select\")]` requires a non-empty \
+             `enum_values = [...]` list; the wizard would render an empty \
+             dropdown otherwise",
+        ));
+    }
     // Required iff (a) not wrapped in Option AND (b) no `#[serde(default)]`
     // / `#[serde(default = "...")]`. The serde-default branch matters for
     // primitives like `bool`/`u32` that have a Rust default but should still

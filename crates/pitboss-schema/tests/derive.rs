@@ -117,3 +117,40 @@ fn combined_default_with_rename_still_optional() {
     let meta = DefaultMixedWithRename::field_metadata();
     assert!(!meta[0].required);
 }
+
+// ── ISSUE-schema-prior-2: enum_select must carry enum_values ───────────
+
+/// Happy-path counterpart to the compile-fail check in the derive: a
+/// field annotated with `form_type = "enum_select"` AND a non-empty
+/// `enum_values = [...]` compiles cleanly and emits the expected
+/// `FormType::EnumSelect` variant with the values on the descriptor.
+#[derive(FieldMetadata)]
+#[allow(dead_code)]
+struct ValidEnumSelect {
+    #[field(form_type = "enum_select", enum_values = ["a", "b", "c"])]
+    color: String,
+}
+
+#[test]
+fn explicit_enum_select_with_values_emits_descriptor() {
+    let meta = ValidEnumSelect::field_metadata();
+    assert_eq!(meta[0].form_type, FormType::EnumSelect);
+    assert_eq!(meta[0].enum_values, &["a", "b", "c"]);
+}
+
+/// `enum_values = [...]` alone (without an explicit `form_type`) infers
+/// `enum_select` — pre-existing behavior at lib.rs:212-216. Pinning the
+/// inference path so the new compile-time guard can't regress it.
+#[derive(FieldMetadata)]
+#[allow(dead_code)]
+struct InferredEnumSelect {
+    #[field(enum_values = ["x", "y"])]
+    mode: String,
+}
+
+#[test]
+fn enum_values_alone_infers_enum_select() {
+    let meta = InferredEnumSelect::field_metadata();
+    assert_eq!(meta[0].form_type, FormType::EnumSelect);
+    assert_eq!(meta[0].enum_values, &["x", "y"]);
+}
