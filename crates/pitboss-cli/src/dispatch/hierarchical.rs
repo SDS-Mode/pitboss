@@ -1473,6 +1473,7 @@ mod mcp_scope_tests {
             args: vec![],
             env: Default::default(),
             scope: scope.map(str::to_string),
+            tools: None,
         }
     }
 

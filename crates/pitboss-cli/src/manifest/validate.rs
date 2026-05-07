@@ -30,6 +30,8 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_actor_types(resolved)?;
     validate_block_untyped_requires_profiles(resolved)?;
     validate_mcp_server_scopes(resolved)?;
+    validate_mcp_server_tools(resolved)?;
+    validate_mcp_tool_consistency(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -183,6 +185,132 @@ fn validate_mcp_server_scopes(r: &ResolvedManifest) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Validate the per-server `[[mcp_server]].tools` allowlist shape
+/// (#391 slice 4 / #397 — Path 2). This is the manifest-time enforcement
+/// half: shape checks only. Runtime enforcement (intersecting with the
+/// actor's `--allowedTools` at spawn time, or denying through Path B's
+/// `permission_prompt`) is a follow-up — see #397.
+///
+/// - Unset → no restriction (the v0.12 default).
+/// - `Some([])` → reject as self-defeating: the operator declared the
+///   `[[mcp_server]]` block then declared zero tools, which is
+///   indistinguishable in intent from "remove the server entirely" but
+///   silent. Force the explicit form.
+/// - Empty / whitespace tool names → reject; would never match a real
+///   tool and likely indicates a typo'd quote pair.
+/// - Duplicate tool names within one server → reject; ambiguous intent
+///   ("did the operator mean to allowlist the tool twice or is one a
+///   typo?") and the dedup would silently lose information either way.
+fn validate_mcp_server_tools(r: &ResolvedManifest) -> Result<()> {
+    for s in &r.mcp_servers {
+        let Some(tools) = s.tools.as_ref() else {
+            continue;
+        };
+        if tools.is_empty() {
+            bail!(
+                "[[mcp_server]].tools on server {:?}: empty list is \
+                 self-defeating (allowlists no tools but keeps the server \
+                 declared). Either remove the [[mcp_server]] block or list \
+                 the tools you want to admit.",
+                s.id
+            );
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for tool in tools {
+            if tool.trim().is_empty() {
+                bail!(
+                    "[[mcp_server]].tools on server {:?}: empty / whitespace \
+                     tool name is not allowed (likely a typo'd quote pair).",
+                    s.id
+                );
+            }
+            if !seen.insert(tool.as_str()) {
+                bail!(
+                    "[[mcp_server]].tools on server {:?}: duplicate tool {:?} \
+                     in allowlist; remove the duplicate so the manifest's \
+                     intent is unambiguous.",
+                    s.id,
+                    tool
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that every actor-declared MCP tool reference is consistent
+/// with the per-server `tools` allowlist (#391 slice 4).
+///
+/// Walks `[lead].tools`, `[[task]].tools`, `[[worker_type]].tools`, and
+/// `[[sublead_type]].tools`. For any entry of the form
+/// `mcp__<server>__<tool>`, if `<server>` is declared with a `tools`
+/// allowlist, `<tool>` must appear in that allowlist. Otherwise reject
+/// with a message naming both the actor surface and the offending
+/// allowlist — operators see exactly which line to fix.
+///
+/// Tool names that don't parse as `mcp__<known-server>__*` are skipped
+/// (they're top-level claude tools or references to undeclared servers,
+/// neither of which this gate constrains). Server-id matching uses
+/// longest-prefix-match so server ids containing underscores parse
+/// unambiguously.
+fn validate_mcp_tool_consistency(r: &ResolvedManifest) -> Result<()> {
+    // Collect (id, allowlist) pairs once. Sort by descending id length so
+    // longest-prefix-match resolves `mcp__some_server__some_tool` correctly
+    // when both `some` and `some_server` are declared servers.
+    let mut servers: Vec<(&str, Option<&[String]>)> = r
+        .mcp_servers
+        .iter()
+        .map(|s| (s.id.as_str(), s.tools.as_deref()))
+        .collect();
+    servers.sort_by_key(|(id, _)| std::cmp::Reverse(id.len()));
+
+    let mut surfaces: Vec<(String, &[String])> = Vec::new();
+    if let Some(lead) = &r.lead {
+        surfaces.push(("[lead].tools".to_string(), &lead.tools));
+    }
+    for t in &r.tasks {
+        surfaces.push((format!("[[task]] {:?}.tools", t.id), &t.tools));
+    }
+    for wt in &r.worker_types {
+        surfaces.push((format!("[[worker_type]] {:?}.tools", wt.id), &wt.tools));
+    }
+    for st in &r.sublead_types {
+        surfaces.push((format!("[[sublead_type]] {:?}.tools", st.id), &st.tools));
+    }
+
+    for (surface, tools) in surfaces {
+        for entry in tools {
+            let Some(rest) = entry.strip_prefix("mcp__") else {
+                continue;
+            };
+            // Find the longest declared server id that is a prefix of
+            // `rest` followed by `__`. Skips entries referencing
+            // undeclared servers — those don't match the gate by design.
+            let Some((server_id, allowlist)) = servers
+                .iter()
+                .find(|(id, _)| rest.starts_with(id) && rest[id.len()..].starts_with("__"))
+                .map(|(id, allow)| (*id, *allow))
+            else {
+                continue;
+            };
+            let Some(allow) = allowlist else {
+                continue;
+            };
+            let tool_name = &rest[server_id.len() + 2..];
+            if !allow.iter().any(|t| t == tool_name) {
+                bail!(
+                    "{surface}: tool {entry:?} references mcp_server {server_id:?} \
+                     which declares tools = {allow:?}. Tool {tool_name:?} is \
+                     not in that allowlist. Either add {tool_name:?} to the \
+                     server's `tools = […]`, remove the entry from {surface}, \
+                     or drop the server's `tools` allowlist."
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2010,6 +2138,7 @@ mod tests {
             args: vec![],
             env: Default::default(),
             scope: scope.map(str::to_string),
+            tools: None,
         }
     }
 
@@ -2089,6 +2218,170 @@ mod tests {
         });
         validate_skip_dir_check(&r)
             .expect("unscoped server is the legacy default and must validate");
+    }
+
+    // ---- per-server [[mcp_server]].tools allowlist (#391 slice 4) -------
+
+    fn mcp_with_tools(id: &str, tools: Vec<&str>) -> crate::manifest::schema::McpServerSpec {
+        crate::manifest::schema::McpServerSpec {
+            id: id.into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            env: Default::default(),
+            scope: None,
+            tools: Some(tools.into_iter().map(String::from).collect()),
+        }
+    }
+
+    /// `tools = []` is self-defeating: the operator declared the server
+    /// then forbade every tool. Force the explicit form (remove the
+    /// block) so the manifest's intent is unambiguous.
+    #[test]
+    fn rejects_mcp_server_tools_empty_list() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools("ctx", vec![])];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("self-defeating"), "{err}");
+        assert!(err.contains("ctx"), "{err}");
+    }
+
+    /// Empty / whitespace tool names are almost always typos and would
+    /// silently match nothing at runtime. Reject loudly.
+    #[test]
+    fn rejects_mcp_server_tools_blank_entry() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools("ctx", vec!["read_file", "  "])];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("empty / whitespace"), "{err}");
+    }
+
+    /// Duplicates in the allowlist mask intent: did the operator mean
+    /// to list the tool twice or is one a typo? Reject so they decide.
+    #[test]
+    fn rejects_mcp_server_tools_duplicate() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools(
+                "ctx",
+                vec!["read_file", "write_file", "read_file"],
+            )];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "{err}");
+        assert!(err.contains("read_file"), "{err}");
+    }
+
+    /// A non-empty, distinct allowlist with no actor surfaces yet
+    /// referencing it must validate cleanly. Pin so the shape checks
+    /// don't accidentally over-reject the happy path.
+    #[test]
+    fn accepts_mcp_server_tools_well_formed() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools("ctx", vec!["read_file", "write_file"])];
+        });
+        validate_skip_dir_check(&r).expect("declared, non-empty, distinct allowlist must validate");
+    }
+
+    /// Consistency check: when an actor surface declares
+    /// `mcp__<server>__<tool>` and the server has an allowlist, `<tool>`
+    /// must appear in it. This is the manifest-time enforcement Path 2
+    /// promises (#397). Tested via worker_type since it's the most
+    /// common case.
+    #[test]
+    fn rejects_worker_type_tool_not_in_mcp_server_allowlist() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools("fs", vec!["read_file"])];
+            m.worker_types = vec![WorkerType {
+                id: "writer".into(),
+                tools: vec!["mcp__fs__write_file".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("write_file"), "{err}");
+        assert!(err.contains("worker_type"), "{err}");
+        assert!(err.contains("\"fs\""), "{err}");
+    }
+
+    /// Same gate, but matching: the worker_type's tool IS in the
+    /// allowlist. Validate must accept.
+    #[test]
+    fn accepts_worker_type_tool_in_mcp_server_allowlist() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools("fs", vec!["read_file", "write_file"])];
+            m.worker_types = vec![WorkerType {
+                id: "writer".into(),
+                tools: vec!["mcp__fs__write_file".into(), "Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        validate_skip_dir_check(&r)
+            .expect("worker_type tool listed in mcp_server allowlist must validate");
+    }
+
+    /// Server ids with underscores parse correctly:
+    /// `mcp__fs_writer__read` must resolve to server `fs_writer` +
+    /// tool `read`, not server `fs` + tool `writer__read`.
+    /// Longest-prefix-match in the validator guards this.
+    #[test]
+    fn consistency_check_resolves_server_ids_with_underscores() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![
+                mcp_with_tools("fs", vec!["never_called"]),
+                mcp_with_tools("fs_writer", vec!["read_file"]),
+            ];
+            m.worker_types = vec![WorkerType {
+                id: "writer".into(),
+                tools: vec!["mcp__fs_writer__read_file".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        validate_skip_dir_check(&r).expect(
+            "longest-prefix-match must resolve `mcp__fs_writer__read_file` to server `fs_writer`, \
+             not `fs`",
+        );
+    }
+
+    /// Tool entries referencing servers without an allowlist must NOT
+    /// trip the consistency check — the gate only constrains servers
+    /// that opted into the allowlist surface.
+    #[test]
+    fn consistency_check_skips_servers_without_allowlist() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp("fs", None)];
+            m.worker_types = vec![WorkerType {
+                id: "writer".into(),
+                tools: vec!["mcp__fs__anything".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        validate_skip_dir_check(&r)
+            .expect("servers without an allowlist must not constrain actor tool entries");
+    }
+
+    /// `[lead].tools` is also subject to the consistency check.
+    /// Operators using a typed lead with declared MCP servers expect
+    /// the same validate-time guarantee as workers/subleads.
+    #[test]
+    fn rejects_lead_tool_not_in_mcp_server_allowlist() {
+        let r = rm_with(|m| {
+            m.mcp_servers = vec![mcp_with_tools("fs", vec!["read_file"])];
+            if let Some(lead) = m.lead.as_mut() {
+                lead.tools = vec!["mcp__fs__write_file".into()];
+            }
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("write_file"), "{err}");
+        assert!(err.contains("[lead]"), "{err}");
     }
 
     /// Path B + zero profiles ⇒ migration warning fires. Pure check on
