@@ -27,6 +27,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_lifecycle(resolved)?;
     validate_container(resolved)?;
     validate_communication(resolved)?;
+    validate_actor_types(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -39,6 +40,89 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         validate_branch_conflicts(resolved)?;
         validate_ranges(resolved)?;
     }
+    Ok(())
+}
+
+/// Validate `[[worker_type]]` / `[[sublead_type]]` profile invariants.
+///
+/// - `id` must match `^[A-Za-z0-9_-]+$`. The id appears in error
+///   messages returned to the model and in `summary.jsonl`; restricting
+///   to a portable charset avoids quoting puzzles in both surfaces.
+/// - Ids must be unique within their kind (worker_type / sublead_type).
+///   A duplicate would silently shadow the earlier definition since
+///   the lookup is "first match wins"; rejecting at validate time
+///   surfaces the typo loudly.
+/// - `require_actor_type = true` requires AT LEAST ONE profile of the
+///   relevant kind to exist (otherwise the run can spawn nothing).
+///   Flat-mode ignores both surfaces — profiles only apply to the
+///   hierarchical spawn path.
+///
+/// (#252)
+fn validate_actor_types(r: &ResolvedManifest) -> Result<()> {
+    fn is_valid_id(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    let mut worker_ids: HashSet<&str> = HashSet::new();
+    for wt in &r.worker_types {
+        if !is_valid_id(&wt.id) {
+            bail!(
+                "[[worker_type]].id {:?}: must match ^[A-Za-z0-9_-]+$ \
+                 (allowed: ASCII alphanumeric, underscore, hyphen)",
+                wt.id
+            );
+        }
+        if !worker_ids.insert(&wt.id) {
+            bail!(
+                "[[worker_type]].id {:?}: duplicate; ids must be unique \
+                 within `[[worker_type]]` (the lookup is first-match-wins, \
+                 a duplicate would silently shadow the earlier entry)",
+                wt.id
+            );
+        }
+    }
+
+    let mut sublead_ids: HashSet<&str> = HashSet::new();
+    for st in &r.sublead_types {
+        if !is_valid_id(&st.id) {
+            bail!(
+                "[[sublead_type]].id {:?}: must match ^[A-Za-z0-9_-]+$ \
+                 (allowed: ASCII alphanumeric, underscore, hyphen)",
+                st.id
+            );
+        }
+        if !sublead_ids.insert(&st.id) {
+            bail!(
+                "[[sublead_type]].id {:?}: duplicate; ids must be unique \
+                 within `[[sublead_type]]`",
+                st.id
+            );
+        }
+    }
+
+    if r.require_actor_type {
+        // The flag is only meaningful in hierarchical mode (it gates
+        // spawn_worker / spawn_sublead). In flat mode the flag is
+        // inert — we don't reject it, but we do warn so an operator
+        // who set it expecting any effect notices.
+        if r.lead.is_none() {
+            tracing::warn!(
+                "[run].require_actor_type = true is ignored in flat mode \
+                 (no [lead] declared); the flag only applies to hierarchical \
+                 spawn_worker / spawn_sublead calls"
+            );
+        } else if r.worker_types.is_empty() && r.sublead_types.is_empty() {
+            bail!(
+                "[run].require_actor_type = true but no `[[worker_type]]` \
+                 or `[[sublead_type]]` declared; the flag would reject every \
+                 spawn call. Declare at least one profile or set \
+                 require_actor_type = false."
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -632,6 +716,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         }
     }
 
@@ -663,6 +750,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         f(&mut m);
         m
@@ -750,6 +840,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -784,6 +877,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         assert!(validate(&r).is_err());
     }
@@ -814,6 +910,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         assert!(validate(&r).is_err());
     }
@@ -858,6 +957,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         }
     }
 
@@ -954,6 +1056,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         (d, r)
     }
@@ -1070,6 +1175,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");
@@ -1125,6 +1233,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -1161,6 +1272,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         assert!(validate(&r).is_err());
     }
@@ -1368,6 +1482,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         // Sanity: with skip_dir_check=false the validator rejects (the
         // host-side path is bogus).
@@ -1557,6 +1674,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         validate(&r).expect("path_b must validate (in soak); pre-#368 this bailed");
     }
@@ -1590,7 +1710,177 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         validate(&r).expect("path_a is the default and must validate");
+    }
+
+    #[test]
+    fn rejects_invalid_worker_type_id_chars() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.worker_types = vec![WorkerType {
+                id: "bad id!".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("worker_type"), "{err}");
+        assert!(err.contains("^[A-Za-z0-9_-]+$"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_worker_type_ids() {
+        use crate::manifest::schema::WorkerType;
+        let r = rm_with(|m| {
+            m.worker_types = vec![
+                WorkerType {
+                    id: "extraction".into(),
+                    tools: vec!["Read".into()],
+                    allowed_models: vec![],
+                    max_timeout_secs: None,
+                },
+                WorkerType {
+                    id: "extraction".into(),
+                    tools: vec!["Write".into()],
+                    allowed_models: vec![],
+                    max_timeout_secs: None,
+                },
+            ];
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "{err}");
+        assert!(err.contains("extraction"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_sublead_type_ids() {
+        use crate::manifest::schema::SubleadType;
+        let r = rm_with(|m| {
+            m.sublead_types = vec![
+                SubleadType {
+                    id: "planner".into(),
+                    tools: vec![],
+                    allowed_models: vec![],
+                    max_timeout_secs: None,
+                    max_budget_usd: None,
+                },
+                SubleadType {
+                    id: "planner".into(),
+                    tools: vec![],
+                    allowed_models: vec![],
+                    max_timeout_secs: None,
+                    max_budget_usd: None,
+                },
+            ];
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "{err}");
+        assert!(err.contains("planner"), "{err}");
+    }
+
+    #[test]
+    fn rejects_require_actor_type_with_no_profiles() {
+        let r = rm_with(|m| {
+            m.require_actor_type = true;
+        });
+        let err = validate(&r).unwrap_err().to_string();
+        assert!(err.contains("require_actor_type"), "{err}");
+        assert!(err.contains("no `[[worker_type]]`"), "{err}");
+    }
+
+    #[test]
+    fn accepts_require_actor_type_with_at_least_one_profile() {
+        use crate::manifest::schema::WorkerType;
+        // Bind the tempdir at test scope so the lead's directory survives
+        // the validate(&r) call — rm_with drops its own tempdir on return,
+        // which would trip validate_lead's directory check.
+        let d = with_tmp_repo(true);
+        let mut m = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(rl("lead", d.path().to_path_buf())),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
+        };
+        m.require_actor_type = true;
+        m.worker_types = vec![WorkerType {
+            id: "extraction".into(),
+            tools: vec!["Read".into()],
+            allowed_models: vec![],
+            max_timeout_secs: None,
+        }];
+        validate(&m).expect("require_actor_type with profile must validate");
+    }
+
+    #[test]
+    fn accepts_typed_profiles_without_require_flag() {
+        use crate::manifest::schema::{SubleadType, WorkerType};
+        let d = with_tmp_repo(true);
+        let mut m = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(rl("lead", d.path().to_path_buf())),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
+        };
+        m.worker_types = vec![WorkerType {
+            id: "extraction".into(),
+            tools: vec!["Read".into(), "Glob".into()],
+            allowed_models: vec!["claude-haiku-4-5".into()],
+            max_timeout_secs: Some(900),
+        }];
+        m.sublead_types = vec![SubleadType {
+            id: "planner".into(),
+            tools: vec!["Read".into()],
+            allowed_models: vec!["claude-opus-4-7".into()],
+            max_timeout_secs: Some(1800),
+            max_budget_usd: Some(2.0),
+        }];
+        validate(&m).expect("declared profiles without require flag must validate");
     }
 }

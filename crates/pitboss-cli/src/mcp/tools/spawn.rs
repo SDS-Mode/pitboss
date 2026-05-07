@@ -115,6 +115,41 @@ pub async fn handle_spawn_worker(
         }
     }
 
+    // Guard 2a: resolve typed worker profile (#252). Profiles live on the
+    // root manifest (run-global), not per-layer. Sub-lead spawns look up
+    // the same `[[worker_type]]` table as root spawns.
+    //
+    // Returns `Typed(profile)` for further enforcement, or `Untyped` for
+    // the back-compat path (no profile arg + require_actor_type = false).
+    // An unknown id, or a type-less call under `require_actor_type = true`,
+    // bails here before any state mutation — operators see a clear
+    // "spawn_worker rejected: ..." in the lead's session.
+    let root_manifest = &state.root.manifest;
+    let profile_resolution = crate::manifest::actor_type::resolve_worker_profile(
+        args.worker_type.as_deref(),
+        &root_manifest.worker_types,
+        root_manifest.require_actor_type,
+    )?;
+
+    // When typed, validate the lead's `tools` arg is a subset of the
+    // profile allowlist. Omitted `tools` is allowed: the spawn gets the
+    // profile's full allowlist verbatim (per #252 — explicit, not the
+    // legacy `[lead].tools` cascade).
+    let resolved_worker_type_id: Option<String> = match &profile_resolution {
+        crate::manifest::actor_type::WorkerProfileResolution::Typed(p) => {
+            if let Some(requested) = args.tools.as_deref() {
+                crate::manifest::actor_type::check_tool_subset(
+                    "spawn_worker",
+                    &p.id,
+                    &p.tools,
+                    requested,
+                )?;
+            }
+            Some(p.id.clone())
+        }
+        crate::manifest::actor_type::WorkerProfileResolution::Untyped => None,
+    };
+
     // Resolve the worker's model up-front so the budget guard can price it.
     let lead = target_layer.manifest.lead.as_ref();
     let worker_model = args
@@ -122,6 +157,20 @@ pub async fn handle_spawn_worker(
         .clone()
         .or_else(|| lead.map(|l| l.model.clone()))
         .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+
+    // When typed, the resolved model must be in the profile's
+    // `allowed_models` (when non-empty). Empty allowed_models = no
+    // restriction. We validate AFTER the cascade because the lead may
+    // have omitted `model` and inherited from `[lead].model` — that
+    // inherited value still has to satisfy the cap.
+    if let crate::manifest::actor_type::WorkerProfileResolution::Typed(p) = &profile_resolution {
+        crate::manifest::actor_type::check_model_allowed(
+            "spawn_worker",
+            &p.id,
+            &p.allowed_models,
+            &worker_model,
+        )?;
+    }
 
     let task_id = format!("worker-{}", Uuid::now_v7());
 
@@ -261,17 +310,36 @@ pub async fn handle_spawn_worker(
 
     // Resolve tools, timeout: per-args override -> lead defaults -> fallback.
     // (worker_model was resolved above for the budget guard.)
-    let worker_tools = args
-        .tools
-        .clone()
-        .or_else(|| lead.map(|l| l.tools.clone()))
-        .or_else(|| root_lead.map(|l| l.tools.clone()))
-        .unwrap_or_default();
-    let worker_timeout_secs = args
+    //
+    // When a `[[worker_type]]` profile is in effect (#252), it overrides
+    // the legacy cascade:
+    //   - tools: lead's `args.tools` if set (already validated as a
+    //     subset above), else the profile's full allowlist.
+    //   - timeout_secs: clamped DOWN to `profile.max_timeout_secs` after
+    //     the cascade resolves.
+    let worker_tools: Vec<String> = match &profile_resolution {
+        crate::manifest::actor_type::WorkerProfileResolution::Typed(p) => {
+            match args.tools.clone() {
+                Some(requested) => requested,
+                None => p.tools.clone(),
+            }
+        }
+        crate::manifest::actor_type::WorkerProfileResolution::Untyped => args
+            .tools
+            .clone()
+            .or_else(|| lead.map(|l| l.tools.clone()))
+            .or_else(|| root_lead.map(|l| l.tools.clone()))
+            .unwrap_or_default(),
+    };
+    let mut worker_timeout_secs = args
         .timeout_secs
         .or_else(|| lead.map(|l| l.timeout_secs))
         .or_else(|| root_lead.map(|l| l.timeout_secs))
         .unwrap_or(3600);
+    if let crate::manifest::actor_type::WorkerProfileResolution::Typed(p) = &profile_resolution {
+        worker_timeout_secs =
+            crate::manifest::actor_type::clamp_down_u64(worker_timeout_secs, p.max_timeout_secs);
+    }
     let worker_branch = args.branch.clone();
     // Mirror the directory cascade: target lead → root lead → default(true).
     // Without the root-lead step, sub-lead workers always made a worktree
@@ -297,6 +365,7 @@ pub async fn handle_spawn_worker(
     let lead_id_bg = target_layer.lead_id.clone();
     let prompt_bg = args.prompt.clone();
 
+    let worker_type_id_bg = resolved_worker_type_id.clone();
     tokio::spawn(async move {
         run_worker(
             state_bg,
@@ -311,6 +380,7 @@ pub async fn handle_spawn_worker(
             worker_timeout_secs,
             worker_use_worktree,
             worker_cancel_bg,
+            worker_type_id_bg,
         )
         .await;
     });
@@ -337,6 +407,7 @@ async fn run_worker(
     timeout_secs: u64,
     use_worktree: bool,
     cancel: pitboss_core::session::CancelToken,
+    actor_type: Option<String>,
 ) {
     use chrono::Utc;
     use pitboss_core::process::SpawnCmd;
@@ -397,6 +468,7 @@ async fn run_worker(
                     model: Some(model.clone()),
                     failure_reason: None,
                     cost_usd,
+                    actor_type: actor_type.clone(),
                 };
                 let _ = layer.store.append_record(layer.run_id, &rec).await;
                 layer
@@ -638,6 +710,7 @@ async fn run_worker(
         model: Some(model.clone()),
         failure_reason,
         cost_usd,
+        actor_type: actor_type.clone(),
     };
 
     // Persist record.
@@ -1084,6 +1157,11 @@ pub async fn spawn_resume_worker(
                 Some(&stderr_path),
             ),
             cost_usd,
+            // TODO(#252 Phase 1.5): plumb actor_type through resume so a
+            // continue/reprompt of a typed worker keeps its profile
+            // attribution on the appended record. For now Phase 1 drops it
+            // on resume — the original spawn record retains the type.
+            actor_type: None,
         };
         let _ = layer_bg.store.append_record(layer_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {

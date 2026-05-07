@@ -105,6 +105,10 @@ pub struct SubleadSpawnRequest {
     /// `pitboss resume` seeds `/resume/subleads` in the shared store with
     /// prior session IDs. `None` for fresh spawns.
     pub resume_session_id: Option<String>,
+    /// Resolved `[[sublead_type]]` id (#252). Persisted on the sub-lead's
+    /// TaskRecord so consumers can attribute the actor to its profile.
+    /// `None` for untyped spawns.
+    pub sublead_type: Option<String>,
 }
 
 /// Validated, defaults-applied resource envelope for a sub-lead spawn.
@@ -380,6 +384,7 @@ pub async fn spawn_sublead(
             req.env,
             req.tools,
             req.resume_session_id,
+            req.sublead_type,
         )
         .await
         .context("sub-lead claude session spawn failed")?;
@@ -467,6 +472,7 @@ async fn spawn_sublead_session(
     operator_env: std::collections::HashMap<String, String>,
     tools_override: Vec<String>,
     resume_session_id: Option<String>,
+    sublead_type: Option<String>,
 ) -> Result<()> {
     use crate::dispatch::hierarchical::build_sublead_mcp_config;
     use crate::dispatch::runner::sublead_spawn_args;
@@ -624,6 +630,9 @@ async fn spawn_sublead_session(
     // Unknown failure, the operator gets a hint pointing at the session
     // id rather than a bare excerpt.
     let resume_session_id_bg = resume_session_id.clone();
+    // Captured for the sub-lead's TaskRecord so consumers can attribute
+    // the actor to its `[[sublead_type]]` profile (#252).
+    let sublead_type_bg = sublead_type.clone();
 
     tokio::spawn(async move {
         // Run the kill+resume loop via the shared helper. The closure
@@ -795,6 +804,7 @@ async fn spawn_sublead_session(
                 }
             }),
             cost_usd,
+            actor_type: sublead_type_bg.clone(),
         };
         if let Err(e) = sub_layer_bg
             .store

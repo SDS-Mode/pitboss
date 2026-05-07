@@ -351,6 +351,47 @@ All declared servers are injected into all actors (scope = all). Per-actor scopi
 
 **Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
 
+### `[[worker_type]]` / `[[sublead_type]]` (v0.12+, typed actor profiles)
+
+Declare per-class capability caps that the dispatcher enforces at spawn time. The lead can never widen these caps — `tools` arg must be a subset of the profile's allowlist; `model` must be in `allowed_models` (when set); `timeout_secs` / `budget_usd` only clamp DOWN. (#252)
+
+```toml
+[[worker_type]]
+id               = "extraction"
+tools            = ["Read", "Glob", "Grep"]
+allowed_models   = ["claude-haiku-4-5", "claude-sonnet-4-6"]
+max_timeout_secs = 900
+
+[[worker_type]]
+id    = "writer"
+tools = ["Read", "Glob", "Grep", "Write"]
+
+[[sublead_type]]
+id              = "planner"
+tools           = ["Read", "Glob", "Grep"]
+allowed_models  = ["claude-opus-4-7"]
+max_budget_usd  = 2.00
+```
+
+The `spawn_worker` and `spawn_sublead` MCP tools gain optional `worker_type` / `sublead_type` args. **Naming a profile overrides the legacy `[lead].tools` cascade** for that spawn — the manifest profile is the single source of truth for capability:
+
+1. Unknown id → spawn rejected at the dispatcher.
+2. `tools` arg must be a **subset** of the profile's allowlist — any tool not in the allowlist rejects the spawn with `denied: tool 'X' is not in worker_type 'Y' allowlist`.
+3. When `tools` is omitted, the spawn gets the profile's full allowlist verbatim — NOT the legacy `[lead].tools` cascade. Untyped spawns continue to follow the cascade unchanged.
+4. `model` must be in `allowed_models` when non-empty (empty = unrestricted).
+5. `timeout_secs` is clamped DOWN to `max_timeout_secs`; smaller values pass through.
+6. `[[sublead_type]]` additionally clamps `budget_usd` down to `max_budget_usd`.
+
+Set `[run].require_actor_type = true` to make every `spawn_worker` / `spawn_sublead` call REQUIRE a profile arg — type-less spawns are rejected. The flag is inert in flat mode (warning logged at validate time).
+
+The resolved profile id is persisted to each `TaskRecord.actor_type`, surfaced in `summary.json` / `summary.jsonl` so the TUI, `pitboss-web`, and `pitboss status` can group actors by class without re-deriving from the manifest snapshot.
+
+**v0.12 limitations (Phase 1, follow-ups in #252 backlog):**
+- Per-actor MCP server scoping (`[[mcp_server].scope = "type:<id>"`) is deferred.
+- Resumed workers (`continue_worker` / `reprompt_worker`) drop `actor_type` on the appended record; the original spawn's record retains the type.
+- Synthesized cancellation records on lead-exit cleanup also drop `actor_type`.
+- SQLite-backed runs lose `actor_type` on round-trip (JsonFileStore preserves it).
+
 ### `[communication]` (v0.10+, opt-in)
 
 Declares the policy for the Pitboss-owned mailbox + artifact MCP tools.

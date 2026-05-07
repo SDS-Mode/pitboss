@@ -31,6 +31,7 @@ default_approval_policy = "block"
 denial_termination_policy = "adapt"
 dump_shared_store = false
 require_plan_approval = false
+require_actor_type = false
 
 [defaults]
 model = "<value>"
@@ -104,6 +105,19 @@ id = "<value>"
 command = "<value>"
 args = []
 env = { EXAMPLE_KEY = "value" }
+
+[[worker_type]]
+id = "<value>"
+tools = []
+allowed_models = []
+max_timeout_secs = 0
+
+[[sublead_type]]
+id = "<value>"
+tools = []
+allowed_models = []
+max_timeout_secs = 0
+max_budget_usd = 0.0
 
 [communication]
 mode = "disabled"

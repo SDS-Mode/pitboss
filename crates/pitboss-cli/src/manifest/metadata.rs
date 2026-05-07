@@ -14,7 +14,7 @@ use pitboss_schema::SchemaSection;
 
 use super::schema::{
     ApprovalRuleSpec, CommunicationConfig, ContainerConfig, Defaults, Lead, Lifecycle,
-    McpServerSpec, MountSpec, RunConfig, SubleadDefaults, Task, Template,
+    McpServerSpec, MountSpec, RunConfig, SubleadDefaults, SubleadType, Task, Template, WorkerType,
 };
 
 /// Walk every section of the v0.9 manifest schema in declaration order.
@@ -68,6 +68,16 @@ pub fn sections() -> Vec<SchemaSection> {
             toml_path: "[[mcp_server]]",
             type_name: "McpServerSpec",
             fields: McpServerSpec::field_metadata(),
+        },
+        SchemaSection {
+            toml_path: "[[worker_type]]",
+            type_name: "WorkerType",
+            fields: WorkerType::field_metadata(),
+        },
+        SchemaSection {
+            toml_path: "[[sublead_type]]",
+            type_name: "SubleadType",
+            fields: SubleadType::field_metadata(),
         },
         SchemaSection {
             toml_path: "[communication]",

@@ -107,6 +107,12 @@ pub struct TaskRecord {
     /// retroactively rewrite historical records.
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    /// Resolved `[[worker_type]]` id at spawn time, or `None` when the
+    /// spawn was untyped or the record is from a pre-v0.12 run. Lets the
+    /// TUI / `pitboss status` / `pitboss-web` group workers by class
+    /// without re-deriving from the manifest snapshot. Added with #252.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +188,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: Some(0.0234),
+            actor_type: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&json).unwrap();
@@ -214,6 +221,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("parent_task_id"));
@@ -277,6 +285,7 @@ mod tests {
             model: Some("claude-opus-4-7".into()),
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("claude-opus-4-7"));
@@ -395,6 +404,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&s).unwrap();
@@ -477,6 +487,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&s).unwrap();

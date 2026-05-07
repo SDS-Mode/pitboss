@@ -62,6 +62,15 @@ pub struct SpawnWorkerArgs {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional `[[worker_type]]` id. When set, the dispatcher resolves
+    /// the named profile and enforces its caps (tools subset, model
+    /// allowlist, timeout clamp) before spawning. Unknown id → reject.
+    /// When `[run].require_actor_type = true` this field is REQUIRED.
+    /// When omitted on a manifest that *does* declare profiles but
+    /// doesn't require them, the spawn falls through to the legacy
+    /// `[lead].tools` cascade — preserving v0.11 behavior. (#252)
+    #[serde(default)]
+    pub worker_type: Option<String>,
     /// Caller identity injected by mcp-bridge. Used to route the new worker
     /// into the caller's layer (sub-lead callers land in their sub-tree;
     /// root-lead callers land in root). Absent for v0.5 back-compat callers —

@@ -71,6 +71,12 @@ struct SpawnSubleadRequest {
     /// that omit this field get a fresh sub-lead session (default behavior).
     #[serde(default)]
     resume_session_id: Option<String>,
+    /// Optional `[[sublead_type]]` id (#252). When set, the dispatcher
+    /// enforces the named profile's caps (tools subset, model allowlist,
+    /// budget/timeout clamps) before launching the sub-tree. Required
+    /// when `[run].require_actor_type = true`.
+    #[serde(default)]
+    sublead_type: Option<String>,
     /// Caller identity injected by mcp-bridge (actor_id + actor_role).
     #[serde(rename = "_meta", default)]
     #[schemars(skip)]
@@ -499,6 +505,10 @@ impl PitbossHandler {
     ) -> Result<CallToolResult, ErrorData> {
         use crate::dispatch::depth;
         use crate::dispatch::sublead::{spawn_sublead as do_spawn, SubleadSpawnRequest};
+        use crate::manifest::actor_type::{
+            check_model_allowed, check_tool_subset, clamp_down_f64, clamp_down_u64,
+            resolve_sublead_profile, SubleadProfileResolution,
+        };
 
         // Depth-2 invariants are owned by `dispatch::depth`. Two distinct
         // checks: (1) manifest opt-in (`allow_subleads = true`), the
@@ -508,17 +518,57 @@ impl PitbossHandler {
             .map_err(|e| ErrorData::invalid_request(e.to_string(), None))?;
         extract_and_check_root_lead(&req.meta)?;
 
+        // #252: resolve typed sub-lead profile and enforce caps before
+        // mutating sub-tree state. Mirrors `handle_spawn_worker`'s
+        // approach: unknown id and "required but missing" reject up
+        // front; tools subset and model-allowlist enforced when typed;
+        // budget and timeout clamp downward only.
+        let manifest = &self.state.root.manifest;
+        let profile = resolve_sublead_profile(
+            req.sublead_type.as_deref(),
+            &manifest.sublead_types,
+            manifest.require_actor_type,
+        )
+        .map_err(|e| ErrorData::invalid_request(e.to_string(), None))?;
+
+        let (resolved_tools, resolved_budget, resolved_timeout, resolved_type_id) = match &profile {
+            SubleadProfileResolution::Typed(p) => {
+                if !req.tools.is_empty() {
+                    check_tool_subset("spawn_sublead", &p.id, &p.tools, &req.tools)
+                        .map_err(|e| ErrorData::invalid_request(e.to_string(), None))?;
+                }
+                check_model_allowed("spawn_sublead", &p.id, &p.allowed_models, &req.model)
+                    .map_err(|e| ErrorData::invalid_request(e.to_string(), None))?;
+                let tools = if req.tools.is_empty() {
+                    p.tools.clone()
+                } else {
+                    req.tools.clone()
+                };
+                let budget = clamp_down_f64(req.budget_usd, p.max_budget_usd);
+                let timeout = req
+                    .lead_timeout_secs
+                    .map(|t| clamp_down_u64(t, p.max_timeout_secs));
+                (tools, budget, timeout, Some(p.id.clone()))
+            }
+            SubleadProfileResolution::Untyped => (
+                req.tools.clone(),
+                req.budget_usd,
+                req.lead_timeout_secs,
+                None,
+            ),
+        };
         let spawn_req = SubleadSpawnRequest {
             prompt: req.prompt,
             model: req.model,
-            budget_usd: req.budget_usd,
+            budget_usd: resolved_budget,
             max_workers: req.max_workers,
-            lead_timeout_secs: req.lead_timeout_secs,
+            lead_timeout_secs: resolved_timeout,
             initial_ref: req.initial_ref,
             read_down: req.read_down,
             env: req.env,
-            tools: req.tools,
+            tools: resolved_tools,
             resume_session_id: req.resume_session_id,
+            sublead_type: resolved_type_id,
         };
 
         match do_spawn(&self.state, spawn_req).await {
@@ -1652,6 +1702,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1739,6 +1792,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1820,6 +1876,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();
@@ -1968,6 +2027,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
         let run_id = Uuid::now_v7();

@@ -213,6 +213,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         }
     }
 

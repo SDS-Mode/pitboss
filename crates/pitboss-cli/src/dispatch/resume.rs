@@ -370,6 +370,7 @@ mod tests {
                 model: None,
                 failure_reason: None,
                 cost_usd: None,
+                actor_type: None,
             })
             .collect();
 
@@ -613,6 +614,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -643,6 +647,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
@@ -728,6 +733,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -761,6 +769,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
@@ -846,6 +855,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -875,6 +887,7 @@ mod tests {
             model: None,
             failure_reason: None,
             cost_usd: None,
+            actor_type: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),

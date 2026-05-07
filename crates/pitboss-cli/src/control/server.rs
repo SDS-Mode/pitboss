@@ -1270,6 +1270,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1749,6 +1752,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2235,6 +2241,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2345,6 +2354,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2470,6 +2482,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2523,6 +2538,7 @@ mod tests {
                 model: None,
                 failure_reason: None,
                 cost_usd: None,
+                actor_type: None,
             }),
         );
         state
@@ -2607,6 +2623,9 @@ mod tests {
             mcp_servers: vec![],
             communication: Default::default(),
             lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
