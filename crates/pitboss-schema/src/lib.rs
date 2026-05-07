@@ -39,6 +39,26 @@
 
 pub use pitboss_schema_derive::FieldMetadata;
 
+/// Compile-fail coverage for ISSUE-schema-prior-2: a field annotated
+/// with `form_type = "enum_select"` but no `enum_values` must be a hard
+/// compile error from the derive. Pre-fix this compiled silently and
+/// the manifest wizard rendered an empty dropdown at runtime.
+///
+/// Lives as a `compile_fail` doctest rather than a `trybuild` test to
+/// avoid pulling in a dev-dep for one negative case.
+///
+/// ```compile_fail
+/// use pitboss_schema::FieldMetadata;
+///
+/// #[derive(FieldMetadata)]
+/// struct BadEnumSelect {
+///     #[field(form_type = "enum_select")]
+///     value: String,
+/// }
+/// ```
+#[doc(hidden)]
+pub fn _enum_select_requires_enum_values_compile_fail() {}
+
 /// Per-field descriptor emitted by `#[derive(FieldMetadata)]`.
 ///
 /// All fields are `&'static` so the descriptor table can live in `.rodata` —
