@@ -2367,9 +2367,7 @@ mod tests {
         let ppt_idx = args
             .iter()
             .position(|a| a == "--permission-prompt-tool")
-            .unwrap_or_else(|| {
-                panic!("Path B lead must have --permission-prompt-tool: {args:?}")
-            });
+            .unwrap_or_else(|| panic!("Path B lead must have --permission-prompt-tool: {args:?}"));
         assert_eq!(
             args.get(ppt_idx + 1).map(String::as_str),
             Some("mcp__pitboss__permission_prompt"),

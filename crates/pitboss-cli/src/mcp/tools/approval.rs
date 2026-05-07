@@ -466,9 +466,9 @@ impl PermissionDenialReason {
             Self::OperatorRejected => {
                 format!("denied: tool '{tool_name}' rejected by operator")
             }
-            Self::TtlExpired => format!(
-                "denied: tool '{tool_name}' approval timed out before operator response"
-            ),
+            Self::TtlExpired => {
+                format!("denied: tool '{tool_name}' approval timed out before operator response")
+            }
         }
     }
 }
