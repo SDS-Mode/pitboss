@@ -962,7 +962,7 @@ fn build_mcp_servers_json(
 /// Validation rejects malformed `scope` strings at manifest load time, so
 /// here a value that doesn't parse as `type:<id>` simply excludes (defence
 /// in depth — should never happen on a validated manifest).
-fn mcp_server_scope_admits(scope: Option<&str>, actor_type: Option<&str>) -> bool {
+pub(crate) fn mcp_server_scope_admits(scope: Option<&str>, actor_type: Option<&str>) -> bool {
     let Some(raw) = scope else {
         return true;
     };
