@@ -63,7 +63,7 @@ rust-embed         = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess         = "2"
 futures-util       = "0.3"
 notify             = "6"
-dirs               = "5"
+dirs               = "6"
 sha2               = "0.10"
 
 # The profile that 'dist' will build with
