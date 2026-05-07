@@ -17,50 +17,129 @@
 use crate::dispatch::hierarchical::mcp_server_scope_admits;
 use crate::manifest::resolve::ResolvedManifest;
 
-/// Render the matrix as a multi-line string ending in `\n`.
+/// Which class of actor a [`MatrixRow`] represents.
+///
+/// The CLI text formatter prefixes each label with this kind
+/// (`worker_type:` / `sublead_type:`) and renders the untyped row as
+/// `(untyped / root)`. Programmatic consumers (TUI Detail view,
+/// `pitboss-web` manifest panel) use the kind directly to pick which
+/// row matches a focused tile's `actor_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    /// Root lead and any un-profiled (`actor_type = None`) spawn.
+    Untyped,
+    /// A declared `[[worker_type]]`.
+    WorkerType,
+    /// A declared `[[sublead_type]]`.
+    SubleadType,
+}
+
+/// One row of the actor-type × MCP-server matrix.
+///
+/// `actor_type` is `None` for the untyped/root row and `Some(id)` for
+/// declared profiles; consumers that want to match a tile's
+/// `actor_type` directly check `row.actor_type.as_deref() ==
+/// tile.actor_type.as_deref()`.
+///
+/// `server_ids` is in manifest declaration order so two manifests
+/// producing the same matrix shape compare stable diff-wise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixRow {
+    /// Display label as the CLI formatter emits it (`(untyped / root)`,
+    /// `worker_type:writer`, `sublead_type:planner`).
+    pub label: String,
+    /// `None` for the untyped row, `Some(id)` for typed rows. Drives
+    /// matching against `TaskRecord.actor_type`.
+    pub actor_type: Option<String>,
+    pub kind: RowKind,
+    /// MCP server ids that scope-admit for this row, in manifest
+    /// declaration order.
+    pub server_ids: Vec<String>,
+}
+
+/// Compute matrix rows from a fully resolved manifest. Used by the CLI
+/// `--capability-matrix` formatter and any Rust consumer that already
+/// owns a `ResolvedManifest`.
 ///
 /// Row order:
-/// 1. `(untyped / root)` — what the root lead and any un-profiled
-///    spawn sees. Always first; operators reading the table want the
-///    "default" row anchored at the top.
+/// 1. Untyped (always first; the "default" anchor row).
 /// 2. One row per `[[worker_type]]`, in declaration order.
 /// 3. One row per `[[sublead_type]]`, in declaration order.
-///
-/// `[[mcp_server]]` ids inside each row are emitted in declaration
-/// order so two manifests producing the same matrix shape compare
-/// stable diff-wise.
-pub fn render(manifest: &ResolvedManifest) -> String {
-    let server_ids: Vec<&str> = manifest.mcp_servers.iter().map(|s| s.id.as_str()).collect();
-    let server_scopes: Vec<Option<&str>> = manifest
+pub fn rows(manifest: &ResolvedManifest) -> Vec<MatrixRow> {
+    let servers: Vec<(String, Option<String>)> = manifest
         .mcp_servers
         .iter()
-        .map(|s| s.scope.as_deref())
+        .map(|s| (s.id.clone(), s.scope.clone()))
         .collect();
+    let wt_ids: Vec<String> = manifest.worker_types.iter().map(|w| w.id.clone()).collect();
+    let st_ids: Vec<String> = manifest
+        .sublead_types
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    rows_from_parts(&servers, &wt_ids, &st_ids)
+}
 
-    // Pre-compute the matrix as Vec<(label, Vec<&str>)>. The widest
-    // label drives the first column's width so multi-row output stays
-    // aligned without an external table crate.
-    let mut rows: Vec<(String, Vec<&str>)> = Vec::new();
-    rows.push((
-        "(untyped / root)".to_string(),
-        admitted_servers(&server_ids, &server_scopes, None),
-    ));
-    for wt in &manifest.worker_types {
-        rows.push((
-            format!("worker_type:{}", wt.id),
-            admitted_servers(&server_ids, &server_scopes, Some(wt.id.as_str())),
-        ));
+/// Compute matrix rows from the minimal data the algorithm needs. The
+/// TUI deserializes a lightweight subset of `resolved.json` and feeds
+/// it in here without having to construct a full `ResolvedManifest` —
+/// keeps the matrix logic decoupled from the larger manifest type.
+pub fn rows_from_parts(
+    servers: &[(String, Option<String>)],
+    worker_type_ids: &[String],
+    sublead_type_ids: &[String],
+) -> Vec<MatrixRow> {
+    let mut out: Vec<MatrixRow> =
+        Vec::with_capacity(1 + worker_type_ids.len() + sublead_type_ids.len());
+    out.push(MatrixRow {
+        label: "(untyped / root)".to_string(),
+        actor_type: None,
+        kind: RowKind::Untyped,
+        server_ids: admitted_for(servers, None),
+    });
+    for id in worker_type_ids {
+        out.push(MatrixRow {
+            label: format!("worker_type:{id}"),
+            actor_type: Some(id.clone()),
+            kind: RowKind::WorkerType,
+            server_ids: admitted_for(servers, Some(id.as_str())),
+        });
     }
-    for st in &manifest.sublead_types {
-        rows.push((
-            format!("sublead_type:{}", st.id),
-            admitted_servers(&server_ids, &server_scopes, Some(st.id.as_str())),
-        ));
+    for id in sublead_type_ids {
+        out.push(MatrixRow {
+            label: format!("sublead_type:{id}"),
+            actor_type: Some(id.clone()),
+            kind: RowKind::SubleadType,
+            server_ids: admitted_for(servers, Some(id.as_str())),
+        });
     }
+    out
+}
+
+fn admitted_for(servers: &[(String, Option<String>)], actor_type: Option<&str>) -> Vec<String> {
+    servers
+        .iter()
+        .filter_map(|(id, scope)| {
+            if mcp_server_scope_admits(scope.as_deref(), actor_type) {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Render the matrix as a multi-line string ending in `\n`.
+///
+/// Thin formatter on top of [`rows`]. The widest label drives the
+/// first column's width so multi-row output stays aligned without an
+/// external table crate.
+pub fn render(manifest: &ResolvedManifest) -> String {
+    let rows = rows(manifest);
 
     let label_width = rows
         .iter()
-        .map(|(l, _)| l.len())
+        .map(|r| r.label.len())
         .chain(std::iter::once("actor type".len()))
         .max()
         .unwrap_or(20);
@@ -75,36 +154,16 @@ pub fn render(manifest: &ResolvedManifest) -> String {
         "-".repeat(label_width),
         "-".repeat(36)
     ));
-    for (label, ids) in &rows {
-        let cell = if ids.is_empty() {
+    for row in &rows {
+        let cell = if row.server_ids.is_empty() {
             "(none)".to_string()
         } else {
-            ids.join(", ")
+            row.server_ids.join(", ")
         };
+        let label = &row.label;
         out.push_str(&format!("{label:<label_width$}  {cell}\n"));
     }
     out
-}
-
-/// Compute the subset of server ids that scope-admit for a given
-/// `actor_type` (`None` for the untyped / root row). Preserves
-/// declaration order — the upstream zip of ids with scopes is
-/// position-aligned by `render`'s caller.
-fn admitted_servers<'a>(
-    ids: &[&'a str],
-    scopes: &[Option<&str>],
-    actor_type: Option<&str>,
-) -> Vec<&'a str> {
-    ids.iter()
-        .zip(scopes.iter())
-        .filter_map(|(id, scope)| {
-            if mcp_server_scope_admits(*scope, actor_type) {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -263,6 +322,64 @@ mod tests {
             !out.contains("worker_type:") && !out.contains("sublead_type:"),
             "must not emit profile rows when no profiles are declared: {out}"
         );
+    }
+
+    /// `rows()` exposes the structured matrix data the TUI Detail view
+    /// and `pitboss-web` manifest panel will consume. Pin the row
+    /// shape: untyped first, then declared profiles in declaration
+    /// order, with `actor_type` set so consumers can match a tile's
+    /// `TaskRecord.actor_type` directly.
+    #[test]
+    fn rows_emits_untyped_then_worker_then_sublead_in_declaration_order() {
+        let mut m = empty_manifest();
+        m.mcp_servers = vec![srv("pitboss", None), srv("fs-writer", Some("type:writer"))];
+        m.worker_types = vec![wt("writer"), wt("reader")];
+        m.sublead_types = vec![st("planner")];
+
+        let rs = rows(&m);
+        assert_eq!(rs.len(), 4, "expected 1 untyped + 2 worker + 1 sublead");
+
+        assert_eq!(rs[0].kind, RowKind::Untyped);
+        assert!(rs[0].actor_type.is_none());
+        assert_eq!(rs[0].server_ids, vec!["pitboss".to_string()]);
+
+        assert_eq!(rs[1].kind, RowKind::WorkerType);
+        assert_eq!(rs[1].actor_type.as_deref(), Some("writer"));
+        assert_eq!(rs[1].label, "worker_type:writer");
+        // writer-scoped server admits for writer.
+        assert_eq!(
+            rs[1].server_ids,
+            vec!["pitboss".to_string(), "fs-writer".to_string()]
+        );
+
+        assert_eq!(rs[2].kind, RowKind::WorkerType);
+        assert_eq!(rs[2].actor_type.as_deref(), Some("reader"));
+
+        assert_eq!(rs[3].kind, RowKind::SubleadType);
+        assert_eq!(rs[3].actor_type.as_deref(), Some("planner"));
+    }
+
+    /// `rows_from_parts` lets the TUI compute the matrix from a
+    /// lightweight resolved.json deserialization without pulling in
+    /// the full `ResolvedManifest` shape. Pin equivalence with the
+    /// `ResolvedManifest`-driven path so the two stay in sync.
+    #[test]
+    fn rows_from_parts_matches_full_manifest_path() {
+        let servers = vec![
+            ("pitboss".to_string(), None),
+            ("fs-writer".to_string(), Some("type:writer".to_string())),
+        ];
+        let workers = vec!["writer".to_string()];
+        let subleads: Vec<String> = vec![];
+
+        let parts_rows = rows_from_parts(&servers, &workers, &subleads);
+
+        let mut m = empty_manifest();
+        m.mcp_servers = vec![srv("pitboss", None), srv("fs-writer", Some("type:writer"))];
+        m.worker_types = vec![wt("writer")];
+        let manifest_rows = rows(&m);
+
+        assert_eq!(parts_rows, manifest_rows);
     }
 
     /// A scoped server must be excluded from the untyped row even

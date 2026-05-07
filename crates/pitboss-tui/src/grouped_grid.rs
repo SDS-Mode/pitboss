@@ -80,6 +80,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            actor_type: None,
         }
     }
 

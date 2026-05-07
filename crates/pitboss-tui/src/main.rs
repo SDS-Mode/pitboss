@@ -308,6 +308,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 worktree_path: rec.worktree_path.clone(),
                 completed_at: Some(rec.ended_at),
                 denials_count: 0,
+                actor_type: rec.actor_type.clone(),
             });
         } else {
             tiles.push(TileState {
@@ -325,6 +326,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 worktree_path: None,
                 completed_at: None,
                 denials_count: 0,
+                actor_type: None,
             });
         }
     }
@@ -334,6 +336,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
         focus_log: Vec::new(),
         failed_count,
         run_started_at,
+        matrix_rows: Vec::new(),
     }
 }
 

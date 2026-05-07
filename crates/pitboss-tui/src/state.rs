@@ -219,6 +219,12 @@ pub struct TileState {
     /// claude received and adapted to (#370). Read-side aggregation only;
     /// the canonical per-row data lives in `events.jsonl`.
     pub denials_count: u32,
+    /// Resolved `[[worker_type]]` / `[[sublead_type]]` id at spawn time
+    /// (from `TaskRecord.actor_type`). `None` for the lead, for un-typed
+    /// spawns, and for in-flight tiles whose record hasn't settled. Drives
+    /// the Detail view's matrix-row lookup so the focused tile sees
+    /// "MCP servers visible to this actor" matching its profile (#391).
+    pub actor_type: Option<String>,
 }
 
 /// Full application state updated each poll cycle.
@@ -335,6 +341,12 @@ pub struct AppState {
     /// operator must explicitly acknowledge before issuing a command that
     /// would target the wrong tile. (#339)
     pub focus_lost_notice: Option<FocusLostNotice>,
+    /// Capability matrix derived from `resolved.json` and refreshed on
+    /// each watcher tick. Empty until the first snapshot lands. The
+    /// Detail view picks the row matching `focused_tile.actor_type` and
+    /// renders the MCP servers visible to that actor. See
+    /// [`pitboss_cli::capability_matrix`] for row semantics (#391).
+    pub matrix_rows: Vec<pitboss_cli::capability_matrix::MatrixRow>,
 }
 
 /// Surfaced in the status bar when the focused tile disappeared (was
@@ -414,6 +426,7 @@ impl AppState {
             completed_after_secs: COMPLETED_COOLDOWN_DEFAULT_SECS,
             compact_tiles: false,
             focus_lost_notice: None,
+            matrix_rows: Vec::new(),
         }
     }
 
@@ -909,6 +922,7 @@ impl AppState {
         self.tasks = snapshot.tasks;
         self.focus_log = snapshot.focus_log;
         self.failed_count = snapshot.failed_count;
+        self.matrix_rows = snapshot.matrix_rows;
         // Keep the earliest start time we've ever seen (monotonically non-increasing).
         match (self.run_started_at, snapshot.run_started_at) {
             (None, v) => self.run_started_at = v,
@@ -1056,6 +1070,12 @@ pub struct AppSnapshot {
     /// Earliest wall-clock start time across all completed tiles. `None` if no
     /// tiles have recorded a `started_at` yet.
     pub run_started_at: Option<DateTime<Utc>>,
+    /// Capability matrix derived from `resolved.json` once on snapshot
+    /// build. Empty when `resolved.json` has no MCP servers and no typed
+    /// profiles — the watcher still emits the untyped row so the Detail
+    /// view can render "(none)" rather than a missing section. See
+    /// [`pitboss_cli::capability_matrix`] for row semantics (#391).
+    pub matrix_rows: Vec<pitboss_cli::capability_matrix::MatrixRow>,
 }
 
 #[cfg(test)]
@@ -1223,6 +1243,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            actor_type: None,
         }];
         state
     }
@@ -1649,6 +1670,7 @@ mod tests {
             focus_log: Vec::new(),
             failed_count: 0,
             run_started_at: Some(t0),
+            matrix_rows: Vec::new(),
         };
         state.apply_snapshot(snapshot);
         assert_eq!(state.run_started_at, Some(t0));
@@ -1660,6 +1682,7 @@ mod tests {
             focus_log: Vec::new(),
             failed_count: 0,
             run_started_at: Some(t_earlier),
+            matrix_rows: Vec::new(),
         };
         state.apply_snapshot(snapshot2);
         assert_eq!(
@@ -1675,6 +1698,7 @@ mod tests {
             focus_log: Vec::new(),
             failed_count: 0,
             run_started_at: Some(t_later),
+            matrix_rows: Vec::new(),
         };
         state.apply_snapshot(snapshot3);
         assert_eq!(
@@ -1781,6 +1805,7 @@ mod tests {
             worktree_path: None,
             completed_at: Some(Utc::now() - chrono::Duration::seconds(ended_secs_ago)),
             denials_count: 0,
+            actor_type: None,
         }
     }
 
@@ -1816,6 +1841,7 @@ mod tests {
             worktree_path: None,
             completed_at: None, // running tiles never have completed_at
             denials_count: 0,
+            actor_type: None,
         };
         assert!(!state.is_promoted(&tile));
     }
@@ -1841,6 +1867,7 @@ mod tests {
                 worktree_path: None,
                 completed_at: None,
                 denials_count: 0,
+                actor_type: None,
             },
             make_done_tile("fresh", 2), // done but within grace period
         ];
@@ -1900,6 +1927,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            actor_type: None,
         }
     }
 
@@ -1944,6 +1972,7 @@ mod tests {
             focus_log: Vec::new(),
             failed_count: 0,
             run_started_at: None,
+            matrix_rows: Vec::new(),
         };
         state.apply_snapshot(snapshot);
         let notice = state
@@ -1965,6 +1994,7 @@ mod tests {
             focus_log: Vec::new(),
             failed_count: 0,
             run_started_at: None,
+            matrix_rows: Vec::new(),
         };
         state.apply_snapshot(snapshot);
         assert_eq!(state.focus, 0, "focus must follow id, not index");
@@ -1992,6 +2022,7 @@ mod tests {
             focus_log: Vec::new(),
             failed_count: 0,
             run_started_at: None,
+            matrix_rows: Vec::new(),
         };
         state.apply_snapshot(snapshot);
         let notice = state
