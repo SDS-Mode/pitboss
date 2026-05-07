@@ -28,6 +28,7 @@ run_dir = "/path/to/value"
 worktree_cleanup = "always"
 emit_event_stream = false
 default_approval_policy = "block"
+denial_termination_policy = "adapt"
 dump_shared_store = false
 require_plan_approval = false
 

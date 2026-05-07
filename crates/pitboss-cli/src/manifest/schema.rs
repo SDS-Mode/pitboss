@@ -513,6 +513,17 @@ pub struct RunConfig {
         enum_values = ["block", "auto_approve", "auto_reject"]
     )]
     pub default_approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
+    /// What happens to an actor's terminal status when its most recent
+    /// `permission_prompt` was denied. `adapt` (default) trusts the
+    /// actor's exit code; `reclassify` re-labels clean exits within
+    /// 30s of a denial as `ApprovalRejected`. See #377.
+    #[serde(default)]
+    #[field(
+        label = "Denial termination policy",
+        help = "How a denied permission_prompt affects the actor's terminal status. `adapt` (default) keeps the actor's exit code as-is; `reclassify` re-labels clean exits within 30s of a denial as ApprovalRejected.",
+        enum_values = ["adapt", "reclassify"]
+    )]
+    pub denial_termination_policy: Option<crate::dispatch::state::DenialTerminationPolicy>,
     /// Dump the shared store (`/ref/*`, `/peer/*`, `/shared/*`, `/leases/*`)
     /// to `<run-dir>/shared-store.json` on finalize.
     #[serde(default)]
@@ -541,6 +552,7 @@ impl Default for RunConfig {
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
             default_approval_policy: None,
+            denial_termination_policy: None,
             dump_shared_store: false,
             require_plan_approval: false,
         }
