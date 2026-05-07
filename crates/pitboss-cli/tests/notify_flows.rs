@@ -250,6 +250,7 @@ async fn approval_pending_notification_fires_on_enqueue() {
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
         default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,

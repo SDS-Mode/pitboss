@@ -191,6 +191,36 @@ pub enum ApprovalPolicy {
     AutoReject,
 }
 
+/// What happens to an actor's terminal status when its most recent
+/// `permission_prompt` was denied. (#377)
+///
+/// Pre-#377, `approval_driven_termination` reclassified any clean exit
+/// within 30s of a denial as `ApprovalRejected`. Post-#368 (when the
+/// deny path actually delivered structured messages to the model),
+/// models began genuinely adapting around denials — using alternative
+/// allowlisted tools to complete their task and then exiting cleanly.
+/// The 30s reclassification window mislabeled these as failures.
+///
+/// `Adapt` (default) trusts the actor's exit code: clean exit means
+/// success regardless of denial history. The audit trail
+/// (`events.jsonl::tool_denied`) and counters
+/// (`approvals_rejected`) remain the source of truth for what was
+/// blocked. `Reclassify` preserves the legacy 30s-window heuristic
+/// for operators who want fast-give-up vs. completed-successfully
+/// distinguished in the status table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenialTerminationPolicy {
+    /// Never reclassify. Actor's exit code is its terminal status.
+    /// (Default — matches the user-facing "soft denial" UX.)
+    #[default]
+    Adapt,
+    /// Legacy 30s-window reclassification: if the actor exited cleanly
+    /// within 30s of a recent denial, status becomes `ApprovalRejected`
+    /// (or `ApprovalTimedOut` for TTL-fired fallbacks).
+    Reclassify,
+}
+
 /// Rich approval record — the canonical representation of a pending operator
 /// decision in Phase 4+. Carries actor lineage, downstream wait set, TTL,
 /// and fallback policy in addition to the human-readable summary.
@@ -533,21 +563,34 @@ impl DispatchState {
     /// recent (within 30 s of now), return the reclassification kind.
     /// Returns `None` if no reclassification applies.
     ///
-    /// Used by actor-termination paths to turn `TaskStatus::Success` into
-    /// `ApprovalRejected` (operator/policy rejection) or `ApprovalTimedOut`
-    /// (TTL-fired fallback) when the actor clearly exited because of the
-    /// rejection rather than by completing real work after it.
+    /// Behavior is gated on `[run].denial_termination_policy` (#377):
     ///
-    /// The 30-second recency window is empirical: claude subprocesses that
-    /// exit due to a rejected approval typically terminate within a few
-    /// seconds (the apology message + exit). 30 seconds gives generous
-    /// headroom while still excluding actors that received a rejection,
-    /// did substantial subsequent work, and then terminated for unrelated
-    /// reasons.
+    /// - `Adapt` (default, post-#377) — always returns `None`. The
+    ///   actor's exit code is its terminal status; the audit trail
+    ///   (`events.jsonl::tool_denied`) and counters
+    ///   (`approvals_rejected`) carry the denial detail. Right answer
+    ///   when models actually adapt around denials, which became real
+    ///   after #368 made the deny path deliver structured messages.
+    /// - `Reclassify` — legacy 30-second window heuristic. Returns
+    ///   `Rejected` (operator / policy rejection) or `TimedOut`
+    ///   (TTL-fired) when the actor exited cleanly within 30 s of a
+    ///   denial. Useful for operators who want fast-give-up vs.
+    ///   completed-via-adaptation distinguished in `pitboss status`,
+    ///   accepting that successful adaptations within the window are
+    ///   misclassified as failures.
     pub async fn approval_driven_termination(
         &self,
         actor_id: &str,
     ) -> Option<ApprovalTerminationKind> {
+        // Default to Adapt when the manifest leaves the field unset.
+        let policy = self
+            .root
+            .manifest
+            .denial_termination_policy
+            .unwrap_or_default();
+        if matches!(policy, DenialTerminationPolicy::Adapt) {
+            return None;
+        }
         let slot = self.last_approval_response.read().await;
         let entry = slot.get(actor_id)?;
         if entry.approved {
@@ -596,6 +639,7 @@ mod tests {
             budget_usd: budget,
             lead_timeout_secs: None,
             default_approval_policy: None,
+            denial_termination_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,

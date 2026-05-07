@@ -89,6 +89,7 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
         budget_usd: Some(budget),
         lead_timeout_secs: None,
         default_approval_policy: None,
+        denial_termination_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -650,6 +651,7 @@ async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchS
         budget_usd: budget,
         lead_timeout_secs: None,
         default_approval_policy: None,
+        denial_termination_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -1498,6 +1500,7 @@ async fn handle_request_approval_auto_approves() {
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
         default_approval_policy: Some(ApprovalPolicy::AutoApprove),
+        denial_termination_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -1593,6 +1596,7 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
         default_approval_policy: Some(ApprovalPolicy::AutoApprove),
+        denial_termination_policy: None,
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval: false,
@@ -1642,11 +1646,30 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
 }
 
 /// Build a `DispatchState` with the specified approval policy and
-/// `require_plan_approval` flag. Mirrors `handle_request_approval_auto_approves`
-/// test scaffolding but parameterized so plan-approval tests can share it.
+/// `require_plan_approval` flag. Pins `denial_termination_policy =
+/// Reclassify` (the legacy behavior) so existing tests asserting
+/// reclassification continue to pass — the production default flipped
+/// to `Adapt` in #377. Tests of the new default use
+/// `mk_plan_state_with_termination_policy` directly.
 async fn mk_plan_state(
     policy: crate::dispatch::state::ApprovalPolicy,
     require_plan_approval: bool,
+) -> Arc<DispatchState> {
+    mk_plan_state_with_termination_policy(
+        policy,
+        require_plan_approval,
+        crate::dispatch::state::DenialTerminationPolicy::Reclassify,
+    )
+    .await
+}
+
+/// Variant of `mk_plan_state` that exposes the
+/// `denial_termination_policy` field. Use directly when a test needs to
+/// exercise the `Adapt` (post-#377 default) reclassification behavior.
+async fn mk_plan_state_with_termination_policy(
+    policy: crate::dispatch::state::ApprovalPolicy,
+    require_plan_approval: bool,
+    termination_policy: crate::dispatch::state::DenialTerminationPolicy,
 ) -> Arc<DispatchState> {
     use crate::dispatch::state::ApprovalPolicy;
     use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
@@ -1695,6 +1718,7 @@ async fn mk_plan_state(
         budget_usd: Some(1.0),
         lead_timeout_secs: None,
         default_approval_policy: Some(policy),
+        denial_termination_policy: Some(termination_policy),
         notifications: vec![],
         dump_shared_store: false,
         require_plan_approval,
@@ -2176,6 +2200,90 @@ async fn permission_prompt_default_policy_auto_reject_records_denied_by_policy()
         !body.contains("\"reason_kind\":\"operator_rejected\""),
         "events.jsonl must NOT misattribute default-policy auto-reject \
          to operator (#373): {body}"
+    );
+}
+
+/// #377: under `denial_termination_policy = "adapt"` (the post-#377
+/// default), `approval_driven_termination` must always return `None`
+/// — even immediately after a denied permission_prompt. Trusts the
+/// actor's exit code; per-actor `events.jsonl` and the
+/// `approvals_rejected` counter remain authoritative for what was
+/// blocked. Pre-#377, this scenario reclassified clean exits as
+/// `ApprovalRejected` and mislabeled successful adaptation (e.g.
+/// "denied Write → fell back to Bash → completed task → exited 0")
+/// as failure.
+#[tokio::test]
+async fn approval_driven_termination_adapt_policy_returns_none_after_denial() {
+    let state = mk_plan_state_with_termination_policy(
+        crate::dispatch::state::ApprovalPolicy::AutoReject,
+        false,
+        crate::dispatch::state::DenialTerminationPolicy::Adapt,
+    )
+    .await;
+
+    // Trigger a real denial via the Path B handler so
+    // last_approval_response is populated with approved=false.
+    let _ = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Sanity: the denial WAS recorded — counters and last_approval_response
+    // both fired (the Adapt policy does not silence those signals,
+    // only the reclassification).
+    let counters = state.root.worker_counters.read().await;
+    let entry = counters
+        .get("lead")
+        .expect("denial must still bump approvals_rejected");
+    assert_eq!(entry.approvals_rejected, 1);
+    drop(counters);
+
+    // The crux of the assertion: with Adapt policy, no reclassification.
+    assert_eq!(
+        state.approval_driven_termination("lead").await,
+        None,
+        "Adapt policy must NEVER return a reclassification kind, even \
+         immediately after a denial — the actor's exit code is its \
+         terminal status (#377)"
+    );
+}
+
+/// #377 companion: under `denial_termination_policy = "reclassify"`
+/// (the legacy behavior, kept for operators who want fast-give-up
+/// distinguished in the status table), the same scenario reclassifies
+/// as `Rejected`. This pins both modes against future drift.
+#[tokio::test]
+async fn approval_driven_termination_reclassify_policy_fires_after_denial() {
+    let state = mk_plan_state_with_termination_policy(
+        crate::dispatch::state::ApprovalPolicy::AutoReject,
+        false,
+        crate::dispatch::state::DenialTerminationPolicy::Reclassify,
+    )
+    .await;
+
+    let _ = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "Bash".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        state.approval_driven_termination("lead").await,
+        Some(crate::dispatch::state::ApprovalTerminationKind::Rejected),
+        "Reclassify policy must surface the recent denial as Rejected"
     );
 }
 

@@ -1090,6 +1090,7 @@ mod await_drained_tests {
             budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
+            denial_termination_policy: None,
             notifications: vec![],
             dump_shared_store: false,
             require_plan_approval: false,

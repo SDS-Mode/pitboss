@@ -152,6 +152,11 @@ pub struct ResolvedManifest {
     /// `alias` keeps pre-v0.9 `resolved.json` snapshots resumable.
     #[serde(alias = "approval_policy")]
     pub default_approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
+    /// What happens to an actor's terminal status after a denied
+    /// `permission_prompt`. `None` resolves to `Adapt` at read time.
+    /// (#377)
+    #[serde(default)]
+    pub denial_termination_policy: Option<crate::dispatch::state::DenialTerminationPolicy>,
     #[serde(default)]
     pub notifications: Vec<crate::notify::config::NotificationConfig>,
     #[serde(default)]
@@ -270,6 +275,7 @@ pub fn resolve(
         budget_usd,
         lead_timeout_secs,
         default_approval_policy: manifest.run.default_approval_policy,
+        denial_termination_policy: manifest.run.denial_termination_policy,
         notifications,
         dump_shared_store: manifest.run.dump_shared_store,
         require_plan_approval: manifest.run.require_plan_approval,
