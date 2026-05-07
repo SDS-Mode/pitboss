@@ -27,6 +27,14 @@ use uuid::Uuid;
 
 use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse, DispatchState, QueuedApproval};
 
+/// Marker text the bridge writes into `ApprovalResponse.comment` when
+/// the AutoReject default-policy short-circuit fires. Read by Path B's
+/// `handle_permission_prompt` to distinguish policy-driven rejections
+/// from operator-driven rejections (#373) — the two paths are
+/// indistinguishable by `from_ttl` alone, but the audit trail and the
+/// model-facing message text need to differ.
+pub(crate) const BRIDGE_AUTO_REJECT_COMMENT: &str = "auto-rejected by default_approval_policy";
+
 // ── Rich approval-record types (Phase 4) ────────────────────────────────────
 
 /// Re-export of `mcp::tools::ApprovalPlan` so callers can refer to it from
@@ -209,7 +217,11 @@ impl ApprovalBridge {
             ApprovalPolicy::AutoReject => {
                 let _ = tx.send(ApprovalResponse {
                     approved: false,
-                    comment: Some("auto-rejected by default_approval_policy".into()),
+                    // #373: this exact string is the discriminator
+                    // `handle_permission_prompt` reads to attribute the
+                    // denial to the policy rather than to an operator.
+                    // Keep it in sync with `BRIDGE_AUTO_REJECT_COMMENT`.
+                    comment: Some(BRIDGE_AUTO_REJECT_COMMENT.into()),
                     edited_summary: None,
                     reason: None,
                     from_ttl: false,

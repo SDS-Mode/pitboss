@@ -2094,14 +2094,17 @@ async fn permission_prompt_default_policy_auto_approve_records_last_response() {
     );
 }
 
-/// #367 regression: the bridge AutoReject path in
-/// `handle_permission_prompt` must record a rejected
-/// `last_approval_response` so a worker that exits silently after the
-/// deny reclassifies as `ApprovalRejected` (not `Success`). Also
-/// asserts that the canned `OperatorRejected` message is the fallback
-/// when the bridge response carries no operator-supplied reason.
+/// #367 + #373 regression: the bridge AutoReject path in
+/// `handle_permission_prompt` must (a) record a rejected
+/// `last_approval_response` so termination reclassifies to
+/// `ApprovalRejected` (#367), and (b) attribute the denial to
+/// `DeniedByPolicy` — NOT `OperatorRejected` — because no operator
+/// was involved. Pre-#373 this was misclassified as `operator_rejected`
+/// in both the audit log and the model-facing message, causing
+/// operators to read audit trails and incorrectly conclude a human
+/// clicked reject.
 #[tokio::test]
-async fn permission_prompt_default_policy_auto_reject_records_last_response() {
+async fn permission_prompt_default_policy_auto_reject_records_denied_by_policy() {
     let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoReject, false).await;
 
     let resp = handle_permission_prompt(
@@ -2126,15 +2129,18 @@ async fn permission_prompt_default_policy_auto_reject_records_last_response() {
         reason.contains("Bash"),
         "reason should name the tool: {reason}"
     );
-
-    // ─── Wire-format unit tests (#368) ─────────────────────────────────────────
-    //
-    // The Rust struct shape is one thing; the JSON Claude actually parses
-    // is another. Pre-#368 the unit tests asserted the Rust struct fields
-    // (`decision`, `reason`, ...) while the wire format silently mismatched
-    // the upstream `PermissionResult` SDK type — every gate call failed
-    // with "Permission prompt tool returned an invalid result" but tests
-    // stayed green. These tests pin the on-the-wire JSON exactly.
+    // #373: the message must attribute the denial to the policy, not
+    // to a non-existent operator.
+    assert!(
+        reason.contains("policy"),
+        "reason should attribute the denial to the policy, not an \
+         operator (#373): {reason}"
+    );
+    assert!(
+        !reason.contains("operator"),
+        "reason must NOT claim 'operator' rejected when default policy \
+         did (#373): {reason}"
+    );
 
     let counters = state.root.worker_counters.read().await;
     let entry = counters
@@ -2150,9 +2156,104 @@ async fn permission_prompt_default_policy_auto_reject_records_last_response() {
         "bridge-driven deny must register a rejected last_approval_response"
     );
 
-    // Per-actor events.jsonl audit row should also be present, since
-    // the deny goes through `record_permission_denied` regardless of
-    // origin (rule vs bridge).
+    // Per-actor events.jsonl audit row should attribute the denial
+    // correctly — `denied_by_policy`, not `operator_rejected` (#373).
+    let events_path = state
+        .root
+        .run_subdir
+        .join("tasks")
+        .join("lead")
+        .join("events.jsonl");
+    let body = tokio::fs::read_to_string(&events_path)
+        .await
+        .unwrap_or_else(|e| panic!("expected {events_path:?} to exist: {e}"));
+    assert!(
+        body.contains("\"reason_kind\":\"denied_by_policy\""),
+        "events.jsonl must record reason_kind=denied_by_policy for \
+         default-policy auto-reject (#373): {body}"
+    );
+    assert!(
+        !body.contains("\"reason_kind\":\"operator_rejected\""),
+        "events.jsonl must NOT misattribute default-policy auto-reject \
+         to operator (#373): {body}"
+    );
+}
+
+/// #373 companion: ensure the genuine operator-driven rejection path
+/// still classifies as `OperatorRejected` (no over-correction). Drives
+/// a Block-policy approval, captures the request_id, calls `respond()`
+/// with `approved=false` and no comment marker — the only path that
+/// should produce `OperatorRejected`.
+#[tokio::test]
+async fn permission_prompt_operator_driven_reject_records_operator_rejected() {
+    use crate::control::protocol::ControlEvent;
+    use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    let state = mk_plan_state(ApprovalPolicy::Block, false).await;
+    let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+    *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+        id: uuid::Uuid::now_v7(),
+        sender: tx,
+    });
+
+    // Driver: wait for the bridge to emit the request, then respond
+    // operator-reject with no marker comment (the genuine human-action
+    // path — distinct from the bridge's policy auto-reject which sets
+    // `BRIDGE_AUTO_REJECT_COMMENT`).
+    let state_for_resp = std::sync::Arc::clone(&state);
+    let driver = tokio::spawn(async move {
+        let request_id = match rx.recv().await.unwrap() {
+            ControlEvent::ApprovalRequest { request_id, .. } => request_id,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let bridge = crate::mcp::approval::ApprovalBridge::new(state_for_resp);
+        bridge
+            .respond(
+                &request_id,
+                ApprovalResponse {
+                    approved: false,
+                    comment: None,
+                    edited_summary: None,
+                    reason: None,
+                    from_ttl: false,
+                },
+            )
+            .await
+            .unwrap();
+    });
+
+    let resp = tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_permission_prompt(
+            &state,
+            PermissionPromptArgs {
+                tool_name: "Bash".into(),
+                tool_input: None,
+                cost_estimate: None,
+                meta: None,
+            },
+        ),
+    )
+    .await
+    .expect("handler must resolve before timeout")
+    .unwrap();
+    driver.await.unwrap();
+
+    let reason = match &resp {
+        PermissionPromptResponse::Deny { message, .. } => message.as_str(),
+        _ => panic!("expected Deny: {resp:?}"),
+    };
+    assert!(
+        reason.contains("operator"),
+        "operator-driven rejection must attribute to operator: {reason}"
+    );
+    assert!(
+        !reason.contains("policy"),
+        "operator-driven rejection must NOT attribute to policy: {reason}"
+    );
+
     let events_path = state
         .root
         .run_subdir
@@ -2164,7 +2265,12 @@ async fn permission_prompt_default_policy_auto_reject_records_last_response() {
         .unwrap_or_else(|e| panic!("expected {events_path:?} to exist: {e}"));
     assert!(
         body.contains("\"reason_kind\":\"operator_rejected\""),
-        "events.jsonl missing operator_rejected kind: {body}"
+        "events.jsonl must record reason_kind=operator_rejected for \
+         genuine operator action: {body}"
+    );
+    assert!(
+        !body.contains("\"reason_kind\":\"denied_by_policy\""),
+        "events.jsonl must NOT label operator action as denied_by_policy: {body}"
     );
 }
 
