@@ -343,6 +343,9 @@ fn reset_state_for_switch(state: &mut AppState, run_dir: PathBuf, run_id: String
 /// `handle_key` so the event-loop's existing `SwitchRun` dispatch can
 /// handle picker-click → open-run in one place.
 fn handle_mouse(state: &mut AppState, mouse: crossterm::event::MouseEvent) -> Action {
+    // Any mouse event acknowledges and clears the focus-lost notice. (#339)
+    state.focus_lost_notice = None;
+
     match (state.mode.clone(), mouse.kind) {
         // Wheel scroll inside Detail view — 5 rows/tick, matches J/K
         // shift-scroll cadence. Exit-by-overscroll was tried briefly
@@ -474,6 +477,9 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> A
     if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
         return Action::Quit;
     }
+
+    // Any key acknowledges and clears the focus-lost notice. (#339)
+    state.focus_lost_notice = None;
 
     match state.mode {
         Mode::Normal => handle_normal(state, code),

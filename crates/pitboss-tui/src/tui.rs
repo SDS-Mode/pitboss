@@ -20,7 +20,7 @@ use ratatui::{
 };
 
 use crate::grouped_grid::SubtreeContainer;
-use crate::state::{AppState, Mode, TileStatus};
+use crate::state::{AppState, FocusLostReason, Mode, TileStatus};
 use crate::theme;
 use pitboss_core::store::TaskStatus;
 
@@ -1431,6 +1431,28 @@ fn render_approval_list_pane(frame: &mut Frame, area: Rect, state: &AppState) {
 // ---------------------------------------------------------------------------
 
 fn render_statusbar(frame: &mut Frame, area: Rect, state: &AppState) {
+    // (#339) When focus auto-fell-back, surface the lost task id and the
+    // reason in the status bar in place of the keybinding hints.
+    // Sticky-until-input — cleared by `handle_key` / `handle_mouse`.
+    if let Some(notice) = state.focus_lost_notice.as_ref() {
+        let verb = match notice.reason {
+            FocusLostReason::Promoted => "exited",
+            FocusLostReason::Disappeared => "gone",
+        };
+        let text = format!(
+            " [focus lost: task {} {} — press any key to dismiss] ",
+            notice.task_id, verb
+        );
+        let para = Paragraph::new(text).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+        frame.render_widget(para, area);
+        return;
+    }
+
     let keys = if matches!(state.mode, Mode::PickingRun { .. }) {
         " [j/k] navigate  [Enter] open  [Esc] cancel"
     } else {
@@ -2335,6 +2357,7 @@ mod tests {
             policy_rules: Vec::new(),
             completed_after_secs: crate::state::COMPLETED_COOLDOWN_DEFAULT_SECS,
             compact_tiles: false,
+            focus_lost_notice: None,
         }
     }
 

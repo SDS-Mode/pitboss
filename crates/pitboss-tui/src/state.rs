@@ -323,6 +323,37 @@ pub struct AppState {
     /// operator saves a `PolicyEditor` session). Seeded as empty until the
     /// first Hello arrives.
     pub policy_rules: Vec<pitboss_cli::mcp::policy::ApprovalRule>,
+    /// Sticky status-bar notice surfaced when focus auto-fell-back from a
+    /// tile that was promoted off the grid (or that disappeared from the
+    /// snapshot entirely). Cleared by the next key or mouse event so the
+    /// operator must explicitly acknowledge before issuing a command that
+    /// would target the wrong tile. (#339)
+    pub focus_lost_notice: Option<FocusLostNotice>,
+}
+
+/// Surfaced in the status bar when the focused tile disappeared (was
+/// promoted to Completed, or vanished from the snapshot entirely) and
+/// focus auto-fell back to another tile. Sticky until the operator
+/// presses any key or clicks — the timer-based variant was rejected
+/// because an operator looking away misses the notice and still fires
+/// the wrong command. (#339)
+#[derive(Debug, Clone)]
+pub struct FocusLostNotice {
+    /// Task id that lost focus.
+    pub task_id: String,
+    /// Reason the tile is no longer focusable, used to phrase the
+    /// status-bar message.
+    pub reason: FocusLostReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusLostReason {
+    /// The tile entered a terminal state long enough ago to be
+    /// promoted off the Active grid.
+    Promoted,
+    /// The task disappeared from the snapshot entirely (run switch,
+    /// or a reload that lost the id).
+    Disappeared,
 }
 
 /// Mirrors `pitboss_cli::control::protocol::ActorActivityEntry` but
@@ -376,6 +407,7 @@ impl AppState {
             policy_rules: Vec::new(),
             completed_after_secs: COMPLETED_COOLDOWN_DEFAULT_SECS,
             compact_tiles: false,
+            focus_lost_notice: None,
         }
     }
 
@@ -465,7 +497,9 @@ impl AppState {
     }
 
     /// If the currently focused tile has been promoted, move focus to the
-    /// first active tile. Called after every snapshot update.
+    /// first active tile. Called after every snapshot update. When
+    /// reassignment fires, capture a sticky `FocusLostNotice` so the
+    /// status bar can flag the implicit move. (#339)
     pub fn ensure_active_focus(&mut self) {
         if matches!(self.mode, Mode::Detail { .. } | Mode::Completed { .. }) {
             return;
@@ -475,6 +509,20 @@ impl AppState {
             return;
         }
         if !active.contains(&self.focus) {
+            // Capture the lost id BEFORE reassigning so the notice
+            // names the right tile. `apply_snapshot` may have also set
+            // a `Disappeared` notice; in that case the focus index now
+            // points at a still-present-but-promoted tile (after the
+            // clamp on line ~876), so we'd overwrite a more specific
+            // reason — only set if not already populated.
+            if self.focus_lost_notice.is_none() {
+                if let Some(lost) = self.tasks.get(self.focus) {
+                    self.focus_lost_notice = Some(FocusLostNotice {
+                        task_id: lost.id.clone(),
+                        reason: FocusLostReason::Promoted,
+                    });
+                }
+            }
             self.focus = active[0];
         }
     }
@@ -865,12 +913,23 @@ impl AppState {
         }
 
         // Restore focus to the same task id if still present.
-        if let Some(id) = focused_id {
-            if let Some(pos) = self.tasks.iter().position(|t| t.id == id) {
+        if let Some(id) = focused_id.as_ref() {
+            if let Some(pos) = self.tasks.iter().position(|t| t.id == *id) {
                 self.focus = pos;
                 self.ensure_active_focus();
                 return;
             }
+        }
+        // The previously-focused id is gone from the snapshot — record a
+        // sticky notice with that id BEFORE the clamp / ensure_active_focus
+        // overwrites the focus index. Without this set first, the
+        // ensure_active_focus path would either name a different
+        // (still-present) tile or skip the notice entirely. (#339)
+        if let Some(id) = focused_id {
+            self.focus_lost_notice = Some(FocusLostNotice {
+                task_id: id,
+                reason: FocusLostReason::Disappeared,
+            });
         }
         // Clamp focus to valid range.
         if !self.tasks.is_empty() && self.focus >= self.tasks.len() {
@@ -1807,6 +1866,132 @@ mod tests {
             "exit_detail should return to Completed, got {:?}",
             state.mode
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #339 — focus-lost notice: ensure_active_focus and apply_snapshot
+    // both surface a sticky notice when focus auto-falls-back, so the
+    // operator can't issue a command targeting the wrong tile silently.
+    // -----------------------------------------------------------------------
+
+    fn make_running_tile(id: &str) -> TileState {
+        TileState {
+            id: id.into(),
+            status: TileStatus::Running,
+            duration_ms: None,
+            token_usage_input: 0,
+            token_usage_output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+            exit_code: None,
+            log_path: std::path::PathBuf::from("/dev/null"),
+            model: None,
+            parent_task_id: None,
+            worktree_path: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn ensure_active_focus_records_promoted_notice_when_focused_tile_promoted() {
+        let mut state = make_state();
+        // tasks[0] is promoted (ended 130s ago > 120s threshold);
+        // tasks[1] is running.
+        state.tasks = vec![make_done_tile("gone", 130), make_running_tile("live")];
+        state.focus = 0;
+        state.ensure_active_focus();
+        assert_eq!(state.focus, 1, "focus must fall back to first active tile");
+        let notice = state
+            .focus_lost_notice
+            .as_ref()
+            .expect("notice must be set when focus is reassigned");
+        assert_eq!(notice.task_id, "gone");
+        assert_eq!(notice.reason, FocusLostReason::Promoted);
+    }
+
+    #[test]
+    fn ensure_active_focus_does_not_set_notice_when_focus_still_active() {
+        let mut state = make_state();
+        state.tasks = vec![make_running_tile("a"), make_running_tile("b")];
+        state.focus = 1;
+        state.ensure_active_focus();
+        assert_eq!(state.focus, 1, "focus must not move when still active");
+        assert!(
+            state.focus_lost_notice.is_none(),
+            "notice must not be set when focus was not reassigned"
+        );
+    }
+
+    #[test]
+    fn apply_snapshot_records_disappeared_notice_when_focused_id_vanishes() {
+        let mut state = make_state();
+        state.tasks = vec![make_running_tile("a"), make_running_tile("b")];
+        state.focus = 1; // focus = "b"
+                         // New snapshot drops "b" entirely.
+        let snapshot = AppSnapshot {
+            tasks: vec![make_running_tile("a"), make_running_tile("c")],
+            focus_log: Vec::new(),
+            failed_count: 0,
+            run_started_at: None,
+        };
+        state.apply_snapshot(snapshot);
+        let notice = state
+            .focus_lost_notice
+            .as_ref()
+            .expect("notice must be set when focused id disappears");
+        assert_eq!(notice.task_id, "b");
+        assert_eq!(notice.reason, FocusLostReason::Disappeared);
+    }
+
+    #[test]
+    fn apply_snapshot_does_not_set_notice_when_focused_id_preserved() {
+        let mut state = make_state();
+        state.tasks = vec![make_running_tile("a"), make_running_tile("b")];
+        state.focus = 1; // focus = "b"
+                         // New snapshot keeps "b" but reorders.
+        let snapshot = AppSnapshot {
+            tasks: vec![make_running_tile("b"), make_running_tile("a")],
+            focus_log: Vec::new(),
+            failed_count: 0,
+            run_started_at: None,
+        };
+        state.apply_snapshot(snapshot);
+        assert_eq!(state.focus, 0, "focus must follow id, not index");
+        assert!(
+            state.focus_lost_notice.is_none(),
+            "notice must not be set when focused id was preserved"
+        );
+    }
+
+    #[test]
+    fn apply_snapshot_disappear_notice_takes_precedence_over_promoted() {
+        // When a snapshot both drops the focused id AND the new index
+        // would point at a promoted tile, the Disappeared notice
+        // (more specific to what the operator just lost) must win over
+        // the Promoted notice that ensure_active_focus would otherwise
+        // overwrite. (#339 — see ensure_active_focus comment)
+        let mut state = make_state();
+        state.tasks = vec![make_running_tile("focused")];
+        state.focus = 0;
+        let snapshot = AppSnapshot {
+            // Old "focused" gone; new task list is one promoted tile
+            // plus one running tile so ensure_active_focus has to
+            // fall back to active[0].
+            tasks: vec![make_done_tile("old", 200), make_running_tile("new")],
+            focus_log: Vec::new(),
+            failed_count: 0,
+            run_started_at: None,
+        };
+        state.apply_snapshot(snapshot);
+        let notice = state
+            .focus_lost_notice
+            .as_ref()
+            .expect("notice must be set");
+        assert_eq!(
+            notice.task_id, "focused",
+            "Disappeared id must win over Promoted overwrite"
+        );
+        assert_eq!(notice.reason, FocusLostReason::Disappeared);
     }
 
     #[test]
