@@ -213,6 +213,12 @@ pub struct TileState {
     /// Used by `is_promoted` to decide when to move the tile to the Completed
     /// page.
     pub completed_at: Option<DateTime<Utc>>,
+    /// Count of `tool_denied` rows in this actor's `events.jsonl`. Surfaced
+    /// on the tile so an operator running under Path B sees the denial
+    /// volume at a glance — every row is a `permission_prompt` deny that
+    /// claude received and adapted to (#370). Read-side aggregation only;
+    /// the canonical per-row data lives in `events.jsonl`.
+    pub denials_count: u32,
 }
 
 /// Full application state updated each poll cycle.
@@ -1216,6 +1222,7 @@ mod tests {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None,
+            denials_count: 0,
         }];
         state
     }
@@ -1773,6 +1780,7 @@ mod tests {
             parent_task_id: None,
             worktree_path: None,
             completed_at: Some(Utc::now() - chrono::Duration::seconds(ended_secs_ago)),
+            denials_count: 0,
         }
     }
 
@@ -1807,6 +1815,7 @@ mod tests {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None, // running tiles never have completed_at
+            denials_count: 0,
         };
         assert!(!state.is_promoted(&tile));
     }
@@ -1831,6 +1840,7 @@ mod tests {
                 parent_task_id: None,
                 worktree_path: None,
                 completed_at: None,
+                denials_count: 0,
             },
             make_done_tile("fresh", 2), // done but within grace period
         ];
@@ -1889,6 +1899,7 @@ mod tests {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None,
+            denials_count: 0,
         }
     }
 

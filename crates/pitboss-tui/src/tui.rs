@@ -1220,6 +1220,17 @@ fn render_tile(frame: &mut Frame, area: Rect, state: &AppState, tile_idx: usize,
     if let Some(line) = activity_line {
         lines.push(line);
     }
+    // Path-B denial counter. Same conditional discipline as the activity
+    // line — only render when non-zero so quiet runs don't spend a row on
+    // a `denied: 0` line. Painted in the danger color so the operator's
+    // eye lands on it; per-row detail still lives in
+    // `<run_dir>/tasks/<id>/events.jsonl`.
+    if tile.denials_count > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("denied: {}", tile.denials_count),
+            theme::danger_style(),
+        )));
+    }
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
@@ -1265,18 +1276,29 @@ fn render_tile_compact(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Two content lines: status + tokens.
+    // Two content lines: status + tokens. The compact tile only has two
+    // rows, so the denial counter (when present) is appended inline to
+    // the status line as a separate styled span instead of consuming a
+    // whole row.
     let tokens = format!(
         "{}↑ {}↓",
         fmt_tokens(tile.token_usage_input),
         fmt_tokens(tile.token_usage_output)
     );
+    let mut status_spans = vec![
+        Span::styled(icon, Style::default().fg(icon_color)),
+        Span::raw(" "),
+        Span::styled(status_label, Style::default().fg(icon_color)),
+    ];
+    if tile.denials_count > 0 {
+        status_spans.push(Span::raw(" "));
+        status_spans.push(Span::styled(
+            format!("⊘{}", tile.denials_count),
+            theme::danger_style(),
+        ));
+    }
     let lines = vec![
-        Line::from(vec![
-            Span::styled(icon, Style::default().fg(icon_color)),
-            Span::raw(" "),
-            Span::styled(status_label, Style::default().fg(icon_color)),
-        ]),
+        Line::from(status_spans),
         Line::from(Span::styled(tokens, theme::muted_style())),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
@@ -2323,6 +2345,7 @@ mod tests {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None,
+            denials_count: 0,
         }
     }
 
@@ -2732,6 +2755,62 @@ mod tests {
         assert!(
             rendered.contains("msg:5 art:1"),
             "tile should render comm counters; got snippet: {:?}",
+            &rendered[..rendered.len().min(400)]
+        );
+    }
+
+    /// Path-B denial counter must surface on the full tile when non-zero.
+    /// The label is intentionally stable (`"denied: <N>"`) — review tooling
+    /// and operators may grep buffer dumps for it.
+    #[test]
+    fn render_tile_shows_denials_counter_when_positive() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut s = state(vec![tile("worker-deny", TileStatus::Running, None, 0, 0)]);
+        s.tasks[0].denials_count = 4;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..30)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            rendered.contains("denied: 4"),
+            "tile should render denial counter; got snippet: {:?}",
+            &rendered[..rendered.len().min(400)]
+        );
+    }
+
+    /// Symmetric to the comm-counters case: zero denials must NOT spend
+    /// a row on a `denied: 0` line — the conditional render is the
+    /// difference between a clean tile and one full of zero-stat noise.
+    #[test]
+    fn render_tile_omits_denials_counter_when_zero() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let s = state(vec![tile("worker-quiet", TileStatus::Running, None, 0, 0)]);
+        // denials_count defaults to 0 via `tile()`.
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..30)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            !rendered.contains("denied:"),
+            "tile rendered a stray denial line for a quiet actor; got snippet: {:?}",
             &rendered[..rendered.len().min(400)]
         );
     }

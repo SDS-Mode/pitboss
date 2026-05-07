@@ -64,6 +64,13 @@ pub fn primary_style() -> Style {
     Style::default().fg(TEXT_PRIMARY)
 }
 
+/// Style for "something was blocked" annotations — Path-B denial counters
+/// and similar operator-attention strings. Reuses the failure red so the
+/// signal is visually consistent with `STATUS_FAILED` tiles.
+pub fn danger_style() -> Style {
+    Style::default().fg(STATUS_FAILED)
+}
+
 pub fn focused_border() -> Style {
     Style::default()
         .fg(BORDER_FOCUSED)

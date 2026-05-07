@@ -224,6 +224,7 @@ fn cmd_screenshot(run: Option<&str>, cols: u16, rows: u16) -> Result<()> {
 }
 
 /// Same shape as `watcher::build_snapshot` but synchronous and self-contained.
+#[allow(clippy::too_many_lines)] // mirror of watcher::build_snapshot; two fns share the schema
 fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
     use pitboss_core::store::{TaskRecord, TaskStatus};
     use pitboss_tui::state::{AppSnapshot, TileState, TileStatus};
@@ -306,6 +307,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 parent_task_id: rec.parent_task_id.clone(),
                 worktree_path: rec.worktree_path.clone(),
                 completed_at: Some(rec.ended_at),
+                denials_count: 0,
             });
         } else {
             tiles.push(TileState {
@@ -322,6 +324,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 parent_task_id: None,
                 worktree_path: None,
                 completed_at: None,
+                denials_count: 0,
             });
         }
     }

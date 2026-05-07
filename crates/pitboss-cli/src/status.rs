@@ -135,6 +135,22 @@ pub(crate) fn render_status<W: Write>(
         writeln!(out, "Total: {total}  Failed: {failed}")?;
     }
 
+    // Approvals aggregate. `approvals_rejected` covers both Path A
+    // (`request_approval` denials) and Path B (`permission_prompt`
+    // denials) — per #367 the Path-B handler bumps the same counter.
+    // Per-`DeniedReasonKind` breakdown lives on each actor's
+    // `events.jsonl::tool_denied` rows; surfacing that requires reading
+    // those files per-actor and is left for `--json` consumers / TUI.
+    let approvals_requested: u32 = records.iter().map(|r| r.approvals_requested).sum();
+    let approvals_approved: u32 = records.iter().map(|r| r.approvals_approved).sum();
+    let approvals_rejected: u32 = records.iter().map(|r| r.approvals_rejected).sum();
+    if approvals_requested > 0 || approvals_approved > 0 || approvals_rejected > 0 {
+        writeln!(
+            out,
+            "Approvals: {approvals_requested} requested, {approvals_approved} approved, {approvals_rejected} rejected"
+        )?;
+    }
+
     // Surface notification emit failures only when the count is positive —
     // the common case (no router or no failures) stays uncluttered.
     // Operators who see this line should consult
@@ -302,6 +318,71 @@ mod tests {
         assert!(
             !out.contains("Notification failures"),
             "spurious footer for None:\n{out}"
+        );
+    }
+
+    fn make_record_with_approvals(
+        task_id: &str,
+        requested: u32,
+        approved: u32,
+        rejected: u32,
+    ) -> TaskRecord {
+        let mut r = make_record(task_id, TaskStatus::Success);
+        r.approvals_requested = requested;
+        r.approvals_approved = approved;
+        r.approvals_rejected = rejected;
+        r
+    }
+
+    /// When any approval counter is positive across the run, the footer
+    /// must surface the aggregate so operators see Path B denial volume
+    /// without piping through `--json`. The line shape is stable —
+    /// downstream tooling may grep for "Approvals:".
+    #[test]
+    fn render_status_emits_approvals_footer_when_any_positive() {
+        let recs = vec![
+            make_record_with_approvals("w-1", 5, 4, 1),
+            make_record_with_approvals("w-2", 3, 1, 2),
+        ];
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Approvals: 8 requested, 5 approved, 3 rejected"),
+            "approvals footer missing or wrong shape in:\n{out}"
+        );
+    }
+
+    /// All-zero approvals is the dominant case (no policy rules fired,
+    /// no Path B routing) and must NOT print the footer — it would just
+    /// be noise.
+    #[test]
+    fn render_status_omits_approvals_footer_when_all_zero() {
+        let recs = vec![
+            make_record_with_approvals("w-1", 0, 0, 0),
+            make_record_with_approvals("w-2", 0, 0, 0),
+        ];
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Approvals:"),
+            "spurious approvals footer in:\n{out}"
+        );
+    }
+
+    /// A run with rejections but zero approvals (e.g. every request hit
+    /// `default_approval_policy = "auto_reject"`) must still show the
+    /// footer — the rejected count is the actionable signal.
+    #[test]
+    fn render_status_emits_approvals_footer_when_only_rejected_positive() {
+        let recs = vec![make_record_with_approvals("w-1", 4, 0, 4)];
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Approvals: 4 requested, 0 approved, 4 rejected"),
+            "approvals footer missing for rejection-only run in:\n{out}"
         );
     }
 }
