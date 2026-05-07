@@ -217,3 +217,238 @@ pub async fn run_kill_resume_loop(
         overall_started_at,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the kill+resume control loop.
+    //!
+    //! ISSUE-dispatch-prior-10: a multi-iteration kill+resume cycle must
+    //! sum the per-subprocess `TokenUsage` into `total_token_usage` —
+    //! double-count, reset-on-restart, or missed-final-iteration would
+    //! silently mis-report cost in `meta.json`/`summary.json`. Pin the
+    //! accumulation contract here so a future refactor that moves the
+    //! `total_token_usage.add(...)` call out of the loop body fails
+    //! loudly.
+    use super::*;
+    use crate::dispatch::layer::LayerState;
+    use crate::dispatch::state::ApprovalPolicy;
+    use crate::manifest::resolve::ResolvedManifest;
+    use crate::manifest::schema::WorktreeCleanup;
+    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use pitboss_core::process::{ChildProcess, ProcessSpawner};
+    use pitboss_core::store::{JsonFileStore, SessionStore};
+    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    /// Cycles through an ordered list of `FakeScript`s — one per
+    /// `spawn` call. Mirrors the `CyclingFake` pattern used in
+    /// `runner.rs:1581-1599` so kill+resume tests can give each
+    /// iteration a different scripted result.
+    struct CyclingFake(Vec<FakeScript>, StdMutex<usize>);
+
+    #[async_trait::async_trait]
+    impl ProcessSpawner for CyclingFake {
+        async fn spawn(
+            &self,
+            cmd: SpawnCmd,
+        ) -> Result<Box<dyn ChildProcess>, pitboss_core::error::SpawnError> {
+            let i = {
+                let mut lock = self.1.lock().unwrap();
+                let i = *lock;
+                *lock += 1;
+                i
+            };
+            let script = self.0[i % self.0.len()].clone();
+            FakeSpawner::new(script).spawn(cmd).await
+        }
+    }
+
+    fn empty_manifest(run_dir: PathBuf) -> ResolvedManifest {
+        ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir,
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(4),
+            budget_usd: Some(5.0),
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+        }
+    }
+
+    fn stub_cmd() -> SpawnCmd {
+        SpawnCmd {
+            program: PathBuf::from("claude"),
+            args: vec![],
+            cwd: PathBuf::from("/"),
+            env: HashMap::new(),
+        }
+    }
+
+    /// One synthetic reprompt → exactly two iterations → `total_token_usage`
+    /// is the sum of both per-iteration `TokenUsage` values, and
+    /// `reprompt_count == iterations - 1`.
+    #[tokio::test]
+    async fn kill_resume_accumulates_token_usage_across_iterations() {
+        let dir = TempDir::new().unwrap();
+        let manifest = empty_manifest(dir.path().to_path_buf());
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+
+        // Iteration 1: 10 input + 20 output. Iteration 2: 5 input + 7 output.
+        // Both emit `system{init,session_id}` so the reprompt path captures
+        // a session_id (required for `--resume`); without that the loop
+        // breaks early on the warn-and-exit branch at kill_resume.rs:201.
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(CyclingFake(
+            vec![
+                FakeScript::new()
+                    .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-1"}"#)
+                    .stdout_line(
+                        r#"{"type":"result","session_id":"sess-1","usage":{"input_tokens":10,"output_tokens":20}}"#,
+                    )
+                    .exit_code(0),
+                FakeScript::new()
+                    .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-1"}"#)
+                    .stdout_line(
+                        r#"{"type":"result","session_id":"sess-1","usage":{"input_tokens":5,"output_tokens":7}}"#,
+                    )
+                    .exit_code(0),
+            ],
+            StdMutex::new(0),
+        ));
+
+        let layer = Arc::new(LayerState::new(
+            Uuid::now_v7(),
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            Arc::new(WorktreeManager::new()),
+            CleanupPolicy::Never,
+            dir.path().to_path_buf(),
+            ApprovalPolicy::Block,
+            None,
+            Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+
+        // Pre-queue one reprompt so iteration 1's `try_recv` finds it and
+        // the loop continues into iteration 2. A second `try_recv` after
+        // iteration 2 returns `Empty`, breaking the loop.
+        let (reprompt_tx, reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        reprompt_tx.send("[SYSTEM] reconsider".into()).unwrap();
+        // Drop the sender so the channel won't accept another send during
+        // the test — defensive against a future regression that would
+        // mis-trigger an extra iteration.
+        drop(reprompt_tx);
+
+        let args = KillResumeArgs {
+            actor_id: "lead".into(),
+            initial_cmd: stub_cmd(),
+            timeout: Duration::from_secs(30),
+            log_path: dir.path().join("stdout.log"),
+            stderr_path: dir.path().join("stderr.log"),
+        };
+
+        let result =
+            run_kill_resume_loop(Arc::clone(&layer), args, reprompt_rx, |_sid, _prompt| {
+                stub_cmd()
+            })
+            .await;
+
+        assert_eq!(
+            result.reprompt_count, 1,
+            "exactly one reprompt → exactly two iterations"
+        );
+        assert_eq!(
+            result.total_token_usage.input, 15,
+            "input_tokens must be 10 (iter 1) + 5 (iter 2) = 15; got {}",
+            result.total_token_usage.input
+        );
+        assert_eq!(
+            result.total_token_usage.output, 27,
+            "output_tokens must be 20 (iter 1) + 7 (iter 2) = 27; got {}",
+            result.total_token_usage.output
+        );
+        assert_eq!(
+            result.last_session_id.as_deref(),
+            Some("sess-1"),
+            "last_session_id must be the most recent iteration's id"
+        );
+    }
+
+    /// Zero reprompts → exactly one iteration → `total_token_usage`
+    /// equals the single iteration's usage. Companion case to the
+    /// kill+resume scenario above; pins the no-reprompt path so a
+    /// regression that double-adds the per-iteration usage (e.g. by
+    /// also accumulating from `final_outcome`) fails here too.
+    #[tokio::test]
+    async fn kill_resume_with_no_reprompt_returns_single_iteration_usage() {
+        let dir = TempDir::new().unwrap();
+        let manifest = empty_manifest(dir.path().to_path_buf());
+        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(
+            FakeScript::new()
+                .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-only"}"#)
+                .stdout_line(
+                    r#"{"type":"result","session_id":"sess-only","usage":{"input_tokens":3,"output_tokens":4}}"#,
+                )
+                .exit_code(0),
+        ));
+
+        let layer = Arc::new(LayerState::new(
+            Uuid::now_v7(),
+            manifest,
+            store,
+            CancelToken::new(),
+            "lead".into(),
+            spawner,
+            PathBuf::from("claude"),
+            Arc::new(WorktreeManager::new()),
+            CleanupPolicy::Never,
+            dir.path().to_path_buf(),
+            ApprovalPolicy::Block,
+            None,
+            Arc::new(crate::shared_store::SharedStore::new()),
+            None,
+        ));
+
+        let (reprompt_tx, reprompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        drop(reprompt_tx); // no reprompts queued
+
+        let args = KillResumeArgs {
+            actor_id: "lead".into(),
+            initial_cmd: stub_cmd(),
+            timeout: Duration::from_secs(30),
+            log_path: dir.path().join("stdout.log"),
+            stderr_path: dir.path().join("stderr.log"),
+        };
+
+        let result =
+            run_kill_resume_loop(Arc::clone(&layer), args, reprompt_rx, |_sid, _prompt| {
+                stub_cmd()
+            })
+            .await;
+
+        assert_eq!(result.reprompt_count, 0);
+        assert_eq!(result.total_token_usage.input, 3);
+        assert_eq!(result.total_token_usage.output, 4);
+    }
+}
