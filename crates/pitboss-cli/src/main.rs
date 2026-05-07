@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use pitboss_cli::{
-    agents_md, analyze, attach, cli, diff, dispatch, list, manifest, mcp, prune, status, tree,
+    agents_md, analyze, attach, capability_matrix, cli, diff, dispatch, list, manifest, mcp, prune,
+    status, tree,
 };
 
 use cli::{Cli, Command};
@@ -20,8 +21,11 @@ fn main() -> Result<()> {
             agents_md::print_agents_md();
             Ok(())
         }
-        Command::Validate { manifest } => {
-            std::process::exit(run_validate(&manifest));
+        Command::Validate {
+            manifest,
+            capability_matrix,
+        } => {
+            std::process::exit(run_validate(&manifest, capability_matrix));
         }
         Command::Dispatch {
             manifest,
@@ -339,7 +343,7 @@ fn init_tracing(verbose: u8, quiet: bool) {
 ///     overlapped with the OS-level "binary not found" exit code and made
 ///     it impossible to distinguish a missing `pitboss` binary from a bad
 ///     manifest. (#157)
-fn run_validate(manifest: &std::path::Path) -> i32 {
+fn run_validate(manifest: &std::path::Path, capability_matrix: bool) -> i32 {
     let env_mp = parse_env_max_parallel();
     let r = match manifest::load_manifest(manifest, env_mp) {
         Ok(r) => r,
@@ -363,6 +367,10 @@ fn run_validate(manifest: &std::path::Path) -> i32 {
             r.tasks.len(),
             r.max_parallel_tasks.unwrap_or(0)
         );
+    }
+    if capability_matrix {
+        println!();
+        print!("{}", capability_matrix::render(&r));
     }
     0
 }

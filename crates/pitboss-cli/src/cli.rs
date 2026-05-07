@@ -41,7 +41,16 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Parse, resolve and validate a manifest. Prints report and exits.
-    Validate { manifest: PathBuf },
+    Validate {
+        manifest: PathBuf,
+        /// On success, also print an `(actor type → MCP servers)`
+        /// matrix derived from the manifest's `[[mcp_server]]` scopes
+        /// and declared `[[worker_type]]` / `[[sublead_type]]`
+        /// profiles. Reuses the same admission logic as the runtime
+        /// injection so the report cannot drift from live behavior.
+        #[arg(long)]
+        capability_matrix: bool,
+    },
     /// Execute a manifest.
     Dispatch {
         manifest: PathBuf,
