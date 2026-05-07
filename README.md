@@ -16,27 +16,25 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.10.0** lands the communication plane. A lead can now exchange
-typed messages and binary artifacts with its workers via eight new
-MCP tools — `message_send` / `list` / `read` / `ack` for the
-parent-child mailbox and `artifact_put` / `list` / `read` / `grant`
-for the artifact registry. The whole surface is gated behind a new
-`[communication]` manifest section that defaults to
-`mode = "disabled"`, so existing manifests see no behavioural change
-until they opt in with `mode = "parent_child"`. The TUI and web
-console both stream per-actor mailbox and artifact activity as
-first-class operator signals alongside the existing KV and lease
-counters. Failure triage gets its own command:
-`pitboss analyze [--recent N] [--failed-only] [--json]` produces
-single-run and cross-run reports with cost rollups, hotspot
-detection (slowest, costliest, token-heaviest tasks), and
-tokenized failure clustering — and the same engine is exposed as
-`analyze_run` / `analyze_recent` MCP tools so leads can self-triage
-mid-run. A security-relevant fix: spawned worker, lead, and
-sub-lead `--allowedTools` argv lists are now mode-aware
-(`pitboss_mcp_tools(mode)` etc.), so `pitboss dispatch --dry-run`
-output finally matches runtime behaviour when communication is
-disabled. See `CHANGELOG.md` for the full per-version history and
+**v0.12.0** lands typed worker/sublead profiles and makes Path B
+permission routing the default. Pitboss shifts from "claude is fully
+trusted, audit after the fact" to "every tool call gates through
+pitboss with a typed allowlist": declare `[[worker_type]]` or
+`[[sublead_type]]` blocks with their own tool allowlists, MCP server
+scopes, and budget caps, and the dispatcher enforces those caps while
+Path B fast-paths typed callers via `permission_prompt` short-circuit.
+`[lead].permission_routing` now defaults to `"path_b"`, so spawned
+claude subprocesses run with their built-in permission gate active;
+tool calls outside `--allowedTools` route through
+`mcp__pitboss__permission_prompt` instead of being silently approved
+via `--dangerously-skip-permissions`. Operators get visibility into
+what's denied: aggregate approvals counters in `pitboss status`,
+per-tile denial counter in the TUI, `tool_denied` events on
+`summary.jsonl`, and a new `pitboss validate --capability-matrix`
+that prints the actor-type × MCP-server table so you can audit
+declared scopes before dispatch. Existing Path-A manifests still work
+— set `permission_routing = "path_a"` explicitly to keep pre-v0.12
+behavior. See `CHANGELOG.md` for the full per-version history and
 `AGENTS.md` for the MCP tool reference, keybindings, and manifest
 schema.
 
