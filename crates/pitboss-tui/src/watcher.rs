@@ -155,6 +155,8 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
 
     for id in &all_ids {
         let log_path = tasks_dir.join(id).join("stdout.log");
+        let events_path = tasks_dir.join(id).join("events.jsonl");
+        let denials_count = count_tool_denials(&events_path);
         let model = model_map.get(id).and_then(Option::clone);
         let is_dynamic = dynamic_ids.iter().any(|d| d == id);
         let tile = build_tile(
@@ -164,6 +166,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
             is_dynamic,
             completed.get(id),
             parent_task_id_fallback.as_deref(),
+            denials_count,
             &mut failed_count,
             &mut run_started_at,
         );
@@ -268,6 +271,7 @@ fn build_tile(
     is_dynamic: bool,
     rec: Option<&TaskRecord>,
     parent_task_id_fallback: Option<&str>,
+    denials_count: u32,
     failed_count: &mut usize,
     run_started_at: &mut Option<chrono::DateTime<chrono::Utc>>,
 ) -> TileState {
@@ -313,6 +317,7 @@ fn build_tile(
                 .clone()
                 .or_else(|| log_path.parent().and_then(read_worktree_sidecar)),
             completed_at: Some(rec.ended_at),
+            denials_count,
         }
     } else {
         // Decide between Pending and Running by checking log freshness.
@@ -355,8 +360,41 @@ fn build_tile(
                 None
             },
             completed_at: None,
+            denials_count,
         }
     }
+}
+
+/// Count `tool_denied` rows in a per-actor `events.jsonl`. Cheap O(file)
+/// scan: lines parse as `serde_json::Value` and we discriminate on
+/// `kind == "tool_denied"`. The file is tiny vs `stdout.log` (one line
+/// per Path-B deny), so reparsing on every poll tick is negligible.
+///
+/// Decoupling from the canonical `TaskEvent` enum (defined in
+/// `pitboss-cli`) keeps `pitboss-tui` from taking a cli-crate dependency
+/// just to read its own jsonl. The `kind` field name is the stable wire
+/// contract that the `#[serde(tag = "kind", rename_all = "snake_case")]`
+/// derive on `TaskEvent` produces — see
+/// `crates/pitboss-cli/src/dispatch/events.rs`.
+fn count_tool_denials(events_jsonl: &Path) -> u32 {
+    let Ok(file) = std::fs::File::open(events_jsonl) else {
+        return 0;
+    };
+    let reader = BufReader::new(file);
+    let mut count: u32 = 0;
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if val.get("kind").and_then(|v| v.as_str()) == Some("tool_denied") {
+            count = count.saturating_add(1);
+        }
+    }
+    count
 }
 
 /// Read the `worktree.path` sidecar file written at spawn time.
@@ -1080,5 +1118,97 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let out = tail_log(&dir.path().join("does-not-exist.log"), 40);
         assert!(out.is_empty());
+    }
+
+    /// `count_tool_denials` must count only `kind == "tool_denied"` rows
+    /// while ignoring other event variants in the same `events.jsonl`
+    /// (e.g. `pause`, `approval_response`). The discriminant is the
+    /// stable wire contract — see `TaskEvent` in
+    /// `crates/pitboss-cli/src/dispatch/events.rs`.
+    #[test]
+    fn count_tool_denials_counts_only_tool_denied_rows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"kind":"pause","at":"2026-05-07T00:00:00Z"}"#,
+            r#"{"kind":"tool_denied","at":"2026-05-07T00:00:01Z","tool_name":"Bash","actor_id":"w-1","reason_kind":"denied_by_rule","reason":"denied: tool 'Bash' rejected by [[approval_policy]] rule"}"#,
+            r#"{"kind":"approval_response","at":"2026-05-07T00:00:02Z","request_id":"r1","approved":true,"edited":false}"#,
+            r#"{"kind":"tool_denied","at":"2026-05-07T00:00:03Z","tool_name":"Write","actor_id":"w-1","reason_kind":"operator_rejected","reason":"denied: tool 'Write' rejected by operator"}"#,
+            r#"{"kind":"tool_denied","at":"2026-05-07T00:00:04Z","tool_name":"Edit","actor_id":"w-1","reason_kind":"ttl_expired","reason":"denied: tool 'Edit' approval timed out before operator response"}"#,
+        ];
+        let body = lines.join("\n");
+        std::fs::write(&path, body).unwrap();
+
+        assert_eq!(count_tool_denials(&path), 3);
+    }
+
+    /// Missing `events.jsonl` (the common quiet-actor case) and malformed
+    /// rows (truncated mid-write, partial flush) must both yield 0 rather
+    /// than panic — the watcher polls every 250ms and any I/O error here
+    /// would freeze the snapshot pipeline.
+    #[test]
+    fn count_tool_denials_handles_missing_and_malformed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Missing file — quiet actor case.
+        assert_eq!(count_tool_denials(&dir.path().join("nope.jsonl")), 0);
+
+        // Malformed lines next to one valid denied row.
+        let path = dir.path().join("events.jsonl");
+        let body = [
+            "not-json-at-all",
+            "",
+            r#"{"kind":"tool_denied","at":"2026-05-07T00:00:00Z","tool_name":"Bash","actor_id":"w-1","reason_kind":"denied_by_policy","reason":"x"}"#,
+            r#"{"kind":""#,
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+        assert_eq!(count_tool_denials(&path), 1);
+    }
+
+    /// End-to-end: a dynamic worker with three `tool_denied` rows in its
+    /// `events.jsonl` must surface as `denials_count = 3` on its tile so
+    /// the TUI render path picks it up.
+    #[test]
+    fn build_snapshot_populates_denials_count_per_actor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+
+        let resolved = serde_json::json!({
+            "max_parallel": 4,
+            "halt_on_failure": false,
+            "run_dir": run_dir.to_str(),
+            "worktree_cleanup": "OnSuccess",
+            "emit_event_stream": false,
+            "tasks": [],
+            "lead": {"id": "lead", "model": "claude-haiku-4-5"},
+            "max_workers": 4,
+            "budget_usd": 5.0,
+            "lead_timeout_secs": 900
+        });
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        // Live worker subdir (no summary record yet) with two denials.
+        let worker_dir = run_dir.join("tasks").join("worker-noisy");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::write(
+            worker_dir.join("events.jsonl"),
+            [
+                r#"{"kind":"tool_denied","at":"2026-05-07T00:00:00Z","tool_name":"Bash","actor_id":"worker-noisy","reason_kind":"denied_by_rule","reason":"x"}"#,
+                r#"{"kind":"tool_denied","at":"2026-05-07T00:00:01Z","tool_name":"Write","actor_id":"worker-noisy","reason_kind":"denied_by_rule","reason":"x"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        // Lead has no events.jsonl — must default to 0 denials.
+        let snap = build_snapshot(&run_dir, None);
+        let lead_tile = snap.tasks.iter().find(|t| t.id == "lead").unwrap();
+        let worker_tile = snap.tasks.iter().find(|t| t.id == "worker-noisy").unwrap();
+        assert_eq!(lead_tile.denials_count, 0);
+        assert_eq!(worker_tile.denials_count, 2);
     }
 }

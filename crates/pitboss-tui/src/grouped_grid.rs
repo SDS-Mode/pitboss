@@ -79,6 +79,7 @@ mod tests {
             parent_task_id: None,
             worktree_path: None,
             completed_at: None,
+            denials_count: 0,
         }
     }
 
