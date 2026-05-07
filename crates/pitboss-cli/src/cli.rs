@@ -409,6 +409,12 @@ pub enum SchemaFormat {
     Map,
     /// Complete reference TOML — every field present as `key = placeholder`.
     Example,
+    /// Starter `[[worker_type]]` / `[[sublead_type]]` profile scaffold
+    /// for operators migrating onto Path B's typed-profile auto-approve
+    /// (#252). Emits a copy-paste TOML block with explanatory comments;
+    /// the operator customizes `tools`, `allowed_models`, and the
+    /// numeric caps to fit their run.
+    Migration,
 }
 
 /// Starter templates supported by `pitboss init`.

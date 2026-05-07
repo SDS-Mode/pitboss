@@ -5,6 +5,7 @@ pub mod init_template;
 pub mod load;
 pub mod map_doc;
 pub mod metadata;
+pub mod migration_doc;
 pub mod resolve;
 pub mod schema;
 pub mod validate;

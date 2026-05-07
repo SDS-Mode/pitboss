@@ -294,6 +294,37 @@ fn validate_mode(r: &ResolvedManifest) -> Result<()> {
     Ok(())
 }
 
+/// Returns a one-line warning message when Path B is in effect but the
+/// manifest declares no `[[worker_type]]` / `[[sublead_type]]` profiles.
+///
+/// The runtime gate (#388) only fast-paths typed actors via their
+/// profile's `tools` allowlist; un-typed callers still bridge-route
+/// every `permission_prompt`. Operators who selected Path B without
+/// profiles are not getting the headline payoff of the routing change
+/// — they're just paying the bridge round-trip on every tool that
+/// claude can't pre-approve via `--allowedTools`. Pure nudge: returns
+/// `None` (no warn) when at least one profile is declared, so a
+/// partially-migrated manifest doesn't keep firing a stale advisory.
+///
+/// Returned as a string rather than emitted via `tracing::warn!` so
+/// unit tests can assert the trigger conditions without capturing a
+/// global subscriber. The validate-time caller logs it.
+pub(crate) fn path_b_profile_migration_warning(r: &ResolvedManifest) -> Option<String> {
+    if !r.worker_types.is_empty() || !r.sublead_types.is_empty() {
+        return None;
+    }
+    Some(
+        "`permission_routing = \"path_b\"` is selected but the manifest declares \
+         no `[[worker_type]]` / `[[sublead_type]]` profiles. Typed actors get a \
+         fast-path auto-approve via their `tools` allowlist (#388); un-typed \
+         actors route every per-tool check through the operator approval bridge \
+         on first use. Declare profiles to fast-path common tools and audit \
+         out-of-policy requests as `denied_by_profile`. \
+         Run `pitboss schema --format=migration` for a starter scaffold."
+            .to_string(),
+    )
+}
+
 fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     let lead = r.lead.as_ref().unwrap();
 
@@ -324,6 +355,9 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
              <run_dir>/tasks/<actor>/events.jsonl. File issues at \
              https://github.com/SDS-Mode/pitboss/issues"
         );
+        if let Some(msg) = path_b_profile_migration_warning(r) {
+            tracing::warn!("{msg}");
+        }
     }
 
     // A lead with an empty prompt starts, receives no `-p` argument, and exits
@@ -2029,5 +2063,73 @@ mod tests {
         });
         validate_skip_dir_check(&r)
             .expect("unscoped server is the legacy default and must validate");
+    }
+
+    /// Path B + zero profiles ⇒ migration warning fires. Pure check on
+    /// the helper since the runtime caller logs via `tracing::warn!`,
+    /// which is awkward to capture without installing a global
+    /// subscriber. Operators see the message via `pitboss validate`'s
+    /// stderr.
+    #[test]
+    fn path_b_without_profiles_emits_migration_warning() {
+        let r = rm_with(|_| {
+            // Default rl() lead has worker_types/sublead_types empty
+            // and permission_routing defaults to PathA — bump it.
+        });
+        let mut r = r;
+        r.lead.as_mut().unwrap().permission_routing =
+            crate::manifest::schema::PermissionRouting::PathB;
+
+        let msg = path_b_profile_migration_warning(&r)
+            .expect("Path B + no profiles must produce a migration warning");
+        assert!(
+            msg.contains("`[[worker_type]]`"),
+            "warning must reference the missing profile section: {msg}"
+        );
+        assert!(
+            msg.contains("pitboss schema --format=migration"),
+            "warning must point operators at the scaffold command: {msg}"
+        );
+    }
+
+    /// Declaring at least one `[[worker_type]]` suppresses the
+    /// migration warning even if `[[sublead_type]]` is still empty
+    /// (and vice versa). A partially-migrated manifest mustn't keep
+    /// firing a stale advisory — once the operator has started
+    /// declaring profiles, they know the system exists.
+    #[test]
+    fn migration_warning_silenced_by_any_declared_profile() {
+        // worker_type-only.
+        let mut r = rm_with(|m| {
+            m.worker_types = vec![crate::manifest::schema::WorkerType {
+                id: "extraction".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+            }];
+        });
+        r.lead.as_mut().unwrap().permission_routing =
+            crate::manifest::schema::PermissionRouting::PathB;
+        assert!(
+            path_b_profile_migration_warning(&r).is_none(),
+            "worker_type alone must suppress the warning"
+        );
+
+        // sublead_type-only.
+        let mut r = rm_with(|m| {
+            m.sublead_types = vec![crate::manifest::schema::SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+            }];
+        });
+        r.lead.as_mut().unwrap().permission_routing =
+            crate::manifest::schema::PermissionRouting::PathB;
+        assert!(
+            path_b_profile_migration_warning(&r).is_none(),
+            "sublead_type alone must suppress the warning"
+        );
     }
 }

@@ -242,6 +242,7 @@ fn run_schema(format: cli::SchemaFormat, check: Option<&std::path::Path>) -> i32
     let (generated, format_flag) = match format {
         cli::SchemaFormat::Map => (crate::manifest::map_doc::render(), "map"),
         cli::SchemaFormat::Example => (crate::manifest::example_doc::render(), "example"),
+        cli::SchemaFormat::Migration => (crate::manifest::migration_doc::render(), "migration"),
     };
     match check {
         None => {
