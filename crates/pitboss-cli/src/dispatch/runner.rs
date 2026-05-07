@@ -76,6 +76,49 @@ pub fn apply_pitboss_env_defaults(
     }
 }
 
+/// Push the per-route permission CLI args.
+///
+/// - Path A (default): `--dangerously-skip-permissions`. Pitboss is the
+///   sole permission authority via its own approval queue.
+/// - Path B: `--permission-prompt-tool mcp__pitboss__permission_prompt`.
+///   Claude's gate stays active and every per-tool check routes through
+///   pitboss's MCP server. Without this flag the gate falls back to the
+///   interactive prompt, which can't be answered under `-p` and silently
+///   stalls.
+///
+/// Extracted in #370 (item 5) so the four hierarchical spawn variants
+/// (lead, lead_resume, sublead, worker) share one implementation. A
+/// future routing mode (e.g. `Cancel` per #377) becomes a one-line
+/// edit here instead of a four-place change.
+pub(crate) fn push_permission_routing_args(
+    args: &mut Vec<String>,
+    routing: crate::manifest::schema::PermissionRouting,
+) {
+    use crate::manifest::schema::PermissionRouting;
+    match routing {
+        PermissionRouting::PathA => {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        PermissionRouting::PathB => {
+            args.push("--permission-prompt-tool".into());
+            args.push("mcp__pitboss__permission_prompt".into());
+        }
+    }
+}
+
+/// Allowlist `mcp__pitboss__permission_prompt` under Path B so claude's
+/// `--allowedTools` gate doesn't block the gate-routing tool itself.
+/// No-op under Path A. (#370 item 5.)
+pub(crate) fn push_permission_routing_allowed(
+    allowed: &mut Vec<String>,
+    routing: crate::manifest::schema::PermissionRouting,
+) {
+    use crate::manifest::schema::PermissionRouting;
+    if routing == PermissionRouting::PathB {
+        allowed.push("mcp__pitboss__permission_prompt".into());
+    }
+}
+
 /// Check whether a manifest has approval gates that will block indefinitely
 /// in a headless (no-TUI) dispatch. Returns warning strings describing each
 /// gate; empty if the manifest can run cleanly headless. Callers typically
@@ -967,24 +1010,12 @@ pub fn lead_spawn_args(
     mcp_config: &std::path::Path,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
     ];
-    // Path A (default): pitboss is the permission authority; bypass claude's gate.
-    // Path B: leave gate active; permission_prompt MCP tool routes each check.
-    if lead.permission_routing == PermissionRouting::PathA {
-        args.push("--dangerously-skip-permissions".into());
-    } else {
-        // Path B: tell claude to route each tool-permission check through
-        // pitboss's MCP `permission_prompt` tool. Without this flag the
-        // gate falls back to the interactive prompt, which can't be
-        // answered under `-p` and silently stalls.
-        args.push("--permission-prompt-tool".into());
-        args.push("mcp__pitboss__permission_prompt".into());
-    }
+    push_permission_routing_args(&mut args, lead.permission_routing);
     // Plugin/skill isolation: prevent operator's ~/.claude/ plugins
     // (skills, MCP servers, agents, hooks) from bleeding in.
     args.push("--strict-mcp-config".into());
@@ -1001,10 +1032,7 @@ pub fn lead_spawn_args(
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
     }
-    // Path B: pre-allow permission_prompt so claude can route checks without stalling.
-    if lead.permission_routing == PermissionRouting::PathB {
-        allowed.push("mcp__pitboss__permission_prompt".into());
-    }
+    push_permission_routing_allowed(&mut allowed, lead.permission_routing);
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
 
@@ -1035,20 +1063,12 @@ pub fn lead_resume_spawn_args(
     new_prompt: &str,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
     ];
-    if lead.permission_routing == PermissionRouting::PathA {
-        args.push("--dangerously-skip-permissions".into());
-    } else {
-        // Path B: route claude's per-tool gate through pitboss's MCP
-        // permission_prompt (see lead_spawn_args doc).
-        args.push("--permission-prompt-tool".into());
-        args.push("mcp__pitboss__permission_prompt".into());
-    }
+    push_permission_routing_args(&mut args, lead.permission_routing);
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
@@ -1059,9 +1079,7 @@ pub fn lead_resume_spawn_args(
     if lead.allow_subleads {
         allowed.push("mcp__pitboss__spawn_sublead".into());
     }
-    if lead.permission_routing == PermissionRouting::PathB {
-        allowed.push("mcp__pitboss__permission_prompt".into());
-    }
+    push_permission_routing_allowed(&mut allowed, lead.permission_routing);
     args.push("--allowedTools".into());
     args.push(allowed.join(","));
 
@@ -1110,20 +1128,12 @@ pub fn sublead_spawn_args(
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
     ];
-    if permission_routing == PermissionRouting::PathA {
-        args.push("--dangerously-skip-permissions".into());
-    } else {
-        // Path B: route claude's per-tool gate through pitboss's MCP
-        // permission_prompt (see lead_spawn_args doc).
-        args.push("--permission-prompt-tool".into());
-        args.push("mcp__pitboss__permission_prompt".into());
-    }
+    push_permission_routing_args(&mut args, permission_routing);
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
@@ -1138,9 +1148,7 @@ pub fn sublead_spawn_args(
     for t in sublead_mcp_tools(communication_mode) {
         allowed.push(t.to_string());
     }
-    if permission_routing == PermissionRouting::PathB {
-        allowed.push("mcp__pitboss__permission_prompt".into());
-    }
+    push_permission_routing_allowed(&mut allowed, permission_routing);
     // De-duplicate while preserving order.
     let mut seen = std::collections::HashSet::new();
     allowed.retain(|t| seen.insert(t.clone()));

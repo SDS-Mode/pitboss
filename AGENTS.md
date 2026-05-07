@@ -2,7 +2,7 @@
 document: pitboss-agent-instructions
 schema_version: 1
 pitboss_version: 0.10.0
-last_updated: 2026-05-06
+last_updated: 2026-05-07
 audience: ai-agent
 canonical_url: https://github.com/SDS-Mode/pitboss/blob/main/AGENTS.md
 ---
@@ -136,6 +136,7 @@ caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 | `worktree_cleanup` | `"always"` \| `"on_success"` \| `"never"` | no | `"on_success"` | What to do with each worker's worktree after completion. `"never"` for inspection-heavy runs. |
 | `emit_event_stream` | bool | no | false | Emit a JSONL event stream alongside summary.jsonl. |
 | `default_approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: default action for `request_approval` / `propose_plan` when no TUI is attached and no `[[approval_policy]]` rule matches. Renamed from `approval_policy` in v0.9 to disambiguate from the rules array. |
+| `denial_termination_policy` | `"adapt"` \| `"reclassify"` | no | `"adapt"` | Path B only: how a denied `permission_prompt` affects the actor's terminal status. `"adapt"` (default, post-#377) trusts the actor's exit code; per-actor `events.jsonl::tool_denied` rows and the `approvals_rejected` counter remain authoritative for what was blocked. `"reclassify"` re-labels clean exits within 30s of a denial as `ApprovalRejected` (legacy heuristic, kept for operators who want fast-give-up distinguished in the status table — accepts that successful adaptation within the window will misclassify as failure). |
 | `require_plan_approval` | bool | no | false | Hierarchical: when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. |
 | `dump_shared_store` | bool | no | false | Hierarchical: at run finalize, write `shared-store.json` into the run dir for post-mortem inspection. |
 
@@ -229,7 +230,7 @@ Depth-2 controls (sub-leads):
 | `max_subleads` | int | unset | Cap on total sub-leads the root lead may spawn. |
 | `max_sublead_budget_usd` | float | unset | Per-sub-lead envelope cap; `spawn_sublead` rejects envelopes exceeding this. |
 | `max_total_workers` | int | unset | Cap on total live workers including all sub-tree workers. Renamed from `max_workers_across_tree` in v0.9. |
-| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_a"` | `"path_a"` sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` so pitboss is the sole permission authority. `"path_b"` routes claude's built-in gate through pitboss's approval queue — rejected at validate time until stabilization (issues #92–#94). |
+| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_a"` | `"path_a"` sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` so pitboss is the sole permission authority. `"path_b"` (in soak) drops `--dangerously-skip-permissions` and wires `--permission-prompt-tool mcp__pitboss__permission_prompt`; each per-tool check the model wants outside its `--allowedTools` routes through pitboss's approval queue and returns the SDK `PermissionResult` shape (`{behavior:"allow",updatedInput?}` or `{behavior:"deny",message,interrupt?}`). Denials are non-terminating — claude receives the structured response and adapts. Per-actor `<run_dir>/tasks/<actor>/events.jsonl` records each denial as a `tool_denied` row. Validate emits a one-line stderr soak warning. See `[run].denial_termination_policy` for how denials affect the actor's terminal status. |
 
 ### Top-level `[sublead_defaults]` (v0.9+, promoted from `[lead.sublead_defaults]`)
 

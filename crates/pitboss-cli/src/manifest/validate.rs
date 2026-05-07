@@ -167,8 +167,14 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
         lead.permission_routing,
         crate::manifest::schema::PermissionRouting::PathB
     ) {
-        eprintln!(
-            "warning: `permission_routing = \"path_b\"` is in soak. Each per-tool \
+        // #370 (item 6): switched from `eprintln!` to `tracing::warn!`
+        // for consistency with the rest of the codebase. Subscriber
+        // defaults to info-level on stderr (see `init_tracing` in
+        // main.rs), so operators running `pitboss validate` still see
+        // this; structured-log consumers and CI pipelines that filter
+        // on RUST_LOG can suppress it explicitly.
+        tracing::warn!(
+            "`permission_routing = \"path_b\"` is in soak. Each per-tool \
              permission check routes through pitboss's MCP `permission_prompt`. \
              Denials are non-terminating — claude receives \
              {{behavior: \"deny\", message: ...}} and adapts; the row lands on \
@@ -1514,5 +1520,77 @@ mod tests {
             ..ContainerConfig::default()
         });
         validate(&m).expect("tilde host + absolute container must validate");
+    }
+
+    /// #370 (item 2): pin the post-#368 contract that
+    /// `permission_routing = "path_b"` is selectable. Pre-#368 this
+    /// returned `Err`; the change to a stderr soak warning is
+    /// behavioral and deserves a regression test so an accidental
+    /// revert to `bail!` would show up in CI rather than at runtime.
+    /// Path A (the default) gets a sibling assertion to pin baseline.
+    #[test]
+    fn path_b_permission_routing_passes_validate() {
+        use super::super::schema::PermissionRouting;
+        let d = with_tmp_repo(true);
+        let mut lead = rl("l", d.path().to_path_buf());
+        lead.permission_routing = PermissionRouting::PathB;
+        let r = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+        };
+        validate(&r).expect("path_b must validate (in soak); pre-#368 this bailed");
+    }
+
+    #[test]
+    fn path_a_permission_routing_passes_validate() {
+        use super::super::schema::PermissionRouting;
+        let d = with_tmp_repo(true);
+        let mut lead = rl("l", d.path().to_path_buf());
+        lead.permission_routing = PermissionRouting::PathA;
+        let r = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir: PathBuf::from("."),
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: Some(lead),
+            max_workers: Some(4),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(600),
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+        };
+        validate(&r).expect("path_a is the default and must validate");
     }
 }

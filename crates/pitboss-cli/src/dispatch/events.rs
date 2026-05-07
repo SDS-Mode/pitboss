@@ -13,10 +13,16 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 /// Why a Path-B `permission_prompt` returned `behavior = "deny"`.
-/// Mirrors `crate::mcp::tools::approval::PermissionDenialReason` but
-/// lives in the events module so the audit log file owns its own
-/// serialization shape (independent of any future refactor of the
-/// MCP-side enum).
+/// Surfaced to the model as the `message` field of
+/// `PermissionPromptResponse::Deny` and recorded as the `reason_kind`
+/// on `TaskEvent::ToolDenied` rows of the per-actor `events.jsonl`.
+///
+/// This was previously duplicated as
+/// `mcp::tools::approval::PermissionDenialReason` (with a `From` impl
+/// connecting the two) — collapsed into a single canonical type in
+/// #370 (item 4) since the duplication couldn't actually diverge:
+/// adding a variant on either side broke the `From` impl at compile
+/// time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeniedReasonKind {
@@ -32,6 +38,28 @@ pub enum DeniedReasonKind {
     OperatorRejected,
     /// TTL on the queued approval expired and the fallback fired.
     TtlExpired,
+}
+
+impl DeniedReasonKind {
+    /// Short, model-readable explanation. Phrasing follows the
+    /// convention "denied: <kind> ..." so a Claude session can detect
+    /// the prefix and adapt without parsing structured fields.
+    pub fn message(self, tool_name: &str) -> String {
+        match self {
+            Self::DeniedByRule => {
+                format!("denied: tool '{tool_name}' rejected by [[approval_policy]] rule")
+            }
+            Self::DeniedByPolicy => {
+                format!("denied: tool '{tool_name}' blocked by default approval policy")
+            }
+            Self::OperatorRejected => {
+                format!("denied: tool '{tool_name}' rejected by operator")
+            }
+            Self::TtlExpired => {
+                format!("denied: tool '{tool_name}' approval timed out before operator response")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
