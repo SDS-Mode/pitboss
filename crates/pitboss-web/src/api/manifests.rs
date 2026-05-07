@@ -21,6 +21,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use pitboss_cli::capability_matrix::MatrixRow;
 use pitboss_cli::manifest::{
     load::load_manifest_from_str, metadata::sections, validate::validate_skip_dir_check,
 };
@@ -189,6 +190,14 @@ pub struct ValidateBody {
 pub struct ValidateResult {
     pub ok: bool,
     pub errors: Vec<String>,
+    /// Capability matrix (actor-type × MCP-server) computed from the
+    /// resolved manifest. `None` when validation failed (no resolved
+    /// manifest to compute against). On success, always populated —
+    /// even for manifests with no `[[mcp_server]]` declarations, the
+    /// SPA renders an explicit "no MCP servers declared" hint rather
+    /// than guessing from a missing field. (#391 slice 3)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_matrix: Option<Vec<MatrixRow>>,
 }
 
 pub async fn validate(Json(body): Json<ValidateBody>) -> Json<ValidateResult> {
@@ -196,6 +205,7 @@ pub async fn validate(Json(body): Json<ValidateBody>) -> Json<ValidateResult> {
         return Json(ValidateResult {
             ok: false,
             errors: vec![format!("manifest exceeds {MAX_MANIFEST_BYTES} bytes")],
+            capability_matrix: None,
         });
     }
     let resolved = match load_manifest_from_str(&body.contents) {
@@ -204,6 +214,7 @@ pub async fn validate(Json(body): Json<ValidateBody>) -> Json<ValidateResult> {
             return Json(ValidateResult {
                 ok: false,
                 errors: chain_errors(&e),
+                capability_matrix: None,
             });
         }
     };
@@ -213,11 +224,13 @@ pub async fn validate(Json(body): Json<ValidateBody>) -> Json<ValidateResult> {
         return Json(ValidateResult {
             ok: false,
             errors: chain_errors(&e),
+            capability_matrix: None,
         });
     }
     Json(ValidateResult {
         ok: true,
         errors: Vec::new(),
+        capability_matrix: Some(pitboss_cli::capability_matrix::rows(&resolved)),
     })
 }
 

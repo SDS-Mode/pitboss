@@ -214,39 +214,80 @@
       </CardContent>
     </Card>
 
-    <Card>
-      <CardHeader class="pb-2">
-        <CardTitle class="flex items-center gap-2 text-base">
-          Validation
-          {#if validating}
-            <Loader2 class="text-muted-foreground size-3.5 animate-spin" />
-          {:else if validation?.ok}
-            <CheckCircle2 class="size-4 text-emerald-600" />
-          {:else if validation && !validation.ok}
-            <AlertTriangle class="text-destructive size-4" />
+    <div class="space-y-4">
+      <Card>
+        <CardHeader class="pb-2">
+          <CardTitle class="flex items-center gap-2 text-base">
+            Validation
+            {#if validating}
+              <Loader2 class="text-muted-foreground size-3.5 animate-spin" />
+            {:else if validation?.ok}
+              <CheckCircle2 class="size-4 text-emerald-600" />
+            {:else if validation && !validation.ok}
+              <AlertTriangle class="text-destructive size-4" />
+            {/if}
+          </CardTitle>
+          <CardDescription class="text-xs">
+            Runs `validate_skip_dir_check` against the editor buffer.
+          </CardDescription>
+        </CardHeader>
+        <CardContent class="pt-0">
+          {#if !validation}
+            <p class="text-muted-foreground py-2 text-xs">Edit to validate.</p>
+          {:else if validation.ok}
+            <p class="text-xs text-emerald-700 dark:text-emerald-400">
+              Manifest validates cleanly. Ready to dispatch.
+            </p>
+          {:else}
+            <ul class="space-y-1.5">
+              {#each validation.errors as err, idx (idx)}
+                <li class="bg-destructive/5 text-destructive rounded border-l-2 border-current px-2 py-1.5 text-xs">
+                  {err}
+                </li>
+              {/each}
+            </ul>
           {/if}
-        </CardTitle>
-        <CardDescription class="text-xs">
-          Runs `validate_skip_dir_check` against the editor buffer.
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="pt-0">
-        {#if !validation}
-          <p class="text-muted-foreground py-2 text-xs">Edit to validate.</p>
-        {:else if validation.ok}
-          <p class="text-xs text-emerald-700 dark:text-emerald-400">
-            Manifest validates cleanly. Ready to dispatch.
-          </p>
-        {:else}
-          <ul class="space-y-1.5">
-            {#each validation.errors as err, idx (idx)}
-              <li class="bg-destructive/5 text-destructive rounded border-l-2 border-current px-2 py-1.5 text-xs">
-                {err}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+
+      {#if validation?.ok && validation.capability_matrix}
+        <Card>
+          <CardHeader class="pb-2">
+            <CardTitle class="text-base">Capability matrix</CardTitle>
+            <CardDescription class="text-xs">
+              Which MCP servers each actor type sees at dispatch.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="pt-0">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-muted-foreground border-b text-left">
+                  <th class="py-1.5 pr-3 font-medium">actor type</th>
+                  <th class="py-1.5 font-medium">mcp servers</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each validation.capability_matrix as row, idx (idx)}
+                  <tr class="border-b last:border-0 align-top">
+                    <td class="py-1.5 pr-3 font-mono">{row.label}</td>
+                    <td class="py-1.5">
+                      {#if row.server_ids.length === 0}
+                        <span class="text-muted-foreground italic">(none)</span>
+                      {:else}
+                        <div class="flex flex-wrap gap-1">
+                          {#each row.server_ids as id, sidx (sidx)}
+                            <code class="bg-muted rounded px-1.5 py-0.5">{id}</code>
+                          {/each}
+                        </div>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      {/if}
+    </div>
   </div>
 {/if}
