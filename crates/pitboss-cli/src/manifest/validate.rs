@@ -154,19 +154,26 @@ fn validate_mode(r: &ResolvedManifest) -> Result<()> {
 fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     let lead = r.lead.as_ref().unwrap();
 
-    // Path B permission routing is not yet stable. The required
-    // --permission-prompt-tool CLI flag, correct wire protocol, and env-bypass
-    // guard are being implemented in a follow-on branch. Reject it at validate
-    // time so operators get a clear error rather than a silent stall.
+    // Path B permission routing is selectable but in soak. The
+    // `--permission-prompt-tool` CLI flag is now wired in every
+    // hierarchical spawn variant (lead, lead_resume, sublead, worker)
+    // and `permission_prompt` denials carry a `reason` payload + a
+    // `TaskEvent::ToolDenied` row on `events.jsonl`. The remaining
+    // unknowns are upstream-contract fit (whether claude consumes the
+    // `reason` field) and queue-flood ergonomics under a real workload;
+    // emit a one-line stderr warning instead of bailing so operators
+    // can opt in and surface real-world issues.
     if matches!(
         lead.permission_routing,
         crate::manifest::schema::PermissionRouting::PathB
     ) {
-        bail!(
-            "`permission_routing = \"path_b\"` is not yet stable and will silently \
-             stall on any permission-gated tool use. Use the default \
-             `\"path_a\"` until the follow-on implementation lands. \
-             Track progress at: https://github.com/SDS-Mode/pitboss/issues"
+        eprintln!(
+            "warning: `permission_routing = \"path_b\"` is in soak. Each per-tool \
+             permission check routes through pitboss's MCP `permission_prompt`. \
+             Denials are non-terminating warnings — claude receives \
+             {{decision: \"deny\", reason: ...}} and adapts; the row lands on \
+             <run_dir>/tasks/<actor>/events.jsonl. File issues at \
+             https://github.com/SDS-Mode/pitboss/issues"
         );
     }
 

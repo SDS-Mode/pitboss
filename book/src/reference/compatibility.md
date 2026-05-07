@@ -8,7 +8,7 @@ Pitboss makes specific backward-compatibility guarantees at each version boundar
 
 v0.8 is backward-compatible with v0.7 manifests and tooling with one caveat:
 
-- **Manifests**: All v0.7 manifests run unchanged. The new `[container]` and `permission_routing` fields are optional; their absence preserves v0.7 behavior. `permission_routing = "path_b"` is explicitly rejected with an error until the follow-on stabilization lands (see issues #92–#94).
+- **Manifests**: All v0.7 manifests run unchanged. The new `[container]` and `permission_routing` fields are optional; their absence preserves v0.7 behavior. `permission_routing = "path_b"` is selectable as of v0.10.1 — validate emits a one-line soak warning rather than the prior hard error. Each per-tool check routes through pitboss's MCP `permission_prompt`; denials are non-terminating and recorded in `<run_dir>/tasks/<actor>/events.jsonl` as `tool_denied` rows.
 - **Wire format**: `ApprovalResponse` gains `from_ttl: bool` (default `false`). Existing consumers parsing approval responses see no change. `summary.json` and `summary.jsonl` gain `ApprovalTimedOut` as a `status` string value alongside existing `ApprovalRejected` and `Success`.
 - **Control protocol**: `ControlEvent::Hello` now includes `policy_rules` (skipped when empty). `ControlOp::UpdatePolicy` is a new op; v0.7 TUI clients that don't send it work unchanged.
 - **`approval_bridge` internal type change**: `BridgeEntry` replaces the bare `Sender<ApprovalResponse>` in the bridge map. Entirely internal; no wire or on-disk format change.
