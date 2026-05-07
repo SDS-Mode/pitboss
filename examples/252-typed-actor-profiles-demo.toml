@@ -1,0 +1,187 @@
+# #252 — Typed worker/sublead profiles, dispatcher-enforced caps.
+#
+# This manifest exercises the v0.12 typed-actor-profile surface end-to-end:
+#
+# - `[run].require_actor_type = true` forces every spawn_worker /
+#   spawn_sublead call to name a profile. Type-less calls are rejected.
+# - Two `[[worker_type]]` profiles (`extraction`, `writer`) with
+#   different tools / allowed_models / max_timeout_secs caps.
+# - One `[[sublead_type]]` profile (`planner`) with tools, allowed
+#   models, and a max_budget_usd clamp.
+# - The lead is instructed to drive a depth-2 hierarchy that exercises
+#   subset-on-explicit-tools, omit-tools (gets profile's full allowlist),
+#   and nominally violates one cap to confirm the dispatcher rejects it.
+#
+# Cost: ~$0.20-$0.40 on Haiku/Sonnet. Run with:
+#
+#   mkdir -p /tmp/pitboss-252-demo && cd /tmp/pitboss-252-demo && git init -q
+#   pitboss validate examples/252-typed-actor-profiles-demo.toml
+#   pitboss dispatch examples/252-typed-actor-profiles-demo.toml
+#
+# Watch live:
+#   (terminal 2) pitboss-tui    # actor tiles surface .actor_type per tile
+#   (terminal 3) pitboss status <run-id>   # summary.json shows actor_type column
+
+[run]
+worktree_cleanup    = "never"
+dump_shared_store   = true
+# Force every spawn to name a profile. A bare spawn_worker without
+# `worker_type=...` is rejected at the dispatcher with a clear error
+# the lead can adapt to.
+require_actor_type  = true
+
+[defaults]
+model        = "claude-haiku-4-5"
+use_worktree = false
+
+# ---- Worker profiles -------------------------------------------------
+
+# Read-only investigator. Cannot Bash, Write, or Edit — even if the lead
+# tries, the spawn_worker call is rejected before the subprocess starts.
+[[worker_type]]
+id               = "extraction"
+tools            = ["Read", "Glob", "Grep"]
+allowed_models   = ["claude-haiku-4-5"]
+max_timeout_secs = 300
+
+# Writer can do everything `extraction` can plus Write. Still no Bash.
+# `allowed_models = []` (omitted) means any model the lead is allowed
+# to spend on.
+[[worker_type]]
+id               = "writer"
+tools            = ["Read", "Glob", "Grep", "Write"]
+max_timeout_secs = 600
+
+# ---- Sub-lead profile ------------------------------------------------
+
+# Planner sub-lead orchestrates investigation phases. Pinned to Haiku
+# (allowed_models has one entry); budget capped at $1.50 even if the
+# lead requests more.
+[[sublead_type]]
+id              = "planner"
+tools           = ["Read", "Glob", "Grep"]
+allowed_models  = ["claude-haiku-4-5"]
+max_budget_usd  = 1.50
+max_timeout_secs = 600
+
+# ---- Lead ------------------------------------------------------------
+
+[lead]
+id                       = "test-coordinator"
+directory                = "/tmp/pitboss-252-demo"
+model                    = "claude-haiku-4-5"
+budget_usd               = 3.00
+max_workers              = 4
+lead_timeout_secs        = 900
+allow_subleads           = true
+max_subleads             = 2
+max_sublead_budget_usd   = 2.00
+
+prompt = """
+You are testing pitboss's typed-actor-profile feature (#252). The
+manifest declares two `[[worker_type]]` profiles and one
+`[[sublead_type]]` profile. `[run].require_actor_type = true` means
+every spawn call MUST include a profile id; a bare spawn_worker is
+rejected.
+
+Run the following test sequence in order. Report PASS/FAIL for each
+step in your final summary.
+
+=== TEST 1 — typed spawn with omit-tools ===
+
+Call mcp__pitboss__spawn_worker with:
+  prompt      = "List the files under /tmp/pitboss-252-demo and report what you see."
+  worker_type = "extraction"
+  directory   = "/tmp/pitboss-252-demo"
+  model       = "claude-haiku-4-5"
+  (NO tools field — the worker must inherit the profile's full allowlist
+   verbatim: Read, Glob, Grep.)
+
+Wait for it via mcp__pitboss__wait_for_worker. Expect SUCCESS.
+
+=== TEST 2 — typed spawn with tools subset ===
+
+Call mcp__pitboss__spawn_worker with:
+  prompt      = "Read /etc/hostname and report the hostname."
+  worker_type = "extraction"
+  directory   = "/tmp/pitboss-252-demo"
+  model       = "claude-haiku-4-5"
+  tools       = ["Read"]    # strict subset of the extraction profile
+
+Wait for it. Expect SUCCESS.
+
+=== TEST 3 — typed spawn that violates the tool cap ===
+
+This call is EXPECTED TO BE REJECTED by the dispatcher. The error string
+will start with "spawn_worker rejected: tool 'Bash' is not in worker_type
+'extraction' allowlist".
+
+Call mcp__pitboss__spawn_worker with:
+  prompt      = "Run `uname -a`."
+  worker_type = "extraction"
+  directory   = "/tmp/pitboss-252-demo"
+  model       = "claude-haiku-4-5"
+  tools       = ["Read", "Bash"]    # Bash is NOT in extraction.tools
+
+You should observe the call returning an error, not a task_id. Record
+the error message verbatim. Do NOT retry. Move on to TEST 4.
+
+=== TEST 4 — typed spawn that violates the model cap ===
+
+This call is EXPECTED TO BE REJECTED. The extraction profile's
+allowed_models is ["claude-haiku-4-5"]; passing Sonnet must reject.
+
+Call mcp__pitboss__spawn_worker with:
+  prompt      = "Trivial."
+  worker_type = "extraction"
+  directory   = "/tmp/pitboss-252-demo"
+  model       = "claude-sonnet-4-6"   # NOT in allowed_models
+
+Record the error. Move on.
+
+=== TEST 5 — typeless spawn under require_actor_type ===
+
+This call is EXPECTED TO BE REJECTED with "[run].require_actor_type =
+true requires every spawn_worker call to name a worker_type".
+
+Call mcp__pitboss__spawn_worker with NO worker_type field:
+  prompt    = "Anything."
+  directory = "/tmp/pitboss-252-demo"
+  model     = "claude-haiku-4-5"
+
+Record the error. Move on.
+
+=== TEST 6 — sub-lead with sublead_type ===
+
+Call mcp__pitboss__spawn_sublead with:
+  prompt          = "You are a planner sub-lead. Spawn ONE worker of
+                    worker_type=writer that writes /tmp/pitboss-252-demo/plan.txt
+                    with the line 'plan complete'. Then exit."
+  sublead_type    = "planner"
+  model           = "claude-haiku-4-5"
+  budget_usd      = 1.00
+  max_workers     = 1
+  lead_timeout_secs = 300
+
+Wait for it via mcp__pitboss__wait_actor with the returned sublead_id.
+Expect SUCCESS.
+
+=== FINAL SUMMARY ===
+
+Print a single concise summary that lists each test 1-6 and PASS / FAIL.
+For tests 3, 4, 5 the expected outcome IS rejection — those PASS when
+the dispatcher rejects them with the documented error message and FAIL
+if the spawn unexpectedly succeeds.
+
+The summary.json from this run should show:
+  - 2 successful workers (tests 1 & 2) with actor_type = "extraction"
+  - 1 successful sublead (test 6) with actor_type = "planner"
+  - 1 successful worker spawned by the planner sublead with actor_type = "writer"
+"""
+
+# Optional sublead defaults — used when spawn_sublead doesn't override.
+[sublead_defaults]
+budget_usd        = 0.50
+max_workers       = 1
+lead_timeout_secs = 180
+read_down         = false
