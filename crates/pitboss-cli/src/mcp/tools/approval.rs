@@ -458,60 +458,11 @@ fn is_default_false(b: &bool) -> bool {
     !b
 }
 
-/// Why a `permission_prompt` returned `behavior == "deny"`. Surfaced
-/// to the requesting actor as the `message` field of
-/// `PermissionPromptResponse::Deny` and also recorded as a
-/// `TaskEvent::ToolDenied` on the per-task `events.jsonl` audit log
-/// so an operator sees what was attempted-and-blocked even when the
-/// lead silently routes around it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionDenialReason {
-    /// An operator-declared `[[approval_policy]]` rule matched with
-    /// `action = "auto_reject"`.
-    DeniedByRule,
-    /// `default_approval_policy = "auto_reject"` short-circuited inside
-    /// the bridge — no operator was involved. Surfaces as `denied_by_policy`
-    /// in the audit log and as "denied: tool 'X' blocked by default
-    /// approval policy" in the model-facing message. (#373)
-    DeniedByPolicy,
-    /// The operator's TUI / web console responded with reject.
-    OperatorRejected,
-    /// The TTL on the queued approval expired and the fallback fired.
-    TtlExpired,
-}
-
-impl PermissionDenialReason {
-    /// Short, model-readable explanation. Phrasing follows the convention
-    /// "denied: <kind> ..." so a Claude session can detect the prefix and
-    /// adapt without parsing structured fields.
-    pub fn message(self, tool_name: &str) -> String {
-        match self {
-            Self::DeniedByRule => {
-                format!("denied: tool '{tool_name}' rejected by [[approval_policy]] rule")
-            }
-            Self::DeniedByPolicy => {
-                format!("denied: tool '{tool_name}' blocked by default approval policy")
-            }
-            Self::OperatorRejected => {
-                format!("denied: tool '{tool_name}' rejected by operator")
-            }
-            Self::TtlExpired => {
-                format!("denied: tool '{tool_name}' approval timed out before operator response")
-            }
-        }
-    }
-}
-
-impl From<PermissionDenialReason> for crate::dispatch::events::DeniedReasonKind {
-    fn from(r: PermissionDenialReason) -> Self {
-        match r {
-            PermissionDenialReason::DeniedByRule => Self::DeniedByRule,
-            PermissionDenialReason::DeniedByPolicy => Self::DeniedByPolicy,
-            PermissionDenialReason::OperatorRejected => Self::OperatorRejected,
-            PermissionDenialReason::TtlExpired => Self::TtlExpired,
-        }
-    }
-}
+/// Re-export of the canonical denial-reason enum, owned by the events
+/// module so the audit-log serialization shape is single-sourced.
+/// (#370 item 4 — collapsed the previous duplicate
+/// `PermissionDenialReason` into this type.)
+pub use crate::dispatch::events::DeniedReasonKind as PermissionDenialReason;
 
 /// Handle Path B `permission_prompt`: routes claude's per-tool permission
 /// check through pitboss's approval queue and TUI. Returns the Claude Code
@@ -676,7 +627,7 @@ async fn record_permission_denied(
         at: chrono::Utc::now(),
         tool_name: tool_name.to_string(),
         actor_id: actor_id.to_string(),
-        reason_kind: reason_kind.into(),
+        reason_kind,
         reason: reason_text.to_string(),
     };
     if let Err(e) =
