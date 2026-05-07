@@ -1451,6 +1451,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         }
     }
 
@@ -1601,6 +1602,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -1700,6 +1702,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -1812,6 +1815,7 @@ mod tests {
             worker_types: vec![],
             sublead_types: vec![],
             require_actor_type: false,
+            untyped_actor_policy: Default::default(),
         };
 
         let spawner = Arc::new(CyclingFake(

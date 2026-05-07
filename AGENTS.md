@@ -388,6 +388,8 @@ The `spawn_worker` and `spawn_sublead` MCP tools gain optional `worker_type` / `
 
 Set `[run].require_actor_type = true` to make every `spawn_worker` / `spawn_sublead` call REQUIRE a profile arg — type-less spawns are rejected. The flag is inert in flat mode (warning logged at validate time).
 
+**`[run].untyped_actor_policy`** (Path-B-only, default `"bridge"`) controls what happens when an un-typed Worker / Sublead reaches `permission_prompt`. `"bridge"` (default) routes to the operator approval bridge — pre-#252 behavior, preserved for back-compat. `"block"` synthesizes an empty profile so anything outside `--allowedTools` auto-denies via `denied_by_profile` with the sentinel `actor_type = "<synthetic>"` on the audit row — closes the un-typed escape hatch for headless production runs. Validate rejects `"block"` when no profiles are declared (every spawn would auto-deny → self-defeating manifest).
+
 The resolved profile id is persisted to each `TaskRecord.actor_type`, surfaced in `summary.json` / `summary.jsonl` so the TUI, `pitboss-web`, and `pitboss status` can group actors by class without re-deriving from the manifest snapshot.
 
 **Phase 1.5 (v0.12, landed):**

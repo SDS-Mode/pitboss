@@ -84,6 +84,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -160,6 +161,7 @@ fn mk_state_without_subleads() -> (TempDir, Arc<DispatchState>) {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -234,6 +236,7 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         worker_types: vec![],
         sublead_types: vec![],
         require_actor_type: false,
+        untyped_actor_policy: Default::default(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
