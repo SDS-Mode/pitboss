@@ -781,12 +781,37 @@ pub(super) fn worker_spawn_args(
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
+    use crate::manifest::schema::PermissionRouting;
+    // #369: Path B requires a reachable mcp-config so claude can route
+    // per-tool checks through `mcp__pitboss__permission_prompt`. The
+    // worker spawn site degrades `mcp_config_arg` to `None` when
+    // `write_worker_mcp_config` fails; under Path B that would have
+    // produced argv with `--permission-prompt-tool` pointing at an
+    // unreachable endpoint — claude falls back to its interactive
+    // gate, which can't be answered under `-p`, and the worker
+    // silently stalls. Downgrade to Path A here so the worker still
+    // runs (just without per-tool gate routing) and emit a warn so
+    // the operator knows to investigate the mcp-config write
+    // failure. Operators who'd rather fail fast can configure their
+    // run-dir to be writable.
+    let effective_routing =
+        if permission_routing == PermissionRouting::PathB && mcp_config.is_none() {
+            tracing::warn!(
+                "Path B requested but no mcp-config available; degrading to Path A \
+             (--dangerously-skip-permissions) for this worker spawn so it \
+             doesn't stall on an unreachable permission_prompt endpoint. \
+             Investigate the mcp-config write failure logged earlier."
+            );
+            PermissionRouting::PathA
+        } else {
+            permission_routing
+        };
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
     ];
-    crate::dispatch::runner::push_permission_routing_args(&mut args, permission_routing);
+    crate::dispatch::runner::push_permission_routing_args(&mut args, effective_routing);
     // Plugin/skill isolation (see runner::lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
@@ -799,7 +824,7 @@ pub(super) fn worker_spawn_args(
         for t in pitboss_worker_mcp_tools(communication_mode) {
             allowed.push(t.to_string());
         }
-        crate::dispatch::runner::push_permission_routing_allowed(&mut allowed, permission_routing);
+        crate::dispatch::runner::push_permission_routing_allowed(&mut allowed, effective_routing);
     }
     if !allowed.is_empty() {
         args.push("--allowedTools".into());
