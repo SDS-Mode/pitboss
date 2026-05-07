@@ -192,6 +192,94 @@ fn path_b_worker_emits_permission_prompt_tool() {
     );
 }
 
+/// #369 regression: when `mcp_config = None` (the recovery path
+/// after `write_worker_mcp_config` failed) AND
+/// `permission_routing = "path_b"`, the worker would have been
+/// spawned with `--permission-prompt-tool mcp__pitboss__permission_prompt`
+/// pointing at an unreachable endpoint — claude falls back to its
+/// interactive gate, can't be answered under `-p`, and the worker
+/// silently stalls. `worker_spawn_args` now downgrades to Path A in
+/// this case so the worker still runs, with a `tracing::warn!` so
+/// the operator knows to investigate.
+#[test]
+fn path_b_worker_with_no_mcp_config_falls_back_to_path_a() {
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string()],
+        None, // ← the recovery condition (#369)
+        PermissionRouting::PathB,
+        CommunicationMode::Disabled,
+    );
+    // Must have the Path A flag (the fallback) — the worker runs
+    // without per-tool gate routing.
+    assert!(
+        argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+        "fallback to Path A must add --dangerously-skip-permissions when \
+         mcp_config is unavailable under Path B (#369): {argv:?}"
+    );
+    // Must NOT have --permission-prompt-tool: claude would otherwise
+    // try to route through an unreachable endpoint.
+    assert!(
+        !argv.iter().any(|a| a == "--permission-prompt-tool"),
+        "fallback path must NOT keep --permission-prompt-tool — the endpoint \
+         is unreachable when mcp_config is None (#369): {argv:?}"
+    );
+}
+
+/// Companion to #369: when mcp_config IS available, Path B argv is
+/// unchanged from the pre-fix behavior — fallback only triggers on
+/// the failure path, never silently disables Path B for a healthy
+/// worker spawn.
+#[test]
+fn path_b_worker_with_mcp_config_keeps_path_b_args() {
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
+    use std::path::PathBuf;
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string()],
+        Some(&PathBuf::from("/tmp/cfg.json")),
+        PermissionRouting::PathB,
+        CommunicationMode::Disabled,
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+        "Path B with valid mcp_config must NOT degrade to Path A: {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "--permission-prompt-tool"),
+        "Path B with valid mcp_config must keep --permission-prompt-tool: {argv:?}"
+    );
+}
+
+/// Companion to #369: under Path A, `mcp_config = None` is benign
+/// (it always was — `--dangerously-skip-permissions` means no gate to
+/// consult). Verify the fallback logic doesn't accidentally rewrite
+/// argv on the Path A path.
+#[test]
+fn path_a_worker_with_no_mcp_config_unchanged() {
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string()],
+        None,
+        PermissionRouting::PathA,
+        CommunicationMode::Disabled,
+    );
+    assert!(
+        argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+        "Path A worker with no mcp_config must still get \
+         --dangerously-skip-permissions: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--permission-prompt-tool"),
+        "Path A worker must never get --permission-prompt-tool: {argv:?}"
+    );
+}
+
 #[test]
 fn worker_spawn_args_excludes_comm_tools_when_mode_disabled() {
     use crate::dispatch::runner::COMMUNICATION_MCP_TOOLS;
