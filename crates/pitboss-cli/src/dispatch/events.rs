@@ -23,6 +23,11 @@ pub enum DeniedReasonKind {
     /// An operator-declared `[[approval_policy]]` rule with
     /// `action = "auto_reject"` matched.
     DeniedByRule,
+    /// `default_approval_policy = "auto_reject"` fired inside the
+    /// bridge — no operator was involved. Distinguished from
+    /// `OperatorRejected` so audit logs reflect what actually decided
+    /// the denial. (#373)
+    DeniedByPolicy,
     /// Operator (TUI / web console) responded with reject.
     OperatorRejected,
     /// TTL on the queued approval expired and the fallback fired.

@@ -469,6 +469,11 @@ pub enum PermissionDenialReason {
     /// An operator-declared `[[approval_policy]]` rule matched with
     /// `action = "auto_reject"`.
     DeniedByRule,
+    /// `default_approval_policy = "auto_reject"` short-circuited inside
+    /// the bridge — no operator was involved. Surfaces as `denied_by_policy`
+    /// in the audit log and as "denied: tool 'X' blocked by default
+    /// approval policy" in the model-facing message. (#373)
+    DeniedByPolicy,
     /// The operator's TUI / web console responded with reject.
     OperatorRejected,
     /// The TTL on the queued approval expired and the fallback fired.
@@ -484,6 +489,9 @@ impl PermissionDenialReason {
             Self::DeniedByRule => {
                 format!("denied: tool '{tool_name}' rejected by [[approval_policy]] rule")
             }
+            Self::DeniedByPolicy => {
+                format!("denied: tool '{tool_name}' blocked by default approval policy")
+            }
             Self::OperatorRejected => {
                 format!("denied: tool '{tool_name}' rejected by operator")
             }
@@ -498,6 +506,7 @@ impl From<PermissionDenialReason> for crate::dispatch::events::DeniedReasonKind 
     fn from(r: PermissionDenialReason) -> Self {
         match r {
             PermissionDenialReason::DeniedByRule => Self::DeniedByRule,
+            PermissionDenialReason::DeniedByPolicy => Self::DeniedByPolicy,
             PermissionDenialReason::OperatorRejected => Self::OperatorRejected,
             PermissionDenialReason::TtlExpired => Self::TtlExpired,
         }
@@ -610,8 +619,20 @@ pub async fn handle_permission_prompt(
             })
         }
         Ok(resp) => {
+            // #373: distinguish three bridge-driven rejection sources.
+            // `from_ttl=true` is the TTL watcher; the bridge's
+            // `BRIDGE_AUTO_REJECT_COMMENT` marker means it was
+            // `default_approval_policy = "auto_reject"` short-circuiting
+            // (no operator involvement); anything else is operator-driven.
+            // Pre-fix, `default_approval_policy` rejections were mislabeled
+            // as `OperatorRejected` in both the audit log and the
+            // model-facing message.
             let kind = if resp.from_ttl {
                 PermissionDenialReason::TtlExpired
+            } else if resp.comment.as_deref()
+                == Some(crate::mcp::approval::BRIDGE_AUTO_REJECT_COMMENT)
+            {
+                PermissionDenialReason::DeniedByPolicy
             } else {
                 PermissionDenialReason::OperatorRejected
             };
