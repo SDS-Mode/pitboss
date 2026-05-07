@@ -10,48 +10,53 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
+## [0.11.0] — 2026-05-07
+
+Path B permission routing graduates from "shipped but bumpy" to
+production-ready. v0.10.0 made Path B the default; v0.11.0 fixes the
+five issues that surfaced during soak — wire-shape mismatch with the
+Claude Code SDK (#376), audit-log misattribution (#375), state-tracking
+gaps that caused counter undercounts (#374), denied-by-policy events
+mislabeled as operator rejections (#378), and a recovery path that
+silently pointed at an unreachable MCP endpoint (#381). Plus a new
+`[run].denial_termination_policy` knob (#379) — defaulting to `adapt`
+— so a single tool denial no longer fails the whole worker; the model
+sees a structured `{behavior:"deny",message,interrupt:false}` reply
+and adapts. Operators who relied on `ApprovalRejected` as a CI signal
+should set `denial_termination_policy = "reclassify"` to preserve the
+v0.10.0 behavior.
+
+### Added
+
+- Add denial_termination_policy with Adapt as default ([#379](https://github.com/SDS-Mode/pitboss/pull/379))
+- Re-stabilize Path B permission routing ([#372](https://github.com/SDS-Mode/pitboss/pull/372))
+- Reject enum_select without enum_values at macro expansion ([#359](https://github.com/SDS-Mode/pitboss/pull/359))
+- Validate sub-lead caps reject 0 and negatives at parse time ([#358](https://github.com/SDS-Mode/pitboss/pull/358))
+
+
+### Fixed
+
+- Downgrade Path B worker spawn to Path A when mcp_config is None ([#381](https://github.com/SDS-Mode/pitboss/pull/381))
+- Attribute default-policy auto-rejection to DeniedByPolicy, not OperatorRejected ([#378](https://github.com/SDS-Mode/pitboss/pull/378))
+- Align permission_prompt with Claude Code's PermissionResult wire shape ([#376](https://github.com/SDS-Mode/pitboss/pull/376))
+- Write approval audit rows to caller actor's tasks dir ([#375](https://github.com/SDS-Mode/pitboss/pull/375))
+- Track approval state on every handle_permission_prompt path ([#374](https://github.com/SDS-Mode/pitboss/pull/374))
+- Surface focus-lost notice when active tile auto-falls-back ([#362](https://github.com/SDS-Mode/pitboss/pull/362))
+- Surface notify_failures in summary.json and pitboss status ([#361](https://github.com/SDS-Mode/pitboss/pull/361))
+- Track total_bytes by delta, not full O(n) recompute ([#357](https://github.com/SDS-Mode/pitboss/pull/357))
+- Align diff cost computation with analyze ([#356](https://github.com/SDS-Mode/pitboss/pull/356))
+- Narrow artifact_put lock around fs I/O ([#355](https://github.com/SDS-Mode/pitboss/pull/355))
+- Make max_parallel_tasks Option<u32> in resolved manifest ([#354](https://github.com/SDS-Mode/pitboss/pull/354))
+- Stream task_log instead of slurping the entire file ([#353](https://github.com/SDS-Mode/pitboss/pull/353))
+- Clamp approval-TTL age before unsigned cast ([#352](https://github.com/SDS-Mode/pitboss/pull/352))
+- Inject PITBOSS_RUN_ID per-spawn instead of mutating parent env ([#350](https://github.com/SDS-Mode/pitboss/pull/350))
+- Subscribe-before-try in lease_acquire ([#348](https://github.com/SDS-Mode/pitboss/pull/348))
+- Prune worker_layer_index on SpawnFailed and resume paths ([#345](https://github.com/SDS-Mode/pitboss/pull/345))
+- Close auth bypass cluster (#309 #310 #311) ([#343](https://github.com/SDS-Mode/pitboss/pull/343))
+- Abort kill+resume bridge task at iteration end ([#342](https://github.com/SDS-Mode/pitboss/pull/342))
+
+
 ## [0.10.0] — 2026-05-06
-
-The communication plane lands. A lead can now exchange typed messages
-and binary artifacts with its workers via eight new MCP tools
-(`message_send`/`list`/`read`/`ack` and
-`artifact_put`/`list`/`read`/`grant`), gated by a new `[communication]`
-manifest section that defaults to `mode = "disabled"` — no behavioural
-change for existing manifests. The TUI and web console both render
-mailbox and artifact activity as first-class operator signals. Failure
-triage gets its own command: `pitboss analyze` (and matching MCP tools)
-produces single-run and cross-run reports with cost rollups, hotspot
-detection, and tokenized failure clustering — no more grepping
-`summary.jsonl` to figure out which task burned the budget. Plus a
-security-relevant fix: spawned worker/lead/sublead `--allowedTools` argv
-lists are now mode-aware, so `dispatch --dry-run` output matches runtime
-behaviour when communication is disabled.
-
-Highlights:
-
-- **`[communication]` manifest section + 8 new MCP tools** —
-  parent-child mailbox (`message_send` / `list` / `read` / `ack`) and
-  artifact registry (`artifact_put` / `list` / `read` / `grant`) with
-  per-actor quotas, scope-based authorization, and bytes/count caps.
-  Default `mode = "disabled"` keeps the toolset out of every actor's
-  `--allowedTools` unless explicitly enabled.
-- **Phase C operator surfaces** — TUI and web console both stream
-  `StoreActivity` events showing per-actor mailbox and artifact ops
-  alongside the existing KV/lease counters.
-- **`pitboss analyze [--recent N] [--failed-only] [--json]`** —
-  single-run and cross-run triage with `RunAnalysis`, `CostRollup`,
-  and `FailureGroup`. Hotspot detection (slowest, costliest,
-  token-heaviest tasks). Failure clustering by tokenized error
-  patterns. Pre-v0.11 records get opportunistic cost recomputation;
-  v0.11+ uses the stored `cost_usd`. Same engine exposed as MCP tools
-  (`analyze_run`, `analyze_recent`) for in-run lead consumption.
-- **Mode-aware `--allowedTools` (#283)** — `pitboss_mcp_tools(mode)`,
-  `sublead_mcp_tools(mode)`, and `pitboss_worker_mcp_tools(mode)`
-  helpers replace the old static `const` arrays. Communication tools
-  are now omitted from spawned actor argv when `mode = "disabled"`
-  instead of being silently filtered only at runtime — closes a
-  cosmetic-but-operator-confusing gap surfaced via
-  `dispatch --dry-run`.
 
 ### Added
 
