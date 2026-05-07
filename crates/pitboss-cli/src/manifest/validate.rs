@@ -167,8 +167,14 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
         lead.permission_routing,
         crate::manifest::schema::PermissionRouting::PathB
     ) {
-        eprintln!(
-            "warning: `permission_routing = \"path_b\"` is in soak. Each per-tool \
+        // #370 (item 6): switched from `eprintln!` to `tracing::warn!`
+        // for consistency with the rest of the codebase. Subscriber
+        // defaults to info-level on stderr (see `init_tracing` in
+        // main.rs), so operators running `pitboss validate` still see
+        // this; structured-log consumers and CI pipelines that filter
+        // on RUST_LOG can suppress it explicitly.
+        tracing::warn!(
+            "`permission_routing = \"path_b\"` is in soak. Each per-tool \
              permission check routes through pitboss's MCP `permission_prompt`. \
              Denials are non-terminating — claude receives \
              {{behavior: \"deny\", message: ...}} and adapts; the row lands on \

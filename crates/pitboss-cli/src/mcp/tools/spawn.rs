@@ -781,7 +781,6 @@ pub(super) fn worker_spawn_args(
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),

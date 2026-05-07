@@ -1010,7 +1010,6 @@ pub fn lead_spawn_args(
     mcp_config: &std::path::Path,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -1064,7 +1063,6 @@ pub fn lead_resume_spawn_args(
     new_prompt: &str,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -1130,7 +1128,6 @@ pub fn sublead_spawn_args(
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
 ) -> Vec<String> {
-    use crate::manifest::schema::PermissionRouting;
     let mut args = vec![
         "--output-format".into(),
         "stream-json".into(),
