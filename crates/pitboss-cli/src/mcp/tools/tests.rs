@@ -2382,6 +2382,115 @@ async fn permission_prompt_operator_driven_reject_records_operator_rejected() {
     );
 }
 
+/// #370 (item 3): the `TtlExpired` denial path in
+/// `handle_permission_prompt` was untested through #378. Drives a
+/// Block-policy approval and responds via `bridge.respond()` with
+/// `from_ttl=true` (the same shape the TTL watcher would produce
+/// when a queued approval's `ttl_secs` elapses without operator
+/// action). Asserts:
+///
+/// - response carries the canonical TTL-denial message
+/// - per-actor `events.jsonl` records `reason_kind=ttl_expired`
+/// - under `Reclassify` policy, `approval_driven_termination`
+///   returns `TimedOut` (not `Rejected`) — the only path that
+///   distinguishes silent-exit-after-TTL from silent-exit-after-deny
+///   in `pitboss status` / `summary.json`.
+#[tokio::test]
+async fn permission_prompt_ttl_driven_reject_records_ttl_expired() {
+    use crate::control::protocol::ControlEvent;
+    use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse, DenialTerminationPolicy};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    // Reclassify policy so the termination assertion is meaningful.
+    let state = mk_plan_state_with_termination_policy(
+        ApprovalPolicy::Block,
+        false,
+        DenialTerminationPolicy::Reclassify,
+    )
+    .await;
+    let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+    *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+        id: uuid::Uuid::now_v7(),
+        sender: tx,
+    });
+
+    let state_for_resp = std::sync::Arc::clone(&state);
+    let driver = tokio::spawn(async move {
+        let request_id = match rx.recv().await.unwrap() {
+            ControlEvent::ApprovalRequest { request_id, .. } => request_id,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let bridge = crate::mcp::approval::ApprovalBridge::new(state_for_resp);
+        bridge
+            .respond(
+                &request_id,
+                ApprovalResponse {
+                    approved: false,
+                    // No comment marker — distinguishes this from
+                    // policy auto-reject. TTL is signaled by `from_ttl`.
+                    comment: None,
+                    edited_summary: None,
+                    reason: None,
+                    from_ttl: true,
+                },
+            )
+            .await
+            .unwrap();
+    });
+
+    let resp = tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_permission_prompt(
+            &state,
+            PermissionPromptArgs {
+                tool_name: "Bash".into(),
+                tool_input: None,
+                cost_estimate: None,
+                meta: None,
+            },
+        ),
+    )
+    .await
+    .expect("handler must resolve before timeout")
+    .unwrap();
+    driver.await.unwrap();
+
+    let reason = match &resp {
+        PermissionPromptResponse::Deny { message, .. } => message.as_str(),
+        _ => panic!("expected Deny: {resp:?}"),
+    };
+    assert!(
+        reason.contains("timed out"),
+        "TTL-driven denial must mention timeout in the message: {reason}"
+    );
+
+    let events_path = state
+        .root
+        .run_subdir
+        .join("tasks")
+        .join("lead")
+        .join("events.jsonl");
+    let body = tokio::fs::read_to_string(&events_path)
+        .await
+        .unwrap_or_else(|e| panic!("expected {events_path:?} to exist: {e}"));
+    assert!(
+        body.contains("\"reason_kind\":\"ttl_expired\""),
+        "events.jsonl must record reason_kind=ttl_expired for TTL-driven \
+         denial: {body}"
+    );
+
+    // Under Reclassify, TTL-driven denial reclassifies as TimedOut,
+    // not Rejected — the distinction in `pitboss status` between
+    // "operator declined" and "no operator responded in time."
+    assert_eq!(
+        state.approval_driven_termination("lead").await,
+        Some(crate::dispatch::state::ApprovalTerminationKind::TimedOut),
+        "TTL denial must reclassify as TimedOut, not Rejected, under \
+         Reclassify policy"
+    );
+}
+
 /// #368: Allow variant must serialize as `{"behavior":"allow", "updatedInput": ...}`
 /// when input is provided. `updatedInput` (camelCase) is the upstream
 /// SDK field name; `updated_input` (snake_case) would silently fail the
