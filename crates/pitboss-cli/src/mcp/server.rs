@@ -1134,9 +1134,18 @@ impl PitbossHandler {
     /// Path B permission gate. Claude calls this when it encounters a
     /// tool-use that requires operator approval. Only visible (list_tools)
     /// and callable when `[lead] permission_routing = "path_b"` is set.
+    ///
+    /// Wire shape (#368): the response MUST be a single text content
+    /// block whose body is a JSON-encoded `PermissionResult` —
+    /// `{"behavior":"allow","updatedInput":...}` or
+    /// `{"behavior":"deny","message":"...","interrupt":false}`. The
+    /// generic `to_structured_result` helper additionally emits a
+    /// `structuredContent` field which Claude's gate parser appears to
+    /// trip on; build the result by hand here so only the text block
+    /// is sent.
     #[tool(
         name = "permission_prompt",
-        description = "Route a Claude tool-permission request to pitboss's approval queue. Returns {decision, behavior}."
+        description = "Route a Claude tool-permission request to pitboss's approval queue. Returns the Claude Code PermissionResult shape: {behavior:'allow',updatedInput?} or {behavior:'deny',message,interrupt?}."
     )]
     async fn permission_prompt(
         &self,
@@ -1161,7 +1170,17 @@ impl PitbossHandler {
             ));
         }
         match handle_permission_prompt(&self.state, args).await {
-            Ok(res) => to_structured_result(&res),
+            Ok(res) => {
+                let json = serde_json::to_string(&res).map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("permission_prompt result serialize: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    json,
+                )]))
+            }
             Err(e) => Err(ErrorData::invalid_request(e.to_string(), None)),
         }
     }

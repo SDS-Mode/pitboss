@@ -12,7 +12,7 @@ use serde::Serialize;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
-/// Why a Path-B `permission_prompt` ended in `decision = "deny"`.
+/// Why a Path-B `permission_prompt` returned `behavior = "deny"`.
 /// Mirrors `crate::mcp::tools::approval::PermissionDenialReason` but
 /// lives in the events module so the audit log file owns its own
 /// serialization shape (independent of any future refactor of the
@@ -64,10 +64,11 @@ pub enum TaskEvent {
         event_kind: String,
         error: String,
     },
-    /// A Path-B `permission_prompt` returned `decision = "deny"`. The
-    /// model receives a denial it can adapt to without an operator
-    /// round-trip; this row gives the operator post-hoc visibility into
-    /// what was attempted-and-blocked.
+    /// A Path-B `permission_prompt` returned `behavior = "deny"`. The
+    /// model receives a structured `{behavior, message, interrupt}`
+    /// denial it can adapt to without an operator round-trip; this row
+    /// gives the operator post-hoc visibility into what was
+    /// attempted-and-blocked.
     ToolDenied {
         at: DateTime<Utc>,
         /// Name of the claude tool the model wanted to invoke

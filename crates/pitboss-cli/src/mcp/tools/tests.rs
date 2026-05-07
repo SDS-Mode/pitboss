@@ -1635,11 +1635,9 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
     )
     .await
     .unwrap();
-    assert_eq!(resp.decision, "allow", "auto-approve should yield allow");
-    assert_eq!(
-        resp.behavior.as_deref(),
-        Some("allow_once"),
-        "allow_once behavior expected"
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "auto-approve should yield Allow variant, got: {resp:?}"
     );
 }
 
@@ -1943,15 +1941,13 @@ async fn permission_prompt_cost_over_rule_denies_when_estimate_exceeds() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        resp.decision, "deny",
-        "cost_estimate=7.5 over threshold=2 must yield deny"
-    );
-    assert!(resp.behavior.is_none(), "deny carries no behavior field");
-    let reason = resp
-        .reason
-        .as_deref()
-        .expect("rule-driven deny must carry a reason for the model");
+    let reason = match &resp {
+        PermissionPromptResponse::Deny { message, interrupt } => {
+            assert!(!interrupt, "deny should not request interrupt by default");
+            message.as_str()
+        }
+        _ => panic!("cost_estimate=7.5 over threshold=2 must yield Deny: {resp:?}"),
+    };
     assert!(
         reason.contains("Bash") && reason.contains("rule"),
         "reason should name the tool and the rule path: {reason}"
@@ -2041,8 +2037,10 @@ async fn permission_prompt_rule_auto_approve_records_state_and_counters() {
     )
     .await
     .unwrap();
-    assert_eq!(resp.decision, "allow");
-    assert_eq!(resp.behavior.as_deref(), Some("allow_once"));
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "rule-driven approve must yield Allow: {resp:?}"
+    );
 
     let counters = state.root.worker_counters.read().await;
     let entry = counters
@@ -2076,7 +2074,10 @@ async fn permission_prompt_default_policy_auto_approve_records_last_response() {
     )
     .await
     .unwrap();
-    assert_eq!(resp.decision, "allow");
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "bridge AutoApprove must yield Allow: {resp:?}"
+    );
 
     let counters = state.root.worker_counters.read().await;
     let entry = counters
@@ -2114,16 +2115,26 @@ async fn permission_prompt_default_policy_auto_reject_records_last_response() {
     )
     .await
     .unwrap();
-    assert_eq!(resp.decision, "deny");
-    assert!(resp.behavior.is_none());
-    let reason = resp
-        .reason
-        .as_deref()
-        .expect("bridge-driven deny must carry a reason for the model");
+    let reason = match &resp {
+        PermissionPromptResponse::Deny { message, interrupt } => {
+            assert!(!interrupt, "deny should not request interrupt by default");
+            message.as_str()
+        }
+        _ => panic!("bridge-driven deny must yield Deny: {resp:?}"),
+    };
     assert!(
         reason.contains("Bash"),
         "reason should name the tool: {reason}"
     );
+
+    // ─── Wire-format unit tests (#368) ─────────────────────────────────────────
+    //
+    // The Rust struct shape is one thing; the JSON Claude actually parses
+    // is another. Pre-#368 the unit tests asserted the Rust struct fields
+    // (`decision`, `reason`, ...) while the wire format silently mismatched
+    // the upstream `PermissionResult` SDK type — every gate call failed
+    // with "Permission prompt tool returned an invalid result" but tests
+    // stayed green. These tests pin the on-the-wire JSON exactly.
 
     let counters = state.root.worker_counters.read().await;
     let entry = counters
@@ -2155,6 +2166,119 @@ async fn permission_prompt_default_policy_auto_reject_records_last_response() {
         body.contains("\"reason_kind\":\"operator_rejected\""),
         "events.jsonl missing operator_rejected kind: {body}"
     );
+}
+
+/// #368: Allow variant must serialize as `{"behavior":"allow", "updatedInput": ...}`
+/// when input is provided. `updatedInput` (camelCase) is the upstream
+/// SDK field name; `updated_input` (snake_case) would silently fail the
+/// gate parser.
+#[test]
+fn permission_prompt_response_allow_with_input_serializes_canonical_shape() {
+    let resp = PermissionPromptResponse::Allow {
+        updated_input: Some(serde_json::json!({"command": "ls -la"})),
+    };
+    let parsed: serde_json::Value = serde_json::to_value(&resp).unwrap();
+    assert_eq!(
+        parsed["behavior"].as_str(),
+        Some("allow"),
+        "behavior must be the literal string 'allow' (matches PermissionResultAllow): {parsed}"
+    );
+    assert_eq!(
+        parsed["updatedInput"]["command"].as_str(),
+        Some("ls -la"),
+        "input must round-trip under camelCase 'updatedInput': {parsed}"
+    );
+    // No legacy fields — these are what pre-#368 shipped, and would
+    // silently fail Claude's parser.
+    assert!(parsed.get("decision").is_none(), "no legacy 'decision' key");
+    assert!(parsed.get("reason").is_none(), "no legacy 'reason' key");
+}
+
+/// #368: Allow without input must omit `updatedInput` entirely (not
+/// emit `null`). Some MCP-tool consumers reject explicit nulls.
+#[test]
+fn permission_prompt_response_allow_without_input_omits_updated_input() {
+    let resp = PermissionPromptResponse::Allow {
+        updated_input: None,
+    };
+    let parsed: serde_json::Value = serde_json::to_value(&resp).unwrap();
+    assert_eq!(parsed["behavior"].as_str(), Some("allow"));
+    assert!(
+        parsed.get("updatedInput").is_none(),
+        "updatedInput must be omitted, not null: {parsed}"
+    );
+    // The whole response is essentially a single-key object on the
+    // wire when the input isn't being modified.
+    let obj = parsed.as_object().unwrap();
+    assert_eq!(obj.len(), 1, "expected exactly {{behavior}}, got: {parsed}");
+}
+
+/// #368: Deny variant must serialize as `{"behavior":"deny","message":"..."}`
+/// — `message` is the upstream SDK field name. `interrupt` defaults to
+/// false and is omitted in that case so the wire stays compact.
+#[test]
+fn permission_prompt_response_deny_serializes_canonical_shape() {
+    let resp = PermissionPromptResponse::Deny {
+        message: "denied: tool 'Bash' rejected by [[approval_policy]] rule".to_string(),
+        interrupt: false,
+    };
+    let parsed: serde_json::Value = serde_json::to_value(&resp).unwrap();
+    assert_eq!(parsed["behavior"].as_str(), Some("deny"));
+    assert_eq!(
+        parsed["message"].as_str(),
+        Some("denied: tool 'Bash' rejected by [[approval_policy]] rule"),
+        "message must round-trip under 'message' key: {parsed}"
+    );
+    assert!(
+        parsed.get("interrupt").is_none(),
+        "interrupt=false must be omitted to keep wire compact: {parsed}"
+    );
+    assert!(parsed.get("reason").is_none(), "no legacy 'reason' key");
+    assert!(parsed.get("decision").is_none(), "no legacy 'decision' key");
+}
+
+/// #368: when interrupt is explicitly set true, it must be serialized
+/// (claude treats it as a request to halt the current turn).
+#[test]
+fn permission_prompt_response_deny_emits_interrupt_when_true() {
+    let resp = PermissionPromptResponse::Deny {
+        message: "stop".to_string(),
+        interrupt: true,
+    };
+    let parsed: serde_json::Value = serde_json::to_value(&resp).unwrap();
+    assert_eq!(parsed["interrupt"].as_bool(), Some(true));
+}
+
+/// #368: round-trip the wire shape through serde to catch any tag
+/// configuration error. `behavior: "allow"` must deserialize into the
+/// Allow variant; `behavior: "deny"` into Deny.
+#[test]
+fn permission_prompt_response_round_trips_via_canonical_wire() {
+    let allow_wire = serde_json::json!({
+        "behavior": "allow",
+        "updatedInput": {"a": 1}
+    });
+    let allow: PermissionPromptResponse = serde_json::from_value(allow_wire).unwrap();
+    assert!(matches!(
+        allow,
+        PermissionPromptResponse::Allow {
+            updated_input: Some(_)
+        }
+    ));
+
+    let deny_wire = serde_json::json!({
+        "behavior": "deny",
+        "message": "no",
+        "interrupt": true
+    });
+    let deny: PermissionPromptResponse = serde_json::from_value(deny_wire).unwrap();
+    match deny {
+        PermissionPromptResponse::Deny { message, interrupt } => {
+            assert_eq!(message, "no");
+            assert!(interrupt);
+        }
+        _ => panic!("expected Deny"),
+    }
 }
 
 #[tokio::test]

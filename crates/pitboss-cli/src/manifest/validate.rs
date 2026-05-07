@@ -155,14 +155,14 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
     let lead = r.lead.as_ref().unwrap();
 
     // Path B permission routing is selectable but in soak. The
-    // `--permission-prompt-tool` CLI flag is now wired in every
-    // hierarchical spawn variant (lead, lead_resume, sublead, worker)
-    // and `permission_prompt` denials carry a `reason` payload + a
-    // `TaskEvent::ToolDenied` row on `events.jsonl`. The remaining
-    // unknowns are upstream-contract fit (whether claude consumes the
-    // `reason` field) and queue-flood ergonomics under a real workload;
-    // emit a one-line stderr warning instead of bailing so operators
-    // can opt in and surface real-world issues.
+    // `--permission-prompt-tool` CLI flag is wired in every hierarchical
+    // spawn variant (lead, lead_resume, sublead, worker) and
+    // `permission_prompt` returns the canonical `PermissionResult` SDK
+    // shape (#368) with a `tool_denied` row on per-actor `events.jsonl`
+    // for every denial. Remaining unknowns are queue-flood ergonomics
+    // under real workloads and the `auto_reject`-vs-operator-rejection
+    // misclassification (#373); emit a one-line stderr warning instead
+    // of bailing so operators can opt in and surface real-world issues.
     if matches!(
         lead.permission_routing,
         crate::manifest::schema::PermissionRouting::PathB
@@ -170,8 +170,8 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
         eprintln!(
             "warning: `permission_routing = \"path_b\"` is in soak. Each per-tool \
              permission check routes through pitboss's MCP `permission_prompt`. \
-             Denials are non-terminating warnings — claude receives \
-             {{decision: \"deny\", reason: ...}} and adapts; the row lands on \
+             Denials are non-terminating — claude receives \
+             {{behavior: \"deny\", message: ...}} and adapts; the row lands on \
              <run_dir>/tasks/<actor>/events.jsonl. File issues at \
              https://github.com/SDS-Mode/pitboss/issues"
         );
