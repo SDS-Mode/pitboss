@@ -152,9 +152,13 @@ impl ApprovalBridge {
         let request_id = format!("req-{}", Uuid::now_v7());
         // Clone before task_id is moved into bridge/queue/event structures below.
         let task_id_for_counter = task_id.clone();
+        // #366: write the audit row to the requesting actor's tasks dir,
+        // not the root lead's. Pre-fix, every worker / sublead approval
+        // collapsed into `tasks/<lead_id>/events.jsonl`, leaving the
+        // per-actor file empty and the lead's file ambiguous.
         let _ = crate::dispatch::events::append_event(
             &self.state.root.run_subdir,
-            &self.state.root.lead_id,
+            &task_id,
             &crate::dispatch::events::TaskEvent::ApprovalRequest {
                 at: chrono::Utc::now(),
                 request_id: request_id.clone(),
@@ -384,9 +388,12 @@ impl ApprovalBridge {
             .await
             .remove(request_id)
             .ok_or(ApprovalError::ControlDisconnected)?;
+        // #366: response row goes to the originating actor's tasks dir,
+        // matching `request`'s path so request/response rows pair up
+        // under the same file.
         let _ = crate::dispatch::events::append_event(
             &self.state.root.run_subdir,
-            &self.state.root.lead_id,
+            &bridge_entry.task_id,
             &crate::dispatch::events::TaskEvent::ApprovalResponse {
                 at: chrono::Utc::now(),
                 request_id: request_id.to_string(),
@@ -421,6 +428,17 @@ mod tests {
     use uuid::Uuid;
 
     async fn mk_state(policy: ApprovalPolicy) -> Arc<DispatchState> {
+        mk_state_with_run_subdir(policy, PathBuf::from("/tmp")).await
+    }
+
+    /// Like `mk_state` but lets the caller pin the `run_subdir` to a
+    /// unique tempdir. Required for tests that assert against
+    /// `<run_subdir>/tasks/<actor>/events.jsonl` paths and would
+    /// collide with other tests if `run_subdir = /tmp`.
+    async fn mk_state_with_run_subdir(
+        policy: ApprovalPolicy,
+        run_subdir: PathBuf,
+    ) -> Arc<DispatchState> {
         let dir = TempDir::new().unwrap();
         let manifest = ResolvedManifest {
             manifest_schema_version: 0,
@@ -460,7 +478,7 @@ mod tests {
             PathBuf::from("/bin/true"),
             wt_mgr,
             CleanupPolicy::Never,
-            PathBuf::from("/tmp"),
+            run_subdir,
             policy,
             None,
             std::sync::Arc::new(crate::shared_store::SharedStore::new()),
@@ -732,6 +750,100 @@ mod tests {
         let resp = request_handle.await.unwrap().unwrap();
         assert!(resp.approved);
         assert_eq!(counters_for(&state, "lead").await, (1, 1, 0));
+    }
+
+    /// #366 regression: `ApprovalBridge::request` and `respond` write
+    /// audit rows to the **requesting actor's** `tasks/<actor_id>/events.jsonl`,
+    /// not the root lead's. Pre-fix every worker / sublead approval
+    /// collapsed into the lead's directory, leaving per-actor files
+    /// empty and the lead's file ambiguous.
+    #[tokio::test]
+    async fn approval_audit_rows_go_to_caller_actor_dir() {
+        use crate::control::protocol::ControlEvent;
+        use tokio::sync::mpsc;
+
+        let run_subdir = TempDir::new().unwrap();
+        let run_subdir_path = run_subdir.path().to_path_buf();
+        let state = mk_state_with_run_subdir(ApprovalPolicy::Block, run_subdir_path.clone()).await;
+
+        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
+            id: Uuid::now_v7(),
+            sender: tx,
+        });
+
+        let bridge = Arc::new(ApprovalBridge::new(Arc::clone(&state)));
+        let bridge_for_request = Arc::clone(&bridge);
+        // Drive `request` from a *worker* actor, not the lead — this is
+        // the path the bug bit on.
+        let request_handle = tokio::spawn(async move {
+            bridge_for_request
+                .request(
+                    "worker-aaaa".into(),
+                    "spawn 2".into(),
+                    None,
+                    crate::control::protocol::ApprovalKind::Action,
+                    Duration::from_secs(2),
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let request_id = match rx.recv().await.unwrap() {
+            ControlEvent::ApprovalRequest { request_id, .. } => request_id,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        bridge
+            .respond(
+                &request_id,
+                ApprovalResponse {
+                    approved: true,
+                    comment: None,
+                    edited_summary: None,
+                    reason: None,
+                    from_ttl: false,
+                },
+            )
+            .await
+            .unwrap();
+        request_handle.await.unwrap().unwrap();
+
+        // Worker's own events.jsonl must contain both audit rows.
+        let worker_events = run_subdir_path
+            .join("tasks")
+            .join("worker-aaaa")
+            .join("events.jsonl");
+        let worker_body = tokio::fs::read_to_string(&worker_events)
+            .await
+            .unwrap_or_else(|e| panic!("expected {worker_events:?} to exist: {e}"));
+        assert!(
+            worker_body.contains("\"kind\":\"approval_request\""),
+            "worker events.jsonl missing approval_request: {worker_body}"
+        );
+        assert!(
+            worker_body.contains("\"kind\":\"approval_response\""),
+            "worker events.jsonl missing approval_response: {worker_body}"
+        );
+        assert!(
+            worker_body.contains(&request_id),
+            "worker events.jsonl missing matching request_id: {worker_body}"
+        );
+
+        // Lead's events.jsonl must NOT have absorbed any of the
+        // worker's approval rows.
+        let lead_events = run_subdir_path
+            .join("tasks")
+            .join("lead")
+            .join("events.jsonl");
+        if lead_events.exists() {
+            let lead_body = tokio::fs::read_to_string(&lead_events).await.unwrap();
+            assert!(
+                !lead_body.contains(&request_id),
+                "lead events.jsonl must not have absorbed worker approval rows \
+                 (request_id {request_id} present): {lead_body}"
+            );
+        }
     }
 
     #[tokio::test]
