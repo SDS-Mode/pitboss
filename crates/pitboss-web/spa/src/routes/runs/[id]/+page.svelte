@@ -73,9 +73,28 @@
   const inProgress = $derived(Boolean(r?.in_progress));
   const summary = $derived(inProgress ? null : r);
   const stub = $derived(inProgress ? (r?.run as Record<string, any> | null) : null);
+  // Run status derivation (#365):
+  //   - in-progress: defer to `stub.status`, which the API returns from
+  //     `pitboss_cli::runs::RunStatus` (the canonical classifier shared
+  //     with the overview list — single source of truth).
+  //   - finalized: read `was_interrupted` directly from `summary.json`.
+  //     `was_interrupted = true` means the run was cancelled (cancel_run
+  //     op or Ctrl-C / TUI quit); render as 'cancelled' so the badge
+  //     goes red and matches the overview's RunStatus::Cancelled.
+  //   - degenerate (no stub, no summary): 'aborted'. This fallback
+  //     should be unreachable in practice — the API always returns one
+  //     or the other — but keeps the type total.
+  //
+  // Replaces a pre-#365 derivation that read `summary.run_meta.outcome`,
+  // a field that has never existed on `RunSummary`, so cancelled runs
+  // silently rendered as 'complete' (green).
   const status = $derived<RunStatus>(
     (stub?.status as RunStatus | undefined) ??
-      (summary?.run_meta?.outcome === 'success' ? 'complete' : summary ? 'complete' : 'aborted')
+      (summary
+        ? summary.was_interrupted === true
+          ? 'cancelled'
+          : 'complete'
+        : 'aborted')
   );
   const taskList = $derived<Array<Record<string, any>>>(
     (summary?.tasks as Array<Record<string, any>> | undefined) ?? []

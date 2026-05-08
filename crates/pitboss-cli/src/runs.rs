@@ -55,8 +55,17 @@ pub const STALENESS_THRESHOLD: Duration = Duration::from_secs(4 * 3600);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
-    /// `summary.json` exists and parsed — run finalized cleanly.
+    /// `summary.json` exists, parsed, and `was_interrupted = false` —
+    /// run finalized cleanly.
     Complete,
+    /// `summary.json` exists, parsed, and `was_interrupted = true` —
+    /// run finalized but was cancelled (`cancel_run` op) or aborted
+    /// by Ctrl-C / TUI quit while still in flight. Distinguished
+    /// from [`Self::Complete`] so the operational console can colour
+    /// it differently and from [`Self::Aborted`] (which is a
+    /// dispatcher crash before any output) so operators can tell
+    /// "we asked it to stop" from "it died on us." (#365)
+    Cancelled,
     /// Live dispatcher (control socket accepts a connection) OR
     /// `summary.jsonl` was written recently (within
     /// [`STALENESS_THRESHOLD`]) so the dispatcher might still come
@@ -78,6 +87,7 @@ impl RunStatus {
     pub fn label(self) -> &'static str {
         match self {
             Self::Complete => "complete",
+            Self::Cancelled => "cancelled",
             Self::Running => "running",
             Self::Stale => "stale",
             Self::Aborted => "aborted",
@@ -92,7 +102,10 @@ impl RunStatus {
     /// to come back. Used by the prune sweep to decide whether a run
     /// is a candidate for cleanup.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Complete | Self::Stale | Self::Aborted)
+        matches!(
+            self,
+            Self::Complete | Self::Cancelled | Self::Stale | Self::Aborted
+        )
     }
 }
 
@@ -222,13 +235,24 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
     let summary_json_state = match std::fs::read(&summary_json) {
         Ok(bytes) => match serde_json::from_slice::<pitboss_core::store::RunSummary>(&bytes) {
             Ok(s) => {
+                // `was_interrupted = true` means the dispatcher
+                // finalized in response to `cancel_run` (or a Ctrl-C /
+                // TUI quit). The summary is canonical; the run did
+                // produce output up until the cancel signal. Surface
+                // as `Cancelled` so the operational console renders
+                // it visually distinct from a clean Complete (#365).
+                let status = if s.was_interrupted {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Complete
+                };
                 return RunEntry {
                     run_id,
                     run_dir: run_dir.to_path_buf(),
                     mtime,
                     tasks_total: s.tasks_total,
                     tasks_failed: s.tasks_failed,
-                    status: RunStatus::Complete,
+                    status,
                 };
             }
             Err(e) => {
@@ -560,14 +584,99 @@ mod tests {
     #[test]
     fn run_status_terminal_helpers() {
         assert!(RunStatus::Complete.is_terminal());
+        assert!(RunStatus::Cancelled.is_terminal());
         assert!(RunStatus::Stale.is_terminal());
         assert!(RunStatus::Aborted.is_terminal());
         assert!(!RunStatus::Running.is_terminal());
 
         assert!(RunStatus::Complete.is_complete());
+        // Cancelled is a TERMINAL state but not a CLEAN completion —
+        // operators querying `is_complete()` to mean "succeeded" should
+        // get false. (#365)
+        assert!(!RunStatus::Cancelled.is_complete());
         assert!(!RunStatus::Stale.is_complete());
         assert!(!RunStatus::Aborted.is_complete());
         assert!(!RunStatus::Running.is_complete());
+    }
+
+    /// Wire-shape pin: `RunStatus::Cancelled` must serialize as the
+    /// lowercase string `"cancelled"` so the SPA's TS `RunStatus` type
+    /// can match on it directly. Same enforcement discipline as the
+    /// other lowercase variants. (#365)
+    #[test]
+    fn run_status_cancelled_serializes_lowercase() {
+        let s = serde_json::to_string(&RunStatus::Cancelled).unwrap();
+        assert_eq!(s, "\"cancelled\"");
+        assert_eq!(RunStatus::Cancelled.label(), "cancelled");
+    }
+
+    /// Acceptance scenario from #365: a cancelled run finalizes its
+    /// `summary.json` with `was_interrupted = true`. The classifier
+    /// must surface this as `Cancelled`, NOT `Complete` — operators
+    /// need to tell "we asked it to stop" from "it finished cleanly"
+    /// at a glance in the run list. Pin the mapping so a future
+    /// schema tweak that drops `was_interrupted` from the path gets
+    /// caught.
+    #[test]
+    fn collect_run_entry_with_was_interrupted_summary_is_cancelled() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = make_run_dir(tmp.path(), "run-cancelled");
+        let run_id_uuid = "019dface-cafe-feed-c0de-deadbeef1234";
+        let summary = serde_json::json!({
+            "run_id": run_id_uuid,
+            "manifest_path": "/tmp/repro.toml",
+            "manifest_name": "repro-cancel",
+            "pitboss_version": "0.12.0",
+            "claude_version": null,
+            "started_at": "2026-05-08T01:00:00Z",
+            "ended_at": "2026-05-08T01:01:00Z",
+            "total_duration_ms": 60000,
+            "tasks_total": 3,
+            "tasks_failed": 2,
+            "was_interrupted": true,
+            "tasks": [],
+        });
+        fs::write(run_dir.join("summary.json"), summary.to_string()).unwrap();
+
+        let entry = collect_run_entry(&run_dir, "run-cancelled".to_string(), SystemTime::now());
+        assert_eq!(
+            entry.status,
+            RunStatus::Cancelled,
+            "summary.json with was_interrupted=true must classify as Cancelled, not Complete"
+        );
+        // Counts still flow through from the parsed summary — the
+        // operational console renders them in the same column.
+        assert_eq!(entry.tasks_total, 3);
+        assert_eq!(entry.tasks_failed, 2);
+    }
+
+    /// Counterpart to the cancelled test: a clean finalize
+    /// (`was_interrupted = false`) still classifies as `Complete`.
+    /// Without this companion test, the cancelled-mapping change
+    /// could silently flip every parseable summary to Cancelled.
+    #[test]
+    fn collect_run_entry_with_clean_summary_is_complete() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = make_run_dir(tmp.path(), "run-clean");
+        let run_id_uuid = "019dface-cafe-feed-c0de-deadbeef5678";
+        let summary = serde_json::json!({
+            "run_id": run_id_uuid,
+            "manifest_path": "/tmp/repro.toml",
+            "manifest_name": "clean",
+            "pitboss_version": "0.12.0",
+            "claude_version": null,
+            "started_at": "2026-05-08T01:00:00Z",
+            "ended_at": "2026-05-08T01:01:00Z",
+            "total_duration_ms": 60000,
+            "tasks_total": 3,
+            "tasks_failed": 0,
+            "was_interrupted": false,
+            "tasks": [],
+        });
+        fs::write(run_dir.join("summary.json"), summary.to_string()).unwrap();
+
+        let entry = collect_run_entry(&run_dir, "run-clean".to_string(), SystemTime::now());
+        assert_eq!(entry.status, RunStatus::Complete);
     }
 
     // ── #141: socket-path resolution doesn't double-nest the run id ─────

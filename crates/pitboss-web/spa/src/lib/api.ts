@@ -4,7 +4,11 @@
 
 import { browser } from '$app/environment';
 
-export type RunStatus = 'complete' | 'running' | 'stale' | 'aborted';
+// Mirror of `pitboss_cli::runs::RunStatus`. `'cancelled'` was added in
+// the #365 fix: previously a `cancel_run`-finalized run rendered as
+// `'complete'` (green), which conflated user-initiated stops with clean
+// success. The status-badge component maps `'cancelled'` to red.
+export type RunStatus = 'complete' | 'cancelled' | 'running' | 'stale' | 'aborted';
 
 export interface RunDto {
   run_id: string;
