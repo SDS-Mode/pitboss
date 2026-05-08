@@ -1138,6 +1138,7 @@
     sublead={selectedTaskId ? subleads[selectedTaskId] : undefined}
     activity={selectedTaskId ? storeActivity[selectedTaskId] : undefined}
     allTasks={tasksToRender as TaskRecord[]}
+    {inProgress}
     onJumpTo={(id) => (selectedTaskId = id === '' ? null : id)}
   />
 {/if}
