@@ -137,41 +137,23 @@ pub fn build_router(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
-    /// All tests that read or write the parent-notify env vars must hold this
-    /// mutex for their duration. `cargo test` runs unit tests in parallel
-    /// within the same process, and env vars are global — without serialization
-    /// these tests trample each other (a `remove_var` in one races a
-    /// `set_var` in another). `tokio::sync::Mutex` rather than `std::sync` so
-    /// the async tests can hold the guard across `.await` points without
-    /// tripping clippy's `await_holding_lock`.
-    static ENV_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    async fn alock() -> tokio::sync::MutexGuard<'static, ()> {
-        ENV_GUARD.lock().await
-    }
-
-    fn lock() -> tokio::sync::MutexGuard<'static, ()> {
-        // Sync tests block on the runtime-less mutex via try_lock loop. In
-        // practice the guard is rarely contended (these tests are fast).
-        loop {
-            match ENV_GUARD.try_lock() {
-                Ok(g) => return g,
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
-            }
-        }
-    }
+    // #351: every test in this module mutates parent-notify env vars.
+    // `#[serial(env)]` serializes against every other env-touching
+    // test in the crate, replacing the previous module-local
+    // `ENV_GUARD` (which only protected this file).
 
     #[test]
+    #[serial(env)]
     fn parent_run_id_returns_none_when_unset() {
-        let _g = lock();
         std::env::remove_var(RUN_ID_ENV);
         assert!(parent_run_id().is_none());
     }
 
     #[test]
+    #[serial(env)]
     fn parent_run_id_returns_some_when_set() {
-        let _g = lock();
         std::env::set_var(RUN_ID_ENV, "  019d0000-aaaa-bbbb-cccc-dddddddddddd  ");
         let v = parent_run_id();
         std::env::remove_var(RUN_ID_ENV);
@@ -179,8 +161,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn parent_run_id_returns_none_when_empty() {
-        let _g = lock();
         std::env::set_var(RUN_ID_ENV, "   ");
         let v = parent_run_id();
         std::env::remove_var(RUN_ID_ENV);
@@ -188,18 +170,18 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn build_parent_sink_returns_none_when_env_unset() {
-        let _g = lock();
         std::env::remove_var(PARENT_NOTIFY_URL_ENV);
         let http = Arc::new(reqwest::Client::new());
         assert!(build_parent_sink(&http).is_none());
     }
 
     #[test]
+    #[serial(env)]
     fn build_parent_sink_returns_none_when_env_unparseable() {
         // A typo'd scheme (`htttp://…`) used to silently construct a sink
         // that failed on first emit. Catch it at dispatch start instead.
-        let _g = lock();
         // No scheme delimiter at all → reqwest::Url::parse rejects.
         // (`htttp://…` parses fine: any token is a valid scheme.)
         std::env::set_var(PARENT_NOTIFY_URL_ENV, "definitely not a url");
@@ -213,8 +195,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(env)]
     async fn parent_sink_posts_run_dispatched_to_localhost() {
-        let _g = alock().await;
         // End-to-end: env var → trusted webhook sink → POST to a local mock.
         // Verifies that the SSRF bypass actually lets a localhost target work
         // (the manifest path would refuse it at parse time).
@@ -252,8 +234,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(env)]
     async fn parent_sink_bypasses_https_only_check() {
-        let _g = alock().await;
         // Manifest webhook validation rejects http:// + loopback. The env-var
         // path must accept both, since the canonical orchestrator topology is
         // `http://localhost:N` on the same host.
@@ -292,8 +274,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn build_router_returns_none_when_no_sources() {
-        let _g = lock();
         std::env::remove_var(PARENT_NOTIFY_URL_ENV);
         let http = Arc::new(reqwest::Client::new());
         let router = build_router(&[], &http).unwrap();
@@ -301,8 +283,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn build_router_includes_parent_sink_when_env_set() {
-        let _g = lock();
         std::env::set_var(PARENT_NOTIFY_URL_ENV, "http://127.0.0.1:9/x");
         let http = Arc::new(reqwest::Client::new());
         let router = build_router(&[], &http).unwrap();

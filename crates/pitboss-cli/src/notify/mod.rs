@@ -423,6 +423,7 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn severity_ord_is_info_warning_error_critical() {
@@ -652,6 +653,7 @@ mod tests {
     /// size directly, so we verify the constructor doesn't panic for an
     /// extreme value (which a misuse of NonZeroUsize might).
     #[test]
+    #[serial(env)]
     fn router_new_honors_dedup_cache_size_env() {
         std::env::set_var(DEDUP_CACHE_SIZE_ENV, "1024");
         let _ = NotificationRouter::new(vec![]);

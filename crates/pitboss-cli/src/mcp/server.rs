@@ -1636,17 +1636,17 @@ impl Drop for McpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use serial_test::serial;
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    // Serializes tests that mutate XDG_RUNTIME_DIR, since env vars are
-    // process-global and cargo runs tests in parallel by default.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // #351: `#[serial(env)]` replaces the previous module-local
+    // `ENV_LOCK` so XDG_RUNTIME_DIR mutations here serialize against
+    // every other env-touching test in the crate, not just this file.
 
     #[test]
+    #[serial(env)]
     fn socket_path_uses_xdg_runtime_dir_when_set() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         let run_id = Uuid::now_v7();
@@ -1657,8 +1657,8 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn socket_path_falls_back_to_run_dir_when_xdg_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("XDG_RUNTIME_DIR");
         let dir = TempDir::new().unwrap();
         let run_id = Uuid::now_v7();

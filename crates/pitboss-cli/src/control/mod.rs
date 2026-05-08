@@ -79,15 +79,16 @@ fn sweep_stale_sockets(dir: &Path) {
 #[cfg(test)]
 mod path_tests {
     use super::*;
-    use std::sync::Mutex;
+    use serial_test::serial;
     use tempfile::TempDir;
 
-    // Serializes tests that mutate XDG_RUNTIME_DIR (env vars are process-global).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // #351: `#[serial(env)]` replaces the previous module-local
+    // `ENV_LOCK` so XDG_RUNTIME_DIR mutations here serialize against
+    // every other env-touching test in the crate, not just this file.
 
     #[test]
+    #[serial(env)]
     fn uses_xdg_runtime_dir_when_set() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         let run_id = Uuid::now_v7();
@@ -98,8 +99,8 @@ mod path_tests {
     }
 
     #[test]
+    #[serial(env)]
     fn falls_back_to_run_dir_when_xdg_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("XDG_RUNTIME_DIR");
         let dir = TempDir::new().unwrap();
         let run_id = Uuid::now_v7();
@@ -113,8 +114,8 @@ mod path_tests {
     /// than the TTL and non-`.control.sock` files in the same dir must
     /// be left alone.
     #[test]
+    #[serial(env)]
     fn sweep_unlinks_only_stale_control_sockets() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let xdg = TempDir::new().unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", xdg.path());
 

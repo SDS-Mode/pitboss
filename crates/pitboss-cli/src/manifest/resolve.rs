@@ -517,6 +517,7 @@ fn resolve_approval_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn man(src: &str) -> Manifest {
         toml::from_str(src).unwrap()
@@ -887,6 +888,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn resolves_notifications_with_env_substitution() {
         // The substitution prefix is `PITBOSS_NOTIFY_` (#156 M3) — narrower
         // than the previous `PITBOSS_` so a manifest can't sneak

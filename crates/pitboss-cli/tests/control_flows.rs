@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[test]
+#[serial_test::serial(env)]
 fn control_socket_path_uses_xdg_or_run_dir() {
     // Ensure the helper at least produces a valid path (regression guard for
     // Phase 1 wiring).

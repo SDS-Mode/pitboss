@@ -366,6 +366,7 @@ mod tests {
     use chrono::Utc;
     use pitboss_core::parser::TokenUsage;
     use pitboss_core::store::{RunSummary, TaskRecord, TaskStatus};
+    use serial_test::serial;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -1162,6 +1163,7 @@ mod tests {
     /// same as the original dispatch's router. The placeholder uses a
     /// var prefixed `PITBOSS_NOTIFY_` (only such vars are substitutable).
     #[test]
+    #[serial(env)]
     fn read_resolved_manifest_repopulates_notifications_from_snapshot() {
         let tmp = TempDir::new().unwrap();
 
@@ -1253,6 +1255,7 @@ url = "https://hooks.slack.com/services/T00/B00/${PITBOSS_NOTIFY_SLACK_TOKEN}"
     /// loudly. Silent fallback to empty notifications would re-create
     /// the silent-disable failure mode #346 is closing.
     #[test]
+    #[serial(env)]
     fn read_resolved_manifest_fails_clearly_when_env_var_missing() {
         let tmp = TempDir::new().unwrap();
 
