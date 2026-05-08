@@ -232,6 +232,10 @@ fn compute_outcome(status: &RunStatus, failed: usize, total: usize) -> String {
         RunStatus::Running => "running".into(),
         RunStatus::Stale => "stale".into(),
         RunStatus::Aborted => "aborted".into(),
+        // Cancelled is its own bucket — operators looking at the
+        // failures dashboard want to distinguish "we cancelled it"
+        // from clean success / partial / total failure. (#365)
+        RunStatus::Cancelled => "cancelled".into(),
         RunStatus::Complete => {
             if failed == 0 {
                 "success".into()

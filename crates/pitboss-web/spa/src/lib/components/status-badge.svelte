@@ -4,6 +4,10 @@
 
   let { status, label }: { status: RunStatus; label?: string } = $props();
 
+  // `cancelled` (user-initiated stop) and `aborted` (dispatcher
+  // crashed) both render in the destructive/red bucket — operators
+  // see at a glance that the run did not complete cleanly. The label
+  // text stays distinct so the difference is still readable. (#365)
   const variant = $derived(
     status === 'complete'
       ? 'default'

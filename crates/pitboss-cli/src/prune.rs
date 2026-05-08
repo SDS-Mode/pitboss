@@ -171,8 +171,11 @@ fn matches_status(s: RunStatus, include_aborted: bool) -> bool {
     match s {
         RunStatus::Stale => true,
         RunStatus::Aborted => include_aborted,
-        // Never sweep live or finalized runs.
-        RunStatus::Running | RunStatus::Complete => false,
+        // Never sweep live or finalized runs. `Cancelled` is finalized
+        // (summary.json exists, was_interrupted=true) — operators who
+        // cancelled deliberately may still want the run dir for
+        // post-mortem; treat it like `Complete` for prune purposes. (#365)
+        RunStatus::Running | RunStatus::Complete | RunStatus::Cancelled => false,
     }
 }
 
