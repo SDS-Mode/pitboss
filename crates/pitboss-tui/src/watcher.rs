@@ -66,6 +66,13 @@ struct ResolvedMcpServer {
     pub id: String,
     #[serde(default)]
     pub scope: Option<String>,
+    /// Per-server `[[mcp_server]].tools` allowlist. `None` = unrestricted;
+    /// `Some(list)` is enforced at spawn-time and at runtime via the
+    /// `permission_prompt` short-circuit (#399). Surfaced in the Detail
+    /// view's MCP SERVERS section so operators can see the cap without
+    /// re-reading the manifest.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
 }
 
 /// Minimal `[[worker_type]]` / `[[sublead_type]]` shape — only the id
@@ -264,9 +271,13 @@ fn build_matrix_rows(
     worker_types: &[ResolvedActorType],
     sublead_types: &[ResolvedActorType],
 ) -> Vec<pitboss_cli::capability_matrix::MatrixRow> {
-    let server_parts: Vec<(String, Option<String>)> = servers
+    let server_parts: Vec<pitboss_cli::capability_matrix::MatrixServerSpec> = servers
         .iter()
-        .map(|s| (s.id.clone(), s.scope.clone()))
+        .map(|s| pitboss_cli::capability_matrix::MatrixServerSpec {
+            id: s.id.clone(),
+            scope: s.scope.clone(),
+            tools: s.tools.clone(),
+        })
         .collect();
     let wt_ids: Vec<String> = worker_types.iter().map(|w| w.id.clone()).collect();
     let st_ids: Vec<String> = sublead_types.iter().map(|s| s.id.clone()).collect();
@@ -1070,7 +1081,7 @@ mod tests {
             .find(|r| r.actor_type.as_deref() == Some("writer"))
             .expect("writer row missing");
         assert!(
-            writer.server_ids.iter().any(|s| s == "fs-writer"),
+            writer.servers.iter().any(|s| s.server_id == "fs-writer"),
             "writer row should admit fs-writer (scope=type:writer)"
         );
     }

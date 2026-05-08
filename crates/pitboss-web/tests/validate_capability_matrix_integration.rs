@@ -64,6 +64,7 @@ command = "/bin/true"
 id = "fs-writer"
 command = "/bin/true"
 scope = "type:writer"
+tools = ["Read", "Write"]
 
 [[worker_type]]
 id = "writer"
@@ -113,29 +114,56 @@ async fn validate_returns_capability_matrix_on_success() {
     // Untyped row anchors first; only sees the unscoped server.
     assert_eq!(matrix[0]["kind"], "untyped");
     assert!(matrix[0]["actor_type"].is_null());
-    let untyped_servers: Vec<&str> = matrix[0]["server_ids"]
+    let untyped_servers: Vec<&str> = matrix[0]["servers"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v| v["server_id"].as_str().unwrap())
         .collect();
     assert_eq!(untyped_servers, vec!["pitboss"]);
+    // pitboss has no per-server `tools` allowlist; the field must be
+    // omitted from the JSON entirely (not serialised as `null`) so the
+    // SPA can branch on key-presence and keep its TS shape clean.
+    assert!(
+        !matrix[0]["servers"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tools"),
+        "pitboss has no allowlist; tools key must be omitted, got: {:?}",
+        matrix[0]["servers"][0]
+    );
 
-    // Writer row sees the writer-scoped server.
+    // Writer row sees the writer-scoped server, AND fs-writer's
+    // per-server tools allowlist surfaces in the JSON so the SPA can
+    // render the per-tool gate without a second API round-trip.
     let writer = matrix
         .iter()
         .find(|r| r["actor_type"] == "writer")
         .expect("writer row missing");
     assert_eq!(writer["kind"], "worker_type");
-    let writer_servers: Vec<&str> = writer["server_ids"]
+    let writer_entries = writer["servers"].as_array().unwrap();
+    let writer_server_ids: Vec<&str> = writer_entries
+        .iter()
+        .map(|v| v["server_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        writer_server_ids.contains(&"pitboss") && writer_server_ids.contains(&"fs-writer"),
+        "writer should see both servers, got: {writer_server_ids:?}"
+    );
+    let fs_writer_entry = writer_entries
+        .iter()
+        .find(|v| v["server_id"] == "fs-writer")
+        .expect("fs-writer entry missing");
+    let tools: Vec<&str> = fs_writer_entry["tools"]
         .as_array()
-        .unwrap()
+        .expect("fs-writer.tools must be present (allowlist declared)")
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert!(
-        writer_servers.contains(&"pitboss") && writer_servers.contains(&"fs-writer"),
-        "writer should see both servers, got: {writer_servers:?}"
+    assert_eq!(
+        tools,
+        vec!["Read", "Write"],
+        "fs-writer's per-server allowlist should round-trip exactly"
     );
 }
 
