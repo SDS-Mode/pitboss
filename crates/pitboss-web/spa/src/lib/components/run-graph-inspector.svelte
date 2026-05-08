@@ -21,6 +21,7 @@
     type WorkerEntry
   } from '$lib/api';
   import { costUsd, fmtCost } from '$lib/prices';
+  import LogPretty from '$lib/components/log-pretty.svelte';
   import { ExternalLink, ArrowLeftRight, AlertTriangle, Pause, Play } from 'lucide-svelte';
 
   let {
@@ -108,8 +109,17 @@
    *  switches to a different actor. Useful for inspecting a stable
    *  window without the view jumping on every poll. */
   let tailPaused = $state(false);
-  /** Pre element bound for auto-scroll-to-bottom on content change. */
-  let logPaneEl = $state<HTMLPreElement | null>(null);
+  /** Scroll container bound for auto-scroll-to-bottom on content change.
+   *  Wraps either the raw `<pre>` or the `LogPretty` component so the
+   *  scroll logic is identical across modes. */
+  let logPaneEl = $state<HTMLDivElement | null>(null);
+  /** Renderer mode. Pretty parses each NDJSON line via stream-json.ts
+   *  and renders kind-styled rows; Raw just dumps the bytes. */
+  let logFormat = $state<'pretty' | 'raw'>('pretty');
+  /** Hide hook noise + thinking blocks in pretty mode. Off by default
+   *  (hide hooks; show thinking). */
+  let hideHooks = $state(true);
+  let hideThinking = $state(false);
   /** Whether the most recent scroll position is at the bottom. If the
    *  user scrolled up to read history, polling continues but the view
    *  stays put. */
@@ -483,6 +493,32 @@
               </span>
             </h3>
             <div class="flex items-center gap-1">
+              <!-- Pretty / Raw toggle (#260 follow-up). Default Pretty:
+                   the raw stream-json is dense and noisy for log
+                   review; the pretty renderer parses each line and
+                   collapses tool_use / tool_result / assistant text /
+                   thinking into one styled row each. Raw stays a click
+                   away for debugging the wire format. -->
+              <div class="bg-muted/30 mr-1 inline-flex items-center rounded text-[10px]">
+                <button
+                  class="px-1.5 py-0.5 rounded {logFormat === 'pretty'
+                    ? 'bg-background border border-border shadow-sm font-medium'
+                    : 'text-muted-foreground hover:text-foreground'}"
+                  onclick={() => (logFormat = 'pretty')}
+                  title="Human-readable rows (parsed stream-json)"
+                >
+                  Pretty
+                </button>
+                <button
+                  class="px-1.5 py-0.5 rounded {logFormat === 'raw'
+                    ? 'bg-background border border-border shadow-sm font-medium'
+                    : 'text-muted-foreground hover:text-foreground'}"
+                  onclick={() => (logFormat = 'raw')}
+                  title="Raw NDJSON as written by the claude subprocess"
+                >
+                  Raw
+                </button>
+              </div>
               {#if inProgress && (worker || task?.status === 'Running' || task?.status === 'Paused' || task?.status === 'Frozen')}
                 <Button
                   variant="ghost"
@@ -518,6 +554,18 @@
               </Button>
             </div>
           </div>
+          {#if logFormat === 'pretty'}
+            <div class="text-muted-foreground flex items-center gap-3 text-[10px]">
+              <label class="inline-flex cursor-pointer items-center gap-1">
+                <input type="checkbox" class="size-3" bind:checked={hideHooks} />
+                hide hooks
+              </label>
+              <label class="inline-flex cursor-pointer items-center gap-1">
+                <input type="checkbox" class="size-3" bind:checked={hideThinking} />
+                hide thinking
+              </label>
+            </div>
+          {/if}
           {#if logError}
             <p class="text-destructive text-[11px]">{logError}</p>
           {:else if logLoading && logText.length === 0}
@@ -527,10 +575,18 @@
               {isLogTailing ? 'Waiting for first output…' : 'Log is empty.'}
             </p>
           {:else}
-            <pre
+            <div
               bind:this={logPaneEl}
               onscroll={onLogScroll}
-              class="bg-muted/40 max-h-72 overflow-auto rounded p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap">{logText}</pre>
+              class="bg-muted/40 max-h-72 overflow-auto rounded p-2"
+            >
+              {#if logFormat === 'pretty'}
+                <LogPretty text={logText} {hideHooks} {hideThinking} />
+              {:else}
+                <pre
+                  class="font-mono text-[10px] leading-relaxed whitespace-pre-wrap m-0">{logText}</pre>
+              {/if}
+            </div>
             {#if !stickToBottom}
               <button
                 class="text-sky-700 dark:text-sky-400 mt-1 text-[10px] underline hover:no-underline"
