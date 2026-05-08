@@ -27,6 +27,10 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/{run_id}/summary-jsonl", get(runs::summary_jsonl))
         .route("/runs/{run_id}/tasks/{task_id}", get(runs::task_detail))
         .route("/runs/{run_id}/tasks/{task_id}/log", get(runs::task_log))
+        .route(
+            "/runs/{run_id}/tasks/{task_id}/events",
+            get(runs::task_events),
+        )
         .route("/runs/{run_id}/events", get(events::events))
         .route("/runs/{run_id}/control", post(control::send))
         .route("/runs/{run_id}/fork", post(manifests::fork_run))
