@@ -903,6 +903,10 @@ pub(super) fn worker_spawn_args(
     // Plugin/skill isolation (see runner::lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
+    // Inside containers, exclude user-scope settings (hooks, etc.). (#426)
+    args.extend(crate::dispatch::container::claude_setting_sources_args(
+        crate::dispatch::container::detect_in_container(),
+    ));
     // Workers always get the shared-store MCP tools in their allowlist when
     // an mcp-config is supplied, alongside their user-declared tools. Without
     // this, kv_set / lease_acquire / etc. hit the permission prompt which

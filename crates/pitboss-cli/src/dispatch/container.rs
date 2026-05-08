@@ -17,6 +17,32 @@ use crate::manifest::schema::ContainerConfig;
 const DEFAULT_IMAGE: &str = "ghcr.io/sds-mode/pitboss-with-claude:latest";
 const PITBOSS_CONTAINER_USER_UID: u32 = 1000;
 
+/// Cheap runtime probe for "are we inside a Docker/Podman container?".
+/// Both runtimes write a marker file at one of these paths during
+/// container init; the absence of both is reliable for "host process".
+pub(crate) fn detect_in_container() -> bool {
+    Path::new("/run/.containerenv").exists() || Path::new("/.dockerenv").exists()
+}
+
+/// Additional CLI args to pass to every `claude … -p` spawn so the host
+/// operator's user-scope `~/.claude/settings.json` (hooks, etc.) doesn't
+/// leak into containerized runs.
+///
+/// `--setting-sources project,local` excludes the `user` scope where
+/// host hooks live, while keeping project- and local-scope settings
+/// active. OAuth/keychain credentials are not loaded via setting-sources
+/// so the bind-mounted `~/.claude/credentials.json` continues to work.
+///
+/// Returns an empty vec on the host so flat-mode `pitboss dispatch` is
+/// unchanged. (#426)
+pub(crate) fn claude_setting_sources_args(in_container: bool) -> Vec<String> {
+    if in_container {
+        vec!["--setting-sources".into(), "project,local".into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Entry point called from `main.rs` for `pitboss container-dispatch`.
 ///
 /// Validates that the manifest has a `[container]` section, then builds and
@@ -438,6 +464,23 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn claude_setting_sources_args_in_container_excludes_user_scope() {
+        let argv = claude_setting_sources_args(true);
+        assert_eq!(
+            argv,
+            vec!["--setting-sources".to_string(), "project,local".to_string()],
+            "in-container claude spawn must drop user-scope settings (#426)"
+        );
+    }
+
+    #[test]
+    fn claude_setting_sources_args_on_host_is_empty() {
+        // Flat-mode `pitboss dispatch` is unchanged — the operator's
+        // host-side ~/.claude/settings.json continues to apply.
+        assert!(claude_setting_sources_args(false).is_empty());
+    }
 
     fn make_config(mounts: Vec<MountSpec>) -> ContainerConfig {
         ContainerConfig {

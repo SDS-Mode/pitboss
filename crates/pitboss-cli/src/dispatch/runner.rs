@@ -838,6 +838,11 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
         "--strict-mcp-config".into(),
         "--disable-slash-commands".into(),
     ];
+    // Inside containers, exclude the host operator's user-scope settings
+    // (hooks, etc.) so they don't leak in. (#426)
+    args.extend(crate::dispatch::container::claude_setting_sources_args(
+        crate::dispatch::container::detect_in_container(),
+    ));
     if !task.tools.is_empty() {
         args.push("--allowedTools".into());
         args.push(task.tools.join(","));
@@ -1018,6 +1023,11 @@ pub fn lead_spawn_args(
     // (skills, MCP servers, agents, hooks) from bleeding in.
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
+    // Inside containers, exclude user-scope settings (hooks, etc.) — the
+    // companion piece that actually delivers on the comment above. (#426)
+    args.extend(crate::dispatch::container::claude_setting_sources_args(
+        crate::dispatch::container::detect_in_container(),
+    ));
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
     // Path-B: per-server `[[mcp_server]].tools` allowlists filter the
@@ -1079,6 +1089,10 @@ pub fn lead_resume_spawn_args(
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
+    // Inside containers, exclude user-scope settings (hooks, etc.). (#426)
+    args.extend(crate::dispatch::container::claude_setting_sources_args(
+        crate::dispatch::container::detect_in_container(),
+    ));
     // Path-B: filter user-declared tools through per-server allowlists
     // before unioning with the pitboss MCP set. Path A: no-op. (#391/#399)
     let mut allowed: Vec<String> = crate::manifest::mcp_tools::filter_actor_tools_by_mcp_allowlists(
@@ -1151,6 +1165,10 @@ pub fn sublead_spawn_args(
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
+    // Inside containers, exclude user-scope settings (hooks, etc.). (#426)
+    args.extend(crate::dispatch::container::claude_setting_sources_args(
+        crate::dispatch::container::detect_in_container(),
+    ));
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
     // listed first; pitboss MCP tools always appended so the sub-lead can
