@@ -93,11 +93,20 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
                 // "no control" status, and a future SwitchRun/reset
                 // can rebuild it cheaply — same UX as before for that
                 // case but without the stall.
+                // `tokio::time::timeout(...)` registers with the timer
+                // driver at construction time and panics ("no reactor
+                // running") if called outside a runtime context. The
+                // argument to `block_on` is evaluated BEFORE block_on
+                // enters the runtime, so we wrap in an `async` block to
+                // ensure the timeout is constructed *inside* the runtime.
                 runtime
-                    .block_on(tokio::time::timeout(
-                        std::time::Duration::from_millis(200),
-                        crate::control::ControlClient::connect(socket_path, bridge_tx),
-                    ))
+                    .block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            crate::control::ControlClient::connect(socket_path, bridge_tx),
+                        )
+                        .await
+                    })
                     .ok()
                     .and_then(Result::ok)
                     .map(Arc::new)
