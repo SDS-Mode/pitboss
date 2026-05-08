@@ -43,7 +43,9 @@ dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
 cap, captures structured artifacts per run, and — in hierarchical mode —
 lets a **lead** dynamically spawn more workers via MCP. The TUI
 (`pitboss-tui`) gives the floor view: tile grid, live log tailing, budget +
-token counters.
+token counters. The web console (`pitboss-web`) is a single-binary axum
+server with an embedded SvelteKit SPA — manifest wizard, run dashboards,
+the post-run actor inspector, and a cross-run failures view.
 
 Language models are stochastic. A well-run pit is not. Give the house a
 clear manifest, a budget, and a prompt — the pit turns variance into
@@ -63,14 +65,16 @@ consistently usable output.
 ### Via shell installer (recommended)
 
 Pitboss releases ship through [`cargo-dist`][cargo-dist], which
-produces two `curl | sh` installers per release (one per binary):
+produces a `curl | sh` installer per binary:
 
 ```bash
 curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-cli-installer.sh | sh
 curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-tui-installer.sh | sh
+curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-web-installer.sh | sh
 
 pitboss version
 pitboss-tui --version
+pitboss-web --version
 ```
 
 Each installer detects your platform, downloads the matching `tar.xz`
@@ -83,6 +87,7 @@ Current target matrix: `x86_64-unknown-linux-gnu`,
 ```bash
 brew install SDS-Mode/pitboss/pitboss-cli
 brew install SDS-Mode/pitboss/pitboss-tui
+brew install SDS-Mode/pitboss/pitboss-web
 ```
 
 Formulae are auto-published to the [`SDS-Mode/homebrew-pitboss`][tap] tap
@@ -108,8 +113,9 @@ A variant image `ghcr.io/sds-mode/pitboss-with-claude` bundles a pinned Claude C
 
 ### Direct tarball download
 
-Prefer the tarball? Grab `pitboss-cli-<target>.tar.xz` or
-`pitboss-tui-<target>.tar.xz` from the [latest release][releases]:
+Prefer the tarball? Grab `pitboss-cli-<target>.tar.xz`,
+`pitboss-tui-<target>.tar.xz`, or `pitboss-web-<target>.tar.xz` from the
+[latest release][releases]:
 
 ```bash
 curl -L https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-cli-x86_64-unknown-linux-gnu.tar.xz \
@@ -127,6 +133,15 @@ git clone https://github.com/SDS-Mode/pitboss.git
 cd pitboss
 cargo install --path crates/pitboss-cli
 cargo install --path crates/pitboss-tui
+cargo install --path crates/pitboss-web
+```
+
+`pitboss-web` embeds the SvelteKit SPA via `rust-embed` at build time —
+build the SPA once before installing from source:
+
+```bash
+(cd crates/pitboss-web/spa && npm install && npm run build)
+cargo install --path crates/pitboss-web
 ```
 
 ## Subcommands
