@@ -89,7 +89,13 @@ jobs:
             //               category fired (e.g. "code" or "book")
             // Adding a required check: append a row here. Removing: delete.
             const required = [
-              { name: 'test + lint + fmt',               always: true },
+              // 'test + lint + fmt' lives in ci.yml which has its own
+              // paths-ignore for CHANGELOG.md / README.md. Hardcoding it as
+              // `always: true` here meant docs-only PRs would wait 25 min
+              // for a check that never runs, then fail. Treat it as code-
+              // gated so the gate's path filter and the CI workflow's path
+              // filter agree.
+              { name: 'test + lint + fmt',               requires: 'code' },
               { name: 'plan',                            always: true },
               { name: 'Build runtime (linux-amd64)',     requires: 'code' },
               { name: 'Build runtime (linux-arm64)',     requires: 'code' },
