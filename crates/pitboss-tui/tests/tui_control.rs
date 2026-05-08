@@ -176,6 +176,7 @@ fn empty_grid_cells_are_cleared() {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }
     }
@@ -245,6 +246,7 @@ fn focus_log_content_does_not_bleed_into_tile_grid() {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }
     }

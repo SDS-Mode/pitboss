@@ -1768,8 +1768,80 @@ fn render_detail_metadata(
         }
     }
 
+    // --- Recent denials (Path B `tool_denied` events) ---
+    // Surfaces the last N denial rows from this actor's events.jsonl so an
+    // operator running under Path B can see WHAT was denied, not just the
+    // count. Conditional on denials_count > 0 so quiet actors don't get
+    // an empty section. Counterpart to the static MCP SERVERS matrix
+    // above: the matrix shows what would admit; this shows what didn't.
+    // (#405)
+    if tile.denials_count > 0 {
+        lines.push(Line::from(Span::styled(
+            "RECENT DENIALS",
+            theme::secondary_style().add_modifier(Modifier::BOLD),
+        )));
+        if tile.recent_denials.is_empty() {
+            // Defensive: count > 0 but no rows captured (file shrank
+            // between watcher polls, or RECENT_DENIALS_CAP = 0). Keep
+            // the heading + count so the operator still sees the
+            // signal.
+            lines.push(Line::from(Span::styled(
+                format!("  ({} denied; rows unavailable)", tile.denials_count),
+                theme::muted_style(),
+            )));
+        } else {
+            // Render newest-last (append order). Show only the time-of-day
+            // portion of `at` (HH:MM:SS) — the date on a live-run jsonl is
+            // always today, and the column is narrow.
+            for row in &tile.recent_denials {
+                lines.push(Line::from(Span::styled(
+                    format!("  • {}", row.tool_name),
+                    theme::muted_style(),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("      reason: {}", row.reason_kind),
+                    theme::muted_style(),
+                )));
+                if let Some(clock) = at_to_hhmmss(&row.at) {
+                    lines.push(Line::from(Span::styled(
+                        format!("      at: {clock}"),
+                        theme::muted_style(),
+                    )));
+                }
+            }
+            // If the buffer is capped, hint that older denials still exist
+            // in events.jsonl. Operator's path to the full history.
+            if (tile.denials_count as usize) > tile.recent_denials.len() {
+                let older = (tile.denials_count as usize) - tile.recent_denials.len();
+                lines.push(Line::from(Span::styled(
+                    format!("  (+{older} older in events.jsonl)"),
+                    theme::muted_style(),
+                )));
+            }
+        }
+    }
+
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// Extract `HH:MM:SS` from an ISO-8601 `at` string. We render only the
+/// time-of-day portion in Detail view since the date is always today on
+/// a live run and the column is narrow. Returns `None` when the input
+/// doesn't match the expected RFC3339 prefix shape so the caller can
+/// fall back gracefully.
+fn at_to_hhmmss(at: &str) -> Option<String> {
+    // Cheap shape check: "YYYY-MM-DDTHH:MM:SS..." — pull the slice between
+    // 'T' and the next non-digit/colon. Avoids a chrono parse for what is
+    // a render-side cosmetic transformation.
+    let t_pos = at.find('T')?;
+    let after_t = &at[t_pos + 1..];
+    // Take HH:MM:SS = exactly 8 chars if available.
+    if after_t.len() >= 8 {
+        Some(after_t[..8].to_string())
+    } else {
+        None
+    }
 }
 
 /// Pick the matrix row that applies to a given tile.
@@ -2413,6 +2485,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }
     }
@@ -2904,6 +2977,166 @@ mod tests {
             !rendered.contains("pitboss      tools:")
                 && !rendered.contains("• pitboss\n      tools:"),
             "pitboss has no allowlist; must not emit a tools continuation line"
+        );
+    }
+
+    /// `RECENT DENIALS` section appears on the Detail view when the
+    /// focused tile has at least one `tool_denied` row. Each row renders
+    /// as bullet (tool) + `reason_kind` + clock. Pin the layout so a
+    /// future refactor that drops one of the three lines per row gets
+    /// caught. (#405)
+    #[test]
+    fn detail_view_renders_recent_denials_section_when_present() {
+        use crate::state::{DenialRow, Mode};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "writer-1";
+        let mut t = tile(task_id, TileStatus::Running, None, 0, 0);
+        t.denials_count = 2;
+        t.recent_denials = vec![
+            DenialRow {
+                at: "2026-05-08T14:32:07Z".to_string(),
+                tool_name: "Bash".to_string(),
+                reason_kind: "denied_by_rule".to_string(),
+                reason: "denied: tool 'Bash' rejected by [[approval_policy]] rule".to_string(),
+            },
+            DenialRow {
+                at: "2026-05-08T14:33:12Z".to_string(),
+                tool_name: "mcp__fs-writer__delete_all".to_string(),
+                reason_kind: "denied_by_mcp_server_allowlist".to_string(),
+                reason: "denied: not in mcp_server allowlist".to_string(),
+            },
+        ];
+
+        let mut s = state(vec![t]);
+        s.mode = Mode::Detail {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(Mode::Normal),
+        };
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..60)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            rendered.contains("RECENT DENIALS"),
+            "RECENT DENIALS heading should appear when recent_denials is non-empty"
+        );
+        assert!(rendered.contains("Bash"), "first row's tool_name");
+        assert!(
+            rendered.contains("reason: denied_by_rule"),
+            "reason_kind line for first row"
+        );
+        assert!(
+            rendered.contains("at: 14:32:07"),
+            "clock-only at: line for first row"
+        );
+        // The metadata pane is 40 cols wide and wraps long lines, so
+        // assert on substrings that fit. `mcp__fs-writer__delete_all`
+        // is 27 chars + `  • ` prefix = fits; the longer reason_kind
+        // wraps after 40 chars so we look for a unique sub-prefix.
+        assert!(
+            rendered.contains("mcp__fs-writer__delete_all"),
+            "second row's tool name"
+        );
+        assert!(
+            rendered.contains("denied_by_mcp_server_allow"),
+            "reason_kind prefix for the mcp-server-allowlist denial \
+             (full string wraps in the 40-col metadata pane)"
+        );
+    }
+
+    /// Quiet actor (no denials) must NOT emit a RECENT DENIALS heading —
+    /// keeps the Detail view tight on the common case. Counterpart to
+    /// the existing `render_tile_omits_denials_counter_when_zero` test
+    /// that pins the same conditional discipline on the tile counter.
+    #[test]
+    fn detail_view_omits_recent_denials_section_when_count_zero() {
+        use crate::state::Mode;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "quiet-1";
+        let t = tile(task_id, TileStatus::Running, None, 0, 0);
+        // denials_count defaults to 0, recent_denials defaults to empty.
+
+        let mut s = state(vec![t]);
+        s.mode = Mode::Detail {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(Mode::Normal),
+        };
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..60)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            !rendered.contains("RECENT DENIALS"),
+            "quiet tile must not paint a RECENT DENIALS section"
+        );
+    }
+
+    /// When more denials exist than the cap captured, the Detail view
+    /// hints at the older history with `(+N older in events.jsonl)`.
+    /// Pin the exact phrasing — operators grep for it.
+    #[test]
+    fn detail_view_hints_at_older_denials_when_cap_exceeded() {
+        use crate::state::{DenialRow, Mode};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "noisy-1";
+        let mut t = tile(task_id, TileStatus::Running, None, 0, 0);
+        t.denials_count = 12;
+        t.recent_denials = (0..5)
+            .map(|i| DenialRow {
+                at: format!("2026-05-08T14:00:{i:02}Z"),
+                tool_name: format!("T{i}"),
+                reason_kind: "denied_by_rule".to_string(),
+                reason: "x".to_string(),
+            })
+            .collect();
+
+        let mut s = state(vec![t]);
+        s.mode = Mode::Detail {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(Mode::Normal),
+        };
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..60)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        assert!(
+            rendered.contains("(+7 older in events.jsonl)"),
+            "expected '(+7 older in events.jsonl)' hint when count exceeds buffer; \
+             rendered: {}",
+            &rendered[..rendered.len().min(800)]
         );
     }
 

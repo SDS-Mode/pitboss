@@ -71,20 +71,77 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| run_dir.display().to_string());
-    render_status(&mut stdout, &run_name, &records, notify_failures)?;
+    let denied_counts = count_denials_per_task(&run_dir, &records);
+    render_status(
+        &mut stdout,
+        &run_name,
+        &records,
+        notify_failures,
+        &denied_counts,
+    )?;
 
     Ok(0)
+}
+
+/// Count `tool_denied` rows in each task's `<run_dir>/tasks/<id>/events.jsonl`.
+/// Returns a map keyed by `task_id`. Tasks with no jsonl file (quiet
+/// actors, common case) are simply absent from the map. (#405)
+///
+/// The five-line `kind == "tool_denied"` discrimination is the stable
+/// wire contract — same logic lives in `pitboss-tui/src/watcher.rs`'s
+/// `read_denial_state`. Duplicated here rather than shared via
+/// `pitboss-core` because the helper is too small to justify an
+/// events-schema dep on core, and the wire-stable `kind` string is
+/// what protects against drift.
+fn count_denials_per_task(
+    run_dir: &Path,
+    records: &[pitboss_core::store::TaskRecord],
+) -> std::collections::HashMap<String, u32> {
+    use std::io::{BufRead, BufReader};
+    let mut out = std::collections::HashMap::new();
+    for rec in records {
+        let path = run_dir
+            .join("tasks")
+            .join(&rec.task_id)
+            .join("events.jsonl");
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut count: u32 = 0;
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if val.get("kind").and_then(|v| v.as_str()) == Some("tool_denied") {
+                count = count.saturating_add(1);
+            }
+        }
+        if count > 0 {
+            out.insert(rec.task_id.clone(), count);
+        }
+    }
+    out
 }
 
 /// Pure rendering helper, separated from I/O setup so the table + footer
 /// can be exercised by tests without driving the binary or capturing
 /// stdout. The non-positive-failure path (no router OR `Some(0)`) must
 /// not emit a footer line — callers depend on the absence as a signal.
+///
+/// `denied_counts` is keyed by `task_id`; tasks absent from the map (or
+/// mapped to 0) carry no denials. When the map is empty across the
+/// whole run, the DENIED column is hidden entirely so the common-case
+/// output stays tight (#405).
 pub(crate) fn render_status<W: Write>(
     out: &mut W,
     run_name: &str,
     records: &[pitboss_core::store::TaskRecord],
     notify_failures: Option<u32>,
+    denied_counts: &std::collections::HashMap<String, u32>,
 ) -> Result<()> {
     writeln!(out, "Run: {run_name}")?;
 
@@ -99,13 +156,36 @@ pub(crate) fn render_status<W: Write>(
         .max()
         .unwrap_or(0);
     let task_id_width = observed_max.clamp(TASK_ID_MIN, TASK_ID_MAX);
-    let sep_width = task_id_width + 1 + 16 + 1 + 10 + 1 + 24 + 1 + 6;
 
-    writeln!(
-        out,
-        "{:<task_id_width$} {:<16} {:>10} {:<24} {:>6}",
-        "TASK_ID", "STATUS", "DURATION", "STARTED", "EXIT",
-    )?;
+    // Show the DENIED column only when at least one actor recorded a
+    // Path-B denial. Empty map => column hidden; same conditional
+    // discipline as the TUI tile counter (#405).
+    let show_denied = denied_counts.values().any(|n| *n > 0);
+    const DENIED_WIDTH: usize = 6;
+    let sep_width = task_id_width
+        + 1
+        + 16
+        + 1
+        + 10
+        + 1
+        + 24
+        + 1
+        + 6
+        + if show_denied { 1 + DENIED_WIDTH } else { 0 };
+
+    if show_denied {
+        writeln!(
+            out,
+            "{:<task_id_width$} {:<16} {:>10} {:<24} {:>6} {:>DENIED_WIDTH$}",
+            "TASK_ID", "STATUS", "DURATION", "STARTED", "EXIT", "DENIED",
+        )?;
+    } else {
+        writeln!(
+            out,
+            "{:<task_id_width$} {:<16} {:>10} {:<24} {:>6}",
+            "TASK_ID", "STATUS", "DURATION", "STARTED", "EXIT",
+        )?;
+    }
     writeln!(out, "{}", "-".repeat(sep_width))?;
 
     for rec in records {
@@ -117,10 +197,22 @@ pub(crate) fn render_status<W: Write>(
             .map(|c| c.to_string())
             .unwrap_or_else(|| "—".to_string());
         let task_id = pitboss_core::fmt::truncate_ellipsis(&rec.task_id, task_id_width);
-        writeln!(
-            out,
-            "{task_id:<task_id_width$} {status:<16} {duration:>10} {started:<24} {exit:>6}",
-        )?;
+        if show_denied {
+            // Render "0" for absent tasks rather than "—" — the count is
+            // an authoritative count, not an unknown value, and "0"
+            // visually contrasts against the populated rows so an
+            // operator sees which actors hit denials at a glance.
+            let denied = denied_counts.get(&rec.task_id).copied().unwrap_or(0);
+            writeln!(
+                out,
+                "{task_id:<task_id_width$} {status:<16} {duration:>10} {started:<24} {exit:>6} {denied:>DENIED_WIDTH$}",
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{task_id:<task_id_width$} {status:<16} {duration:>10} {started:<24} {exit:>6}",
+            )?;
+        }
     }
 
     if records.is_empty() {
@@ -138,9 +230,10 @@ pub(crate) fn render_status<W: Write>(
     // Approvals aggregate. `approvals_rejected` covers both Path A
     // (`request_approval` denials) and Path B (`permission_prompt`
     // denials) — per #367 the Path-B handler bumps the same counter.
-    // Per-`DeniedReasonKind` breakdown lives on each actor's
-    // `events.jsonl::tool_denied` rows; surfacing that requires reading
-    // those files per-actor and is left for `--json` consumers / TUI.
+    // Per-actor Path-B denial counts surface in the DENIED column
+    // above (#405); per-`DeniedReasonKind` breakdown still lives on
+    // `events.jsonl::tool_denied` rows and is left for `--json`
+    // consumers / TUI Detail's RECENT DENIALS section.
     let approvals_requested: u32 = records.iter().map(|r| r.approvals_requested).sum();
     let approvals_approved: u32 = records.iter().map(|r| r.approvals_approved).sum();
     let approvals_rejected: u32 = records.iter().map(|r| r.approvals_rejected).sum();
@@ -283,7 +376,14 @@ mod tests {
     fn render_status_emits_notify_failures_footer_when_positive() {
         let recs = vec![make_record("w-1", TaskStatus::Success)];
         let mut buf = Vec::new();
-        render_status(&mut buf, "test-run", &recs, Some(3)).unwrap();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            Some(3),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains("Notification failures: 3 (see notifications.jsonl)"),
@@ -298,7 +398,14 @@ mod tests {
     fn render_status_omits_notify_failures_footer_when_zero() {
         let recs = vec![make_record("w-1", TaskStatus::Success)];
         let mut buf = Vec::new();
-        render_status(&mut buf, "test-run", &recs, Some(0)).unwrap();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            Some(0),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             !out.contains("Notification failures"),
@@ -313,7 +420,14 @@ mod tests {
     fn render_status_omits_notify_failures_footer_when_unknown() {
         let recs = vec![make_record("w-1", TaskStatus::Success)];
         let mut buf = Vec::new();
-        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             !out.contains("Notification failures"),
@@ -345,7 +459,14 @@ mod tests {
             make_record_with_approvals("w-2", 3, 1, 2),
         ];
         let mut buf = Vec::new();
-        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains("Approvals: 8 requested, 5 approved, 3 rejected"),
@@ -363,7 +484,14 @@ mod tests {
             make_record_with_approvals("w-2", 0, 0, 0),
         ];
         let mut buf = Vec::new();
-        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             !out.contains("Approvals:"),
@@ -378,11 +506,140 @@ mod tests {
     fn render_status_emits_approvals_footer_when_only_rejected_positive() {
         let recs = vec![make_record_with_approvals("w-1", 4, 0, 4)];
         let mut buf = Vec::new();
-        render_status(&mut buf, "test-run", &recs, None).unwrap();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains("Approvals: 4 requested, 0 approved, 4 rejected"),
             "approvals footer missing for rejection-only run in:\n{out}"
+        );
+    }
+
+    /// When no actor in the run has Path-B denials, the DENIED column is
+    /// hidden entirely so the common-case output stays unchanged. Pin
+    /// the absence so a future "always-show" refactor that breaks
+    /// downstream parsers gets caught. (#405)
+    #[test]
+    fn render_status_omits_denied_column_when_all_zero() {
+        let recs = vec![
+            make_record("w-1", TaskStatus::Success),
+            make_record("w-2", TaskStatus::Success),
+        ];
+        let mut buf = Vec::new();
+        render_status(
+            &mut buf,
+            "test-run",
+            &recs,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("DENIED"),
+            "DENIED column must be hidden when no actor has denials:\n{out}"
+        );
+    }
+
+    /// When at least one actor recorded a Path-B denial, the DENIED
+    /// column appears; absent tasks render as "0", populated tasks
+    /// render the count right-aligned. The signal is per-actor so an
+    /// operator can see at a glance which workers hit denials. (#405)
+    #[test]
+    fn render_status_emits_denied_column_when_any_positive() {
+        let recs = vec![
+            make_record("writer-1", TaskStatus::Success),
+            make_record("writer-2", TaskStatus::Failed),
+            make_record("reader-1", TaskStatus::Success),
+        ];
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("writer-1".to_string(), 3);
+        counts.insert("writer-2".to_string(), 7);
+        // reader-1 has no denials — should render as "0", not be hidden.
+
+        let mut buf = Vec::new();
+        render_status(&mut buf, "test-run", &recs, None, &counts).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(
+            out.contains("DENIED"),
+            "DENIED column heading missing in:\n{out}"
+        );
+        // Per-row counts. Right-aligned in 6-col field, so look for the
+        // task-id followed by the row content and a final "    3"
+        // (4 spaces padding + count).
+        let writer1_line = out
+            .lines()
+            .find(|l| l.starts_with("writer-1"))
+            .expect("writer-1 row missing");
+        assert!(
+            writer1_line.trim_end().ends_with("3"),
+            "writer-1 row should end with denied count 3, got: {writer1_line:?}"
+        );
+        let writer2_line = out
+            .lines()
+            .find(|l| l.starts_with("writer-2"))
+            .expect("writer-2 row missing");
+        assert!(
+            writer2_line.trim_end().ends_with("7"),
+            "writer-2 row should end with denied count 7, got: {writer2_line:?}"
+        );
+        let reader_line = out
+            .lines()
+            .find(|l| l.starts_with("reader-1"))
+            .expect("reader-1 row missing");
+        assert!(
+            reader_line.trim_end().ends_with("0"),
+            "reader-1 row (no denials) should render as 0, got: {reader_line:?}"
+        );
+    }
+
+    /// `count_denials_per_task` reads each task's events.jsonl and
+    /// counts only `kind == "tool_denied"` rows. Tasks with no jsonl
+    /// file (quiet actors) are absent from the result map; tasks with
+    /// jsonl but no denials don't appear either (the rendering helper
+    /// treats absent as zero).
+    #[test]
+    fn count_denials_per_task_reads_jsonl_per_task() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        let mk = |id: &str, body: &str| {
+            let dir = run_dir.join("tasks").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("events.jsonl"), body).unwrap();
+        };
+        mk(
+            "noisy",
+            "{\"kind\":\"tool_denied\",\"at\":\"2026-05-08T00:00:00Z\",\"tool_name\":\"Bash\",\"actor_id\":\"noisy\",\"reason_kind\":\"denied_by_rule\",\"reason\":\"x\"}\n\
+             {\"kind\":\"pause\",\"at\":\"2026-05-08T00:00:01Z\"}\n\
+             {\"kind\":\"tool_denied\",\"at\":\"2026-05-08T00:00:02Z\",\"tool_name\":\"Write\",\"actor_id\":\"noisy\",\"reason_kind\":\"operator_rejected\",\"reason\":\"y\"}\n",
+        );
+        mk(
+            "approved-only",
+            "{\"kind\":\"approval_response\",\"at\":\"2026-05-08T00:00:00Z\",\"request_id\":\"r1\",\"approved\":true,\"edited\":false}\n",
+        );
+        // "quiet" has no events.jsonl at all.
+
+        let recs = vec![
+            make_record("noisy", TaskStatus::Success),
+            make_record("approved-only", TaskStatus::Success),
+            make_record("quiet", TaskStatus::Success),
+        ];
+        let counts = count_denials_per_task(run_dir, &recs);
+        assert_eq!(counts.get("noisy"), Some(&2));
+        assert!(
+            !counts.contains_key("approved-only"),
+            "task with jsonl but no tool_denied rows must be absent from map"
+        );
+        assert!(
+            !counts.contains_key("quiet"),
+            "task with no jsonl must be absent from map"
         );
     }
 }

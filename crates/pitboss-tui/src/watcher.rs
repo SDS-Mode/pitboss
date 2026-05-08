@@ -10,7 +10,13 @@ use pitboss_core::parser::{parse_line_all, Event};
 use pitboss_core::store::{TaskRecord, TaskStatus};
 use serde::Deserialize;
 
-use crate::state::{AppSnapshot, TileState, TileStatus};
+use crate::state::{AppSnapshot, DenialRow, TileState, TileStatus};
+
+/// Maximum number of recent `tool_denied` rows the watcher carries on each
+/// tile. The Detail view's `RECENT DENIALS` section renders from this
+/// buffer; older denials remain available in `events.jsonl` itself
+/// for post-mortem inspection. (#405)
+const RECENT_DENIALS_CAP: usize = 5;
 
 const POLL_INTERVAL_MS: u64 = 250;
 /// Number of parsed focus-pane lines to keep. Deep scroll-back on long
@@ -197,7 +203,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
     for id in &all_ids {
         let log_path = tasks_dir.join(id).join("stdout.log");
         let events_path = tasks_dir.join(id).join("events.jsonl");
-        let denials_count = count_tool_denials(&events_path);
+        let (denials_count, recent_denials) = read_denial_state(&events_path);
         let model = model_map.get(id).and_then(Option::clone);
         let is_dynamic = dynamic_ids.iter().any(|d| d == id);
         let tile = build_tile(
@@ -208,6 +214,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
             completed.get(id),
             parent_task_id_fallback.as_deref(),
             denials_count,
+            recent_denials,
             &mut failed_count,
             &mut run_started_at,
         );
@@ -348,6 +355,7 @@ fn build_tile(
     rec: Option<&TaskRecord>,
     parent_task_id_fallback: Option<&str>,
     denials_count: u32,
+    recent_denials: Vec<DenialRow>,
     failed_count: &mut usize,
     run_started_at: &mut Option<chrono::DateTime<chrono::Utc>>,
 ) -> TileState {
@@ -394,6 +402,7 @@ fn build_tile(
                 .or_else(|| log_path.parent().and_then(read_worktree_sidecar)),
             completed_at: Some(rec.ended_at),
             denials_count,
+            recent_denials,
             actor_type: rec.actor_type.clone(),
         }
     } else {
@@ -438,6 +447,7 @@ fn build_tile(
             },
             completed_at: None,
             denials_count,
+            recent_denials,
             // In-flight tiles haven't settled a `TaskRecord` yet, so we
             // don't know the resolved actor_type. Defaults to None →
             // Detail view falls back to the "(untyped / root)" matrix
@@ -451,10 +461,13 @@ fn build_tile(
     }
 }
 
-/// Count `tool_denied` rows in a per-actor `events.jsonl`. Cheap O(file)
-/// scan: lines parse as `serde_json::Value` and we discriminate on
-/// `kind == "tool_denied"`. The file is tiny vs `stdout.log` (one line
-/// per Path-B deny), so reparsing on every poll tick is negligible.
+/// Single-pass scan of a per-actor `events.jsonl` that returns both the
+/// total `tool_denied` count and the last [`RECENT_DENIALS_CAP`] rows
+/// (in append order, oldest → newest). Cheap O(file) scan: lines parse
+/// as `serde_json::Value` and we discriminate on `kind == "tool_denied"`.
+/// The file is tiny vs `stdout.log` (one line per Path-B deny), so
+/// reparsing on every poll tick is negligible. Denial volume is bounded
+/// by per-tool gate cardinality, not by stdout chatter.
 ///
 /// Decoupling from the canonical `TaskEvent` enum (defined in
 /// `pitboss-cli`) keeps `pitboss-tui` from taking a cli-crate dependency
@@ -462,12 +475,22 @@ fn build_tile(
 /// contract that the `#[serde(tag = "kind", rename_all = "snake_case")]`
 /// derive on `TaskEvent` produces — see
 /// `crates/pitboss-cli/src/dispatch/events.rs`.
-fn count_tool_denials(events_jsonl: &Path) -> u32 {
+///
+/// Returns `(count, recent_in_oldest_to_newest_order)`. Missing or
+/// malformed files yield `(0, vec![])`. Malformed individual rows are
+/// skipped silently — the watcher is read-side and must never panic
+/// over a corrupt audit log.
+fn read_denial_state(events_jsonl: &Path) -> (u32, Vec<DenialRow>) {
     let Ok(file) = std::fs::File::open(events_jsonl) else {
-        return 0;
+        return (0, Vec::new());
     };
     let reader = BufReader::new(file);
     let mut count: u32 = 0;
+    // Ring buffer: keep the last RECENT_DENIALS_CAP rows seen. We use a
+    // VecDeque so we can pop from the front when the cap is exceeded
+    // without shifting the whole buffer.
+    let mut recent: std::collections::VecDeque<DenialRow> =
+        std::collections::VecDeque::with_capacity(RECENT_DENIALS_CAP);
     for line in reader.lines().map_while(Result::ok) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -476,11 +499,38 @@ fn count_tool_denials(events_jsonl: &Path) -> u32 {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
-        if val.get("kind").and_then(|v| v.as_str()) == Some("tool_denied") {
-            count = count.saturating_add(1);
+        if val.get("kind").and_then(|v| v.as_str()) != Some("tool_denied") {
+            continue;
         }
+        count = count.saturating_add(1);
+        let row = DenialRow {
+            at: val
+                .get("at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            tool_name: val
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            reason_kind: val
+                .get("reason_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            reason: val
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        };
+        if recent.len() == RECENT_DENIALS_CAP {
+            recent.pop_front();
+        }
+        recent.push_back(row);
     }
-    count
+    (count, recent.into_iter().collect())
 }
 
 /// Read the `worktree.path` sidecar file written at spawn time.
@@ -1365,13 +1415,15 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// `count_tool_denials` must count only `kind == "tool_denied"` rows
+    /// `read_denial_state` must count only `kind == "tool_denied"` rows
     /// while ignoring other event variants in the same `events.jsonl`
     /// (e.g. `pause`, `approval_response`). The discriminant is the
     /// stable wire contract — see `TaskEvent` in
-    /// `crates/pitboss-cli/src/dispatch/events.rs`.
+    /// `crates/pitboss-cli/src/dispatch/events.rs`. Recent rows must
+    /// arrive in append order (oldest → newest) so the Detail view
+    /// renders them top-down chronologically.
     #[test]
-    fn count_tool_denials_counts_only_tool_denied_rows() {
+    fn read_denial_state_counts_and_collects_only_tool_denied_rows() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("events.jsonl");
         let lines = [
@@ -1384,18 +1436,66 @@ mod tests {
         let body = lines.join("\n");
         std::fs::write(&path, body).unwrap();
 
-        assert_eq!(count_tool_denials(&path), 3);
+        let (count, recent) = read_denial_state(&path);
+        assert_eq!(count, 3, "must count only the three tool_denied rows");
+        let tool_names: Vec<&str> = recent.iter().map(|r| r.tool_name.as_str()).collect();
+        assert_eq!(
+            tool_names,
+            vec!["Bash", "Write", "Edit"],
+            "recent rows must preserve append order (oldest first)"
+        );
+        assert_eq!(recent[0].reason_kind, "denied_by_rule");
+        assert_eq!(recent[1].reason_kind, "operator_rejected");
+        assert_eq!(recent[2].reason_kind, "ttl_expired");
+        assert_eq!(recent[0].at, "2026-05-07T00:00:01Z");
+    }
+
+    /// Once the file accumulates more than `RECENT_DENIALS_CAP` denied
+    /// rows, the watcher must keep the LAST N — the most recent are
+    /// what the Detail view's `RECENT DENIALS` section is meant to
+    /// surface. Older rows remain in `events.jsonl` for post-mortem
+    /// inspection. Pin the cap behavior so a future bump of the
+    /// constant stays explicit.
+    #[test]
+    fn read_denial_state_keeps_most_recent_when_over_cap() {
+        use std::fmt::Write as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+        // Write CAP + 3 denial rows with monotonically increasing tool
+        // names so we can assert which window survived.
+        let total = RECENT_DENIALS_CAP + 3;
+        let mut body = String::new();
+        for i in 0..total {
+            writeln!(
+                body,
+                r#"{{"kind":"tool_denied","at":"2026-05-07T00:00:{i:02}Z","tool_name":"T{i}","actor_id":"w-1","reason_kind":"denied_by_rule","reason":"x"}}"#
+            )
+            .unwrap();
+        }
+        std::fs::write(&path, body).unwrap();
+
+        let (count, recent) = read_denial_state(&path);
+        let total_u32 = u32::try_from(total).unwrap();
+        assert_eq!(count, total_u32, "count is total denials regardless of cap");
+        assert_eq!(recent.len(), RECENT_DENIALS_CAP, "recent buffer is capped");
+        // Last row should be T(total-1); first should be T(total-CAP).
+        let first_name = format!("T{}", total - RECENT_DENIALS_CAP);
+        let last_name = format!("T{}", total - 1);
+        assert_eq!(recent.first().unwrap().tool_name, first_name);
+        assert_eq!(recent.last().unwrap().tool_name, last_name);
     }
 
     /// Missing `events.jsonl` (the common quiet-actor case) and malformed
-    /// rows (truncated mid-write, partial flush) must both yield 0 rather
-    /// than panic — the watcher polls every 250ms and any I/O error here
-    /// would freeze the snapshot pipeline.
+    /// rows (truncated mid-write, partial flush) must both yield empty
+    /// state rather than panic — the watcher polls every 250ms and any
+    /// I/O error here would freeze the snapshot pipeline.
     #[test]
-    fn count_tool_denials_handles_missing_and_malformed() {
+    fn read_denial_state_handles_missing_and_malformed() {
         let dir = tempfile::TempDir::new().unwrap();
         // Missing file — quiet actor case.
-        assert_eq!(count_tool_denials(&dir.path().join("nope.jsonl")), 0);
+        let (count, recent) = read_denial_state(&dir.path().join("nope.jsonl"));
+        assert_eq!(count, 0);
+        assert!(recent.is_empty());
 
         // Malformed lines next to one valid denied row.
         let path = dir.path().join("events.jsonl");
@@ -1407,7 +1507,10 @@ mod tests {
         ]
         .join("\n");
         std::fs::write(&path, body).unwrap();
-        assert_eq!(count_tool_denials(&path), 1);
+        let (count, recent) = read_denial_state(&path);
+        assert_eq!(count, 1);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].tool_name, "Bash");
     }
 
     /// End-to-end: a dynamic worker with three `tool_denied` rows in its

@@ -80,6 +80,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }
     }

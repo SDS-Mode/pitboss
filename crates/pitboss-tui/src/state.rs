@@ -185,6 +185,26 @@ pub struct SubtreeView {
     pub read_down: bool,
 }
 
+/// One `tool_denied` row read from a per-actor `events.jsonl`. Lightweight
+/// TUI-local mirror of the canonical `pitboss_cli::dispatch::events::TaskEvent::ToolDenied`
+/// variant; carrying the typed enum here would force `pitboss-tui` to
+/// take a `pitboss-cli` dep just to read its own jsonl. The watcher
+/// extracts these fields via `serde_json::Value` discriminated on
+/// `kind == "tool_denied"` — same wire-stable contract as
+/// `count_tool_denials` already documents. (#405)
+///
+/// `at` and `reason_kind` are kept as strings since rendering doesn't
+/// need the typed forms — `reason_kind` is the `snake_case` enum
+/// discriminant (`denied_by_rule`, `denied_by_profile`, etc.) and `at`
+/// is rendered to clock time without parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenialRow {
+    pub at: String,
+    pub tool_name: String,
+    pub reason_kind: String,
+    pub reason: String,
+}
+
 /// State for one task tile.
 #[derive(Debug, Clone)]
 pub struct TileState {
@@ -219,6 +239,13 @@ pub struct TileState {
     /// claude received and adapted to (#370). Read-side aggregation only;
     /// the canonical per-row data lives in `events.jsonl`.
     pub denials_count: u32,
+    /// Last `RECENT_DENIALS_CAP` (typically 5) `tool_denied` rows from
+    /// this actor's `events.jsonl`, in append order (oldest → newest).
+    /// Populated by the watcher in the same single pass as
+    /// [`Self::denials_count`]; the Detail view's `RECENT DENIALS`
+    /// section reads directly from this. Empty when no denials yet,
+    /// or when `denials_count == 0`. (#405)
+    pub recent_denials: Vec<DenialRow>,
     /// Resolved `[[worker_type]]` / `[[sublead_type]]` id at spawn time
     /// (from `TaskRecord.actor_type`). `None` for the lead, for un-typed
     /// spawns, and for in-flight tiles whose record hasn't settled. Drives
@@ -1243,6 +1270,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }];
         state
@@ -1805,6 +1833,7 @@ mod tests {
             worktree_path: None,
             completed_at: Some(Utc::now() - chrono::Duration::seconds(ended_secs_ago)),
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }
     }
@@ -1841,6 +1870,7 @@ mod tests {
             worktree_path: None,
             completed_at: None, // running tiles never have completed_at
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         };
         assert!(!state.is_promoted(&tile));
@@ -1867,6 +1897,7 @@ mod tests {
                 worktree_path: None,
                 completed_at: None,
                 denials_count: 0,
+                recent_denials: Vec::new(),
                 actor_type: None,
             },
             make_done_tile("fresh", 2), // done but within grace period
@@ -1927,6 +1958,7 @@ mod tests {
             worktree_path: None,
             completed_at: None,
             denials_count: 0,
+            recent_denials: Vec::new(),
             actor_type: None,
         }
     }
