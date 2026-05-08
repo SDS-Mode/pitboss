@@ -106,14 +106,14 @@ pub fn derived_image_tag(container: &ContainerConfig) -> Result<Option<String>> 
             )
         })?;
         let file_digest = file_hasher.finalize();
-        hasher.update(format!("{:x}", file_digest).as_bytes());
+        hasher.update(hex::encode(file_digest).as_bytes());
         hasher.update(b"\n");
     }
 
     let digest = hasher.finalize();
     // 12 hex chars = 48 bits — ~10^14 distinct tags. Plenty for a per-host
     // local cache; the leading byte cluster reads cleanly in image lists.
-    let short = format!("{:x}", digest);
+    let short = hex::encode(digest);
     let tag = format!("pitboss-derived-{}:local", &short[..12]);
     Ok(Some(tag))
 }

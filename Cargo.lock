@@ -1941,6 +1941,7 @@ dependencies = [
  "fake-mcp-client",
  "git2",
  "glob",
+ "hex",
  "libc",
  "lru 0.18.0",
  "pitboss-core",
