@@ -999,14 +999,19 @@ pub struct Lead {
     pub lead_timeout_secs: Option<u64>,
 
     // ── v0.8 permission routing ──────────────────────────────────────────
-    /// `"path_a"` (default): `CLAUDE_CODE_ENTRYPOINT=sdk-ts` bypasses claude's
-    /// built-in gate; pitboss is sole authority via its approval queue.
-    /// `"path_b"`: pitboss registers a `permission_prompt` MCP tool;
-    /// claude routes each permission check through it.
+    /// `"path_b"` (default since v0.12): pitboss registers a
+    /// `permission_prompt` MCP tool; claude routes each per-tool check
+    /// through it. Layered enforcement runs the per-server
+    /// `[[mcp_server]].tools` allowlist first, then operator
+    /// `[[approval_policy]]` rules, then the typed-profile gate.
+    /// `"path_a"`: `CLAUDE_CODE_ENTRYPOINT=sdk-ts` plus
+    /// `--dangerously-skip-permissions` bypasses claude's built-in gate;
+    /// pitboss becomes sole authority via the approval queue. Use only
+    /// for runs that want to opt out of per-tool gating entirely.
     #[serde(default)]
     #[field(
         label = "Permission routing",
-        help = "path_a (default) makes pitboss the sole permission authority. path_b routes claude's gate through pitboss (rejected at validate time pending stabilization).",
+        help = "path_b (default) routes claude's per-tool gate through pitboss's permission_prompt MCP tool — layered enforcement (mcp_server tools allowlist, operator policy, typed profile). path_a bypasses claude's gate via --dangerously-skip-permissions and makes pitboss the sole authority.",
         enum_values = ["path_a", "path_b"]
     )]
     pub permission_routing: PermissionRouting,
