@@ -666,6 +666,11 @@ Other low-level options:
 - `cat <run-dir>/summary.jsonl` — completed tasks (streamed append-only)
 - `cat <run-dir>/summary.json` — full summary on clean finalize
 - `ls <run-dir>/tasks/` — all spawned task directories
+- `cat <run-dir>/tasks/<actor-id>/events.jsonl` — Path-B `tool_denied`
+  rows (the per-actor audit trail). `pitboss status` adds a `DENIED`
+  column when any actor recorded a denial; the TUI's Detail view
+  surfaces the last 5 rows in a `RECENT DENIALS` section so an operator
+  can see what was blocked without grepping the file (#405).
 
 The root lead's logs live at `<run-dir>/tasks/<lead-id>/stdout.log`.
 Workers and sub-leads live at `<run-dir>/tasks/<task-id>/` and

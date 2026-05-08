@@ -308,6 +308,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 worktree_path: rec.worktree_path.clone(),
                 completed_at: Some(rec.ended_at),
                 denials_count: 0,
+                recent_denials: Vec::new(),
                 actor_type: rec.actor_type.clone(),
             });
         } else {
@@ -326,6 +327,7 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
                 worktree_path: None,
                 completed_at: None,
                 denials_count: 0,
+                recent_denials: Vec::new(),
                 actor_type: None,
             });
         }
