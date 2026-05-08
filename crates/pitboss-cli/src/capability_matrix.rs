@@ -1,18 +1,37 @@
-//! `pitboss validate --capability-matrix` formatter (#385).
+//! `pitboss validate --capability-matrix` formatter (#385, #391).
 //!
 //! Walks the resolved manifest's `[[mcp_server]]` list and computes,
 //! for each declared `[[worker_type]]` / `[[sublead_type]]` (plus an
 //! "untyped / root" row representing the root lead and any
-//! pre-#252-style un-profiled spawns), the set of MCP server ids that
-//! pitboss would inject into actors of that class.
+//! pre-#252-style un-profiled spawns), the set of MCP servers — and
+//! their per-server tool allowlists — that pitboss would inject into
+//! actors of that class.
 //!
 //! Reuses the same admission helper as the runtime injection
 //! (`crate::dispatch::hierarchical::mcp_server_scope_admits`) so the
 //! report output and the live behavior cannot drift.
 //!
-//! The output is plain text — one row per actor class, server ids as
-//! a comma-joined list. No JSON output here yet; operators piping
-//! the table into grep/awk get a stable column structure.
+//! ## What this matrix means (and what it does not)
+//!
+//! The matrix shows the **server-side** allowlist as it applies on
+//! each row: which MCP servers admit, and the `[[mcp_server]].tools`
+//! filter pitboss enforces against `--allowedTools` and the
+//! `permission_prompt` short-circuit (#399).
+//!
+//! It is **not** an intersection with the actor-side
+//! `[[worker_type]].tools` / `[[sublead_type]].tools` profile
+//! allowlist — that orthogonal restriction is surfaced in the actor
+//! profile panel of the wizard. The matrix answers "what can the
+//! server admit for this row," not "what can this actor actually
+//! call."
+//!
+//! ## Wire-shape contract
+//!
+//! `MatrixRow` ships JSON over `pitboss-web`'s `validate` endpoint,
+//! is consumed by the SPA's TS `MatrixRow` interface, and is read
+//! by the TUI from `resolved.json`. Three consumers; one shape.
+//! Field names and the snake-case `kind` / `MatrixServerEntry`
+//! discriminants are pinned by tests in this module.
 
 use crate::dispatch::hierarchical::mcp_server_scope_admits;
 use crate::manifest::resolve::ResolvedManifest;
@@ -40,6 +59,28 @@ pub enum RowKind {
     SubleadType,
 }
 
+/// One MCP server admitted on a [`MatrixRow`], plus the per-server
+/// `[[mcp_server]].tools` allowlist as it applies to actors on that
+/// row.
+///
+/// `tools = None` means the server has no allowlist — every tool the
+/// server exports is admitted at the server gate. `tools = Some(list)`
+/// means pitboss enforces that allowlist at spawn-time
+/// (`--allowedTools` filter) and at runtime (`permission_prompt`
+/// short-circuit) — see #399.
+///
+/// `validate.rs` rejects `tools = Some([])` as self-defeating, so
+/// consumers can safely treat `Some(non_empty)` and `None` as the
+/// only two cases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatrixServerEntry {
+    pub server_id: String,
+    /// `None` = no per-server filter (all tools admitted).
+    /// `Some(non_empty)` = explicit allowlist enforced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
 /// One row of the actor-type × MCP-server matrix.
 ///
 /// `actor_type` is `None` for the untyped/root row and `Some(id)` for
@@ -47,7 +88,7 @@ pub enum RowKind {
 /// `actor_type` directly check `row.actor_type.as_deref() ==
 /// tile.actor_type.as_deref()`.
 ///
-/// `server_ids` is in manifest declaration order so two manifests
+/// `servers` is in manifest declaration order so two manifests
 /// producing the same matrix shape compare stable diff-wise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixRow {
@@ -58,9 +99,19 @@ pub struct MatrixRow {
     /// matching against `TaskRecord.actor_type`.
     pub actor_type: Option<String>,
     pub kind: RowKind,
-    /// MCP server ids that scope-admit for this row, in manifest
-    /// declaration order.
-    pub server_ids: Vec<String>,
+    /// MCP servers (with their per-server tool allowlists) that
+    /// scope-admit for this row, in manifest declaration order.
+    pub servers: Vec<MatrixServerEntry>,
+}
+
+/// Lightweight server descriptor for [`rows_from_parts`]. The TUI
+/// deserializes a subset of `resolved.json` and feeds these in
+/// without having to construct a full `ResolvedManifest`.
+#[derive(Debug, Clone)]
+pub struct MatrixServerSpec {
+    pub id: String,
+    pub scope: Option<String>,
+    pub tools: Option<Vec<String>>,
 }
 
 /// Compute matrix rows from a fully resolved manifest. Used by the CLI
@@ -72,10 +123,14 @@ pub struct MatrixRow {
 /// 2. One row per `[[worker_type]]`, in declaration order.
 /// 3. One row per `[[sublead_type]]`, in declaration order.
 pub fn rows(manifest: &ResolvedManifest) -> Vec<MatrixRow> {
-    let servers: Vec<(String, Option<String>)> = manifest
+    let servers: Vec<MatrixServerSpec> = manifest
         .mcp_servers
         .iter()
-        .map(|s| (s.id.clone(), s.scope.clone()))
+        .map(|s| MatrixServerSpec {
+            id: s.id.clone(),
+            scope: s.scope.clone(),
+            tools: s.tools.clone(),
+        })
         .collect();
     let wt_ids: Vec<String> = manifest.worker_types.iter().map(|w| w.id.clone()).collect();
     let st_ids: Vec<String> = manifest
@@ -86,12 +141,10 @@ pub fn rows(manifest: &ResolvedManifest) -> Vec<MatrixRow> {
     rows_from_parts(&servers, &wt_ids, &st_ids)
 }
 
-/// Compute matrix rows from the minimal data the algorithm needs. The
-/// TUI deserializes a lightweight subset of `resolved.json` and feeds
-/// it in here without having to construct a full `ResolvedManifest` —
-/// keeps the matrix logic decoupled from the larger manifest type.
+/// Compute matrix rows from the minimal data the algorithm needs.
+/// Keeps the matrix logic decoupled from the larger manifest type.
 pub fn rows_from_parts(
-    servers: &[(String, Option<String>)],
+    servers: &[MatrixServerSpec],
     worker_type_ids: &[String],
     sublead_type_ids: &[String],
 ) -> Vec<MatrixRow> {
@@ -101,14 +154,14 @@ pub fn rows_from_parts(
         label: "(untyped / root)".to_string(),
         actor_type: None,
         kind: RowKind::Untyped,
-        server_ids: admitted_for(servers, None),
+        servers: admitted_for(servers, None),
     });
     for id in worker_type_ids {
         out.push(MatrixRow {
             label: format!("worker_type:{id}"),
             actor_type: Some(id.clone()),
             kind: RowKind::WorkerType,
-            server_ids: admitted_for(servers, Some(id.as_str())),
+            servers: admitted_for(servers, Some(id.as_str())),
         });
     }
     for id in sublead_type_ids {
@@ -116,18 +169,21 @@ pub fn rows_from_parts(
             label: format!("sublead_type:{id}"),
             actor_type: Some(id.clone()),
             kind: RowKind::SubleadType,
-            server_ids: admitted_for(servers, Some(id.as_str())),
+            servers: admitted_for(servers, Some(id.as_str())),
         });
     }
     out
 }
 
-fn admitted_for(servers: &[(String, Option<String>)], actor_type: Option<&str>) -> Vec<String> {
+fn admitted_for(servers: &[MatrixServerSpec], actor_type: Option<&str>) -> Vec<MatrixServerEntry> {
     servers
         .iter()
-        .filter_map(|(id, scope)| {
-            if mcp_server_scope_admits(scope.as_deref(), actor_type) {
-                Some(id.clone())
+        .filter_map(|s| {
+            if mcp_server_scope_admits(s.scope.as_deref(), actor_type) {
+                Some(MatrixServerEntry {
+                    server_id: s.id.clone(),
+                    tools: s.tools.clone(),
+                })
             } else {
                 None
             }
@@ -137,9 +193,12 @@ fn admitted_for(servers: &[(String, Option<String>)], actor_type: Option<&str>) 
 
 /// Render the matrix as a multi-line string ending in `\n`.
 ///
-/// Thin formatter on top of [`rows`]. The widest label drives the
-/// first column's width so multi-row output stays aligned without an
-/// external table crate.
+/// Servers admitted on a row print as a comma-joined list. Each
+/// server with a `[[mcp_server]].tools` allowlist gets a continuation
+/// line listing those tools, indented under its server. Servers with
+/// no allowlist render bare — absence is implicit "all tools" and
+/// printing every per-server `(all)` annotation would clutter the
+/// common case.
 pub fn render(manifest: &ResolvedManifest) -> String {
     let rows = rows(manifest);
 
@@ -160,14 +219,27 @@ pub fn render(manifest: &ResolvedManifest) -> String {
         "-".repeat(label_width),
         "-".repeat(36)
     ));
+    let indent = " ".repeat(label_width + 2);
     for row in &rows {
-        let cell = if row.server_ids.is_empty() {
-            "(none)".to_string()
-        } else {
-            row.server_ids.join(", ")
-        };
         let label = &row.label;
-        out.push_str(&format!("{label:<label_width$}  {cell}\n"));
+        if row.servers.is_empty() {
+            out.push_str(&format!("{label:<label_width$}  (none)\n"));
+            continue;
+        }
+        let ids = row
+            .servers
+            .iter()
+            .map(|s| s.server_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("{label:<label_width$}  {ids}\n"));
+        for s in &row.servers {
+            if let Some(tools) = &s.tools {
+                let joined = tools.join(", ");
+                let server_id = &s.server_id;
+                out.push_str(&format!("{indent}  {server_id} tools: {joined}\n"));
+            }
+        }
     }
     out
 }
@@ -221,6 +293,17 @@ mod tests {
         }
     }
 
+    fn srv_with_tools(id: &str, scope: Option<&str>, tools: &[&str]) -> McpServerSpec {
+        McpServerSpec {
+            id: id.to_string(),
+            command: "/bin/true".into(),
+            args: vec![],
+            env: Default::default(),
+            scope: scope.map(str::to_string),
+            tools: Some(tools.iter().map(|t| (*t).to_string()).collect()),
+        }
+    }
+
     fn wt(id: &str) -> WorkerType {
         WorkerType {
             id: id.to_string(),
@@ -253,10 +336,6 @@ mod tests {
         m.sublead_types = vec![st("planner")];
 
         let out = render(&m);
-        // Anchor row: contains pitboss (unscoped) but not the
-        // writer-scoped server. Asserting on substring rather than the
-        // full padded prefix because the label column width is driven
-        // by the widest label in the matrix.
         let untyped_line = out
             .lines()
             .find(|l| l.starts_with("(untyped / root)"))
@@ -265,7 +344,6 @@ mod tests {
             untyped_line.contains("pitboss") && !untyped_line.contains("fs-writer"),
             "untyped row must list only the unscoped server: {untyped_line}"
         );
-        // Scoped server appears only on the matching row.
         let writer_line = out
             .lines()
             .find(|l| l.starts_with("worker_type:writer"))
@@ -314,9 +392,7 @@ mod tests {
     }
 
     /// An unscoped manifest (no `[[worker_type]]`/`[[sublead_type]]`)
-    /// renders just the untyped row. Verifies the helper's edge case:
-    /// the matrix is still useful for un-migrated manifests, even
-    /// though it collapses to a single row.
+    /// renders just the untyped row.
     #[test]
     fn renders_single_untyped_row_when_no_profiles_declared() {
         let mut m = empty_manifest();
@@ -324,7 +400,6 @@ mod tests {
 
         let out = render(&m);
         assert!(out.contains("(untyped / root)"));
-        // No worker_type or sublead_type rows.
         assert!(
             !out.contains("worker_type:") && !out.contains("sublead_type:"),
             "must not emit profile rows when no profiles are declared: {out}"
@@ -348,16 +423,14 @@ mod tests {
 
         assert_eq!(rs[0].kind, RowKind::Untyped);
         assert!(rs[0].actor_type.is_none());
-        assert_eq!(rs[0].server_ids, vec!["pitboss".to_string()]);
+        let untyped_ids: Vec<&str> = rs[0].servers.iter().map(|s| s.server_id.as_str()).collect();
+        assert_eq!(untyped_ids, vec!["pitboss"]);
 
         assert_eq!(rs[1].kind, RowKind::WorkerType);
         assert_eq!(rs[1].actor_type.as_deref(), Some("writer"));
         assert_eq!(rs[1].label, "worker_type:writer");
-        // writer-scoped server admits for writer.
-        assert_eq!(
-            rs[1].server_ids,
-            vec!["pitboss".to_string(), "fs-writer".to_string()]
-        );
+        let writer_ids: Vec<&str> = rs[1].servers.iter().map(|s| s.server_id.as_str()).collect();
+        assert_eq!(writer_ids, vec!["pitboss", "fs-writer"]);
 
         assert_eq!(rs[2].kind, RowKind::WorkerType);
         assert_eq!(rs[2].actor_type.as_deref(), Some("reader"));
@@ -378,29 +451,48 @@ mod tests {
             label: "worker_type:writer".to_string(),
             actor_type: Some("writer".to_string()),
             kind: RowKind::WorkerType,
-            server_ids: vec!["pitboss".to_string(), "fs-writer".to_string()],
+            servers: vec![
+                MatrixServerEntry {
+                    server_id: "pitboss".to_string(),
+                    tools: None,
+                },
+                MatrixServerEntry {
+                    server_id: "fs-writer".to_string(),
+                    tools: Some(vec!["Read".to_string(), "Write".to_string()]),
+                },
+            ],
         };
         let json = serde_json::to_value(&row).expect("serialise");
         assert_eq!(json["label"], "worker_type:writer");
         assert_eq!(json["actor_type"], "writer");
         assert_eq!(json["kind"], "worker_type");
+        assert_eq!(json["servers"][0]["server_id"], "pitboss");
+        // `tools = None` must be omitted (not serialised as
+        // `null`) so the SPA can branch on key-presence and keep its
+        // TS shape `tools?: string[]` clean.
+        assert!(
+            !json["servers"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("tools"),
+            "absent tools must be omitted from JSON, not null: {json}"
+        );
+        assert_eq!(json["servers"][1]["server_id"], "fs-writer");
         assert_eq!(
-            json["server_ids"],
-            serde_json::json!(["pitboss", "fs-writer"])
+            json["servers"][1]["tools"],
+            serde_json::json!(["Read", "Write"])
         );
 
-        // Untyped row also pins the `null` shape for actor_type and the
-        // `"untyped"` kind discriminant so SPA TS code can branch on
-        // either field.
         let untyped = MatrixRow {
             label: "(untyped / root)".to_string(),
             actor_type: None,
             kind: RowKind::Untyped,
-            server_ids: vec![],
+            servers: vec![],
         };
         let json = serde_json::to_value(&untyped).expect("serialise untyped");
         assert!(json["actor_type"].is_null());
         assert_eq!(json["kind"], "untyped");
+        assert_eq!(json["servers"], serde_json::json!([]));
     }
 
     /// `rows_from_parts` lets the TUI compute the matrix from a
@@ -410,8 +502,16 @@ mod tests {
     #[test]
     fn rows_from_parts_matches_full_manifest_path() {
         let servers = vec![
-            ("pitboss".to_string(), None),
-            ("fs-writer".to_string(), Some("type:writer".to_string())),
+            MatrixServerSpec {
+                id: "pitboss".to_string(),
+                scope: None,
+                tools: None,
+            },
+            MatrixServerSpec {
+                id: "fs-writer".to_string(),
+                scope: Some("type:writer".to_string()),
+                tools: Some(vec!["Read".to_string(), "Write".to_string()]),
+            },
         ];
         let workers = vec!["writer".to_string()];
         let subleads: Vec<String> = vec![];
@@ -419,7 +519,10 @@ mod tests {
         let parts_rows = rows_from_parts(&servers, &workers, &subleads);
 
         let mut m = empty_manifest();
-        m.mcp_servers = vec![srv("pitboss", None), srv("fs-writer", Some("type:writer"))];
+        m.mcp_servers = vec![
+            srv("pitboss", None),
+            srv_with_tools("fs-writer", Some("type:writer"), &["Read", "Write"]),
+        ];
         m.worker_types = vec![wt("writer")];
         let manifest_rows = rows(&m);
 
@@ -443,6 +546,47 @@ mod tests {
         assert!(
             !untyped_line.contains("orphan"),
             "untyped row must not list orphaned scoped servers: {untyped_line}"
+        );
+    }
+
+    /// A `[[mcp_server]]` with a `tools = […]` allowlist renders the
+    /// tools on a continuation line under the server. Servers with no
+    /// allowlist render bare on the same line. Pins the layout the
+    /// CLI text formatter ships so operators piping the table into
+    /// grep/awk get a stable two-section output.
+    #[test]
+    fn render_emits_per_server_tool_lists_on_continuation_lines() {
+        let mut m = empty_manifest();
+        m.mcp_servers = vec![
+            srv("pitboss", None),
+            srv_with_tools("fs-writer", Some("type:writer"), &["Read", "Write", "Edit"]),
+        ];
+        m.worker_types = vec![wt("writer")];
+
+        let out = render(&m);
+        // Writer row lists both servers comma-joined.
+        let writer_line = out
+            .lines()
+            .find(|l| l.starts_with("worker_type:writer"))
+            .expect("writer row missing");
+        assert!(writer_line.contains("pitboss") && writer_line.contains("fs-writer"));
+
+        // The tools continuation line lists the allowlist for fs-writer.
+        let tools_line = out
+            .lines()
+            .find(|l| l.contains("fs-writer tools:"))
+            .expect("fs-writer tools continuation line missing");
+        assert!(
+            tools_line.contains("Read")
+                && tools_line.contains("Write")
+                && tools_line.contains("Edit"),
+            "expected continuation line listing fs-writer's tools allowlist: {tools_line}"
+        );
+
+        // Servers without an allowlist must not emit a continuation line.
+        assert!(
+            !out.contains("pitboss tools:"),
+            "pitboss has no allowlist; must not render a 'tools:' continuation line: {out}"
         );
     }
 }

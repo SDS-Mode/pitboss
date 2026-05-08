@@ -1749,14 +1749,21 @@ fn render_detail_metadata(
             format!("  {actor_label}"),
             theme::muted_style(),
         )));
-        if row.server_ids.is_empty() {
+        if row.servers.is_empty() {
             lines.push(Line::from(Span::styled("  (none)", theme::muted_style())));
         } else {
-            for id in &row.server_ids {
+            for s in &row.servers {
                 lines.push(Line::from(Span::styled(
-                    format!("  • {id}"),
+                    format!("  • {}", s.server_id),
                     theme::muted_style(),
                 )));
+                if let Some(tools) = &s.tools {
+                    let joined = tools.join(", ");
+                    lines.push(Line::from(Span::styled(
+                        format!("      tools: {joined}"),
+                        theme::muted_style(),
+                    )));
+                }
             }
         }
     }
@@ -2642,7 +2649,13 @@ mod tests {
             label: label.to_string(),
             actor_type: actor_type.map(str::to_string),
             kind,
-            server_ids: servers.iter().map(|s| (*s).to_string()).collect(),
+            servers: servers
+                .iter()
+                .map(|s| pitboss_cli::capability_matrix::MatrixServerEntry {
+                    server_id: (*s).to_string(),
+                    tools: None,
+                })
+                .collect(),
         }
     }
 
@@ -2814,6 +2827,83 @@ mod tests {
         assert!(
             !rendered.contains("fs-writer"),
             "writer-scoped server must not appear under the untyped row"
+        );
+    }
+
+    /// A `[[mcp_server]].tools = [...]` allowlist surfaces in the
+    /// MCP-SERVERS section as an indented `tools:` continuation line
+    /// under the server bullet. Operators should be able to read the
+    /// per-server cap directly from the Detail view without re-opening
+    /// the manifest. (#391)
+    #[test]
+    fn detail_view_renders_per_server_tools_continuation_line() {
+        use crate::state::Mode;
+        use pitboss_cli::capability_matrix::{MatrixRow, MatrixServerEntry, RowKind};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let task_id = "writer-1";
+        let mut t = tile(task_id, TileStatus::Running, None, 0, 0);
+        t.actor_type = Some("writer".to_string());
+
+        let mut s = state(vec![t]);
+        s.matrix_rows = vec![
+            matrix_row("(untyped / root)", None, RowKind::Untyped, &["pitboss"]),
+            // Hand-build the writer row so we can attach a per-server
+            // `tools` allowlist to fs-writer; the `matrix_row` helper
+            // produces only `tools = None` entries.
+            MatrixRow {
+                label: "worker_type:writer".to_string(),
+                actor_type: Some("writer".to_string()),
+                kind: RowKind::WorkerType,
+                servers: vec![
+                    MatrixServerEntry {
+                        server_id: "pitboss".to_string(),
+                        tools: None,
+                    },
+                    MatrixServerEntry {
+                        server_id: "fs-writer".to_string(),
+                        tools: Some(vec![
+                            "Read".to_string(),
+                            "Write".to_string(),
+                            "Edit".to_string(),
+                        ]),
+                    },
+                ],
+            },
+        ];
+        s.mode = Mode::Detail {
+            task_id: task_id.to_string(),
+            scroll: 0,
+            at_bottom: true,
+            return_to: Box::new(Mode::Normal),
+        };
+
+        let backend = TestBackend::new(120, 60);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &s)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..60)
+            .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect();
+
+        // The continuation line lists the allowlist verbatim — pin the
+        // exact tools so a future refactor that drops/replaces the
+        // line gets caught.
+        assert!(
+            rendered.contains("tools: Read, Write, Edit"),
+            "fs-writer's per-server tools allowlist must render as a continuation line"
+        );
+        // pitboss has no allowlist; assert no `pitboss tools:`-style
+        // line was emitted. Tying the negative assertion to the
+        // server prefix keeps it stable against unrelated
+        // `tools:`-substring uses elsewhere in the rendered buffer.
+        assert!(
+            !rendered.contains("pitboss      tools:")
+                && !rendered.contains("• pitboss\n      tools:"),
+            "pitboss has no allowlist; must not emit a tools continuation line"
         );
     }
 

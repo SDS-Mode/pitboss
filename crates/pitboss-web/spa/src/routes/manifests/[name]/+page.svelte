@@ -271,14 +271,24 @@
                   <tr class="border-b last:border-0 align-top">
                     <td class="py-1.5 pr-3 font-mono">{row.label}</td>
                     <td class="py-1.5">
-                      {#if row.server_ids.length === 0}
+                      {#if row.servers.length === 0}
                         <span class="text-muted-foreground italic">(none)</span>
                       {:else}
-                        <div class="flex flex-wrap gap-1">
-                          {#each row.server_ids as id, sidx (sidx)}
-                            <code class="bg-muted rounded px-1.5 py-0.5">{id}</code>
+                        <ul class="space-y-1">
+                          {#each row.servers as srv, sidx (sidx)}
+                            <li>
+                              <code class="bg-muted rounded px-1.5 py-0.5">{srv.server_id}</code>
+                              {#if srv.tools && srv.tools.length > 0}
+                                <span class="text-muted-foreground ml-2">tools:</span>
+                                <span class="ml-1 inline-flex flex-wrap gap-1 align-middle">
+                                  {#each srv.tools as tool, tidx (tidx)}
+                                    <code class="bg-muted/60 rounded px-1 py-0.5">{tool}</code>
+                                  {/each}
+                                </span>
+                              {/if}
+                            </li>
                           {/each}
-                        </div>
+                        </ul>
                       {/if}
                     </td>
                   </tr>

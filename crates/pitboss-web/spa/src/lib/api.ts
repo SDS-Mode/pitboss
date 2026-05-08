@@ -280,14 +280,32 @@ export type RowKind = 'untyped' | 'worker_type' | 'sublead_type';
  * validation succeeds. Matches the wire shape pinned by
  * `matrix_row_serialises_with_stable_field_and_kind_names` (#391 slice 3).
  */
+/**
+ * Mirror of `pitboss_cli::capability_matrix::MatrixServerEntry`.
+ * One server admitted on a `MatrixRow`, plus the per-server
+ * `[[mcp_server]].tools` allowlist as it applies on that row.
+ *
+ * `tools` is omitted (not `null`) when the server has no allowlist —
+ * the Rust struct uses `#[serde(skip_serializing_if = "Option::is_none")]`
+ * so the SPA branches on key-presence, not on a sentinel. (#391)
+ */
+export interface MatrixServerEntry {
+  server_id: string;
+  /** Absent => unrestricted. Present => explicit allowlist. */
+  tools?: string[];
+}
+
 export interface MatrixRow {
   /** Display label as the CLI text formatter emits it. */
   label: string;
   /** `null` for the untyped row, the type id for declared profiles. */
   actor_type: string | null;
   kind: RowKind;
-  /** MCP server ids that scope-admit, in manifest declaration order. */
-  server_ids: string[];
+  /**
+   * MCP servers (with their per-server tool allowlists) that scope-admit,
+   * in manifest declaration order.
+   */
+  servers: MatrixServerEntry[];
 }
 
 export interface ValidateResult {
