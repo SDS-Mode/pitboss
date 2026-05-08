@@ -20,7 +20,7 @@ GitHub issue, not here.
 - **No version targeting.** Use GitHub Milestones for release-train
   scheduling. Strategic horizons can stay inline as `parked:` notes.
 
-Last refreshed: v0.12.0 (2026-05-07).
+Last refreshed: v0.13.0 (2026-05-08).
 
 ---
 
@@ -134,13 +134,6 @@ abstract is the spec.
 
 Items with an explicit blocker — usually waiting on something
 upstream.
-
-- **Path B `permission_routing` stabilization.** The implementation
-  PRs (#92, #93, #94) merged, but `validate.rs` still rejects
-  `permission_routing = "path_b"` as "not yet stable". Soak in
-  staging, then remove the validate gate. **Status:** blocked: needs
-  real-world soak before gate removal. **Tracking:** none yet (file
-  when ready to remove the gate).
 
 - **Broadcast mode (`pitboss b "<prompt>"`).** Send the same prompt
   to every running tile. Parked because the original UX (interactive
