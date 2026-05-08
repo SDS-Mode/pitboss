@@ -11,6 +11,8 @@
   import { Separator } from '$lib/components/ui/separator';
   import {
     getTaskEvents,
+    getTaskLog,
+    ApiError,
     type ActorActivity,
     type FailureReason,
     type SubleadInfo,
@@ -19,7 +21,7 @@
     type WorkerEntry
   } from '$lib/api';
   import { costUsd, fmtCost } from '$lib/prices';
-  import { ExternalLink, ArrowLeftRight, AlertTriangle } from 'lucide-svelte';
+  import { ExternalLink, ArrowLeftRight, AlertTriangle, Pause, Play } from 'lucide-svelte';
 
   let {
     runId,
@@ -31,6 +33,7 @@
     sublead,
     activity,
     allTasks,
+    inProgress,
     onJumpTo
   }: {
     runId: string;
@@ -48,6 +51,9 @@
     /** Full task list — used to compute parent/children for the
      *  hierarchy section. Same source the graph already consumes. */
     allTasks: TaskRecord[];
+    /** Whether the run is still in progress. Drives whether the log
+     *  pane auto-tails. Post-run inspectors render a frozen tail. */
+    inProgress: boolean;
     /** Click-jump on parent / child rows to swap the selection. */
     onJumpTo: (taskId: string) => void;
   } = $props();
@@ -87,6 +93,106 @@
         if (lastFetchedFor === id) eventsLoading = false;
       });
   });
+
+  // ---- Log tail (inline, like the TUI's per-tile log view) ---------
+  // The fetch hits the existing `/log` endpoint with `tail=true`, so
+  // "tailing" is implemented as polling the last 64 KiB every 2 s
+  // while the actor is still running. Keeps the implementation in
+  // line with the existing standalone task log page (no new SSE
+  // endpoint needed).
+  let logText = $state<string>('');
+  let logError = $state<string | null>(null);
+  let logLoading = $state(false);
+  let logLastFetchedFor = $state<string | null>(null);
+  /** Operator override: pause auto-tail. Resets when the inspector
+   *  switches to a different actor. Useful for inspecting a stable
+   *  window without the view jumping on every poll. */
+  let tailPaused = $state(false);
+  /** Pre element bound for auto-scroll-to-bottom on content change. */
+  let logPaneEl = $state<HTMLPreElement | null>(null);
+  /** Whether the most recent scroll position is at the bottom. If the
+   *  user scrolled up to read history, polling continues but the view
+   *  stays put. */
+  let stickToBottom = $state(true);
+
+  const LOG_TAIL_BYTES = 64 * 1024;
+  const LOG_POLL_MS = 2000;
+
+  /** True when this actor still has a live writer: run is in progress
+   *  AND the actor's last-known status is non-terminal. */
+  const isLogTailing = $derived.by(() => {
+    if (!inProgress || tailPaused) return false;
+    const s = task?.status;
+    if (s && s !== 'Running' && s !== 'Paused' && s !== 'Frozen') return false;
+    if (!worker && !task) return false;
+    return true;
+  });
+
+  async function fetchLogOnce(id: string) {
+    logLoading = true;
+    try {
+      const text = await getTaskLog(runId, id, { limit: LOG_TAIL_BYTES, tail: true });
+      // Drop late results if the user navigated to another node.
+      if (logLastFetchedFor !== id) return;
+      logText = text;
+      logError = null;
+    } catch (err) {
+      if (logLastFetchedFor !== id) return;
+      // 404 is normal: stdout.log doesn't exist until the subprocess
+      // writes its first byte. Render an empty pane rather than a banner.
+      if (err instanceof ApiError && err.status === 404) {
+        logText = '';
+        logError = null;
+      } else {
+        logError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      if (logLastFetchedFor === id) logLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const id = selectedTaskId;
+    if (!open || !id) {
+      logText = '';
+      logError = null;
+      logLastFetchedFor = null;
+      tailPaused = false;
+      stickToBottom = true;
+      return;
+    }
+    if (id !== logLastFetchedFor) {
+      logLastFetchedFor = id;
+      tailPaused = false;
+      stickToBottom = true;
+      // Initial fetch fires regardless of inProgress so terminal actors
+      // still show their final log tail.
+      fetchLogOnce(id);
+    }
+    if (!isLogTailing) return;
+    const h = setInterval(() => {
+      if (logLastFetchedFor === id) fetchLogOnce(id);
+    }, LOG_POLL_MS);
+    return () => clearInterval(h);
+  });
+
+  // Auto-scroll to bottom whenever new content lands AND the operator
+  // hasn't scrolled up. Triggered by `logText` change.
+  $effect(() => {
+    // Touch logText so the effect re-runs on update.
+    void logText;
+    if (!stickToBottom || !logPaneEl) return;
+    queueMicrotask(() => {
+      if (logPaneEl) logPaneEl.scrollTop = logPaneEl.scrollHeight;
+    });
+  });
+
+  function onLogScroll() {
+    if (!logPaneEl) return;
+    const dist = logPaneEl.scrollHeight - logPaneEl.scrollTop - logPaneEl.clientHeight;
+    // 8 px tolerance for browsers that don't quite hit 0 on a flush.
+    stickToBottom = dist <= 8;
+  }
 
   const status = $derived(task?.status ?? worker?.state ?? 'unknown');
   const startedIso = $derived(task?.started_at ?? worker?.started_at);
@@ -356,26 +462,87 @@
           {/if}
         </section>
 
-        <!-- Open log -->
+        <!-- Live log tail -->
         <Separator />
         <section class="space-y-1 text-xs">
-          <Button
-            variant="outline"
-            size="sm"
-            class="w-full"
-            onclick={() => {
-              // Lean on the existing static log endpoint. Opens in a new
-              // tab so the inspector stays open for cross-referencing.
-              window.open(
-                `/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(selectedTaskId!)}/log`,
-                '_blank',
-                'noopener'
-              );
-            }}
-          >
-            <ExternalLink class="mr-1.5 size-3.5" />
-            Open stdout.log
-          </Button>
+          <div class="flex items-center justify-between gap-2">
+            <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
+              stdout.log
+              <span class="ml-1 inline-flex items-center gap-1 normal-case">
+                {#if isLogTailing}
+                  <span
+                    class="inline-block size-1.5 rounded-full bg-emerald-500 animate-pulse"
+                    aria-hidden="true"
+                  ></span>
+                  <span class="text-emerald-700 dark:text-emerald-400">live</span>
+                {:else if inProgress && tailPaused}
+                  <span class="text-amber-700 dark:text-amber-400">paused</span>
+                {:else}
+                  <span class="text-muted-foreground/70">final</span>
+                {/if}
+              </span>
+            </h3>
+            <div class="flex items-center gap-1">
+              {#if inProgress && (worker || task?.status === 'Running' || task?.status === 'Paused' || task?.status === 'Frozen')}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 px-2"
+                  onclick={() => (tailPaused = !tailPaused)}
+                  title={tailPaused ? 'Resume tail' : 'Pause tail'}
+                >
+                  {#if tailPaused}
+                    <Play class="size-3" />
+                  {:else}
+                    <Pause class="size-3" />
+                  {/if}
+                </Button>
+              {/if}
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-6 px-2"
+                onclick={() => {
+                  // Open the standalone task page (head/tail toggle,
+                  // download-full button, status card) so an operator
+                  // who needs more than a 64 KiB tail can get it.
+                  window.open(
+                    `/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(selectedTaskId!)}`,
+                    '_blank',
+                    'noopener'
+                  );
+                }}
+                title="Open in standalone log view"
+              >
+                <ExternalLink class="size-3" />
+              </Button>
+            </div>
+          </div>
+          {#if logError}
+            <p class="text-destructive text-[11px]">{logError}</p>
+          {:else if logLoading && logText.length === 0}
+            <p class="text-muted-foreground italic">Loading…</p>
+          {:else if logText.length === 0}
+            <p class="text-muted-foreground italic">
+              {isLogTailing ? 'Waiting for first output…' : 'Log is empty.'}
+            </p>
+          {:else}
+            <pre
+              bind:this={logPaneEl}
+              onscroll={onLogScroll}
+              class="bg-muted/40 max-h-72 overflow-auto rounded p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap">{logText}</pre>
+            {#if !stickToBottom}
+              <button
+                class="text-sky-700 dark:text-sky-400 mt-1 text-[10px] underline hover:no-underline"
+                onclick={() => {
+                  stickToBottom = true;
+                  if (logPaneEl) logPaneEl.scrollTop = logPaneEl.scrollHeight;
+                }}
+              >
+                ↓ Jump to bottom
+              </button>
+            {/if}
+          {/if}
         </section>
       </div>
     {/if}
