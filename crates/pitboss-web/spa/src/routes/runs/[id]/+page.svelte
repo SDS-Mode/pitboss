@@ -164,19 +164,34 @@
 
   // Parsed JSONL of in-progress task records — lets the Tasks tab show
   // partial state while the run hasn't finalized.
+  //
+  // Dedupe by task_id, keeping the LAST entry per id. summary.jsonl is
+  // append-only and certain failure recovery paths (reprompt → cancel →
+  // respawn, hook-failure-on-cancel) can produce multiple rows for the
+  // same task_id. Keyed `{#each}` blocks downstream require unique keys,
+  // so collapse here at the parse boundary. (#425)
   const liveTasks = $derived<Array<Record<string, any>>>(
     summaryJsonl
-      ? summaryJsonl
-          .split('\n')
-          .filter((l) => l.trim().length > 0)
-          .map((l) => {
-            try {
-              return JSON.parse(l) as Record<string, any>;
-            } catch {
-              return {};
-            }
-          })
-          .filter((o) => Object.keys(o).length > 0)
+      ? Array.from(
+          summaryJsonl
+            .split('\n')
+            .filter((l) => l.trim().length > 0)
+            .map((l) => {
+              try {
+                return JSON.parse(l) as Record<string, any>;
+              } catch {
+                return {};
+              }
+            })
+            .filter((o) => Object.keys(o).length > 0)
+            .reduce((m: Map<string | symbol, Record<string, any>>, o) => {
+              // Records without a task_id keep their own slot via Symbol()
+              // so we don't collapse unrelated parse-error rows together.
+              const key = (o.task_id as string | undefined) ?? Symbol();
+              return m.set(key, o);
+            }, new Map())
+            .values()
+        )
       : []
   );
 
@@ -1023,7 +1038,7 @@
               </TableRow>
             </TableHeader>
             <TableBody>
-              {#each tasksToRender as t (t.task_id ?? Math.random())}
+              {#each tasksToRender as t, idx ((t.task_id ?? '') + '#' + idx)}
                 <TableRow>
                   <TableCell>
                     <code class="text-xs">{t.task_id ?? '—'}</code>
