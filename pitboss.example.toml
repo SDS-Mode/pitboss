@@ -197,11 +197,18 @@ max_workers = 3                     # 1–16; required when the lead spawns work
 budget_usd = 1.50                   # soft cap; reservation accounting at spawn time
 lead_timeout_secs = 900             # wall-clock cap on the lead session
 
-# Permission routing (v0.8+). "path_a" (default) = pitboss is sole authority
-# via CLAUDE_CODE_ENTRYPOINT=sdk-ts. "path_b" = route claude's built-in gate
-# through pitboss's approval queue; rejected at validate time until the
-# follow-on stabilization lands (issues #92–#94).
-# permission_routing = "path_a"
+# Permission routing (v0.8+, default flipped to path_b in v0.12).
+# "path_b" (default) leaves claude's per-tool gate active and wires
+# `--permission-prompt-tool mcp__pitboss__permission_prompt`; every
+# check the model wants outside its `--allowedTools` routes through
+# pitboss with layered enforcement: (1) per-server `[[mcp_server]].tools`
+# allowlist, (2) operator `[[approval_policy]]` rules, (3) typed
+# profile cap, (4) bridge fallback. Denials are non-terminating —
+# claude receives a structured response and adapts.
+# "path_a" is the opt-out: sets CLAUDE_CODE_ENTRYPOINT=sdk-ts plus
+# --dangerously-skip-permissions, bypassing claude's gate entirely so
+# pitboss's [[approval_policy]] rules + bridge are the sole authority.
+# permission_routing = "path_b"
 
 # ─── Depth-2 sub-leads (v0.6+) ───
 # Uncomment to enable a root lead that may spawn sub-leads.
@@ -242,7 +249,8 @@ lead_timeout_secs = 900             # wall-clock cap on the lead session
 # ────────────────────────────────────────────────────────────────────────────
 # [[mcp_server]] — external MCP server injection (v0.9+).
 # Servers declared here are injected into every actor's --mcp-config
-# (lead, sub-leads, and workers) at dispatch time.
+# (lead, sub-leads, and workers) at dispatch time, unless narrowed by
+# `scope` (v0.12) or further capped by `tools` (v0.12).
 # ────────────────────────────────────────────────────────────────────────────
 #
 # [[mcp_server]]
@@ -250,8 +258,58 @@ lead_timeout_secs = 900             # wall-clock cap on the lead session
 # command = "npx"
 # args    = ["-y", "@upstash/context7-mcp"]
 #
+# # `scope = "type:<id>"` (v0.12) narrows injection: this server only
+# # appears in actors spawned with `worker_type = "writer"` or
+# # `sublead_type = "writer"`. Untyped actors (no profile arg on spawn)
+# # never receive scoped servers. Useful for separating side-effecting
+# # servers (filesystem writes, network calls) from analysis-only roles.
+# [[mcp_server]]
+# id      = "fs-writer"
+# command = "/usr/local/bin/fs-writer-mcp"
+# scope   = "type:writer"
+# # `tools = [...]` (v0.12) caps which tools this server may admit.
+# # Enforced at three layers (most-restrictive-wins): (1) manifest validate
+# # rejects any actor surface referencing `mcp__fs-writer__X` for an X
+# # not in this list; (2) spawn-time argv drops non-allowlisted entries
+# # from --allowedTools (Path B); (3) runtime permission_prompt denies
+# # any routed mcp__fs-writer__X call where X isn't in the allowlist.
+# # `tools = []` is rejected as self-defeating. Unset = no per-tool cap.
+# tools   = ["Read", "Write", "Edit"]
+#
 # [[mcp_server]]
 # id      = "my-tool"
 # command = "/usr/local/bin/my-mcp-server"
 # args    = ["--port", "3000"]
 # env     = { MY_TOKEN = "abc" }
+
+# ────────────────────────────────────────────────────────────────────────────
+# [[worker_type]] / [[sublead_type]] — typed actor profiles (v0.12+, #252).
+# Declarative capability caps the dispatcher enforces at spawn time.
+# A `spawn_worker(worker_type = "<id>")` call is rejected when its
+# `tools` arg is not a subset of the profile's allowlist, when its
+# `model` is not in `allowed_models`, or when its `timeout_secs` exceeds
+# `max_timeout_secs`. Sub-leads add the same clamp on `budget_usd`.
+# Profiles are belt-and-suspenders: even if the lead's prompt drifts or
+# is hijacked, the dispatcher will not honour an off-policy spawn.
+# ────────────────────────────────────────────────────────────────────────────
+#
+# [[worker_type]]
+# id               = "extraction"
+# tools            = ["Read", "Glob", "Grep"]
+# allowed_models   = ["claude-haiku-4-5", "claude-sonnet-4-6"]
+# max_timeout_secs = 900
+#
+# [[worker_type]]
+# id    = "writer"
+# tools = ["Read", "Glob", "Grep", "Write", "Edit"]
+#
+# [[sublead_type]]
+# id             = "planner"
+# tools          = ["Read", "Glob", "Grep"]
+# allowed_models = ["claude-opus-4-7"]
+# max_budget_usd = 2.00
+
+# `require_actor_type = true` (v0.12+) forces every spawn_worker /
+# spawn_sublead call to name a declared profile. Type-less spawns are
+# rejected. Default false for back-compat with pre-#252 manifests.
+# require_actor_type = true
