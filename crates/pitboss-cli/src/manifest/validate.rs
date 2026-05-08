@@ -245,27 +245,18 @@ fn validate_mcp_server_tools(r: &ResolvedManifest) -> Result<()> {
 /// with the per-server `tools` allowlist (#391 slice 4).
 ///
 /// Walks `[lead].tools`, `[[task]].tools`, `[[worker_type]].tools`, and
-/// `[[sublead_type]].tools`. For any entry of the form
-/// `mcp__<server>__<tool>`, if `<server>` is declared with a `tools`
-/// allowlist, `<tool>` must appear in that allowlist. Otherwise reject
-/// with a message naming both the actor surface and the offending
-/// allowlist — operators see exactly which line to fix.
+/// `[[sublead_type]].tools`. For any entry that resolves via
+/// [`crate::manifest::mcp_tools::parse_mcp_tool_name`] to a server with
+/// a declared `tools` allowlist, the parsed tool name must be in the
+/// allowlist. Otherwise reject with a message naming both the actor
+/// surface and the offending allowlist — operators see exactly which
+/// line to fix.
 ///
-/// Tool names that don't parse as `mcp__<known-server>__*` are skipped
-/// (they're top-level claude tools or references to undeclared servers,
-/// neither of which this gate constrains). Server-id matching uses
-/// longest-prefix-match so server ids containing underscores parse
-/// unambiguously.
+/// The parsing logic (longest-prefix-match against declared server ids)
+/// is shared with the spawn-time filter and the runtime
+/// `permission_prompt` short-circuit so the three sites cannot drift.
 fn validate_mcp_tool_consistency(r: &ResolvedManifest) -> Result<()> {
-    // Collect (id, allowlist) pairs once. Sort by descending id length so
-    // longest-prefix-match resolves `mcp__some_server__some_tool` correctly
-    // when both `some` and `some_server` are declared servers.
-    let mut servers: Vec<(&str, Option<&[String]>)> = r
-        .mcp_servers
-        .iter()
-        .map(|s| (s.id.as_str(), s.tools.as_deref()))
-        .collect();
-    servers.sort_by_key(|(id, _)| std::cmp::Reverse(id.len()));
+    use crate::manifest::mcp_tools::parse_mcp_tool_name;
 
     let mut surfaces: Vec<(String, &[String])> = Vec::new();
     if let Some(lead) = &r.lead {
@@ -283,32 +274,25 @@ fn validate_mcp_tool_consistency(r: &ResolvedManifest) -> Result<()> {
 
     for (surface, tools) in surfaces {
         for entry in tools {
-            let Some(rest) = entry.strip_prefix("mcp__") else {
+            let Some(parsed) = parse_mcp_tool_name(entry, &r.mcp_servers) else {
                 continue;
             };
-            // Find the longest declared server id that is a prefix of
-            // `rest` followed by `__`. Skips entries referencing
-            // undeclared servers — those don't match the gate by design.
-            let Some((server_id, allowlist)) = servers
-                .iter()
-                .find(|(id, _)| rest.starts_with(id) && rest[id.len()..].starts_with("__"))
-                .map(|(id, allow)| (*id, *allow))
-            else {
+            if parsed.is_admitted() {
                 continue;
-            };
-            let Some(allow) = allowlist else {
-                continue;
-            };
-            let tool_name = &rest[server_id.len() + 2..];
-            if !allow.iter().any(|t| t == tool_name) {
-                bail!(
-                    "{surface}: tool {entry:?} references mcp_server {server_id:?} \
-                     which declares tools = {allow:?}. Tool {tool_name:?} is \
-                     not in that allowlist. Either add {tool_name:?} to the \
-                     server's `tools = […]`, remove the entry from {surface}, \
-                     or drop the server's `tools` allowlist."
-                );
             }
+            // Safe to unwrap: `is_admitted` returned false, which only
+            // happens when the allowlist is `Some(_)`.
+            let allow = parsed.allowlist.unwrap();
+            bail!(
+                "{surface}: tool {entry:?} references mcp_server {:?} \
+                 which declares tools = {allow:?}. Tool {:?} is \
+                 not in that allowlist. Either add {:?} to the \
+                 server's `tools = […]`, remove the entry from {surface}, \
+                 or drop the server's `tools` allowlist.",
+                parsed.server_id,
+                parsed.tool_name,
+                parsed.tool_name
+            );
         }
     }
     Ok(())

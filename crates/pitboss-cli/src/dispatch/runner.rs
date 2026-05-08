@@ -1006,6 +1006,7 @@ pub fn lead_spawn_args(
     lead: &crate::manifest::resolve::ResolvedLead,
     mcp_config: &std::path::Path,
     communication_mode: crate::manifest::schema::CommunicationMode,
+    mcp_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -1019,7 +1020,15 @@ pub fn lead_spawn_args(
     args.push("--disable-slash-commands".into());
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
-    let mut allowed: Vec<String> = lead.tools.clone();
+    // Path-B: per-server `[[mcp_server]].tools` allowlists filter the
+    // user-declared tools BEFORE we union with the pitboss MCP set, so
+    // a non-allowlisted MCP tool routes through `permission_prompt`
+    // instead of being silently auto-approved. Path A: no-op (#391/#399).
+    let mut allowed: Vec<String> = crate::manifest::mcp_tools::filter_actor_tools_by_mcp_allowlists(
+        &lead.tools,
+        mcp_servers,
+        lead.permission_routing,
+    );
     for t in pitboss_mcp_tools(communication_mode) {
         allowed.push(t.to_string());
     }
@@ -1059,6 +1068,7 @@ pub fn lead_resume_spawn_args(
     session_id: &str,
     new_prompt: &str,
     communication_mode: crate::manifest::schema::CommunicationMode,
+    mcp_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -1069,7 +1079,13 @@ pub fn lead_resume_spawn_args(
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
-    let mut allowed: Vec<String> = lead.tools.clone();
+    // Path-B: filter user-declared tools through per-server allowlists
+    // before unioning with the pitboss MCP set. Path A: no-op. (#391/#399)
+    let mut allowed: Vec<String> = crate::manifest::mcp_tools::filter_actor_tools_by_mcp_allowlists(
+        &lead.tools,
+        mcp_servers,
+        lead.permission_routing,
+    );
     for t in pitboss_mcp_tools(communication_mode) {
         allowed.push(t.to_string());
     }
@@ -1124,6 +1140,7 @@ pub fn sublead_spawn_args(
     tools_override: Option<&[String]>,
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
+    mcp_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -1137,9 +1154,15 @@ pub fn sublead_spawn_args(
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
     // listed first; pitboss MCP tools always appended so the sub-lead can
-    // still orchestrate workers regardless of the override.
+    // still orchestrate workers regardless of the override. Path-B:
+    // operator-supplied tools are filtered through per-server allowlists
+    // first; Path A: no-op. (#391/#399)
     let mut allowed: Vec<String> = match tools_override {
-        Some(ts) => ts.to_vec(),
+        Some(ts) => crate::manifest::mcp_tools::filter_actor_tools_by_mcp_allowlists(
+            ts,
+            mcp_servers,
+            permission_routing,
+        ),
         None => Vec::new(),
     };
     for t in sublead_mcp_tools(communication_mode) {
@@ -1964,10 +1987,10 @@ mod tests {
         let cm = crate::manifest::schema::CommunicationMode::Disabled;
         let cases: Vec<(&str, Vec<String>)> = vec![
             ("flat task", spawn_args(&task)),
-            ("lead", lead_spawn_args(&lead, &cfg, cm)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[])),
             (
                 "lead_resume",
-                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm),
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[]),
             ),
             (
                 "sublead",
@@ -1980,6 +2003,7 @@ mod tests {
                     None,
                     PermissionRouting::PathA,
                     cm,
+                    &[],
                 ),
             ),
             (
@@ -1993,6 +2017,7 @@ mod tests {
                     None,
                     PermissionRouting::PathA,
                     cm,
+                    &[],
                 ),
             ),
         ];
@@ -2039,6 +2064,7 @@ mod tests {
             &lead,
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         assert!(args.iter().any(|a| a == "--verbose"));
         assert!(args.iter().any(|a| a == "--mcp-config"));
@@ -2074,6 +2100,7 @@ mod tests {
             &lead,
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2123,6 +2150,7 @@ mod tests {
             &lead,
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::ParentChild,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2166,6 +2194,7 @@ mod tests {
             &lead,
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2206,6 +2235,7 @@ mod tests {
             None,
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2233,6 +2263,7 @@ mod tests {
             None,
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2259,6 +2290,7 @@ mod tests {
             None,
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2282,6 +2314,7 @@ mod tests {
             None,
             Default::default(),
             crate::manifest::schema::CommunicationMode::ParentChild,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2305,6 +2338,7 @@ mod tests {
             None,
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2326,6 +2360,7 @@ mod tests {
             None,
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         // Verify the basic arg structure is correct
         assert!(args.contains(&"--output-format".to_string()));
@@ -2353,6 +2388,7 @@ mod tests {
             Some(&custom),
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2380,6 +2416,7 @@ mod tests {
             Some(&custom),
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2416,6 +2453,7 @@ mod tests {
             &lead,
             &cfg,
             crate::manifest::schema::CommunicationMode::Disabled,
+            &[],
         );
         assert!(
             !args.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -2477,10 +2515,10 @@ mod tests {
         // `pub(super)`. Its Path-B variant is asserted in
         // `mcp::tools::spawn::tests::path_b_worker_emits_permission_prompt_tool`.
         let cases: Vec<(&str, Vec<String>)> = vec![
-            ("lead", lead_spawn_args(&lead, &cfg, cm)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[])),
             (
                 "lead_resume",
-                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm),
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[]),
             ),
             (
                 "sublead",
@@ -2493,6 +2531,7 @@ mod tests {
                     None,
                     PermissionRouting::PathB,
                     cm,
+                    &[],
                 ),
             ),
             (
@@ -2506,6 +2545,7 @@ mod tests {
                     None,
                     PermissionRouting::PathB,
                     cm,
+                    &[],
                 ),
             ),
         ];

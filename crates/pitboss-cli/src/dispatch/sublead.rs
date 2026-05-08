@@ -542,6 +542,7 @@ async fn spawn_sublead_session(
         tools_for_args,
         spawn_routing,
         communication_mode,
+        &state.root.manifest.mcp_servers,
     );
 
     // 4. Task log directory (mirrors workers' layout for consistency).
@@ -689,6 +690,7 @@ async fn spawn_sublead_session(
                     tools_for_resume,
                     resume_routing,
                     resume_communication_mode,
+                    &state_bg.root.manifest.mcp_servers,
                 );
                 // Env precedence: lead → operator → pitboss defaults
                 // (see compose_sublead_env). Same cwd rationale as the

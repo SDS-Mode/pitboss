@@ -226,20 +226,37 @@ pub struct McpServerSpec {
         help = "Optional injection scope. Form: \"type:<id>\" — narrows this server to actors spawned under that worker_type/sublead_type. Unset = inject into all actors."
     )]
     pub scope: Option<String>,
-    /// Optional per-server tool allowlist. When set, any actor's
-    /// declared `tools` (in `[lead]`, `[[task]]`, `[[worker_type]]`,
-    /// `[[sublead_type]]`) referencing this server via the
-    /// `mcp__<id>__<tool>` form must list a `<tool>` that appears in
-    /// this allowlist; validate rejects mismatches loudly. Unset means
-    /// "no per-server restriction" (the v0.12 default). Empty list
-    /// (`tools = []`) is rejected as self-defeating — set
-    /// `mode = "disabled"` on `[communication]` or remove the
-    /// `[[mcp_server]]` block instead. (#391 / #397, slice 4 — schema
-    /// + validate-time enforcement; runtime gate is a follow-up.)
+    /// Optional per-server tool allowlist. When set, the per-server
+    /// allowlist enforces at three layers (most-restrictive-wins):
+    ///
+    /// 1. **Manifest validate** — actor surfaces (`[lead].tools`,
+    ///    `[[task]].tools`, `[[worker_type]].tools`,
+    ///    `[[sublead_type]].tools`) referencing `mcp__<id>__<tool>`
+    ///    must name a `<tool>` in this allowlist. Mismatches are
+    ///    rejected at parse time.
+    /// 2. **Spawn-time argv (Path B)** — non-allowlisted entries are
+    ///    dropped from the spawned actor's `--allowedTools` so the
+    ///    call routes through `mcp__pitboss__permission_prompt`
+    ///    instead of being silently auto-approved.
+    /// 3. **Runtime permission_prompt (Path B)** — when claude routes
+    ///    a `mcp__<id>__<tool>` call, the gate denies if `<tool>` is
+    ///    not in this allowlist.
+    ///
+    /// **Path A note:** `--dangerously-skip-permissions` bypasses the
+    /// entire claude permission layer (`--allowedTools` is ignored;
+    /// permission_prompt never fires), so the per-server allowlist
+    /// has NO runtime effect under Path A. Manifest validate still
+    /// rejects conflicting actor surfaces; only the runtime gate is
+    /// inert. Operators who chose Path A as the "skip all gates"
+    /// escape hatch retain that semantic. (#391 / #399)
+    ///
+    /// Unset means "no per-server restriction" (the v0.12 default).
+    /// Empty list (`tools = []`) is rejected as self-defeating —
+    /// remove the `[[mcp_server]]` block instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[field(
         label = "Tools",
-        help = "Optional per-tool allowlist for this MCP server. Validate rejects any actor `tools` entry like `mcp__<id>__X` whose `X` is not in this list. Unset = no restriction."
+        help = "Optional per-tool allowlist for this MCP server. Path B: enforced at validate + spawn argv + permission_prompt runtime. Path A: no runtime effect (claude bypasses the permission layer). Unset = no restriction."
     )]
     pub tools: Option<Vec<String>>,
 }
