@@ -76,6 +76,24 @@ impl SubleadOutcome {
             SubleadOutcome::ApprovalTimedOut => "approval_timed_out",
         }
     }
+
+    /// Map to the `TaskStatus` used in `TaskRecord` and the
+    /// `WorkerSnapshotEntry.state` wire string. Mirrors the on-exit
+    /// classification done by `spawn_sublead_session` so the sub-lead's
+    /// own row in its layer's workers map (set by
+    /// `reconcile_terminated_sublead`) carries the same terminal
+    /// status as the canonical record persisted to summary.jsonl.
+    pub fn to_task_status(&self) -> pitboss_core::store::TaskStatus {
+        use pitboss_core::store::TaskStatus;
+        match self {
+            SubleadOutcome::Success => TaskStatus::Success,
+            SubleadOutcome::Cancel => TaskStatus::Cancelled,
+            SubleadOutcome::Timeout => TaskStatus::TimedOut,
+            SubleadOutcome::Error(_) => TaskStatus::Failed,
+            SubleadOutcome::ApprovalRejected => TaskStatus::ApprovalRejected,
+            SubleadOutcome::ApprovalTimedOut => TaskStatus::ApprovalTimedOut,
+        }
+    }
 }
 
 /// Configuration for a sub-lead spawn, validated against root's caps.
@@ -774,14 +792,7 @@ async fn spawn_sublead_session(
         }
 
         // 8. Map to TaskStatus for the TaskRecord.
-        let status = match &sublead_outcome {
-            SubleadOutcome::Success => TaskStatus::Success,
-            SubleadOutcome::Cancel => TaskStatus::Cancelled,
-            SubleadOutcome::Timeout => TaskStatus::TimedOut,
-            SubleadOutcome::Error(_) => TaskStatus::Failed,
-            SubleadOutcome::ApprovalRejected => TaskStatus::ApprovalRejected,
-            SubleadOutcome::ApprovalTimedOut => TaskStatus::ApprovalTimedOut,
-        };
+        let status: TaskStatus = sublead_outcome.to_task_status();
 
         // 9. Build and persist a TaskRecord for the sub-lead's compound session.
         //    Uses total_token_usage across all subprocess iterations.
@@ -945,6 +956,85 @@ pub async fn reconcile_terminated_sublead(
     let actual_spend = *sub_layer.spent_usd.lock().await;
     let original_reservation_usd = sub_layer.original_reservation_usd.unwrap_or(0.0);
     let unspent = (original_reservation_usd - actual_spend).max(0.0);
+
+    // Close out the sub-lead's own row in its layer's workers map. The
+    // kill+resume loop wrote a `WorkerState::Running` entry for the
+    // sub-lead at every iteration, but no terminal write ever landed —
+    // so `WorkersSnapshot` consumers (pitboss-web, TUI Live tab) saw
+    // the sub-lead as `running` for the rest of the run even after the
+    // claude subprocess had exited and a TaskRecord had been appended
+    // to summary.jsonl. The synthesized record below carries only the
+    // fields `collect_layer_workers` actually reads off
+    // `WorkerState::Done` (status, started_at, claude_session_id) plus
+    // the cosmetic ones touched by aggregation; the canonical record
+    // with full token_usage / log_path / final_message lives on disk.
+    // See #431 for the original report. Idempotent: if the row is
+    // already `Done` (a future direct caller landed it before us) we
+    // leave it alone rather than clobbering richer data.
+    {
+        use crate::dispatch::state::WorkerState;
+        let mut workers = sub_layer.workers.write().await;
+        let already_done = matches!(workers.get(sublead_id), Some(WorkerState::Done(_)));
+        if !already_done {
+            let (started_at, claude_session_id) = match workers.get(sublead_id) {
+                Some(WorkerState::Running {
+                    started_at,
+                    session_id,
+                }) => (*started_at, session_id.clone()),
+                Some(WorkerState::Paused {
+                    paused_at,
+                    session_id,
+                    ..
+                }) => (*paused_at, Some(session_id.clone())),
+                Some(WorkerState::Frozen {
+                    started_at,
+                    session_id,
+                    ..
+                }) => (*started_at, Some(session_id.clone())),
+                _ => (chrono::Utc::now(), None),
+            };
+            let ended_at = chrono::Utc::now();
+            let actor_type = state
+                .sublead_actor_types
+                .read()
+                .await
+                .get(sublead_id)
+                .cloned();
+            let synthetic = pitboss_core::store::TaskRecord {
+                task_id: sublead_id.to_string(),
+                status: outcome.to_task_status(),
+                exit_code: None,
+                started_at,
+                ended_at,
+                duration_ms: (ended_at - started_at).num_milliseconds().max(0),
+                worktree_path: None,
+                log_path: sub_layer
+                    .run_subdir
+                    .join("tasks")
+                    .join(sublead_id)
+                    .join("stdout.log"),
+                token_usage: pitboss_core::parser::TokenUsage::default(),
+                claude_session_id,
+                final_message_preview: None,
+                final_message: None,
+                parent_task_id: Some(state.root.lead_id.clone()),
+                pause_count: 0,
+                reprompt_count: 0,
+                approvals_requested: 0,
+                approvals_approved: 0,
+                approvals_rejected: 0,
+                model: None,
+                failure_reason: None,
+                cost_usd: if actual_spend > 0.0 {
+                    Some(actual_spend)
+                } else {
+                    None
+                },
+                actor_type,
+            };
+            workers.insert(sublead_id.to_string(), WorkerState::Done(synthetic));
+        }
+    }
 
     // Release the original reservation in full
     {

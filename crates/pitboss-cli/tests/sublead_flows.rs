@@ -1960,3 +1960,248 @@ async fn v0_5_single_shot_root_lead_unchanged_when_no_reprompts() {
         .await;
     // If we reached here without panicking, the no-channel path is safe.
 }
+
+/// #431 regression: after `reconcile_terminated_sublead` runs, the
+/// sub-lead's own row in its layer's `workers` map must transition to
+/// `WorkerState::Done(_)` with a `TaskStatus` matching the outcome.
+///
+/// Pre-fix the row stayed `Running` forever — the kill+resume loop's
+/// per-iteration `Running` write was never cleared at termination, so
+/// `collect_layer_workers` (and therefore pitboss-web's Live/Graph
+/// tabs) showed the sub-lead as active for the rest of the run even
+/// though its claude subprocess had exited and its `TaskRecord` was on
+/// disk.
+#[tokio::test]
+async fn reconcile_terminated_sublead_marks_self_row_done() {
+    use pitboss_cli::dispatch::state::WorkerState;
+    use pitboss_cli::dispatch::sublead::{reconcile_terminated_sublead, SubleadOutcome};
+    use pitboss_core::store::TaskStatus;
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    // Build a sub-layer directly (bypassing spawn_sublead's spawn-side
+    // effects which we don't need) and put it on `state.subleads` so
+    // `reconcile_terminated_sublead` finds it via the live map.
+    let sub_id = "sublead-431".to_string();
+    let sub_manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: state.root.manifest.run_dir.clone(),
+        worktree_cleanup: WorktreeCleanup::Never,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(2),
+        budget_usd: Some(2.0),
+        lead_timeout_secs: Some(1800),
+        default_approval_policy: None,
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let sub_layer = Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
+        state.root.run_id,
+        sub_manifest,
+        state.root.store.clone(),
+        CancelToken::new(),
+        sub_id.clone(),
+        state.root.spawner.clone(),
+        PathBuf::from("/bin/true"),
+        state.root.wt_mgr.clone(),
+        CleanupPolicy::Never,
+        state.root.run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+        Some(2.0),
+    ));
+
+    // Mirror what `run_kill_resume_loop` writes for the sub-lead's own
+    // row — this is the state the bug observed (Running with a
+    // session_id, never cleared).
+    let started = chrono::Utc::now();
+    sub_layer.workers.write().await.insert(
+        sub_id.clone(),
+        WorkerState::Running {
+            started_at: started,
+            session_id: Some("sub-sess-431".into()),
+        },
+    );
+    state
+        .subleads
+        .write()
+        .await
+        .insert(sub_id.clone(), sub_layer.clone());
+
+    // Reconcile — the fix should rewrite the sub-lead's row to
+    // `WorkerState::Done(rec)` with the outcome's TaskStatus.
+    reconcile_terminated_sublead(&state, &sub_id, SubleadOutcome::Success)
+        .await
+        .expect("reconcile should succeed");
+
+    // The layer is now in `terminated_sublead_layers`. Walk it the way
+    // `collect_layer_workers` does and assert the sub-lead's own row
+    // landed in a terminal state.
+    let term = state.terminated_sublead_layers.read().await;
+    let layer = term
+        .iter()
+        .find(|l| l.lead_id == sub_id)
+        .expect("layer must be in terminated_sublead_layers after reconcile");
+    let workers = layer.workers.read().await;
+    let row = workers
+        .get(&sub_id)
+        .expect("sublead's own row must still be present after reconcile");
+    match row {
+        WorkerState::Done(rec) => {
+            assert_eq!(rec.task_id, sub_id);
+            assert!(
+                matches!(rec.status, TaskStatus::Success),
+                "expected Success, got {:?}",
+                rec.status
+            );
+            assert_eq!(rec.started_at, started, "started_at must carry over");
+            assert_eq!(
+                rec.claude_session_id.as_deref(),
+                Some("sub-sess-431"),
+                "claude_session_id must carry over from the prior Running row"
+            );
+        }
+        other => panic!("expected WorkerState::Done, got {other:?}"),
+    }
+}
+
+/// `reconcile_terminated_sublead` must map every `SubleadOutcome` to
+/// the corresponding terminal `TaskStatus` on the workers-map row. Pin
+/// the full mapping so a future refactor of `to_task_status` can't
+/// drift the `Running`-forever bug back in for any single variant.
+#[tokio::test]
+async fn reconcile_terminated_sublead_outcome_to_status_mapping() {
+    use pitboss_cli::dispatch::state::WorkerState;
+    use pitboss_cli::dispatch::sublead::{reconcile_terminated_sublead, SubleadOutcome};
+    use pitboss_core::store::TaskStatus;
+
+    fn build_sub_layer(
+        state: &Arc<DispatchState>,
+        id: &str,
+    ) -> Arc<pitboss_cli::dispatch::layer::LayerState> {
+        let sub_manifest = ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(4),
+            halt_on_failure: false,
+            run_dir: state.root.manifest.run_dir.clone(),
+            worktree_cleanup: WorktreeCleanup::Never,
+            emit_event_stream: false,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(1),
+            budget_usd: Some(1.0),
+            lead_timeout_secs: Some(60),
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
+            untyped_actor_policy: Default::default(),
+        };
+        Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
+            state.root.run_id,
+            sub_manifest,
+            state.root.store.clone(),
+            CancelToken::new(),
+            id.into(),
+            state.root.spawner.clone(),
+            PathBuf::from("/bin/true"),
+            state.root.wt_mgr.clone(),
+            CleanupPolicy::Never,
+            state.root.run_subdir.clone(),
+            ApprovalPolicy::Block,
+            None,
+            Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+            Some(1.0),
+        ))
+    }
+
+    let cases: Vec<(&str, SubleadOutcome, TaskStatus)> = vec![
+        (
+            "sublead-cancel",
+            SubleadOutcome::Cancel,
+            TaskStatus::Cancelled,
+        ),
+        (
+            "sublead-timeout",
+            SubleadOutcome::Timeout,
+            TaskStatus::TimedOut,
+        ),
+        (
+            "sublead-error",
+            SubleadOutcome::Error("boom".into()),
+            TaskStatus::Failed,
+        ),
+        (
+            "sublead-rejected",
+            SubleadOutcome::ApprovalRejected,
+            TaskStatus::ApprovalRejected,
+        ),
+        (
+            "sublead-tto",
+            SubleadOutcome::ApprovalTimedOut,
+            TaskStatus::ApprovalTimedOut,
+        ),
+    ];
+
+    for (id, outcome, expected) in cases {
+        let (_dir, state) = mk_state_with_subleads();
+        let sub_layer = build_sub_layer(&state, id);
+        sub_layer.workers.write().await.insert(
+            id.into(),
+            WorkerState::Running {
+                started_at: chrono::Utc::now(),
+                session_id: None,
+            },
+        );
+        state
+            .subleads
+            .write()
+            .await
+            .insert(id.into(), sub_layer.clone());
+
+        reconcile_terminated_sublead(&state, id, outcome.clone())
+            .await
+            .expect("reconcile should succeed");
+
+        let term = state.terminated_sublead_layers.read().await;
+        let layer = term.iter().find(|l| l.lead_id == id).unwrap();
+        let workers = layer.workers.read().await;
+        let row = workers.get(id).expect("row present");
+        match row {
+            WorkerState::Done(rec) => assert_eq!(
+                std::mem::discriminant(&rec.status),
+                std::mem::discriminant(&expected),
+                "outcome {outcome:?} should map to status {expected:?}, got {:?}",
+                rec.status
+            ),
+            other => panic!("expected Done for outcome {outcome:?}, got {other:?}"),
+        }
+    }
+}
