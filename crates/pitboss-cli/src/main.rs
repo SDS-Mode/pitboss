@@ -24,8 +24,9 @@ fn main() -> Result<()> {
         Command::Validate {
             manifest,
             capability_matrix,
+            container,
         } => {
-            std::process::exit(run_validate(&manifest, capability_matrix));
+            std::process::exit(run_validate(&manifest, capability_matrix, container));
         }
         Command::Dispatch {
             manifest,
@@ -343,15 +344,53 @@ fn init_tracing(verbose: u8, quiet: bool) {
 ///     overlapped with the OS-level "binary not found" exit code and made
 ///     it impossible to distinguish a missing `pitboss` binary from a bad
 ///     manifest. (#157)
-fn run_validate(manifest: &std::path::Path, capability_matrix: bool) -> i32 {
+fn run_validate(manifest: &std::path::Path, capability_matrix: bool, container: bool) -> i32 {
     let env_mp = parse_env_max_parallel();
-    let r = match manifest::load_manifest(manifest, env_mp) {
+    let load_result = if container {
+        manifest::load_manifest_skip_dir_check(manifest, env_mp)
+    } else {
+        manifest::load_manifest(manifest, env_mp)
+    };
+    let r = match load_result {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("validation failed: {e:#}");
+            // #255: when validate fails on the host-side directory check
+            // and the manifest declares a `[container]` block, point the
+            // operator at `--container`. Without the hint, a typical
+            // failure is `validation failed: lead directory does not
+            // exist: /workspace` against a perfectly valid
+            // container-mode manifest, with no surface for fixing it.
+            //
+            // Cheap text scan over the manifest source rather than a
+            // re-parse: if parsing failed at TOML level the user has a
+            // bigger problem than the dir check. Re-parsing the
+            // already-rejected file would also risk diverging error
+            // messages.
+            let err_msg = format!("{e:#}");
+            let manifest_text = std::fs::read_to_string(manifest).unwrap_or_default();
+            let hint = if !container
+                && manifest_text.contains("[container]")
+                && err_msg.contains("directory does not exist")
+            {
+                "\n  hint: pass `--container` to validate container-mode manifests \
+                 (the [lead]/[[task]].directory fields are interpreted as \
+                 container-side paths that don't exist on the host)"
+            } else {
+                ""
+            };
+            eprintln!("validation failed: {err_msg}{hint}");
             return 2;
         }
     };
+    // Advisory when --container is set on a manifest that has no
+    // `[container]` block — the flag had no effect and the operator
+    // probably typoed something. Don't fail; the manifest IS valid.
+    if container && r.container.is_none() {
+        eprintln!(
+            "note: manifest has no [container] block — `--container` had no effect \
+             (the dir-existence check would have passed anyway)"
+        );
+    }
     if let Some(lead) = &r.lead {
         println!(
             "OK (hierarchical) — lead='{}', max_workers={}, budget=${:.2}",

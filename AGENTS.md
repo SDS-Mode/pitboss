@@ -257,6 +257,8 @@ read_down = false
 
 The `[container]` section enables `pitboss container-dispatch`, which assembles and execs a Docker/Podman run command from the manifest. Task and lead `directory` fields are interpreted as container-side paths when `[container]` is present.
 
+To pre-flight a container-mode manifest without dispatching, use `pitboss validate --container <manifest>` (#255). The flag skips the host-side directory-existence check that would otherwise fail on the in-container mount paths. Without `--container`, validate emits a hint pointing at the flag rather than failing silently.
+
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `image` | string | `ghcr.io/sds-mode/pitboss-with-claude:latest` | Container image to run. |

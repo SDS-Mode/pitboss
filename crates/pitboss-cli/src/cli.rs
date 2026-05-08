@@ -50,6 +50,15 @@ pub enum Command {
         /// injection so the report cannot drift from live behavior.
         #[arg(long)]
         capability_matrix: bool,
+        /// Skip the host-side directory-existence check on
+        /// `[lead].directory` and `[[task]].directory`. Pass this when
+        /// validating a container-mode manifest (`[container]` set):
+        /// those fields are interpreted as container-side paths that
+        /// don't exist on the host and would otherwise fail
+        /// `validate`. Routes through the same `validate_skip_dir_check`
+        /// path that `pitboss container-dispatch` uses internally. (#255)
+        #[arg(long, alias = "skip-dir-check")]
+        container: bool,
     },
     /// Execute a manifest.
     Dispatch {
