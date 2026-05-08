@@ -16,27 +16,27 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.12.0** lands typed worker/sublead profiles and makes Path B
-permission routing the default. Pitboss shifts from "claude is fully
-trusted, audit after the fact" to "every tool call gates through
-pitboss with a typed allowlist": declare `[[worker_type]]` or
-`[[sublead_type]]` blocks with their own tool allowlists, MCP server
-scopes, and budget caps, and the dispatcher enforces those caps while
-Path B fast-paths typed callers via `permission_prompt` short-circuit.
-`[lead].permission_routing` now defaults to `"path_b"`, so spawned
-claude subprocesses run with their built-in permission gate active;
-tool calls outside `--allowedTools` route through
-`mcp__pitboss__permission_prompt` instead of being silently approved
-via `--dangerously-skip-permissions`. Operators get visibility into
-what's denied: aggregate approvals counters in `pitboss status`,
-per-tile denial counter in the TUI, `tool_denied` events on
-`summary.jsonl`, and a new `pitboss validate --capability-matrix`
-that prints the actor-type × MCP-server table so you can audit
-declared scopes before dispatch. Existing Path-A manifests still work
-— set `permission_routing = "path_a"` explicitly to keep pre-v0.12
-behavior. See `CHANGELOG.md` for the full per-version history and
-`AGENTS.md` for the MCP tool reference, keybindings, and manifest
-schema.
+**v0.13.0** turns the `pitboss-web` Graph tab into the natural first
+stop for run forensics and surfaces the v0.12 typed-actor capability
+work everywhere an operator might look. The Graph tab persists past run
+finalize, every node densifies with timestamps / tokens / cost /
+counters / failure-reason, and clicking opens a side-panel inspector
+with parent/child click-jump plus an inline live log tail (with a
+Pretty/Raw toggle that parses the underlying stream-json into styled
+rows for tool_use / tool_result / thinking / assistant text). On the
+permissions side, per-server `[[mcp_server]].tools` allowlists land both
+as a schema knob and a runtime enforcement gate, complementing the
+v0.12 typed-profile allowlists for defense-in-depth narrowing — typed
+profiles cap which tools an actor class may *request*, per-server
+allowlists cap which tools each MCP server will even *expose*. The
+resolved capability matrix surfaces in the TUI Detail view, the
+manifest detail page, and `pitboss validate --capability-matrix`. Tool
+denials get first-class treatment: per-tile counter, recent-denials
+panel, `DENIED` column in `pitboss status`. `pitboss validate
+--container` finally lets operators pre-flight container manifests
+from outside the container. See `CHANGELOG.md` for the full per-version
+history and `AGENTS.md` for the MCP tool reference, keybindings, and
+manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency

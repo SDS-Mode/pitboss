@@ -10,44 +10,71 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
-## [0.12.0] — 2026-05-07
+## [0.13.0] — 2026-05-08
 
-Pitboss v0.12 lands the **typed worker/sublead profiles** arc (#252) and
-makes **Path B permission routing the default**. Together they shift
-pitboss from "claude is fully trusted, pitboss audits after the fact" to
-"every tool call gates through pitboss with a typed allowlist" — defense
-in depth against prompt-injected leads and drifting workers, with
-per-actor MCP server scoping and a capability matrix you can audit
-before dispatch.
+v0.13.0 reworks the pitboss-web Graph tab from a live-only ornament into
+the natural first stop for run forensics, and surfaces the v0.12
+typed-actor capability work everywhere an operator might look for it.
+The Graph tab now persists past run finalize, every node densifies with
+timestamps / tokens / cost / counters / failure-reason, and clicking
+opens a side-panel inspector with parent/child click-jump plus an inline
+live log tail. Per-server `[[mcp_server]].tools` allowlists land both as
+a schema knob and a runtime enforcement gate, with the resolved
+capability matrix surfacing in the TUI Detail view, the manifest detail
+page, and `pitboss validate --capability-matrix`. Tool denials get
+first-class treatment in the TUI and `pitboss status`. `pitboss validate
+--container` finally lets operators pre-flight container manifests from
+outside the container.
 
 Highlights:
 
-- **Typed actor profiles (#252)** — declare `[[worker_type]]` /
-  `[[sublead_type]]` blocks with their own tool allowlists, MCP server
-  scopes, and budget caps. The dispatcher enforces caps; Path B
-  fast-paths typed callers via `permission_prompt` short-circuit.
-- **Path B is the new default** — `[lead].permission_routing` defaults
-  to `"path_b"`. Spawned claude subprocesses now have their built-in
-  permission gate active; tool calls outside `--allowedTools` route
-  through `mcp__pitboss__permission_prompt` instead of being silently
-  approved via `--dangerously-skip-permissions`.
-- **Capability matrix (`pitboss validate --capability-matrix`)** —
-  prints the actor-type × MCP-server table so operators can audit
-  declared scopes before dispatch.
-- **Approvals visibility everywhere** — aggregate approvals counters
-  in `pitboss status` (#386), per-tile denial counter in the TUI
-  (#387), `tool_denied` events in `summary.jsonl` (#388).
+- **Graph inspector** — Click any actor to drill in. Persists past run
+  finalize. Inline live log tail with a Pretty/Raw stream-json renderer
+  that collapses tool_use / tool_result / thinking / assistant text into
+  styled rows. (#260)
+- **Per-server tool allowlists + capability matrix UI** —
+  Defense-in-depth narrowing: typed profiles cap which tools an actor
+  class may request; per-server allowlists cap which tools each MCP
+  server will even expose. Both axes now visible across the TUI Detail
+  view, the manifest detail page, and `validate --capability-matrix`.
+- **`pitboss validate --container`** — Pre-flight a container-mode
+  manifest without the host-side directory check failing on in-container
+  mount paths.
+- **Tool denials surface in TUI + `pitboss status`** — Per-tile denial
+  counter, recent-denials panel, and `DENIED` column in status output.
+
+### Added
+
+- Pretty/Raw toggle for stream-json task logs ([#421](https://github.com/SDS-Mode/pitboss/pull/421))
+- Tail active task logs inline in graph inspector ([#420](https://github.com/SDS-Mode/pitboss/pull/420))
+- Rework Graph tab into post-run actor inspector ([#419](https://github.com/SDS-Mode/pitboss/pull/419))
+- Pitboss validate --container skips host-side dir checks ([#410](https://github.com/SDS-Mode/pitboss/pull/410))
+- Surface recent tool denials in TUI Detail and pitboss status ([#407](https://github.com/SDS-Mode/pitboss/pull/407))
+- Surface per-server tool allowlists in capability matrix UI ([#402](https://github.com/SDS-Mode/pitboss/pull/402))
+- Runtime [[mcp_server]].tools allowlist enforcement ([#401](https://github.com/SDS-Mode/pitboss/pull/401))
+- Per-server tools allowlist on [[mcp_server]] (#397 slice) ([#400](https://github.com/SDS-Mode/pitboss/pull/400))
+- Surface capability matrix on manifest detail page (#391 slice) ([#398](https://github.com/SDS-Mode/pitboss/pull/398))
+- Surface capability matrix in Detail view (#391 slice) ([#396](https://github.com/SDS-Mode/pitboss/pull/396))
+
+
+### Dependencies
+
+- Bump dirs from 5.0.1 to 6.0.0 ([#277](https://github.com/SDS-Mode/pitboss/pull/277))
+
+
+### Fixed
+
+- Serialize env-touching tests crate-wide via serial_test ([#418](https://github.com/SDS-Mode/pitboss/pull/418))
+- Cancelled runs render distinctly in overview and detail ([#409](https://github.com/SDS-Mode/pitboss/pull/409))
+- Route breaking-marker commits to dedicated section ([#408](https://github.com/SDS-Mode/pitboss/pull/408))
+
+
+## [0.12.0] — 2026-05-07
 
 ### Breaking changes
 
-- **Flip `[lead].permission_routing` default to `path_b`** ([#393](https://github.com/SDS-Mode/pitboss/pull/393)).
-  Existing manifests that relied on the implicit `"path_a"` default get
-  a behavior change at upgrade time. Migration paths: set
-  `permission_routing = "path_a"` to keep pre-v0.12 behavior; declare
-  `[[worker_type]]` / `[[sublead_type]]` profiles to fast-path common
-  tools (see `pitboss schema --format=migration`); or set
-  `[run].default_approval_policy = "auto_approve"` for trusted headless
-  runs.
+- Flip permission_routing default to path_b ([#393](https://github.com/SDS-Mode/pitboss/pull/393))
+
 
 ### Added
 
