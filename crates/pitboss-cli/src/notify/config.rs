@@ -404,8 +404,10 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(env)]
     fn env_var_substitution_replaces_tokens() {
         std::env::set_var("PITBOSS_NOTIFY_TEST_URL", "https://example.com/hook");
         let out = substitute_env_vars("${PITBOSS_NOTIFY_TEST_URL}/sub").unwrap();
@@ -413,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn env_var_missing_fails_loud() {
         std::env::remove_var("PITBOSS_NOTIFY_TEST_MISSING_XYZ");
         let err = substitute_env_vars("${PITBOSS_NOTIFY_TEST_MISSING_XYZ}").unwrap_err();
@@ -425,6 +428,7 @@ mod tests {
     /// URL — both are runtime values pitboss itself sets, and one of them
     /// (PITBOSS_PARENT_NOTIFY_URL) is itself a sensitive operator endpoint.
     #[test]
+    #[serial(env)]
     fn env_var_pitboss_run_id_not_substitutable() {
         std::env::set_var("PITBOSS_RUN_ID", "019d0000-aaaa-bbbb-cccc-dddddddddddd");
         let err = substitute_env_vars("${PITBOSS_RUN_ID}").unwrap_err();
@@ -469,6 +473,7 @@ url = "https://example.com""#;
     }
 
     #[test]
+    #[serial(env)]
     fn env_var_without_pitboss_prefix_rejected() {
         std::env::set_var("NOTIFY_TEST_FOREIGN", "leaked");
         let err = substitute_env_vars("${NOTIFY_TEST_FOREIGN}").unwrap_err();

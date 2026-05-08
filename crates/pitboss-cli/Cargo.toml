@@ -69,3 +69,8 @@ fake-mcp-client = { path = "../../tests-support/fake-mcp-client" }
 fake-control-client = { path = "../../tests-support/fake-control-client" }
 wiremock           = { workspace = true }
 tracing-test       = { workspace = true }
+# #351: serializes env-touching tests across the whole crate so that
+# concurrent set_var/remove_var calls don't race glibc's environ
+# reallocation against background getenv readers (tracing, reqwest,
+# locale init). All env-touching tests must carry `#[serial(env)]`.
+serial_test        = "3.4"

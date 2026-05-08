@@ -438,6 +438,7 @@ pub fn format_mtime(mtime: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -682,6 +683,7 @@ mod tests {
     // ── #141: socket-path resolution doesn't double-nest the run id ─────
 
     #[test]
+    #[serial(env)]
     fn resolve_socket_path_does_not_double_nest_run_id() {
         // Simulate the no-XDG case where the fallback path matters.
         // Stash and restore the env so the test is hermetic regardless of

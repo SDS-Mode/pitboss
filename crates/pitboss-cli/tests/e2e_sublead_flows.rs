@@ -761,6 +761,7 @@ async fn budget_envelope_returns_to_root_pool() {
 /// This proves the full subprocess-spawn → monitor → reconcile path that
 /// v0.6 sub-task 3 wires up.
 #[tokio::test]
+#[serial_test::serial(env)]
 async fn sublead_session_spawns_runs_and_reconciles() {
     ensure_built();
 
