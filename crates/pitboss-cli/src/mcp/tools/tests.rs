@@ -26,6 +26,7 @@ fn worker_spawn_args_has_plugin_isolation_flags() {
         Some(&PathBuf::from("/tmp/cfg.json")),
         Default::default(),
         crate::manifest::schema::CommunicationMode::Disabled,
+        &[],
     );
     assert!(
         argv.iter().any(|a| a == "--strict-mcp-config"),
@@ -153,6 +154,7 @@ fn worker_spawn_args_passes_dangerously_skip_permissions_under_path_a() {
         Some(&PathBuf::from("/tmp/cfg.json")),
         PermissionRouting::PathA,
         CommunicationMode::Disabled,
+        &[],
     );
     assert!(
         argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -177,6 +179,7 @@ fn path_b_worker_emits_permission_prompt_tool() {
         Some(&PathBuf::from("/tmp/cfg.json")),
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
+        &[],
     );
     assert!(
         !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -218,6 +221,7 @@ fn path_b_worker_with_no_mcp_config_falls_back_to_path_a() {
         None, // ← the recovery condition (#369)
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
+        &[],
     );
     // Must have the Path A flag (the fallback) — the worker runs
     // without per-tool gate routing.
@@ -250,6 +254,7 @@ fn path_b_worker_with_mcp_config_keeps_path_b_args() {
         Some(&PathBuf::from("/tmp/cfg.json")),
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
+        &[],
     );
     assert!(
         !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -275,6 +280,7 @@ fn path_a_worker_with_no_mcp_config_unchanged() {
         None,
         PermissionRouting::PathA,
         CommunicationMode::Disabled,
+        &[],
     );
     assert!(
         argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -299,6 +305,7 @@ fn worker_spawn_args_excludes_comm_tools_when_mode_disabled() {
         Some(&PathBuf::from("/tmp/cfg.json")),
         Default::default(),
         CommunicationMode::Disabled,
+        &[],
     );
     let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
     let list = &argv[idx + 1];
@@ -323,6 +330,7 @@ fn worker_spawn_args_includes_comm_tools_when_mode_parent_child() {
         Some(&PathBuf::from("/tmp/cfg.json")),
         Default::default(),
         CommunicationMode::ParentChild,
+        &[],
     );
     let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
     let list = &argv[idx + 1];
@@ -333,6 +341,94 @@ fn worker_spawn_args_includes_comm_tools_when_mode_parent_child() {
              got: {list}"
         );
     }
+}
+
+// ---- per-server [[mcp_server]].tools spawn-time filter (#391/#399) ----
+
+fn mcp_server_with_tools(id: &str, tools: Vec<&str>) -> crate::manifest::schema::McpServerSpec {
+    crate::manifest::schema::McpServerSpec {
+        id: id.into(),
+        command: "/bin/true".into(),
+        args: vec![],
+        env: Default::default(),
+        scope: None,
+        tools: Some(tools.into_iter().map(String::from).collect()),
+    }
+}
+
+/// Under Path B, a non-allowlisted MCP tool in the worker's `tools`
+/// list is dropped from `--allowedTools` at spawn time. Without the
+/// drop, claude would auto-approve the call (anything in
+/// `--allowedTools` skips `permission_prompt`) and the runtime gate
+/// would never fire — the per-server allowlist would be silently
+/// ineffective for programmatic spawns. (#391/#399)
+#[test]
+fn path_b_worker_filters_non_allowlisted_mcp_tool_from_allowed_tools() {
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
+    use std::path::PathBuf;
+
+    let servers = vec![mcp_server_with_tools("fs", vec!["read_file"])];
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &[
+            "Read".to_string(),
+            "mcp__fs__read_file".to_string(),
+            "mcp__fs__write_file".to_string(),
+        ],
+        Some(&PathBuf::from("/tmp/cfg.json")),
+        PermissionRouting::PathB,
+        CommunicationMode::Disabled,
+        &servers,
+    );
+    let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    let list = &argv[idx + 1];
+    assert!(
+        list.contains("Read"),
+        "non-MCP tool must be preserved: {list}"
+    );
+    assert!(
+        list.contains("mcp__fs__read_file"),
+        "allowlisted MCP tool must be preserved: {list}"
+    );
+    assert!(
+        !list.split(',').any(|t| t == "mcp__fs__write_file"),
+        "non-allowlisted MCP tool must be dropped from allowedTools: {list}"
+    );
+}
+
+/// **Load-bearing contract pin (#399 design verification):** under
+/// Path A (`--dangerously-skip-permissions`), the per-server
+/// allowlist has NO runtime effect. Claude bypasses the entire
+/// permission layer in `bypassPermissions` mode, so `--allowedTools`
+/// is ignored and filtering it would change nothing about
+/// enforcement while misleading operators who picked Path A as the
+/// "skip all gates" escape hatch. The non-allowlisted tool must
+/// remain in the argv. A future "let's just filter under both paths
+/// for safety" refactor would silently break this contract — this
+/// test catches it.
+#[test]
+fn path_a_worker_leaves_non_allowlisted_mcp_tool_in_allowed_tools() {
+    use crate::manifest::schema::{CommunicationMode, PermissionRouting};
+    use std::path::PathBuf;
+
+    let servers = vec![mcp_server_with_tools("fs", vec!["read_file"])];
+    let argv = worker_spawn_args(
+        "p",
+        "claude-haiku-4-5",
+        &["Read".to_string(), "mcp__fs__write_file".to_string()],
+        Some(&PathBuf::from("/tmp/cfg.json")),
+        PermissionRouting::PathA,
+        CommunicationMode::Disabled,
+        &servers,
+    );
+    let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    let list = &argv[idx + 1];
+    assert!(
+        list.split(',').any(|t| t == "mcp__fs__write_file"),
+        "Path A is the documented 'skip all gates' escape hatch — \
+         per-server allowlist must have NO runtime effect under it: {list}"
+    );
 }
 
 #[tokio::test]
@@ -1765,6 +1861,250 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
     assert!(
         matches!(resp, PermissionPromptResponse::Allow { .. }),
         "auto-approve should yield Allow variant, got: {resp:?}"
+    );
+}
+
+/// Path B + per-server `[[mcp_server]].tools` allowlist: when claude
+/// routes a `mcp__<server>__<not-allowlisted>` call through
+/// `permission_prompt` (because the spawn-time filter dropped it from
+/// `--allowedTools`), the runtime gate denies with
+/// `DeniedByMcpServerAllowlist` and returns the model-readable
+/// reason string. The deny short-circuit must fire BEFORE the
+/// operator policy + typed-profile gates so `auto_approve` policy
+/// rules can't widen what the per-server allowlist forbids — most
+/// restrictive wins. (#391/#399)
+#[tokio::test]
+async fn permission_prompt_denies_mcp_tool_outside_server_allowlist() {
+    use crate::dispatch::state::ApprovalPolicy;
+    use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+    use crate::manifest::schema::{Effort, McpServerSpec, PermissionRouting, WorktreeCleanup};
+    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use pitboss_core::process::ProcessSpawner;
+    use pitboss_core::session::CancelToken;
+    use pitboss_core::store::{JsonFileStore, SessionStore};
+    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    let dir = TempDir::new().unwrap();
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "p".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 60,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+        permission_routing: PermissionRouting::PathB,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_total_workers: None,
+        sublead_defaults: None,
+    };
+    // Operator policy auto-approves everything — verifies the
+    // mcp_server allowlist gate fires BEFORE the operator rule
+    // (which would otherwise have approved the call). Most-
+    // restrictive wins.
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::AutoApprove),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![McpServerSpec {
+            id: "fs".into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            env: Default::default(),
+            scope: None,
+            tools: Some(vec!["read_file".into()]),
+        }],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_id = Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    std::mem::forget(dir);
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::AutoApprove,
+        None,
+        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+    ));
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "mcp__fs__write_file".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    let PermissionPromptResponse::Deny { message, .. } = resp else {
+        panic!("expected Deny for non-allowlisted MCP tool, got: {resp:?}");
+    };
+    assert!(
+        message.contains("write_file") && message.contains("fs"),
+        "deny reason should name the offending tool and server: {message}"
+    );
+    assert!(
+        message.contains("not in") && message.contains("allowlist"),
+        "deny reason should phrase as 'not in <X> allowlist' for model legibility: {message}"
+    );
+}
+
+/// Companion to the deny test: when the requested tool IS in the
+/// per-server allowlist, the gate doesn't fire — control falls through
+/// to the existing gates (operator policy / typed-profile / bridge).
+/// Without this pin, an over-aggressive gate could deny legitimate
+/// allowlisted calls.
+#[tokio::test]
+async fn permission_prompt_admits_mcp_tool_inside_server_allowlist() {
+    use crate::dispatch::state::ApprovalPolicy;
+    use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
+    use crate::manifest::schema::{Effort, McpServerSpec, PermissionRouting, WorktreeCleanup};
+    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+    use pitboss_core::process::ProcessSpawner;
+    use pitboss_core::session::CancelToken;
+    use pitboss_core::store::{JsonFileStore, SessionStore};
+    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    let dir = TempDir::new().unwrap();
+    let lead = ResolvedLead {
+        id: "lead".into(),
+        directory: PathBuf::from("/tmp"),
+        prompt: "p".into(),
+        branch: None,
+        model: "claude-haiku-4-5".into(),
+        effort: Effort::High,
+        tools: vec![],
+        timeout_secs: 60,
+        use_worktree: false,
+        env: Default::default(),
+        resume_session_id: None,
+        permission_routing: PermissionRouting::PathB,
+        allow_subleads: false,
+        max_subleads: None,
+        max_sublead_budget_usd: None,
+        max_total_workers: None,
+        sublead_defaults: None,
+    };
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: Some(lead),
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_timeout_secs: None,
+        // AutoApprove default: lets `read_file` through the operator
+        // policy gate so we know the mcp_server allowlist DIDN'T
+        // deny — the call reaches Allow via the next gate.
+        default_approval_policy: Some(ApprovalPolicy::AutoApprove),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![McpServerSpec {
+            id: "fs".into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            env: Default::default(),
+            scope: None,
+            tools: Some(vec!["read_file".into()]),
+        }],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let script = FakeScript::new().hold_until_signal();
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let run_id = Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    std::mem::forget(dir);
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("claude"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir,
+        ApprovalPolicy::AutoApprove,
+        None,
+        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
+    ));
+    let resp = handle_permission_prompt(
+        &state,
+        PermissionPromptArgs {
+            tool_name: "mcp__fs__read_file".into(),
+            tool_input: None,
+            cost_estimate: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(resp, PermissionPromptResponse::Allow { .. }),
+        "allowlisted MCP tool should fall through to AutoApprove, got: {resp:?}"
     );
 }
 

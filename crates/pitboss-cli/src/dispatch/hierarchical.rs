@@ -110,6 +110,7 @@ pub async fn run_hierarchical(
             &lead,
             &placeholder_cfg,
             resolved.communication.mode,
+            &resolved.mcp_servers,
         );
         println!("DRY-RUN lead: {}", lead.id);
         println!(
@@ -327,7 +328,12 @@ pub async fn run_hierarchical(
     let communication_mode = resolved.communication.mode;
     let initial_cmd = pitboss_core::process::SpawnCmd {
         program: claude_binary.clone(),
-        args: crate::dispatch::runner::lead_spawn_args(&lead, &mcp_config_path, communication_mode),
+        args: crate::dispatch::runner::lead_spawn_args(
+            &lead,
+            &mcp_config_path,
+            communication_mode,
+            &resolved.mcp_servers,
+        ),
         cwd: lead_cwd.clone(),
         env: lead_env,
     };
@@ -357,6 +363,7 @@ pub async fn run_hierarchical(
                     sid,
                     new_prompt,
                     communication_mode,
+                    &resolved.mcp_servers,
                 ),
                 cwd: lead_cwd.clone(),
                 env: resume_env,

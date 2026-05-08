@@ -488,6 +488,63 @@ pub async fn handle_permission_prompt(
         fallback: crate::mcp::approval::ApprovalFallback::AutoReject,
     };
 
+    // Per-server [[mcp_server]].tools allowlist short-circuit (#391
+    // slice 4 / #399). Goes BEFORE operator policy + typed-profile
+    // because it represents a structural manifest constraint —
+    // most-restrictive-wins. An operator's `[[approval_policy]]`
+    // auto_approve rule cannot widen what the per-server allowlist
+    // forbids; the operator must edit the server's `tools = […]` (or
+    // remove it) to allow the tool. PR #400 already validates that
+    // declared actor surfaces (worker_type/sublead_type/lead/task tools)
+    // can't conflict; this gate catches programmatic spawns
+    // (`spawn_worker(tools = […])`) and any defense-in-depth case where
+    // a tool somehow reached `permission_prompt` despite the spawn-time
+    // `--allowedTools` filter.
+    //
+    // **Layered ordering (deliberate asymmetry vs. typed-profile):**
+    // 1. mcp_server allowlist (this gate, structural — un-overridable)
+    // 2. operator policy rules (cross-cutting — can override profile)
+    // 3. typed-profile short-circuit (per-class)
+    // 4. bridge fallback (operator interactive)
+    //
+    // The asymmetry — operator `auto_approve` overrides typed-profile
+    // but NOT mcp_server.tools — is intentional. `[[mcp_server]].tools`
+    // is the operator's per-server consent contract; `[[approval_policy]]`
+    // is the operator's behavioral exception layer. Allowing rules to
+    // widen the server allowlist would make the per-server contract
+    // operator-policy-dependent, which defeats the audit story
+    // ("which tools is server X consented to expose?" must have a
+    // single answer).
+    if let Some(parsed) = crate::manifest::mcp_tools::parse_mcp_tool_name(
+        &args.tool_name,
+        &state.root.manifest.mcp_servers,
+    ) {
+        if !parsed.is_admitted() {
+            let reason = PermissionDenialReason::mcp_server_allowlist_message(
+                &args.tool_name,
+                parsed.server_id,
+                parsed.tool_name,
+            );
+            record_permission_denied(
+                state,
+                &caller_id,
+                &args.tool_name,
+                PermissionDenialReason::DeniedByMcpServerAllowlist,
+                &reason,
+            )
+            .await;
+            state
+                .record_last_approval_response(&caller_id, false, false)
+                .await;
+            crate::mcp::approval::bump_approval_requested(state, &caller_id).await;
+            crate::mcp::approval::record_approval_outcome(state, &caller_id, false).await;
+            return Ok(PermissionPromptResponse::Deny {
+                message: reason,
+                interrupt: false,
+            });
+        }
+    }
+
     // Evaluate operator-declared policy first.
     {
         let matcher_guard = state.root.policy_matcher.lock().await;

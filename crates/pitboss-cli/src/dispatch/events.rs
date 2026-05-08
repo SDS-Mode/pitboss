@@ -42,6 +42,12 @@ pub enum DeniedReasonKind {
     /// time whether a deny came from the cross-cutting rule machinery
     /// or from a per-class profile cap.
     DeniedByProfile,
+    /// The requested tool resolves to `mcp__<server>__<tool>` for a
+    /// `[[mcp_server]]` whose declared `tools = […]` allowlist does
+    /// not include `<tool>`. Path-B-only enforcement: under Path A
+    /// (`bypassPermissions`) claude skips the entire permission layer
+    /// and the gate has no effect. (#391 / #399)
+    DeniedByMcpServerAllowlist,
     /// Operator (TUI / web console) responded with reject.
     OperatorRejected,
     /// TTL on the queued approval expired and the fallback fired.
@@ -68,6 +74,9 @@ impl DeniedReasonKind {
             Self::DeniedByProfile => {
                 format!("denied: tool '{tool_name}' not in actor profile allowlist")
             }
+            Self::DeniedByMcpServerAllowlist => {
+                format!("denied: tool '{tool_name}' not in mcp_server allowlist")
+            }
             Self::OperatorRejected => {
                 format!("denied: tool '{tool_name}' rejected by operator")
             }
@@ -84,6 +93,22 @@ impl DeniedReasonKind {
     /// allowlist`.
     pub fn profile_message(tool_name: &str, role: &str, type_id: &str) -> String {
         format!("denied: tool '{tool_name}' not in {role}_type '{type_id}' allowlist")
+    }
+
+    /// Specific phrasing for [`Self::DeniedByMcpServerAllowlist`]. The
+    /// model sees both the server id and the tool name so it can
+    /// rephrase its request without an operator round-trip — e.g.,
+    /// `denied: tool 'mcp__fs-writer__delete_all' not in mcp_server
+    /// 'fs-writer' allowlist`.
+    pub fn mcp_server_allowlist_message(
+        tool_name: &str,
+        server_id: &str,
+        bare_tool: &str,
+    ) -> String {
+        format!(
+            "denied: tool '{tool_name}' (mcp_server '{server_id}' tool '{bare_tool}') \
+             not in server allowlist"
+        )
     }
 }
 

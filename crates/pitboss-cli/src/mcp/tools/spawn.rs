@@ -603,6 +603,7 @@ async fn run_worker(
             mcp_config_arg.as_deref(),
             worker_routing,
             worker_communication_mode,
+            &state.root.manifest.mcp_servers,
         ),
         cwd: cwd.clone(),
         env: worker_env,
@@ -858,6 +859,7 @@ pub fn pitboss_worker_mcp_tools(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn worker_spawn_args(
     prompt: &str,
     model: &str,
@@ -865,6 +867,7 @@ pub(super) fn worker_spawn_args(
     mcp_config: Option<&std::path::Path>,
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
+    mcp_servers: &[crate::manifest::schema::McpServerSpec],
 ) -> Vec<String> {
     use crate::manifest::schema::PermissionRouting;
     // #369: Path B requires a reachable mcp-config so claude can route
@@ -904,7 +907,20 @@ pub(super) fn worker_spawn_args(
     // an mcp-config is supplied, alongside their user-declared tools. Without
     // this, kv_set / lease_acquire / etc. hit the permission prompt which
     // can't be answered in non-interactive mode.
-    let mut allowed: Vec<String> = tools.to_vec();
+    //
+    // Path-B: per-server `[[mcp_server]].tools` allowlists filter the
+    // user-declared tools BEFORE we union with the pitboss MCP set so a
+    // non-allowlisted MCP tool routes through `permission_prompt`
+    // instead of being silently auto-approved. This is the spawn-time
+    // half of the per-server gate; the runtime half lives in
+    // `handle_permission_prompt`. Path A: no-op (#391/#399). Note we
+    // pass `effective_routing` (not `permission_routing`) so the
+    // mcp-config-fallback path correctly downgrades to Path A behavior.
+    let mut allowed: Vec<String> = crate::manifest::mcp_tools::filter_actor_tools_by_mcp_allowlists(
+        tools,
+        mcp_servers,
+        effective_routing,
+    );
     if mcp_config.is_some() {
         for t in pitboss_worker_mcp_tools(communication_mode) {
             allowed.push(t.to_string());
@@ -1066,6 +1082,7 @@ pub async fn spawn_resume_worker(
         mcp_config_arg.as_deref(),
         resume_routing,
         resume_communication_mode,
+        &state.root.manifest.mcp_servers,
     );
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
