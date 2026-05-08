@@ -118,6 +118,22 @@ git cliff --unreleased            # what would land in [Unreleased]
 git cliff --tag vX.Y.Z --strip header  # what cliff would emit for this tag
 ```
 
+**Verify breaking changes routed correctly (#406).** When a release
+includes any commit with a `!:` marker (e.g. `feat(scope)!: …`) or a
+`BREAKING CHANGE:` footer, the regenerated changelog MUST emit a
+`### Breaking changes` section ABOVE `### Added` for that release.
+Sanity-check before tagging:
+
+```bash
+# Should print "### Breaking changes" ahead of "### Added" for any
+# release containing a breaking commit:
+awk '/^## \[X\.Y\.Z\]/,/^## \[/' CHANGELOG.md | grep -E '^### '
+```
+
+If the section is missing or out of order, the cliff config has
+regressed — see #406 for the parser-and-template setup that handles
+both the subject `!:` marker and the `BREAKING CHANGE:` footer.
+
 ### 4. README.md — replace the version-highlight paragraph
 
 README has one paragraph near the top that describes the current release.

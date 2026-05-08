@@ -37,13 +37,31 @@ body = """
 {% else %}\
 ## [Unreleased]
 {% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
+{# Emit Breaking changes first when present. Tera's group_by sorts groups
+   alphabetically, which puts "Added" above "Breaking changes" — wrong
+   for our convention (CLAUDE.md says breaking belongs above the others
+   so operators see the upgrade impact at the top of the section).
+   Two-pass: explicit Breaking block, then the rest with that group
+   filtered out. (#406) -#}
+{% for group, commits in commits | group_by(attribute="group") %}\
+{% if group == "Breaking changes" %}
 ### {{ group | upper_first }}
 
 {% for commit in commits %}\
 - {{ commit.message | upper_first }}\
 {% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}](https://github.com/SDS-Mode/pitboss/pull/{{ commit.remote.pr_number }})){% endif %}
 {% endfor %}
+{% endif %}\
+{% endfor %}\
+{% for group, commits in commits | group_by(attribute="group") %}\
+{% if group != "Breaking changes" %}
+### {{ group | upper_first }}
+
+{% for commit in commits %}\
+- {{ commit.message | upper_first }}\
+{% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}](https://github.com/SDS-Mode/pitboss/pull/{{ commit.remote.pr_number }})){% endif %}
+{% endfor %}
+{% endif %}\
 {% endfor %}\n
 """
 
@@ -78,9 +96,19 @@ commit_preprocessors = [
 # The wider community uses "Added/Fixed/Changed" from Keep-a-Changelog;
 # we keep that vocabulary so existing entries don't look out of place.
 commit_parsers = [
-    # Breaking changes (cliff sets `commit.breaking = true` when the
-    # subject has `!:` or the body has `BREAKING CHANGE:`). Promote
-    # those to a dedicated section regardless of type.
+    # Breaking changes — promote to a dedicated section regardless of
+    # commit type. cliff's `breaking = true` parser key alone does NOT
+    # reliably route conventionally-marked breaking commits to a custom
+    # group when they ALSO match a later type parser (`^feat` etc.) —
+    # observed during the v0.12 release where #393's
+    # `feat(dispatch)!: ...` subject + `BREAKING CHANGE:` footer landed
+    # in `### Added`. Belt-and-suspenders: explicit regex matchers on
+    # the subject's `!:` marker AND the body footer, ordered first so
+    # they win first-match-wins. (#406)
+    { message = "^[a-z]+(\\(.+\\))?!:", group = "Breaking changes" },
+    { body = ".*BREAKING CHANGE", group = "Breaking changes" },
+    # Kept as a backstop for any future cliff release where the
+    # `breaking = true` filter starts working as advertised.
     { breaking = true, group = "Breaking changes" },
 
     { message = "^feat", group = "Added" },
