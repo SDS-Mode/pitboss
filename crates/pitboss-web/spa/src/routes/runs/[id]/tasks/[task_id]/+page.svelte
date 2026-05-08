@@ -5,6 +5,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Badge } from '$lib/components/ui/badge';
   import { ArrowLeft, ChevronRight, RefreshCw, AlertTriangle, Download } from 'lucide-svelte';
+  import LogPretty from '$lib/components/log-pretty.svelte';
 
   const runId = $derived(page.params.id ?? '');
   const taskId = $derived(page.params.task_id ?? '');
@@ -14,6 +15,12 @@
   let loading = $state(false);
   let tail = $state(true);
   let detail = $state<TaskRecord | null>(null);
+  // #260 follow-up: render mode for the log body. Pretty parses each
+  // stream-json line into a styled row; Raw keeps the original
+  // dispatch-side bytes for wire-format debugging.
+  let logFormat = $state<'pretty' | 'raw'>('pretty');
+  let hideHooks = $state(true);
+  let hideThinking = $state(false);
   const limit = 256 * 1024; // 256 KiB
 
   async function load() {
@@ -88,6 +95,26 @@
     </p>
   </div>
   <div class="flex items-center gap-2">
+    <div class="bg-muted/30 inline-flex items-center rounded text-xs">
+      <button
+        class="px-2 py-1 rounded {logFormat === 'pretty'
+          ? 'bg-background border border-border shadow-sm font-medium'
+          : 'text-muted-foreground hover:text-foreground'}"
+        onclick={() => (logFormat = 'pretty')}
+        title="Human-readable rows"
+      >
+        Pretty
+      </button>
+      <button
+        class="px-2 py-1 rounded {logFormat === 'raw'
+          ? 'bg-background border border-border shadow-sm font-medium'
+          : 'text-muted-foreground hover:text-foreground'}"
+        onclick={() => (logFormat = 'raw')}
+        title="Raw NDJSON"
+      >
+        Raw
+      </button>
+    </div>
     <Badge
       variant={tail ? 'default' : 'outline'}
       class="cursor-pointer"
@@ -189,6 +216,20 @@
         <p class="text-muted-foreground py-6 text-center text-sm">Loading log…</p>
       {:else if log.length === 0}
         <p class="text-muted-foreground py-6 text-center text-sm">Log is empty.</p>
+      {:else if logFormat === 'pretty'}
+        <div class="text-muted-foreground mb-2 flex items-center gap-3 text-xs">
+          <label class="inline-flex cursor-pointer items-center gap-1">
+            <input type="checkbox" class="size-3.5" bind:checked={hideHooks} />
+            hide hooks
+          </label>
+          <label class="inline-flex cursor-pointer items-center gap-1">
+            <input type="checkbox" class="size-3.5" bind:checked={hideThinking} />
+            hide thinking
+          </label>
+        </div>
+        <div class="bg-muted/40 max-h-[75vh] overflow-auto rounded-md p-4">
+          <LogPretty text={log} {hideHooks} {hideThinking} />
+        </div>
       {:else}
         <pre
           class="bg-muted/40 max-h-[75vh] overflow-auto rounded-md p-4 text-xs leading-relaxed font-mono"><code
