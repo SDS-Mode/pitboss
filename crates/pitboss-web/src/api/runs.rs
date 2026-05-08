@@ -226,6 +226,32 @@ pub async fn task_log(
         .expect("log response"))
 }
 
+/// `GET /api/runs/:run_id/tasks/:task_id/events` — per-actor `events.jsonl`
+/// (pause / continue / reprompt / approval / tool-denied audit trail
+/// written by `pitboss-cli/src/dispatch/events.rs::append_event`). Streamed
+/// verbatim as NDJSON; the SPA's run-graph inspector parses lines as
+/// `TaskEvent` for the lifecycle list (#260).
+///
+/// 404 when the task dir exists but has never had an event appended (the
+/// dispatcher only creates the file on first append).
+pub async fn task_events(
+    State(state): State<AppState>,
+    AxPath((run_id, task_id)): AxPath<(String, String)>,
+) -> ApiResult<Response> {
+    let run_dir = run_dir(state.runs_dir(), &run_id)?;
+    let task_seg = sanitize_id(&task_id)?;
+    let path = run_dir.join("tasks").join(task_seg).join("events.jsonl");
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/x-ndjson")
+            .body(Body::from(bytes))
+            .expect("ndjson response")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ApiError::NotFound),
+        Err(e) => Err(e.into()),
+    }
+}
+
 // ---- helpers -------------------------------------------------------------
 
 fn json_response(bytes: Vec<u8>) -> Response {
@@ -597,6 +623,94 @@ mod tests {
         )
         .await;
         assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    // ── #260: task_events endpoint ─────────────────────────────────────────
+
+    /// Build a run dir with a synthetic `tasks/<task_id>/events.jsonl`
+    /// containing the given raw lines. The file is written verbatim so the
+    /// test can pin the exact byte stream the endpoint should echo back.
+    fn build_run_with_task_events(
+        run_id: &str,
+        task_id: &str,
+        lines: &[&str],
+    ) -> (TempDir, AppState) {
+        let tmp = TempDir::new().unwrap();
+        let runs_dir = tmp.path().to_path_buf();
+        let task_dir = runs_dir.join(run_id).join("tasks").join(task_id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let mut content = String::new();
+        for l in lines {
+            content.push_str(l);
+            content.push('\n');
+        }
+        std::fs::write(task_dir.join("events.jsonl"), content).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(runs_dir, manifests_dir, None);
+        (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn task_events_returns_ndjson_for_existing_file() {
+        let run_id = "01950000-0000-7000-8000-000000000020";
+        let lines = [
+            r#"{"kind":"pause","at":"2026-05-01T00:00:00Z"}"#,
+            r#"{"kind":"continue","at":"2026-05-01T00:00:05Z","new_session_id":"sess-2","prompt_preview":"continue"}"#,
+            r#"{"kind":"tool_denied","at":"2026-05-01T00:00:10Z","tool_name":"Bash","actor_id":"worker-A","reason_kind":"denied_by_profile","reason":"Bash not in profile allowlist"}"#,
+        ];
+        let (_tmp, state) = build_run_with_task_events(run_id, "worker-A", &lines);
+
+        let resp = task_events(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/x-ndjson"
+        );
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        let got: Vec<&str> = text.lines().collect();
+        assert_eq!(got, lines, "endpoint must echo events.jsonl verbatim");
+    }
+
+    /// A task that never had an event appended has no `events.jsonl` file
+    /// (the writer in `dispatch/events.rs::append_event` creates it lazily).
+    /// 404 — the inspector will treat that as "no lifecycle events".
+    #[tokio::test]
+    async fn task_events_returns_404_when_events_jsonl_missing() {
+        let run_id = "01950000-0000-7000-8000-000000000021";
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(run_id).join("tasks").join("worker-A")).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(tmp.path().to_path_buf(), manifests_dir, None);
+
+        let resp = task_events(
+            State(state),
+            AxPath((run_id.to_string(), "worker-A".to_string())),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    /// A task_id with a path separator must be rejected before the read.
+    /// Same sanitizer the `task_log` endpoint uses (`sanitize_id`).
+    #[tokio::test]
+    async fn task_events_rejects_traversal_in_task_id() {
+        let run_id = "01950000-0000-7000-8000-000000000022";
+        let (_tmp, state) = build_run_with_task_events(run_id, "worker-A", &[]);
+
+        let resp = task_events(
+            State(state),
+            AxPath((run_id.to_string(), "../../etc/passwd".to_string())),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::BadRequest(_))));
     }
 
     /// Malformed JSON lines (e.g., a partial-write tail caught mid-flush)

@@ -1,0 +1,383 @@
+<script lang="ts">
+  import {
+    Sheet,
+    SheetContent,
+    SheetDescription,
+    SheetHeader,
+    SheetTitle
+  } from '$lib/components/ui/sheet';
+  import { Badge } from '$lib/components/ui/badge';
+  import { Button } from '$lib/components/ui/button';
+  import { Separator } from '$lib/components/ui/separator';
+  import {
+    getTaskEvents,
+    type ActorActivity,
+    type FailureReason,
+    type SubleadInfo,
+    type TaskEvent,
+    type TaskRecord,
+    type WorkerEntry
+  } from '$lib/api';
+  import { costUsd, fmtCost } from '$lib/prices';
+  import { ExternalLink, ArrowLeftRight, AlertTriangle } from 'lucide-svelte';
+
+  let {
+    runId,
+    open = $bindable(false),
+    selectedTaskId,
+    task,
+    worker,
+    failure,
+    sublead,
+    activity,
+    allTasks,
+    onJumpTo
+  }: {
+    runId: string;
+    open?: boolean;
+    selectedTaskId: string | null;
+    /** Matching TaskRecord from `summary.jsonl` (post-finalize) or
+     *  `summary.json` (post-finalize). Undefined when the actor only
+     *  exists in live SSE state. */
+    task: TaskRecord | undefined;
+    /** Live `WorkersSnapshot` row if the actor is still active. */
+    worker: WorkerEntry | undefined;
+    failure: FailureReason | undefined;
+    sublead: SubleadInfo | undefined;
+    activity: ActorActivity | undefined;
+    /** Full task list — used to compute parent/children for the
+     *  hierarchy section. Same source the graph already consumes. */
+    allTasks: TaskRecord[];
+    /** Click-jump on parent / child rows to swap the selection. */
+    onJumpTo: (taskId: string) => void;
+  } = $props();
+
+  // Lazy-fetch lifecycle events when the inspector opens for a new id.
+  // The fetch is bounded to the currently-selected task; if the user
+  // switches selection mid-fetch, the previous request's result is
+  // dropped via the `lastFetchedFor` token check.
+  let events = $state<TaskEvent[]>([]);
+  let eventsLoading = $state(false);
+  let eventsError = $state<string | null>(null);
+  let lastFetchedFor = $state<string | null>(null);
+
+  $effect(() => {
+    const id = selectedTaskId;
+    if (!open || !id) {
+      events = [];
+      eventsError = null;
+      lastFetchedFor = null;
+      return;
+    }
+    if (id === lastFetchedFor) return;
+    lastFetchedFor = id;
+    eventsLoading = true;
+    eventsError = null;
+    getTaskEvents(runId, id)
+      .then((rows) => {
+        // Drop the result if the selection has moved on.
+        if (lastFetchedFor !== id) return;
+        events = rows;
+      })
+      .catch((err) => {
+        if (lastFetchedFor !== id) return;
+        eventsError = err instanceof Error ? err.message : String(err);
+      })
+      .finally(() => {
+        if (lastFetchedFor === id) eventsLoading = false;
+      });
+  });
+
+  const status = $derived(task?.status ?? worker?.state ?? 'unknown');
+  const startedIso = $derived(task?.started_at ?? worker?.started_at);
+  const endedIso = $derived(task?.ended_at);
+  const duration = $derived(task?.duration_ms);
+
+  const parentId = $derived(task?.parent_task_id ?? worker?.parent_task_id ?? null);
+  const childrenIds = $derived(
+    allTasks
+      .filter((t) => t.parent_task_id === selectedTaskId)
+      .map((t) => t.task_id)
+  );
+
+  const totalTokens = $derived(
+    (task?.token_usage?.input ?? 0) +
+      (task?.token_usage?.output ?? 0) +
+      (task?.token_usage?.cache_read ?? 0) +
+      (task?.token_usage?.cache_creation ?? 0)
+  );
+
+  const cost = $derived(
+    typeof task?.cost_usd === 'number' ? task.cost_usd : costUsd(task?.model, task?.token_usage)
+  );
+
+  const failureKind = $derived.by(() => {
+    const r = (task?.failure_reason ?? failure) as { kind?: string } | null | undefined;
+    return r && typeof r === 'object' ? (r.kind ?? null) : null;
+  });
+  const failureMessage = $derived.by(() => {
+    const r = (task?.failure_reason ?? failure) as { message?: string } | null | undefined;
+    return r && typeof r === 'object' ? (r.message ?? null) : null;
+  });
+
+  function fmtDuration(ms?: number): string {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  }
+
+  function fmtTime(iso?: string | null): string {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  }
+
+  function statusBadgeVariant(s: string): 'destructive' | 'secondary' | 'outline' {
+    const lc = s.toLowerCase();
+    if (lc === 'failed' || lc === 'aborted' || lc === 'cancelled') return 'destructive';
+    if (lc === 'success' || lc === 'completed') return 'secondary';
+    return 'outline';
+  }
+
+  function eventLabel(e: TaskEvent): string {
+    switch (e.kind) {
+      case 'pause':
+        return 'paused' + (e.reason ? ` (${e.reason})` : '');
+      case 'continue':
+        return `continued → ${e.new_session_id}`;
+      case 'reprompt':
+        return 'reprompted';
+      case 'approval_request':
+        return `approval requested (${e.request_id.slice(0, 8)}…)`;
+      case 'approval_response':
+        return `approval ${e.approved ? 'granted' : 'denied'}${e.edited ? ' (edited)' : ''}`;
+      case 'notification_failed':
+        return `notify_failed: ${e.sink_id}`;
+      case 'tool_denied':
+        return `denied: ${e.tool_name} (${e.reason_kind})`;
+      case 'tool_auto_approved':
+        return `auto-approved: ${e.tool_name}`;
+    }
+  }
+</script>
+
+<Sheet
+  bind:open
+  onOpenChange={(o: boolean) => {
+    // Bubble close-via-overlay/ESC up to the parent so it can clear
+    // `selectedTaskId`. Without this, hitting ESC closes the sheet but
+    // the graph keeps highlighting the node.
+    if (!o && selectedTaskId !== null) onJumpTo('');
+  }}
+>
+  <SheetContent class="w-full overflow-y-auto sm:max-w-md">
+    {#if !selectedTaskId}
+      <SheetHeader>
+        <SheetTitle>No selection</SheetTitle>
+      </SheetHeader>
+    {:else}
+      <SheetHeader class="space-y-1">
+        <SheetTitle class="flex items-center gap-2">
+          <code class="text-base font-mono">{selectedTaskId}</code>
+          <Badge variant={statusBadgeVariant(status)} class="text-[10px]">
+            {status}
+          </Badge>
+          {#if sublead}
+            <Badge variant="outline" class="text-[10px]">sublead</Badge>
+          {/if}
+        </SheetTitle>
+        <SheetDescription class="text-xs">
+          {task?.model ?? worker?.session_id ?? 'unknown model'}
+          {#if task?.actor_type}
+            · profile <code class="font-mono">{task.actor_type}</code>
+          {/if}
+        </SheetDescription>
+      </SheetHeader>
+
+      <div class="space-y-4 px-4 pb-6">
+        <!-- Timing -->
+        <section class="space-y-1 text-xs">
+          <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">Timing</h3>
+          <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt class="text-muted-foreground">Started</dt>
+            <dd class="font-mono">{fmtTime(startedIso)}</dd>
+            <dt class="text-muted-foreground">Ended</dt>
+            <dd class="font-mono">{endedIso ? fmtTime(endedIso) : '—'}</dd>
+            <dt class="text-muted-foreground">Duration</dt>
+            <dd class="font-mono">{fmtDuration(duration)}</dd>
+            {#if task?.exit_code !== undefined && task.exit_code !== null}
+              <dt class="text-muted-foreground">Exit code</dt>
+              <dd class="font-mono">{task.exit_code}</dd>
+            {/if}
+          </dl>
+        </section>
+
+        <Separator />
+
+        <!-- Tokens / cost -->
+        <section class="space-y-1 text-xs">
+          <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">Tokens &amp; cost</h3>
+          {#if totalTokens === 0 && cost === null}
+            <p class="text-muted-foreground italic">No usage data yet.</p>
+          {:else}
+            <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 tabular-nums">
+              <dt class="text-muted-foreground">Input</dt>
+              <dd class="font-mono">{(task?.token_usage?.input ?? 0).toLocaleString()}</dd>
+              <dt class="text-muted-foreground">Output</dt>
+              <dd class="font-mono">{(task?.token_usage?.output ?? 0).toLocaleString()}</dd>
+              <dt class="text-muted-foreground">Cache read</dt>
+              <dd class="font-mono">{(task?.token_usage?.cache_read ?? 0).toLocaleString()}</dd>
+              <dt class="text-muted-foreground">Cache create</dt>
+              <dd class="font-mono">{(task?.token_usage?.cache_creation ?? 0).toLocaleString()}</dd>
+              <dt class="text-muted-foreground">Cost</dt>
+              <dd class="font-mono">{fmtCost(cost)}</dd>
+            </dl>
+          {/if}
+        </section>
+
+        <Separator />
+
+        <!-- Counters -->
+        <section class="space-y-1 text-xs">
+          <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">Counters</h3>
+          <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 tabular-nums">
+            <dt class="text-muted-foreground">Pauses</dt>
+            <dd class="font-mono">{task?.pause_count ?? 0}</dd>
+            <dt class="text-muted-foreground">Reprompts</dt>
+            <dd class="font-mono">{task?.reprompt_count ?? 0}</dd>
+            <dt class="text-muted-foreground">Approvals (req / ok / denied)</dt>
+            <dd class="font-mono">
+              {task?.approvals_requested ?? 0} / {task?.approvals_approved ?? 0} / {task?.approvals_rejected ?? 0}
+            </dd>
+            {#if activity}
+              <dt class="text-muted-foreground">Store ops (kv / lease / msg / art)</dt>
+              <dd class="font-mono">
+                {activity.kv_ops} / {activity.lease_ops} / {activity.message_ops ?? 0} / {activity.artifact_ops ?? 0}
+              </dd>
+            {/if}
+          </dl>
+        </section>
+
+        <!-- Failure detail -->
+        {#if failureKind}
+          <Separator />
+          <section class="space-y-1 text-xs">
+            <h3 class="text-destructive flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide">
+              <AlertTriangle class="size-3" /> Failure
+            </h3>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              <dt class="text-muted-foreground">Kind</dt>
+              <dd class="font-mono">{failureKind}</dd>
+              {#if failureMessage}
+                <dt class="text-muted-foreground">Message</dt>
+                <dd class="font-mono break-words">{failureMessage}</dd>
+              {/if}
+            </dl>
+          </section>
+        {/if}
+
+        <Separator />
+
+        <!-- Hierarchy -->
+        <section class="space-y-1 text-xs">
+          <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">Hierarchy</h3>
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center gap-2">
+              <span class="text-muted-foreground w-12">Parent</span>
+              {#if parentId}
+                <Button
+                  variant="link"
+                  size="sm"
+                  class="h-auto p-0 font-mono"
+                  onclick={() => onJumpTo(parentId)}
+                >
+                  <ArrowLeftRight class="mr-1 size-3" />
+                  {parentId}
+                </Button>
+              {:else}
+                <span class="text-muted-foreground italic">root</span>
+              {/if}
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="text-muted-foreground w-12 pt-0.5">Children</span>
+              {#if childrenIds.length === 0}
+                <span class="text-muted-foreground italic">none</span>
+              {:else}
+                <div class="flex flex-wrap gap-1">
+                  {#each childrenIds as id (id)}
+                    <Button
+                      variant="link"
+                      size="sm"
+                      class="h-auto p-0 font-mono"
+                      onclick={() => onJumpTo(id)}
+                    >
+                      {id}
+                    </Button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </div>
+        </section>
+
+        <!-- Final message -->
+        {#if task?.final_message ?? task?.final_message_preview}
+          <Separator />
+          <section class="space-y-1 text-xs">
+            <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">Final message</h3>
+            <pre class="bg-muted/30 max-h-48 overflow-auto whitespace-pre-wrap rounded p-2 font-mono text-[11px]">{task.final_message ?? task.final_message_preview}</pre>
+          </section>
+        {/if}
+
+        <!-- Lifecycle events -->
+        <Separator />
+        <section class="space-y-1 text-xs">
+          <h3 class="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">Lifecycle events</h3>
+          {#if eventsLoading}
+            <p class="text-muted-foreground italic">Loading…</p>
+          {:else if eventsError}
+            <p class="text-destructive">Failed to load events: {eventsError}</p>
+          {:else if events.length === 0}
+            <p class="text-muted-foreground italic">No lifecycle events recorded.</p>
+          {:else}
+            <ul class="space-y-1">
+              {#each events as e, i (i)}
+                <li class="flex items-start gap-2 text-[11px]">
+                  <span class="text-muted-foreground/80 w-32 shrink-0 font-mono">
+                    {fmtTime(e.at)}
+                  </span>
+                  <span class="font-mono">{eventLabel(e)}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+
+        <!-- Open log -->
+        <Separator />
+        <section class="space-y-1 text-xs">
+          <Button
+            variant="outline"
+            size="sm"
+            class="w-full"
+            onclick={() => {
+              // Lean on the existing static log endpoint. Opens in a new
+              // tab so the inspector stays open for cross-referencing.
+              window.open(
+                `/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(selectedTaskId!)}/log`,
+                '_blank',
+                'noopener'
+              );
+            }}
+          >
+            <ExternalLink class="mr-1.5 size-3.5" />
+            Open stdout.log
+          </Button>
+        </section>
+      </div>
+    {/if}
+  </SheetContent>
+</Sheet>

@@ -160,6 +160,57 @@ export interface TaskRecord {
   approvals_rejected: number;
   model: string | null;
   failure_reason: unknown | null;
+  /** Dispatcher-stamped USD cost (#258); falls back to client-side
+   * `prices.ts` table when null on older runs. */
+  cost_usd?: number | null;
+  /** Resolved profile id (`worker_type` / `sublead_type`); v0.12+. */
+  actor_type?: string | null;
+}
+
+/** NDJSON event row from `tasks/<task_id>/events.jsonl`. The kind tag is
+ * snake-case to match `pitboss-cli/src/dispatch/events.rs::TaskEvent`. */
+export type TaskEvent =
+  | { kind: 'pause'; at: string; reason?: string }
+  | { kind: 'continue'; at: string; new_session_id: string; prompt_preview: string }
+  | { kind: 'reprompt'; at: string; prompt_preview: string; prior_session_id: string }
+  | { kind: 'approval_request'; at: string; request_id: string; summary_preview: string }
+  | { kind: 'approval_response'; at: string; request_id: string; approved: boolean; edited: boolean }
+  | { kind: 'notification_failed'; at: string; sink_id: string; event_kind: string; error: string }
+  | {
+      kind: 'tool_denied';
+      at: string;
+      tool_name: string;
+      actor_id: string;
+      reason_kind: string;
+      reason: string;
+    }
+  | { kind: 'tool_auto_approved'; at: string; tool_name: string; actor_id: string; actor_type: string };
+
+/** GET /api/runs/:id/tasks/:task_id/events — NDJSON parsed into rows.
+ * 404 (no events.jsonl yet — task never paused/repromp ted/got an
+ * approval, etc.) returns an empty list rather than throwing so the
+ * inspector can render "no lifecycle events yet". */
+export async function getTaskEvents(runId: string, taskId: string): Promise<TaskEvent[]> {
+  try {
+    const text = await request<string>(
+      `/api/runs/${enc(runId)}/tasks/${enc(taskId)}/events`,
+      { accept: 'text' }
+    );
+    return text
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as TaskEvent;
+        } catch {
+          return null;
+        }
+      })
+      .filter((e): e is TaskEvent => e !== null);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return [];
+    throw err;
+  }
 }
 
 export function getTaskDetail(runId: string, taskId: string): Promise<TaskRecord> {

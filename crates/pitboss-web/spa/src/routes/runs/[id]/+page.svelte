@@ -26,6 +26,8 @@
   import PolicyEditor from '$lib/components/policy-editor.svelte';
   import RunTileGrid from '$lib/components/run-tile-grid.svelte';
   import RunGraph from '$lib/components/run-graph.svelte';
+  import RunGraphInspector from '$lib/components/run-graph-inspector.svelte';
+  import type { TaskRecord } from '$lib/api';
   import {
     Card,
     CardContent,
@@ -334,6 +336,19 @@
   // Banner shown when ANOTHER client takes over our slot (we get
   // `Superseded` from the dispatcher right before the socket closes).
   let superseded = $state(false);
+
+  // #260: graph node inspector — selected actor id (null = closed).
+  // Bound through to `RunGraph` (drives the ring on the matching node)
+  // and `RunGraphInspector` (drives the side panel).
+  let selectedTaskId = $state<string | null>(null);
+  const selectedTask = $derived(
+    selectedTaskId
+      ? (tasksToRender.find((t) => t.task_id === selectedTaskId) as TaskRecord | undefined)
+      : undefined
+  );
+  const selectedWorker = $derived(
+    selectedTaskId ? allWorkers.find((w) => w.task_id === selectedTaskId) : undefined
+  );
   let opFeedback = $state<{ kind: 'ok' | 'err'; text: string } | null>(null);
   let opFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -749,8 +764,8 @@
             aria-hidden="true"
           ></span>
         </TabsTrigger>
-        <TabsTrigger value="graph">Graph</TabsTrigger>
       {/if}
+      <TabsTrigger value="graph">Graph</TabsTrigger>
       <TabsTrigger value="tasks">Tasks ({tasksToRender.length})</TabsTrigger>
       <TabsTrigger value="manifest">Manifest</TabsTrigger>
       <TabsTrigger value="resolved">Resolved</TabsTrigger>
@@ -951,21 +966,42 @@
         </Card>
       </TabsContent>
 
-      <TabsContent value="graph" class="mt-4">
-        <Card>
-          <CardHeader class="pb-3">
-            <CardTitle class="text-base">Run hierarchy</CardTitle>
-            <CardDescription class="text-xs">
-              Live graph laid out via Dagre. Animated edges trace `running` workers; sublead
-              nodes are marked with a layers icon.
-            </CardDescription>
-          </CardHeader>
-          <CardContent class="pt-0">
-            <RunGraph workers={allWorkers} {storeActivity} {failures} {subleads} />
-          </CardContent>
-        </Card>
-      </TabsContent>
     {/if}
+
+    <!--
+      Graph tab is intentionally OUTSIDE the inProgress gate (#260):
+      the actor topology + per-actor inspector should remain useful for
+      post-mortems on finalized runs, not just live ones. Live overlays
+      (animated edges, store-activity counters) gracefully degrade to
+      empty maps when SSE is dormant; per-actor TaskRecord data comes
+      from `summary.jsonl` which is live-appended and survives finalize.
+    -->
+    <TabsContent value="graph" class="mt-4">
+      <Card>
+        <CardHeader class="pb-3">
+          <CardTitle class="text-base">Run hierarchy</CardTitle>
+          <CardDescription class="text-xs">
+            Actor tree laid out via Dagre. Click a node to open the inspector.
+            {#if inProgress}
+              Animated edges trace `running` workers; sublead nodes carry the layers icon.
+            {:else}
+              Showing every actor recorded for this run, including cancelled / failed states.
+            {/if}
+          </CardDescription>
+        </CardHeader>
+        <CardContent class="pt-0">
+          <RunGraph
+            workers={allWorkers}
+            {storeActivity}
+            {failures}
+            {subleads}
+            tasks={tasksToRender as TaskRecord[]}
+            {selectedTaskId}
+            onSelect={(id) => (selectedTaskId = id)}
+          />
+        </CardContent>
+      </Card>
+    </TabsContent>
 
     <TabsContent value="tasks" class="mt-4">
       <Card>
@@ -1088,4 +1124,20 @@
   </Tabs>
 
   <ApprovalModal {runId} bind:request={activeApproval} />
+
+  <!-- Graph node inspector (#260). Bound to `selectedTaskId`; opens
+       whenever the user clicks a graph node. Lazy-fetches the per-actor
+       events.jsonl on first open. -->
+  <RunGraphInspector
+    {runId}
+    open={selectedTaskId !== null}
+    {selectedTaskId}
+    task={selectedTask}
+    worker={selectedWorker}
+    failure={selectedTaskId ? failures[selectedTaskId] : undefined}
+    sublead={selectedTaskId ? subleads[selectedTaskId] : undefined}
+    activity={selectedTaskId ? storeActivity[selectedTaskId] : undefined}
+    allTasks={tasksToRender as TaskRecord[]}
+    onJumpTo={(id) => (selectedTaskId = id === '' ? null : id)}
+  />
 {/if}

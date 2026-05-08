@@ -3,35 +3,58 @@
   import dagre from '@dagrejs/dagre';
   import '@xyflow/svelte/dist/style.css';
   import RunGraphNode from './run-graph-node.svelte';
-  import type { WorkerEntry, ActorActivity, FailureReason, SubleadInfo } from '$lib/api';
+  import type {
+    WorkerEntry,
+    ActorActivity,
+    FailureReason,
+    SubleadInfo,
+    TaskRecord
+  } from '$lib/api';
 
   let {
     workers,
     storeActivity,
     failures,
-    subleads
+    subleads,
+    tasks,
+    selectedTaskId,
+    onSelect
   }: {
     workers: WorkerEntry[];
     storeActivity: Record<string, ActorActivity>;
     failures: Record<string, FailureReason>;
     subleads: Record<string, SubleadInfo>;
+    /** Per-task records from `summary.jsonl` / `summary.json`. Looked up
+     *  by `task_id` to densify each tile (timestamps, tokens, cost,
+     *  counters, failure reason) and to power the inspector. */
+    tasks: TaskRecord[];
+    /** Currently-inspected task_id. The matching node renders with a
+     *  ring; the inspector panel reads from this same value. Bindable so
+     *  ESC / overlay click in the inspector clears the selection too. */
+    selectedTaskId?: string | null;
+    /** Fires on node click. Parent updates `selectedTaskId` to open the
+     *  inspector. Toggling on the same node clears the selection. */
+    onSelect?: (taskId: string | null) => void;
   } = $props();
 
-  const NODE_WIDTH = 180;
-  const NODE_HEIGHT = 90;
+  const NODE_WIDTH = 208; // matches w-52 in run-graph-node.svelte
+  const NODE_HEIGHT = 130; // grew from 90 to fit the new dense rows
 
   /** Build {nodes, edges} for the current snapshot, then run dagre for layout. */
   function layout(
     workers: WorkerEntry[],
     storeActivity: Record<string, ActorActivity>,
     failures: Record<string, FailureReason>,
-    subleads: Record<string, SubleadInfo>
+    subleads: Record<string, SubleadInfo>,
+    tasks: TaskRecord[],
+    selectedTaskId: string | null | undefined
   ): { nodes: Node[]; edges: Edge[] } {
     const g = new dagre.graphlib.Graph();
     g.setGraph({ rankdir: 'TB', nodesep: 32, ranksep: 64 });
     g.setDefaultEdgeLabel(() => ({}));
 
     const knownIds = new Set(workers.map((w) => w.task_id));
+    const taskById = new Map(tasks.map((t) => [t.task_id, t]));
 
     for (const w of workers) {
       g.setNode(w.task_id, { width: NODE_WIDTH, height: NODE_HEIGHT });
@@ -56,7 +79,9 @@
           worker: w,
           activity: storeActivity[w.task_id],
           failure: failures[w.task_id],
-          sublead: subleads[w.task_id]
+          sublead: subleads[w.task_id],
+          task: taskById.get(w.task_id),
+          selected: selectedTaskId === w.task_id
         }
       };
     });
@@ -79,7 +104,9 @@
   // Recompute on every prop change. SvelteFlow's `nodes` / `edges` props
   // expect $state stores under the hood; reassigning derived arrays
   // re-renders cleanly because the component does shallow identity diff.
-  let layoutResult = $derived(layout(workers, storeActivity, failures, subleads));
+  let layoutResult = $derived(
+    layout(workers, storeActivity, failures, subleads, tasks, selectedTaskId)
+  );
   let nodes = $state<Node[]>([]);
   let edges = $state<Edge[]>([]);
   $effect(() => {
@@ -88,12 +115,20 @@
   });
 
   const nodeTypes = { runNode: RunGraphNode };
+
+  // SvelteFlow's nodeclick handler. Clicking the already-selected node
+  // clears the selection (matches the issue's "click again to dismiss"
+  // muscle memory).
+  function handleNodeClick({ node }: { node: Node }): void {
+    if (!onSelect) return;
+    onSelect(selectedTaskId === node.id ? null : node.id);
+  }
 </script>
 
 <div class="bg-muted/20 dark:bg-muted/5 h-[60vh] w-full rounded-md border">
   {#if workers.length === 0}
     <div class="text-muted-foreground flex h-full items-center justify-center text-xs">
-      No workers reported yet.
+      No actors recorded for this run yet.
     </div>
   {:else}
     <SvelteFlow
@@ -103,6 +138,7 @@
       fitView
       nodesDraggable={false}
       nodesConnectable={false}
+      onnodeclick={handleNodeClick}
       proOptions={{ hideAttribution: true }}
     >
       <Background />
