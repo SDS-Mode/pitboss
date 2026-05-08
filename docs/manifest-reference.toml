@@ -107,6 +107,7 @@ command = "<value>"
 args = []
 env = { EXAMPLE_KEY = "value" }
 scope = "<value>"
+tools = []
 
 [[worker_type]]
 id = "<value>"

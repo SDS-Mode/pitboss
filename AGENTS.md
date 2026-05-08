@@ -352,6 +352,7 @@ scope   = "type:writer"   # only injected into worker_type/sublead_type "writer"
 | `args` | no | Arguments passed to the command. Default `[]`. |
 | `env` | no | Environment variables injected into the server process. Default `{}`. |
 | `scope` | no | Optional injection scope. Form `"type:<id>"` references a `[[worker_type]]` or `[[sublead_type]]`. Validated at manifest load — unknown ids are rejected. Untyped actors (no `worker_type` / `sublead_type` arg on spawn) NEVER receive scoped servers. Unset (default) = inject into all actors. |
+| `tools` | no | Optional per-tool allowlist for THIS server. When set, validate rejects any actor surface (`[lead].tools`, `[[task]].tools`, `[[worker_type]].tools`, `[[sublead_type]].tools`) that references `mcp__<id>__X` for an `X` not in this list. `tools = []` is rejected as self-defeating (remove the `[[mcp_server]]` block instead). Unset (default) = no per-tool restriction. **Manifest-time enforcement only in v0.12** — runtime gating is a follow-up (#397). (#391 / #397) |
 
 **Tools from injected servers are available immediately** — no additional `--allowedTools` configuration is needed; claude's MCP client discovers the tools from the server at startup.
 
