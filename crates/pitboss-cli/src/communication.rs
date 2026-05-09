@@ -477,7 +477,7 @@ pub async fn handle_artifact_put(
         .map_err(|e| CommunicationError::Storage(e.to_string()))?;
 
     let digest = Sha256::digest(&content);
-    let sha256 = format!("{digest:x}");
+    let sha256 = hex::encode(digest);
     let uri = format!("pitboss://run/{}/artifact/{artifact_id}", state.root.run_id);
     let metadata = ArtifactMetadata {
         artifact_id: artifact_id.clone(),
