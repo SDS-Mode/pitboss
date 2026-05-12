@@ -62,6 +62,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         lead: Some(lead),
         max_workers: Some(4),
         budget_usd: Some(5.0),
+        lead_budget_usd: None,
         lead_timeout_secs: None,
         default_approval_policy: None,
         denial_termination_policy: None,

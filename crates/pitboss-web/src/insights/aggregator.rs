@@ -256,6 +256,7 @@ fn failure_kind_str(reason: &FailureReason) -> String {
         FailureReason::ContextExceeded => "context_exceeded",
         FailureReason::InvalidArgument { .. } => "invalid_argument",
         FailureReason::Unknown { .. } => "unknown",
+        FailureReason::BudgetExceeded { .. } => "budget_exceeded",
     }
     .into()
 }
@@ -264,7 +265,8 @@ fn failure_message_and_template(reason: &FailureReason) -> (Option<String>, Opti
     let msg = match reason {
         FailureReason::NetworkError { message }
         | FailureReason::InvalidArgument { message }
-        | FailureReason::Unknown { message } => Some(message.clone()),
+        | FailureReason::Unknown { message }
+        | FailureReason::BudgetExceeded { message } => Some(message.clone()),
         _ => None,
     };
     let template = msg.as_deref().map(canonicalize);

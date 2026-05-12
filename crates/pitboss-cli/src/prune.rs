@@ -222,6 +222,7 @@ fn build_synthesized_summary(run_dir: &Path) -> Result<RunSummary> {
         was_interrupted: true,
         notify_failures: None,
         tasks: Vec::new(),
+        spend_breakdown: None,
     })
 }
 

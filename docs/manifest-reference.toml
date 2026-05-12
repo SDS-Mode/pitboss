@@ -85,6 +85,7 @@ use_worktree = false
 env = { EXAMPLE_KEY = "value" }
 max_workers = 0
 budget_usd = 0.0
+lead_budget_usd = 0.0
 lead_timeout_secs = 0
 permission_routing = "path_a"
 allow_subleads = false
@@ -94,6 +95,7 @@ max_total_workers = 0
 
 [sublead_defaults]
 budget_usd = 0.0
+lead_budget_usd = 0.0
 max_workers = 0
 lead_timeout_secs = 0
 read_down = false

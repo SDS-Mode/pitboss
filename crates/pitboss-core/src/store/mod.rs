@@ -3,7 +3,7 @@
 pub mod record;
 pub mod traits;
 
-pub use record::{FailureReason, RunMeta, RunSummary, TaskRecord, TaskStatus};
+pub use record::{FailureReason, RunMeta, RunSummary, SpendBreakdown, TaskRecord, TaskStatus};
 pub use traits::SessionStore;
 
 pub mod json_file;
@@ -89,6 +89,7 @@ mod integration_tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
+            spend_breakdown: None,
         };
         store.finalize_run(&summary).await.unwrap();
 

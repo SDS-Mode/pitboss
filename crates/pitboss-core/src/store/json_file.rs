@@ -145,6 +145,12 @@ impl SessionStore for JsonFileStore {
             was_interrupted: true,
             notify_failures: None,
             tasks,
+            // Live-reconstruction from `summary.jsonl` doesn't know the
+            // root lead id, so we can't classify records into the
+            // breakdown shape here. Consumers see `None` and fall back
+            // to scanning `tasks` themselves; finalize-time writes
+            // (`run_hierarchical`) populate this with the real value.
+            spend_breakdown: None,
         })
     }
 }

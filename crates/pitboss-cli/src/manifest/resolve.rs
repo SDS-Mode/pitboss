@@ -82,6 +82,8 @@ pub struct ResolvedLead {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedSubleadDefaults {
     pub budget_usd: Option<f64>,
+    #[serde(default)]
+    pub lead_budget_usd: Option<f64>,
     pub max_workers: Option<u32>,
     pub lead_timeout_secs: Option<u64>,
     pub read_down: bool,
@@ -145,6 +147,11 @@ pub struct ResolvedManifest {
     pub max_workers: Option<u32>,
     /// Surfaced from `[lead].budget_usd`. `None` in flat mode.
     pub budget_usd: Option<f64>,
+    /// Surfaced from `[lead].lead_budget_usd` — optional separate cap on
+    /// lead + sub-lead token spend, independent of `budget_usd`. `None` when
+    /// unset or in flat mode. (#253)
+    #[serde(default)]
+    pub lead_budget_usd: Option<f64>,
     /// Surfaced from `[lead].lead_timeout_secs`. `None` in flat mode.
     pub lead_timeout_secs: Option<u64>,
     /// Renamed from `approval_policy` in v0.9 to match the TOML field name
@@ -285,9 +292,15 @@ pub fn resolve(
 
     // Surface lead-level caps at the top level of ResolvedManifest for
     // consumer convenience. `None` when no [lead] is declared (flat mode).
-    let (max_workers, budget_usd, lead_timeout_secs) = match manifest.lead.as_ref() {
-        Some(l) => (l.max_workers, l.budget_usd, l.lead_timeout_secs),
-        None => (None, None, None),
+    let (max_workers, budget_usd, lead_budget_usd, lead_timeout_secs) = match manifest.lead.as_ref()
+    {
+        Some(l) => (
+            l.max_workers,
+            l.budget_usd,
+            l.lead_budget_usd,
+            l.lead_timeout_secs,
+        ),
+        None => (None, None, None, None),
     };
 
     Ok(ResolvedManifest {
@@ -302,6 +315,7 @@ pub fn resolve(
         lead: resolved_lead,
         max_workers,
         budget_usd,
+        lead_budget_usd,
         lead_timeout_secs,
         default_approval_policy: manifest.run.default_approval_policy,
         denial_termination_policy: manifest.run.denial_termination_policy,
@@ -416,6 +430,7 @@ fn resolve_task(
 fn resolve_sublead_defaults(spec: &SubleadDefaults) -> ResolvedSubleadDefaults {
     ResolvedSubleadDefaults {
         budget_usd: spec.budget_usd,
+        lead_budget_usd: spec.lead_budget_usd,
         max_workers: spec.max_workers,
         lead_timeout_secs: spec.lead_timeout_secs,
         read_down: spec.read_down,

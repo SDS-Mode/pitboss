@@ -12,6 +12,13 @@ use crate::process::{ProcessSpawner, SpawnCmd};
 
 use super::{CancelToken, SessionOutcome, SessionState};
 
+/// Per-message usage callback. Invoked on every `Event::AssistantUsage`
+/// and on the terminal `Event::Result` with the *cumulative-for-this-
+/// subprocess* `TokenUsage` value. Used by the dispatcher's lead
+/// kill+resume loop to reconcile lead/sub-lead token cost mid-run
+/// without waiting for terminal subprocess exit. (#253)
+pub type UsageObserver = Arc<dyn Fn(TokenUsage) + Send + Sync>;
+
 pub struct SessionHandle {
     task_id: String,
     spawner: Arc<dyn ProcessSpawner>,
@@ -22,6 +29,7 @@ pub struct SessionHandle {
     pid_slot: Option<Arc<std::sync::atomic::AtomicU32>>,
     terminate_grace: Duration,
     stream_drain_timeout: Duration,
+    usage_observer: Option<UsageObserver>,
 }
 
 impl SessionHandle {
@@ -40,7 +48,17 @@ impl SessionHandle {
             pid_slot: None,
             terminate_grace: super::TERMINATE_GRACE,
             stream_drain_timeout: super::DEFAULT_STREAM_DRAIN_TIMEOUT,
+            usage_observer: None,
         }
+    }
+
+    /// Install a callback that fires on every observed cumulative usage
+    /// update (per-assistant-message and on the terminal Result). Used by
+    /// the dispatcher to reconcile lead token spend mid-run. (#253)
+    #[must_use]
+    pub fn with_usage_observer(mut self, observer: UsageObserver) -> Self {
+        self.usage_observer = Some(observer);
+        self
     }
 
     #[must_use]
@@ -173,6 +191,7 @@ impl SessionHandle {
             log_writer,
             accum_stream,
             self.session_id_tx.clone(),
+            self.usage_observer.clone(),
         ));
 
         // Drain stderr into a separate log file if requested. Many subprocess errors
@@ -335,6 +354,7 @@ async fn stream_loop(
     mut log: Option<tokio::fs::File>,
     accum: Arc<Mutex<StreamAccum>>,
     session_id_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    usage_observer: Option<UsageObserver>,
 ) {
     // Tracks whether we've already published the session id on the
     // `session_id_tx` channel — Claude Code emits `system{init}` first
@@ -410,6 +430,17 @@ async fn stream_loop(
                             // We just need to publish to the dispatcher early.
                             session_id_published = true;
                         }
+                        Event::AssistantUsage { usage: u } => {
+                            // Per-turn cumulative usage snapshot from
+                            // claude's wire format. We don't update `accum.usage`
+                            // here — `Event::Result` remains the authoritative
+                            // per-subprocess total. We only notify the
+                            // observer so the dispatcher's budget watcher
+                            // can react before subprocess exit. (#253)
+                            if let Some(obs) = &usage_observer {
+                                obs(u);
+                            }
+                        }
                         Event::Result {
                             session_id: sid,
                             usage: u,
@@ -437,6 +468,10 @@ async fn stream_loop(
                             a.session_id = Some(sid);
                             a.usage.add(&u);
                             a.saw_result = true;
+                            drop(a);
+                            if let Some(obs) = &usage_observer {
+                                obs(u);
+                            }
                         }
                         _ => {}
                     }

@@ -198,7 +198,14 @@ pub async fn handle_spawn_worker(
         let mut reserved_guard = target_layer.reserved_usd.lock().await;
         let spent = *target_layer.spent_usd.lock().await;
         let reserved = *reserved_guard;
-        if spent + reserved + estimate > budget {
+        // (#253) Include the lead/sub-lead's own token spend in the
+        // budget check — `budget_usd` is now the run-wide cap across
+        // workers + lead orchestration cost for this layer.
+        let lead_spent = *target_layer
+            .lead_spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if spent + reserved + lead_spent + estimate > budget {
             drop(reserved_guard);
             if let Some(router) = target_layer.notification_router.clone() {
                 let envelope = crate::notify::NotificationEnvelope::new(
@@ -206,7 +213,7 @@ pub async fn handle_spawn_worker(
                     crate::notify::Severity::Error,
                     crate::notify::PitbossEvent::BudgetExceeded {
                         run_id: state.root.run_id.to_string(),
-                        spent_usd: spent,
+                        spent_usd: spent + lead_spent,
                         budget_usd: budget,
                     },
                     chrono::Utc::now(),
@@ -214,8 +221,13 @@ pub async fn handle_spawn_worker(
                 let _ = router.dispatch(envelope).await;
             }
             bail!(
-                "budget exceeded: ${:.2} spent + ${:.2} reserved + ${:.2} estimated > ${:.2} budget",
-                spent, reserved, estimate, budget
+                "budget exceeded: ${:.2} spent (workers) + ${:.2} reserved + \
+                 ${:.2} lead/sublead spend + ${:.2} estimated > ${:.2} budget",
+                spent,
+                reserved,
+                lead_spent,
+                estimate,
+                budget
             );
         }
         // Reserve against the target layer.

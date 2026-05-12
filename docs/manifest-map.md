@@ -102,24 +102,26 @@ Defined at [`../crates/pitboss-cli/src/manifest/schema.rs:904`](../crates/pitbos
 | `use_worktree` | boolean | no | Per-lead override of [defaults].use_worktree. | [`../crates/pitboss-cli/src/manifest/schema.rs#L966`](../crates/pitboss-cli/src/manifest/schema.rs#L966) |
 | `env` | key-value map | no | Per-lead env vars merged on top of [defaults].env. | [`../crates/pitboss-cli/src/manifest/schema.rs#L972`](../crates/pitboss-cli/src/manifest/schema.rs#L972) |
 | `max_workers` | integer | no | Hard cap on the lead's concurrent + queued worker pool (1–16). Required when the lead spawns workers. | [`../crates/pitboss-cli/src/manifest/schema.rs#L981`](../crates/pitboss-cli/src/manifest/schema.rs#L981) |
-| `budget_usd` | float | no | Soft cap on lead spend with reservation accounting. spawn_worker fails once spent + reserved + next_estimate > budget. | [`../crates/pitboss-cli/src/manifest/schema.rs#L990`](../crates/pitboss-cli/src/manifest/schema.rs#L990) |
-| `lead_timeout_secs` | integer | no | Wall-clock cap on the lead session. Default 3600. | [`../crates/pitboss-cli/src/manifest/schema.rs#L999`](../crates/pitboss-cli/src/manifest/schema.rs#L999) |
-| `permission_routing` | enum (`path_a` \| `path_b`) | no | path_b (default) routes claude's per-tool gate through pitboss's permission_prompt MCP tool — layered enforcement (mcp_server tools allowlist, operator policy, typed profile). path_a bypasses claude's gate via --dangerously-skip-permissions and makes pitboss the sole authority. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1017`](../crates/pitboss-cli/src/manifest/schema.rs#L1017) |
-| `allow_subleads` | boolean | no | Expose spawn_sublead to the root lead. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1026`](../crates/pitboss-cli/src/manifest/schema.rs#L1026) |
-| `max_subleads` | integer | no | Hard cap on total live sub-leads under this root. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1033`](../crates/pitboss-cli/src/manifest/schema.rs#L1033) |
-| `max_sublead_budget_usd` | float | no | Cap on the per-sub-lead budget envelope. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1040`](../crates/pitboss-cli/src/manifest/schema.rs#L1040) |
-| `max_total_workers` | integer | no | Cap on total live workers across the entire tree (root + sub-trees). | [`../crates/pitboss-cli/src/manifest/schema.rs#L1048`](../crates/pitboss-cli/src/manifest/schema.rs#L1048) |
+| `budget_usd` | float | no | Soft cap on the run's total spend (workers + lead + sub-leads). spawn_worker fails once total_spent + reserved + next_estimate > budget; the lead is aborted if a reconciled turn drives total_spent past the cap. | [`../crates/pitboss-cli/src/manifest/schema.rs#L992`](../crates/pitboss-cli/src/manifest/schema.rs#L992) |
+| `lead_budget_usd` | float | no | Optional separate cap on lead + sub-lead token spend (orchestration cost). Independent of budget_usd. Lead is aborted when reached. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1002`](../crates/pitboss-cli/src/manifest/schema.rs#L1002) |
+| `lead_timeout_secs` | integer | no | Wall-clock cap on the lead session. Default 3600. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1011`](../crates/pitboss-cli/src/manifest/schema.rs#L1011) |
+| `permission_routing` | enum (`path_a` \| `path_b`) | no | path_b (default) routes claude's per-tool gate through pitboss's permission_prompt MCP tool — layered enforcement (mcp_server tools allowlist, operator policy, typed profile). path_a bypasses claude's gate via --dangerously-skip-permissions and makes pitboss the sole authority. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1029`](../crates/pitboss-cli/src/manifest/schema.rs#L1029) |
+| `allow_subleads` | boolean | no | Expose spawn_sublead to the root lead. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1038`](../crates/pitboss-cli/src/manifest/schema.rs#L1038) |
+| `max_subleads` | integer | no | Hard cap on total live sub-leads under this root. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1045`](../crates/pitboss-cli/src/manifest/schema.rs#L1045) |
+| `max_sublead_budget_usd` | float | no | Cap on the per-sub-lead budget envelope. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1052`](../crates/pitboss-cli/src/manifest/schema.rs#L1052) |
+| `max_total_workers` | integer | no | Cap on total live workers across the entire tree (root + sub-trees). | [`../crates/pitboss-cli/src/manifest/schema.rs#L1060`](../crates/pitboss-cli/src/manifest/schema.rs#L1060) |
 
 ## `[sublead_defaults]` — `SubleadDefaults`
 
-Defined at [`../crates/pitboss-cli/src/manifest/schema.rs:1055`](../crates/pitboss-cli/src/manifest/schema.rs#L1055).
+Defined at [`../crates/pitboss-cli/src/manifest/schema.rs:1067`](../crates/pitboss-cli/src/manifest/schema.rs#L1067).
 
 | Field | Type | Required | Help | Source |
 |---|---|---|---|---|
-| `budget_usd` | float | no | Per-sub-lead envelope when read_down = false. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1060`](../crates/pitboss-cli/src/manifest/schema.rs#L1060) |
-| `max_workers` | integer | no | Per-sub-lead worker pool when read_down = false. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1065`](../crates/pitboss-cli/src/manifest/schema.rs#L1065) |
-| `lead_timeout_secs` | integer | no | Wall-clock cap for the sub-lead session. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1070`](../crates/pitboss-cli/src/manifest/schema.rs#L1070) |
-| `read_down` | boolean | no | When true, sub-lead shares root's budget + worker pool instead of carving its own envelope. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1076`](../crates/pitboss-cli/src/manifest/schema.rs#L1076) |
+| `budget_usd` | float | no | Per-sub-lead envelope when read_down = false. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1072`](../crates/pitboss-cli/src/manifest/schema.rs#L1072) |
+| `lead_budget_usd` | float | no | Per-sub-lead cap on the sub-lead's own token spend (orchestration cost), independent of budget_usd. Honored when read_down = false. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1077`](../crates/pitboss-cli/src/manifest/schema.rs#L1077) |
+| `max_workers` | integer | no | Per-sub-lead worker pool when read_down = false. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1082`](../crates/pitboss-cli/src/manifest/schema.rs#L1082) |
+| `lead_timeout_secs` | integer | no | Wall-clock cap for the sub-lead session. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1087`](../crates/pitboss-cli/src/manifest/schema.rs#L1087) |
+| `read_down` | boolean | no | When true, sub-lead shares root's budget + worker pool instead of carving its own envelope. | [`../crates/pitboss-cli/src/manifest/schema.rs#L1093`](../crates/pitboss-cli/src/manifest/schema.rs#L1093) |
 
 ## `[[approval_policy]]` — `ApprovalRuleSpec`
 

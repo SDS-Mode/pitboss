@@ -64,10 +64,28 @@ pub struct LayerState {
     pub lead_id: String,
     /// Map of task_id → worker state. Lead is also tracked here for convenience.
     pub workers: RwLock<HashMap<String, WorkerState>>,
-    /// Total USD cost spent so far (updated after each worker completes).
+    /// Total USD cost spent so far on completed workers in this layer.
+    /// Lead and sub-lead token spend live in their own counters
+    /// (`lead_spent_usd`); helpers that compute the total run spend sum
+    /// across layers.
     pub spent_usd: Mutex<f64>,
     /// USD reserved for in-flight workers at spawn time.
     pub reserved_usd: Mutex<f64>,
+    /// Token spend (USD) attributed to *this layer's lead* (the root
+    /// lead for the root layer; the sub-lead for a sub-tree layer).
+    /// Updated live as each assistant turn's cumulative usage is
+    /// observed from the stream-json output, so budget enforcement can
+    /// abort mid-subprocess rather than waiting for terminal exit.
+    /// Uses `std::sync::Mutex` rather than `tokio::sync::Mutex` because
+    /// it is written from the session stream loop's synchronous event
+    /// observer — no `.await` may cross the lock guard. (#253)
+    pub lead_spent_usd: std::sync::Mutex<f64>,
+    /// Set to `Some(reason)` when the dispatcher decides to abort the
+    /// lead/sub-lead because of a budget cap breach. Cleared on dispatch
+    /// startup and read by `failure_detection` so the lead's
+    /// `TaskRecord.failure_reason` names the overspend rather than
+    /// looking like a generic cancellation. (#253)
+    pub budget_abort_reason: std::sync::Mutex<Option<String>>,
     /// Broadcast channel that emits a `task_id` whenever a worker transitions
     /// to `Done`. Subscribed to by `wait_for_worker` handlers.
     pub done_tx: broadcast::Sender<String>,
@@ -212,6 +230,8 @@ impl LayerState {
             workers: RwLock::new(HashMap::new()),
             spent_usd: Mutex::new(0.0),
             reserved_usd: Mutex::new(0.0),
+            lead_spent_usd: std::sync::Mutex::new(0.0),
+            budget_abort_reason: std::sync::Mutex::new(None),
             done_tx,
             worker_cancels: RwLock::new(HashMap::new()),
             worker_prompts: RwLock::new(HashMap::new()),
@@ -458,6 +478,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

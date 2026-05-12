@@ -829,6 +829,11 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
         // SqliteStore moves out of test-only use.
         notify_failures: None,
         tasks,
+        // SQLite backend is test-only and doesn't carry a root_lead_id
+        // anchor; leave `None` and let the JsonFileStore-backed
+        // finalize path (the production write site) populate the
+        // breakdown for real runs.
+        spend_breakdown: None,
     })
 }
 
@@ -1158,6 +1163,7 @@ mod sqlite_tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
+            spend_breakdown: None,
         };
         store.finalize_run(&summary).await.unwrap();
 
@@ -1284,6 +1290,7 @@ mod sqlite_tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![rec.clone()],
+            spend_breakdown: None,
         };
         store.finalize_run(&summary).await.unwrap();
 
@@ -1377,6 +1384,7 @@ mod sqlite_tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![rec.clone()],
+            spend_breakdown: None,
         };
         store.finalize_run(&summary).await.unwrap();
         let back = store.load_run(run_id).await.unwrap();

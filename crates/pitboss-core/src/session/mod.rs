@@ -8,7 +8,7 @@ pub mod outcome;
 pub mod state;
 
 pub use cancel::CancelToken;
-pub use handle::SessionHandle;
+pub use handle::{SessionHandle, UsageObserver};
 pub use outcome::SessionOutcome;
 pub use state::SessionState;
 

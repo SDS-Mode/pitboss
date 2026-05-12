@@ -792,7 +792,7 @@ fn format_single_event(event: Event) -> Option<String> {
             Some(format!("! rate-limit {status} ({rtype}) resets={resets}"))
         }
         // System and Unknown events are too noisy; skip them.
-        Event::System { .. } | Event::Unknown { .. } => None,
+        Event::System { .. } | Event::Unknown { .. } | Event::AssistantUsage { .. } => None,
     }
 }
 

@@ -480,6 +480,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks,
+            spend_breakdown: None,
         };
         std::fs::write(
             dir.join("summary.json"),
@@ -697,6 +698,7 @@ mod tests {
             }),
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -759,6 +761,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![lead_record],
+            spend_breakdown: None,
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -818,6 +821,7 @@ mod tests {
             }),
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -883,6 +887,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![lead_record],
+            spend_breakdown: None,
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -942,6 +947,7 @@ mod tests {
             }),
             max_workers: Some(4),
             budget_usd: Some(10.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -1003,6 +1009,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![lead_record],
+            spend_breakdown: None,
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -1124,6 +1131,7 @@ mod tests {
             lead: None,
             max_workers: None,
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

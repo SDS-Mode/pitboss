@@ -45,7 +45,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use pitboss_core::parser::TokenUsage;
 use pitboss_core::process::SpawnCmd;
-use pitboss_core::session::{CancelToken, SessionHandle, SessionOutcome};
+use pitboss_core::session::{CancelToken, SessionHandle, SessionOutcome, UsageObserver};
 
 use crate::dispatch::layer::LayerState;
 use crate::dispatch::state::WorkerState;
@@ -66,7 +66,21 @@ pub struct KillResumeArgs {
     pub log_path: PathBuf,
     /// Stderr log path passed to every iteration's `SessionHandle`.
     pub stderr_path: PathBuf,
+    /// Optional per-message usage observer. Wired into every iteration's
+    /// `SessionHandle` so the dispatcher can reconcile lead/sub-lead
+    /// token spend on each assistant turn rather than only at
+    /// subprocess termination. (#253)
+    pub usage_observer: Option<UsageObserver>,
+    /// Optional post-iteration hook invoked with the iteration's final
+    /// `TokenUsage`. Used by the budget watcher to fold the iteration's
+    /// committed cost into the running baseline so the next iteration's
+    /// observer starts from the updated zero. (#253)
+    pub on_iteration_done: Option<IterationDoneHook>,
 }
+
+/// Post-iteration callback type used by [`KillResumeArgs::on_iteration_done`].
+/// Aliased so the field type doesn't trip clippy's `type_complexity` lint.
+pub type IterationDoneHook = Arc<dyn Fn(&TokenUsage) + Send + Sync>;
 
 /// Aggregated result across all iterations.
 pub struct KillResumeResult {
@@ -142,16 +156,18 @@ pub async fn run_kill_resume_loop(
             })
         };
 
-        let outcome = SessionHandle::new(
+        let mut handle = SessionHandle::new(
             actor_id.clone(),
             Arc::clone(&layer.spawner),
             current_cmd.clone(),
         )
         .with_log_path(args.log_path.clone())
         .with_stderr_log_path(args.stderr_path.clone())
-        .with_session_id_tx(session_id_tx)
-        .run_to_completion(proc_cancel, args.timeout)
-        .await;
+        .with_session_id_tx(session_id_tx);
+        if let Some(obs) = args.usage_observer.clone() {
+            handle = handle.with_usage_observer(obs);
+        }
+        let outcome = handle.run_to_completion(proc_cancel, args.timeout).await;
 
         // The bridge task awaits `tree_cancel.await_terminate()` which
         // does not fire until the run ends. Without this abort, every
@@ -178,6 +194,9 @@ pub async fn run_kill_resume_loop(
         }
 
         total_token_usage.add(&outcome.token_usage);
+        if let Some(hook) = args.on_iteration_done.as_ref() {
+            hook(&outcome.token_usage);
+        }
 
         let pending_reprompt = reprompt_rx.try_recv().ok();
         if let Some(new_prompt) = pending_reprompt {
@@ -279,6 +298,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -370,6 +390,8 @@ mod tests {
             timeout: Duration::from_secs(30),
             log_path: dir.path().join("stdout.log"),
             stderr_path: dir.path().join("stderr.log"),
+            usage_observer: None,
+            on_iteration_done: None,
         };
 
         let result =
@@ -444,6 +466,8 @@ mod tests {
             timeout: Duration::from_secs(30),
             log_path: dir.path().join("stdout.log"),
             stderr_path: dir.path().join("stderr.log"),
+            usage_observer: None,
+            on_iteration_done: None,
         };
 
         let result =

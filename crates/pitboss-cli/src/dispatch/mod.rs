@@ -1,5 +1,6 @@
 pub mod actor;
 pub mod background;
+pub mod budget_watch;
 pub mod container;
 pub mod container_build;
 pub mod container_prune;

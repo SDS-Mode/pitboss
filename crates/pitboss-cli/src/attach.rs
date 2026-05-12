@@ -360,7 +360,7 @@ fn format_single_event_capped(event: Event) -> Option<String> {
             let resets = resets_at.map_or_else(|| "?".to_string(), |ts| ts.to_string());
             Some(format!("! rate-limit {status} ({rtype}) resets={resets}"))
         }
-        Event::System { .. } | Event::Unknown { .. } => None,
+        Event::System { .. } | Event::Unknown { .. } | Event::AssistantUsage { .. } => None,
     }
 }
 
