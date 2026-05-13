@@ -134,7 +134,7 @@ caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 | `halt_on_failure` | bool | no | false | Flat mode. If a task fails, skip remaining tasks. |
 | `run_dir` | string path | no | `~/.local/share/pitboss/runs` | Where per-run artifacts land. |
 | `worktree_cleanup` | `"always"` \| `"on_success"` \| `"never"` | no | `"on_success"` | What to do with each worker's worktree after completion. `"never"` for inspection-heavy runs. |
-| `emit_event_stream` | bool | no | false | Emit a JSONL event stream alongside summary.jsonl. |
+| `emit_event_stream` | bool | no | false | When true, the dispatcher persists every control-plane envelope (sub-lead lifecycle, worker failures, approval requests, etc.) to `<run-dir>/events.jsonl` as it fires on the wire. Off by default for back-compat — older runs have no such file. Different from the per-actor `tasks/<id>/events.jsonl` audit log: that's always-on for tool-denial / pause / reprompt rows; this one is run-wide, opt-in, and carries the same envelope shape as the live SSE stream. See [`events.jsonl` structure](#eventsjsonl-structure-v013-opt-in) below. |
 | `default_approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: default action for `request_approval` / `propose_plan` when no TUI is attached and no `[[approval_policy]]` rule matches. Renamed from `approval_policy` in v0.9 to disambiguate from the rules array. |
 | `denial_termination_policy` | `"adapt"` \| `"reclassify"` | no | `"adapt"` | Path B only: how a denied `permission_prompt` affects the actor's terminal status. `"adapt"` (default, post-#377) trusts the actor's exit code; per-actor `events.jsonl::tool_denied` rows and the `approvals_rejected` counter remain authoritative for what was blocked. `"reclassify"` re-labels clean exits within 30s of a denial as `ApprovalRejected` (legacy heuristic, kept for operators who want fast-give-up distinguished in the status table — accepts that successful adaptation within the window will misclassify as failure). |
 | `require_plan_approval` | bool | no | false | Hierarchical: when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. |
@@ -775,8 +775,10 @@ Files in the run dir:
 | `meta.json` | `run_id`, `started_at`, `claude_version`, `pitboss_version`. |
 | `summary.json` | Written on clean finalize. Full structured summary of the run. |
 | `summary.jsonl` | Appended incrementally as tasks finish. Useful for live observation. |
+| `events.jsonl` | **Opt-in** (v0.13+, `[run].emit_event_stream = true`). Run-wide control-event log: every `EventEnvelope` the dispatcher would have sent on the wire, persisted as it fires. Survives headless dispatches (no TUI / web bridge). See [`events.jsonl` structure](#eventsjsonl-structure-v013-opt-in). |
 | `tasks/<id>/stdout.log` | Raw stream-json from the task's claude subprocess. |
 | `tasks/<id>/stderr.log` | Stderr. |
+| `tasks/<id>/events.jsonl` | **Distinct from the run-level file above.** Per-actor audit log: `pause` / `continue` / `reprompt` / `tool_denied` / `tool_auto_approved` / `approval_request` rows. Always-on (created lazily on first append). |
 | `lead-mcp-config.json` | Hierarchical only. The `--mcp-config` file pointed at `pitboss mcp-bridge <socket>`. |
 
 ### `summary.json` structure
@@ -818,6 +820,62 @@ Files in the run dir:
 
 Lead records have `parent_task_id: null`. Worker records have
 `parent_task_id: "<lead-id>"`. Query with `jq`.
+
+### `events.jsonl` structure (v0.13+, opt-in)
+
+Enabled by `[run].emit_event_stream = true`. The dispatcher writes
+one `EventEnvelope` per line as the event fires on the live wire,
+so the file is consistent with what a connected TUI / web bridge
+would have observed. Headless dispatches (no client ever attached)
+still produce a complete log — persistence rides on a dispatcher-
+owned bus subscriber, not on the per-connection pump.
+
+```json
+{"actor_path":["root","sub-1"],"seq":3,"event":"sublead_spawned","sublead_id":"sub-1","budget_usd":0.5,"max_workers":2,"read_down":false}
+{"actor_path":["root","sub-1"],"seq":4,"event":"worker_failed","task_id":"w-1","parent_task_id":"sub-1","reason":{"kind":"auth_failure"}}
+{"actor_path":["root","sub-1","lead"],"seq":5,"event":"approval_request","request_id":"r-1","task_id":"t-1","summary":"run cargo test","kind":"action"}
+```
+
+Wire shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `actor_path` | `string[]` (omitted when empty) | Tree path from root to the actor that produced the event. Run-level events (sub-lead lifecycle, root-layer transitions) have an empty path. |
+| `seq` | `uint64` | Monotonic per-run sequence. Starts at 1. Pre-v0.13 envelopes default to 0 (legacy sentinel). Shared with the live wire — replaying disk up to seq=N then subscribing to SSE at seq=N+1 gives gap-free coverage. |
+| `event` | snake-case discriminator | Carries the variant payload inline via `#[serde(flatten)]` — same shape as the live `/api/runs/:id/events` SSE feed. |
+
+**What's in the log:** every envelope produced by the dispatcher's
+`broadcast_control_event` path — `sublead_spawned`,
+`sublead_terminated`, `worker_failed`, run-wide `approval_request`
+(including ones queued before any client connected). Also
+connection-scoped envelopes that ran during an attached session:
+`approval_request` replay, `op_acked` / `op_failed`,
+`store_activity` ticks, `superseded`.
+
+**What's not in the log:**
+
+- `hello` handshakes — pure connection-bootstrap noise, filtered
+  at the persist boundary.
+- Connection-scoped envelopes that fired during periods when no
+  client was attached (e.g. `store_activity` ticks only run while
+  a TUI / web bridge is connected). The bus-routed events
+  (sub-lead lifecycle, worker failures, approvals) persist
+  unconditionally.
+
+Three ways to consume the log:
+
+```bash
+# CLI: compact one-line summary, or --json for jq-friendly NDJSON
+pitboss events <run-id>
+pitboss events <run-id> --json | jq 'select(.event == "worker_failed")'
+
+# HTTP: raw NDJSON over the web server (auth-gated like the rest of /api)
+curl -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8080/api/runs/<run-id>/events-jsonl
+
+# SPA: the "Replay" tab on the run-detail page (finalized runs only;
+# in-progress runs still use the live SSE Live tab).
+```
 
 ---
 
