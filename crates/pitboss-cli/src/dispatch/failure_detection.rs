@@ -403,13 +403,12 @@ mod tests {
             Arc::new(SharedStore::new()),
             None,
         );
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<EventEnvelope>(
-            crate::dispatch::layer::CONTROL_EVENT_QUEUE_CAP,
-        );
-        *layer.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
-            id: uuid::Uuid::now_v7(),
-            sender: tx,
-        });
+        // PR-H of #259: `broadcast_control_event` publishes on the
+        // per-run broadcast bus rather than directly into the
+        // `control_writer` mpsc. Subscribe to the bus to observe the
+        // envelope from this test fixture (no `DispatchState` /
+        // server / pump runs here).
+        let mut rx = layer.events_tx.subscribe();
 
         broadcast_worker_failed(
             &layer,

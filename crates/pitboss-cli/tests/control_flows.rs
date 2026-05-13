@@ -573,6 +573,129 @@ async fn emit_event_stream_off_does_not_create_events_jsonl() {
     );
 }
 
+/// PR-H of #259: headless dispatches (no control server, no client)
+/// must still produce `events.jsonl` when `emit_event_stream = true`.
+/// Persistence rides on a bus subscriber spawned in
+/// `DispatchState::new` rather than on the per-connection pump path.
+/// Without this, a hierarchical run with no operator attached would
+/// silently lose its sub-lead lifecycle, worker-failure, and
+/// approval-queue audit trail.
+#[tokio::test]
+async fn headless_broadcast_persists_events_jsonl_without_client() {
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: true,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        "lead".into(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    // No control server. No client. Fire two broadcast events
+    // directly on the root layer — the only path that exercises the
+    // dispatcher-internal bus.
+    state
+        .root
+        .broadcast_control_event(pitboss_cli::control::protocol::EventEnvelope {
+            actor_path: pitboss_cli::dispatch::actor::ActorPath::default(),
+            seq: 0,
+            event: ControlEvent::WorkerFailed {
+                task_id: "w-1".into(),
+                parent_task_id: None,
+                reason: pitboss_core::store::FailureReason::Unknown {
+                    message: "test failure".into(),
+                },
+            },
+        })
+        .await;
+    state
+        .root
+        .broadcast_control_event(pitboss_cli::control::protocol::EventEnvelope {
+            actor_path: pitboss_cli::dispatch::actor::ActorPath::default(),
+            seq: 0,
+            event: ControlEvent::SubleadSpawned {
+                sublead_id: "sub-1".into(),
+                budget_usd: Some(0.5),
+                lead_budget_usd: Some(0.1),
+                max_workers: Some(2),
+                read_down: false,
+            },
+        })
+        .await;
+
+    // Wait for the persistence subscriber task to drain the bus and
+    // flush both envelopes. 200 ms is conservative — broadcast send
+    // is in-process and `event_log.persist` is one append per row.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let events_path = run_subdir.join("events.jsonl");
+    let contents = tokio::fs::read_to_string(&events_path)
+        .await
+        .expect("events.jsonl must be created by the headless bus subscriber");
+    let lines: Vec<&str> = contents.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected two persisted envelopes, got: {contents}",
+    );
+    assert!(
+        lines[0].contains("\"worker_failed\""),
+        "first envelope payload: {}",
+        lines[0],
+    );
+    assert!(
+        lines[1].contains("\"sublead_spawned\""),
+        "second envelope payload: {}",
+        lines[1],
+    );
+    // Seqs come from the run-scoped EventLog and start at 1.
+    assert!(lines[0].contains("\"seq\":1"), "first seq: {}", lines[0]);
+    assert!(lines[1].contains("\"seq\":2"), "second seq: {}", lines[1]);
+}
+
 #[tokio::test]
 async fn block_policy_queue_drains_on_tui_connect() {
     use std::time::Duration;
