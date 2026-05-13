@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
-use pitboss_cli::control::protocol::{ControlEvent, ControlOp};
+use pitboss_cli::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
 
 pub struct FakeControlClient {
     writer: OwnedWriteHalf,
@@ -66,6 +66,26 @@ impl FakeControlClient {
     pub async fn recv_timeout(&mut self, d: Duration) -> Result<Option<ControlEvent>> {
         match tokio::time::timeout(d, self.recv()).await {
             Ok(ev) => Ok(Some(ev?)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Read one full envelope (with `actor_path` and `seq` fields). Use
+    /// when a test needs to inspect the envelope wrapper; otherwise
+    /// `recv` is the lighter-weight path that only decodes the inner
+    /// `ControlEvent`. PR-B of #438.
+    pub async fn recv_envelope(&mut self) -> Result<EventEnvelope> {
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line).await?;
+        if n == 0 {
+            anyhow::bail!("control socket EOF");
+        }
+        Ok(serde_json::from_str(line.trim_end_matches('\n'))?)
+    }
+
+    pub async fn recv_envelope_timeout(&mut self, d: Duration) -> Result<Option<EventEnvelope>> {
+        match tokio::time::timeout(d, self.recv_envelope()).await {
+            Ok(env) => Ok(Some(env?)),
             Err(_) => Ok(None),
         }
     }
