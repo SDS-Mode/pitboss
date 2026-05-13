@@ -325,6 +325,27 @@ impl ApprovalBridge {
             // drain when a TUI connects (see control/server.rs). AutoApprove
             // / AutoReject already short-circuited above, so this branch is
             // reachable only under `block`.
+            //
+            // PR-H of #259: persist an `ApprovalRequest` envelope here so
+            // **headless** approval flows (no TUI ever attaches, decision
+            // resolves via TTL fallback or a later `respond_approval` op)
+            // still leave an audit trail in `events.jsonl`. The seq is
+            // canonical — the run-scoped counter — and matches the wire
+            // seq the queue drain (`control/server.rs`) will emit if a
+            // client connects later. `event_log.persist` no-ops when
+            // `emit_event_stream = false`.
+            let queue_envelope = crate::control::protocol::EventEnvelope {
+                actor_path: crate::dispatch::actor::ActorPath::default(),
+                seq: self.state.root.event_log.next_seq(),
+                event: crate::control::protocol::ControlEvent::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    task_id: task_id.clone(),
+                    summary: summary.clone(),
+                    plan: plan.clone().map(approval_plan_to_wire),
+                    kind,
+                },
+            };
+            self.state.root.event_log.persist(&queue_envelope).await;
             self.state
                 .root
                 .approval_queue

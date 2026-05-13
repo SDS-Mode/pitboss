@@ -463,6 +463,12 @@ impl DispatchState {
             &run_subdir,
             manifest.emit_event_stream,
         ));
+        // PR-H of #259: run-scoped event broadcast bus. Subscribers
+        // are spawned below (persistence) and inside `serve_connection`
+        // (per-connection pump). Sub-leads inherit this same Sender via
+        // `with_events_tx` so the whole run funnels into one bus.
+        let (events_tx, _) =
+            tokio::sync::broadcast::channel(crate::dispatch::layer::EVENTS_BROADCAST_CAP);
         let root = Arc::new(
             LayerState::new(
                 run_id,
@@ -480,8 +486,40 @@ impl DispatchState {
                 shared_store,
                 None,
             )
-            .with_event_log(event_log.clone()),
+            .with_event_log(event_log.clone())
+            .with_events_tx(events_tx.clone()),
         );
+
+        // PR-H: persistent events.jsonl subscriber. Drains the bus
+        // and persists every envelope, regardless of whether a TUI /
+        // web bridge is connected. This is what makes headless
+        // dispatches produce a complete log: the bus is alive for
+        // the lifetime of the run, the subscriber is spawned before
+        // any emission can happen, and `event_log.persist` no-ops
+        // gracefully when `emit_event_stream = false`.
+        //
+        // The task exits when all `events_tx` clones (root + every
+        // sub-tree layer) drop, which happens after `DispatchState`
+        // is dropped at run finalization.
+        {
+            let mut rx = events_tx.subscribe();
+            let log = event_log.clone();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(envelope) => log.persist(&envelope).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                lagged = n,
+                                "events.jsonl persistence subscriber lagged; \
+                                 some envelopes will be missing from the log",
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
         Self {
             root,
             subleads: RwLock::new(HashMap::new()),

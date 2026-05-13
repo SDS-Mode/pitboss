@@ -338,6 +338,50 @@ async fn serve_connection(
         let _ = enqueue_envelope(&ev_tx, &event_log, ev).await;
     }
 
+    // PR-H of #259: bus → mpsc bridge. The per-run events broadcast
+    // bus carries every `broadcast_control_event` emission. A
+    // dedicated subscriber forwards bus envelopes into THIS
+    // connection's mpsc so the existing pump (below) can stay
+    // single-source and the batched-flush optimisation is unchanged.
+    //
+    // Lag handling: a slow pump can starve the broadcast subscriber
+    // past `EVENTS_BROADCAST_CAP`. `recv()` then returns `Lagged(n)`
+    // — we log and continue. The dropped envelopes are still in
+    // `events.jsonl` (the persistence subscriber drains the bus
+    // independently), so the lag manifests as missing wire frames
+    // on this client only, not as missing audit-log rows.
+    //
+    // Bridge-only sites (direct mpsc pushes from server.rs:
+    // queued-approval drain, bridge replay, activity ticker, op
+    // replies, Hello, Superseded-to-displaced) bypass the bus on
+    // purpose — they're connection-scoped, not run-wide events.
+    let ev_tx_bus = ev_tx.clone();
+    let mut events_bus_rx = state.root.events_tx.subscribe();
+    let bus_bridge = tokio::spawn(async move {
+        loop {
+            match events_bus_rx.recv().await {
+                Ok(envelope) => {
+                    if ev_tx_bus.try_send(envelope).is_err() {
+                        // mpsc is closed or full. Closed means pump is
+                        // gone; full means pump is wedged — neither
+                        // recoverable from here. Persistence is
+                        // unaffected; the bus's other subscriber
+                        // (event_log writer in DispatchState::new) is
+                        // independent.
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        lagged = n,
+                        "control bus → mpsc bridge lagged; \
+                         some envelopes dropped from this client's wire stream",
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     // Concurrent outbound pump: forward events from the mpsc to the socket.
     //
     // Batched-flush optimisation (#152 L5): the hello handshake bursts
@@ -472,6 +516,7 @@ async fn serve_connection(
     }
     pump.abort();
     activity_pump.abort();
+    bus_bridge.abort();
 }
 
 /// Best-effort SIGCONT helper: if `task_id` is currently `Frozen`,

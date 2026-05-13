@@ -38,6 +38,16 @@ type RepromptHook = Arc<dyn Fn(String) + Send + Sync + 'static>;
 /// re-syncs via the Hello snapshot.
 pub const CONTROL_EVENT_QUEUE_CAP: usize = 512;
 
+/// Capacity of the per-run event broadcast bus (PR-H of #259).
+///
+/// Sized 2× `CONTROL_EVENT_QUEUE_CAP` so the headless persistence
+/// subscriber has enough slack to absorb a burst even while one
+/// connected pump is briefly stalled on socket I/O. Lag past this
+/// bound surfaces as `broadcast::error::RecvError::Lagged(n)` on the
+/// affected subscriber and is logged but not fatal — the run's
+/// canonical state still lands in `summary.jsonl`.
+pub const EVENTS_BROADCAST_CAP: usize = 1024;
+
 /// One installed outbound control-event sender.
 ///
 /// `id` is a UUID minted when the connection is accepted. The disconnect
@@ -145,10 +155,31 @@ pub struct LayerState {
     /// Per-run event-stream log (#259, co-spec'd with #438). Cloned
     /// from `DispatchState.event_log` at LayerState construction so
     /// the per-layer `broadcast_control_event` can assign the
-    /// run-scoped seq + persist envelopes without going through the
-    /// pump (which only runs when a client is connected). Shared
-    /// across the root layer and every sub-tree layer.
+    /// run-scoped seq without going through the pump (which only runs
+    /// when a client is connected). Shared across the root layer and
+    /// every sub-tree layer.
     pub event_log: Arc<crate::control::event_log::EventLog>,
+    /// Per-run event broadcast bus (#259 PR-H). Every envelope
+    /// produced by [`Self::broadcast_control_event`] (and direct
+    /// emitters in `control::server` / `mcp::approval`) is sent here
+    /// **regardless of whether a client is connected**. Subscribers:
+    ///
+    /// 1. A persistent task spawned in `DispatchState::new` that
+    ///    drains the broadcast and persists each envelope to
+    ///    `events.jsonl` — this is what makes headless dispatches
+    ///    produce a complete log.
+    /// 2. Per-connection pump tasks in `control::server` that forward
+    ///    to the connected socket.
+    ///
+    /// 1024 capacity covers multi-second bursts (sub-lead spawn fan-
+    /// out, approvals) without unbounded memory. A lagged subscriber
+    /// sees `broadcast::error::RecvError::Lagged(n)` and logs a warn;
+    /// the headless persistence task is unlikely to lag because
+    /// `event_log.persist` is a small append.
+    ///
+    /// Shared by clone across the root layer and every sub-tree
+    /// layer so the entire run funnels into a single bus.
+    pub events_tx: broadcast::Sender<crate::control::protocol::EventEnvelope>,
     /// Per-task event counters.
     pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
     /// v0.4.1: notification router.
@@ -242,6 +273,11 @@ impl LayerState {
             false,
         ));
         let (done_tx, _) = broadcast::channel(64);
+        // PR-H of #259: each `LayerState::new` mints its own broadcast
+        // bus by default. Prod callers (`DispatchState::new`, sub-lead
+        // spawn) override via [`Self::with_events_tx`] to share the
+        // root layer's bus so the entire run funnels into one stream.
+        let (events_tx, _) = broadcast::channel(EVENTS_BROADCAST_CAP);
         Self {
             run_id,
             manifest,
@@ -269,6 +305,7 @@ impl LayerState {
             approval_policy,
             control_writer: Mutex::new(None),
             event_log,
+            events_tx,
             worker_counters: RwLock::new(HashMap::new()),
             notification_router,
             shared_store,
@@ -291,6 +328,21 @@ impl LayerState {
     #[must_use]
     pub fn with_event_log(mut self, event_log: Arc<crate::control::event_log::EventLog>) -> Self {
         self.event_log = event_log;
+        self
+    }
+
+    /// Builder: install the run-scoped event broadcast bus on this
+    /// freshly-constructed layer. PR-H of #259 — sub-leads call this
+    /// with the root layer's `events_tx` so the whole run funnels
+    /// into one bus, which the headless persistence subscriber
+    /// drains. Test callers that don't care about the broadcast can
+    /// omit and inherit the per-layer default.
+    #[must_use]
+    pub fn with_events_tx(
+        mut self,
+        events_tx: broadcast::Sender<crate::control::protocol::EventEnvelope>,
+    ) -> Self {
+        self.events_tx = events_tx;
         self
     }
 
@@ -400,39 +452,36 @@ impl LayerState {
         }
     }
 
-    /// Broadcast a control-plane event. PR-G of #259: this call assigns
-    /// the run-scoped seq from [`Self::event_log`], persists the
-    /// envelope to `events.jsonl` (no-op when `emit_event_stream` is
-    /// off), and — if a TUI/web bridge is connected — forwards the
-    /// envelope to the pump for wire emission.
+    /// Broadcast a control-plane event. PR-H of #259: this call
+    /// assigns the run-scoped seq from [`Self::event_log`] and
+    /// publishes the envelope onto [`Self::events_tx`]. Subscribers
+    /// fan out from there:
     ///
-    /// Persistence happens **regardless of whether a client is
-    /// connected**: headless dispatches still produce a complete
-    /// `events.jsonl` for post-run replay. The caller's `envelope.seq`
-    /// is overwritten; the caller is expected to construct envelopes
-    /// with `seq: 0` placeholders (pre-PR-G call sites still compile
-    /// unchanged).
+    /// - The persistent task spawned in `DispatchState::new` reads
+    ///   off the bus and appends to `events.jsonl` (gated by
+    ///   `emit_event_stream`). This is what makes headless
+    ///   dispatches produce a complete log.
+    /// - The connected control-socket pump (if any) reads off the
+    ///   bus and writes to the connected client.
     ///
-    /// `try_send` drops the wire emission on a full queue (slow /
-    /// frozen TUI) rather than blocking the dispatcher — the archived
-    /// row is unaffected.
+    /// The caller's `envelope.seq` is overwritten; call sites pass
+    /// `seq: 0` placeholders.
+    ///
+    /// `events_tx.send` returns `Err` only when there are zero
+    /// subscribers — possible only during the narrow window before
+    /// the persistence subscriber has been spawned (in tests that
+    /// build a bare `LayerState` without a `DispatchState`). The
+    /// error is logged and swallowed; the envelope is dropped.
     pub async fn broadcast_control_event(
         &self,
         mut envelope: crate::control::protocol::EventEnvelope,
     ) {
         envelope.seq = self.event_log.next_seq();
-        self.event_log.persist(&envelope).await;
-
-        if let Some(w) = self.control_writer.lock().await.as_ref() {
-            if let Err(e) = w.sender.try_send(envelope) {
-                tracing::debug!(
-                    "control_writer try_send dropped envelope: {}",
-                    match &e {
-                        tokio::sync::mpsc::error::TrySendError::Full(_) => "queue full",
-                        tokio::sync::mpsc::error::TrySendError::Closed(_) => "receiver dropped",
-                    },
-                );
-            }
+        if let Err(e) = self.events_tx.send(envelope) {
+            tracing::debug!(
+                "events_tx send dropped envelope: {} (no active subscribers)",
+                e,
+            );
         }
     }
 
