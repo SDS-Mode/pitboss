@@ -21,5 +21,6 @@ pub mod prune;
 pub mod runs;
 pub mod shared_store;
 pub mod status;
+pub mod stream;
 pub mod tree;
 pub mod tui_table;
