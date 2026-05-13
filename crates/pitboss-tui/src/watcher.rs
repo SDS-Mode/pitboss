@@ -119,6 +119,10 @@ pub fn watch(
 ) {
     std::thread::spawn(move || {
         let mut focused_id: Option<String> = None;
+        // Tier 2 of #437: hold the canonical reader across ticks so a
+        // 4 Hz poll only re-parses new `summary.jsonl` bytes (and
+        // re-reads `summary.json` only when its mtime advances).
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
 
         loop {
             // Drain any pending focus updates (non-blocking).
@@ -126,7 +130,7 @@ pub fn watch(
                 focused_id = Some(id);
             }
 
-            let snapshot = build_snapshot(&run_dir, focused_id.as_deref());
+            let snapshot = build_snapshot(&run_dir, &mut summary_reader, focused_id.as_deref());
             // Full channel means the UI is temporarily behind (e.g. a blocking
             // render tick). Drop this snapshot — the next tick will publish
             // a fresh one. Only a disconnected receiver ends the watcher.
@@ -151,7 +155,11 @@ pub fn watch(
 // Snapshot construction
 // ---------------------------------------------------------------------------
 
-fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
+fn build_snapshot(
+    run_dir: &Path,
+    summary_reader: &mut pitboss_core::store::RunSnapshotReader,
+    focused_id: Option<&str>,
+) -> AppSnapshot {
     // 1. Read resolved.json → get static task ids, models, lead (if any),
     //    plus the MCP servers + actor-type ids needed for the capability
     //    matrix shown in Detail view.
@@ -165,11 +173,14 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
         &resolved.sublead_types,
     );
 
-    // 2. Gather completed task records via the canonical reader (#437).
-    //    summary.json seeds the map when finalized; summary.jsonl rows
-    //    overlay last-wins by task_id, so a resume-after-finalize or a
-    //    reprompt/cancel/respawn lifecycle reflects the freshest record.
-    let completed = pitboss_core::store::read_run_snapshot(run_dir).tasks;
+    // 2. Refresh the cached snapshot reader (#437 Tier 2). The first
+    //    tick does a full reparse; subsequent ticks only re-parse new
+    //    bytes in `summary.jsonl` (and re-read `summary.json` only when
+    //    its mtime advances). Merge semantics are identical to the
+    //    stateless `read_run_snapshot` — last-wins-by-task_id dedup so
+    //    resume-after-finalize and reprompt / cancel / respawn
+    //    lifecycles reflect the freshest record.
+    let completed = &summary_reader.refresh().tasks;
 
     // 3. Dynamic worker ids come from two sources:
     //    - `summary.jsonl`/`summary.json` records for completed workers not in
@@ -177,7 +188,7 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
     //    - `tasks/<id>/` filesystem subdirectories for workers that have been
     //      spawned but may not yet have a summary record (still running).
     let tasks_dir = run_dir.join("tasks");
-    let dynamic_ids = collect_dynamic_ids(&completed, &static_ids, &tasks_dir);
+    let dynamic_ids = collect_dynamic_ids(completed, &static_ids, &tasks_dir);
 
     // 4. All tile ids = static (tasks + lead) then dynamic (sorted).
     let all_ids: Vec<String> = static_ids
@@ -952,7 +963,8 @@ mod tests {
         )
         .unwrap();
 
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         assert_eq!(snap.tasks.len(), 1);
         assert_eq!(snap.tasks[0].id, "triage-lead");
     }
@@ -1000,7 +1012,8 @@ mod tests {
         jsonl_line.push(b'\n');
         std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
 
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         let ids: Vec<&str> = snap.tasks.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"lead"), "lead tile missing: {ids:?}");
         assert!(
@@ -1038,7 +1051,8 @@ mod tests {
         // Create a tasks/<worker-id>/ directory with no summary record yet.
         std::fs::create_dir_all(run_dir.join("tasks/worker-live")).unwrap();
 
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         let ids: Vec<&str> = snap.tasks.iter().map(|t| t.id.as_str()).collect();
         assert!(
             ids.contains(&"worker-live"),
@@ -1084,7 +1098,8 @@ mod tests {
         )
         .unwrap();
 
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         // Untyped row + worker_type:writer = 2 rows.
         assert_eq!(snap.matrix_rows.len(), 2, "expected untyped + writer rows");
         let writer = snap
@@ -1144,7 +1159,8 @@ mod tests {
         jsonl_line.push(b'\n');
         std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
 
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         let tile = snap
             .tasks
             .iter()
@@ -1198,7 +1214,8 @@ mod tests {
         jsonl_line.push(b'\n');
         std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
 
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         let tile = snap
             .tasks
             .iter()
@@ -1515,7 +1532,8 @@ mod tests {
         .unwrap();
 
         // Lead has no events.jsonl — must default to 0 denials.
-        let snap = build_snapshot(&run_dir, None);
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
         let lead_tile = snap.tasks.iter().find(|t| t.id == "lead").unwrap();
         let worker_tile = snap.tasks.iter().find(|t| t.id == "worker-noisy").unwrap();
         assert_eq!(lead_tile.denials_count, 0);

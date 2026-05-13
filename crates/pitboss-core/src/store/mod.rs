@@ -13,7 +13,7 @@ pub mod sqlite;
 pub use sqlite::SqliteStore;
 
 pub mod summary;
-pub use summary::{read_run_snapshot, RunSnapshot};
+pub use summary::{read_run_snapshot, RunSnapshot, RunSnapshotReader};
 
 #[cfg(test)]
 mod integration_tests {
