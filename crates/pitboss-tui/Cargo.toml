@@ -33,10 +33,8 @@ tracing      = { workspace = true }
 tui-textarea = { workspace = true }
 tokio        = { workspace = true }
 tokio-stream = { workspace = true }
-# #437 Tier 3: push-based summary.json[l] watch. inotify on Linux,
-# FSEvents on macOS, ReadDirectoryChangesW on Windows — all auto-
-# selected by `notify::recommended_watcher`.
-notify       = { workspace = true }
+# (#438 PR-F) `notify` left this crate's dep graph when watcher.rs moved
+# onto `pitboss_core::stream::tail_run_stream` for disk-tail.
 
 [dev-dependencies]
 tempfile = { workspace = true }
