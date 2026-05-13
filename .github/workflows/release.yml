@@ -157,6 +157,19 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      # Build the pitboss-web SPA before `dist build` so rust-embed
+      # captures real assets into the binary instead of an empty
+      # directory (issue #435). Required for every target since
+      # cargo-dist builds the full workspace, including pitboss-web.
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build pitboss-web SPA
+        run: |
+          cd crates/pitboss-web/spa
+          npm ci
+          npm run build
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
