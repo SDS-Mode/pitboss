@@ -7,6 +7,7 @@
     getResolvedManifest,
     getManifestToml,
     getSummaryJsonl,
+    getEventsJsonl,
     subscribeRunEvents,
     postControlOp,
     forkRun,
@@ -92,11 +93,7 @@
   // silently rendered as 'complete' (green).
   const status = $derived<RunStatus>(
     (stub?.status as RunStatus | undefined) ??
-      (summary
-        ? summary.was_interrupted === true
-          ? 'cancelled'
-          : 'complete'
-        : 'aborted')
+      (summary ? (summary.was_interrupted === true ? 'cancelled' : 'complete') : 'aborted')
   );
   const taskList = $derived<Array<Record<string, any>>>(
     (summary?.tasks as Array<Record<string, any>> | undefined) ?? []
@@ -234,8 +231,7 @@
       const status = ((t.status as string | undefined) ?? 'unknown').toLowerCase();
       // Map TaskStatus → tile color buckets used by RunTileGrid.tileColor.
       // Anything not running/paused/frozen renders as terminal.
-      const stateStr =
-        status === 'success' ? 'completed' : status === 'failed' ? 'failed' : status;
+      const stateStr = status === 'success' ? 'completed' : status === 'failed' ? 'failed' : status;
       merged.push({
         task_id: id,
         state: stateStr,
@@ -293,10 +289,7 @@
   $effect(() => {
     if (!browser) return;
     try {
-      window.localStorage.setItem(
-        FILTER_STORAGE_KEY,
-        JSON.stringify({ hideNoise, disabledKinds })
-      );
+      window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify({ hideNoise, disabledKinds }));
     } catch {
       /* quota / disabled — silently ignore */
     }
@@ -331,6 +324,49 @@
   }
 
   const hiddenCount = $derived(liveEvents.length - visibleEvents.length);
+
+  // ---- Replay tab: persisted events.jsonl (#259) ----------------------
+  // For finalized runs, the Live SSE bridge has closed but the
+  // dispatcher persisted every envelope to `<run-dir>/events.jsonl`
+  // (when `[run].emit_event_stream = true`). The Replay tab fetches
+  // that file via GET /api/runs/:id/events-jsonl and renders the
+  // same scrollable event list as Live, sharing the filter state so
+  // an operator's "hide store_activity" preference carries between
+  // live and historical inspection.
+  //
+  // Fetched lazily on first tab open (or via the Reload button) —
+  // not at page mount — because a finalized run that didn't enable
+  // emit_event_stream shouldn't pay the 404 round-trip until the
+  // operator actually clicks Replay.
+  let replayEvents = $state<ControlEnvelope[]>([]);
+  let replayLoaded = $state(false);
+  let replayLoading = $state(false);
+  let replayError = $state<string | null>(null);
+
+  async function loadReplay() {
+    replayLoading = true;
+    replayError = null;
+    try {
+      replayEvents = await getEventsJsonl(runId);
+      replayLoaded = true;
+    } catch (e) {
+      replayError = e instanceof ApiError ? `${e.status}: ${e.body || e.message}` : String(e);
+    } finally {
+      replayLoading = false;
+    }
+  }
+
+  const visibleReplayEvents = $derived.by(() => replayEvents.filter((e) => !isHidden(e)));
+  const replayHiddenCount = $derived(replayEvents.length - visibleReplayEvents.length);
+  /** Replay-specific kind set, separate from `seenKinds` (which is
+   * scoped to live events). Used to populate the Replay tab's
+   * filter panel so the kind chips reflect what's actually in the
+   * historical log, not what arrived on this session's SSE. */
+  const replaySeenKinds = $derived.by(() => {
+    const s = new Set<string>();
+    for (const e of replayEvents) s.add(e.event);
+    return [...s].sort();
+  });
 
   // ---- Phase 3: control state derived from the live event stream ------
   // The dispatcher pushes typed events; we keep the latest snapshot of
@@ -595,10 +631,7 @@
     );
   }
   function continueWorker(task_id: string) {
-    sendOp(
-      postControlOp(runId, { op: 'continue_worker', task_id }),
-      `continue_worker ${task_id}`
-    );
+    sendOp(postControlOp(runId, { op: 'continue_worker', task_id }), `continue_worker ${task_id}`);
   }
   function repromptWorker(task_id: string) {
     const prompt = window.prompt('New prompt for the worker?');
@@ -782,6 +815,9 @@
       {/if}
       <TabsTrigger value="graph">Graph</TabsTrigger>
       <TabsTrigger value="tasks">Tasks ({tasksToRender.length})</TabsTrigger>
+      {#if !inProgress}
+        <TabsTrigger value="replay">Replay</TabsTrigger>
+      {/if}
       <TabsTrigger value="manifest">Manifest</TabsTrigger>
       <TabsTrigger value="resolved">Resolved</TabsTrigger>
       <TabsTrigger value="summary">Summary JSON</TabsTrigger>
@@ -790,12 +826,11 @@
     <!--
       The Live tab (event stream + Filter UI + Workers card) is
       gated on inProgress on purpose: SSE closes when the
-      dispatcher exits and there's no static event-log surface
-      yet, so a finalised run has nothing live to show. The 3-s
-      polling tick re-fetches the run record (see effect above),
-      so this gate flips at finalize without a manual reload.
-      Don't remove the gate — fix the post-finalise event view
-      instead if operators want to filter historical events.
+      dispatcher exits, so a finalised run has nothing live to
+      stream. The 3-s polling tick re-fetches the run record
+      (see effect above), so this gate flips at finalize without
+      a manual reload. The historical equivalent is the Replay
+      tab (#259) below, which reads the persisted events.jsonl.
     -->
     {#if inProgress}
       <TabsContent value="live" class="mt-4 space-y-4">
@@ -806,8 +841,8 @@
               <div>
                 <p class="font-medium text-amber-700 dark:text-amber-300">Control taken</p>
                 <p class="text-muted-foreground mt-1 text-sm">
-                  Another client (TUI or another browser) connected to this run's control
-                  socket and superseded ours. Read-only views still work.
+                  Another client (TUI or another browser) connected to this run's control socket and
+                  superseded ours. Read-only views still work.
                   <Button
                     variant="link"
                     class="ml-1 h-auto p-0 text-sm"
@@ -861,21 +896,21 @@
               <Badge variant="outline" class="ml-2 text-xs">{allWorkers.length}</Badge>
               {#if Object.keys(subleads).length > 0}
                 <Badge variant="outline" class="ml-1 text-xs">
-                  {Object.keys(subleads).length} sublead{Object.keys(subleads).length === 1 ? '' : 's'}
+                  {Object.keys(subleads).length} sublead{Object.keys(subleads).length === 1
+                    ? ''
+                    : 's'}
                 </Badge>
               {/if}
             </CardTitle>
             <CardDescription class="text-xs">
-              Live state from `WorkersSnapshot`; terminated actors filled in from `summary.jsonl`
-              so sub-tree workers stay visible after their sublead exits.
+              Live state from `WorkersSnapshot`; terminated actors filled in from `summary.jsonl` so
+              sub-tree workers stay visible after their sublead exits.
             </CardDescription>
           </CardHeader>
           <CardContent class="pt-0">
             {#if allWorkers.length === 0}
               <p class="text-muted-foreground py-4 text-center text-xs">
-                {sseStatus === 'open'
-                  ? 'No workers reported yet.'
-                  : 'Waiting for first snapshot…'}
+                {sseStatus === 'open' ? 'No workers reported yet.' : 'Waiting for first snapshot…'}
               </p>
             {:else}
               <RunTileGrid
@@ -956,8 +991,8 @@
               </p>
             {:else if visibleEvents.length === 0}
               <p class="text-muted-foreground py-4 text-center text-sm">
-                All {liveEvents.length} event{liveEvents.length === 1 ? ' is' : 's are'} hidden by
-                current filters.
+                All {liveEvents.length} event{liveEvents.length === 1 ? ' is' : 's are'} hidden by current
+                filters.
               </p>
             {:else}
               <div class="max-h-[40vh] space-y-1 overflow-auto font-mono text-xs">
@@ -980,7 +1015,6 @@
           </CardContent>
         </Card>
       </TabsContent>
-
     {/if}
 
     <!--
@@ -1062,8 +1096,10 @@
                   <TableCell class="text-muted-foreground text-xs">{t.model ?? '—'}</TableCell>
                   <TableCell class="text-right tabular-nums text-xs">
                     {#if t.token_usage}
-                      {(((t.token_usage as Record<string, number>).input ?? 0) +
-                        ((t.token_usage as Record<string, number>).output ?? 0)).toLocaleString()}
+                      {(
+                        ((t.token_usage as Record<string, number>).input ?? 0) +
+                        ((t.token_usage as Record<string, number>).output ?? 0)
+                      ).toLocaleString()}
                     {:else}—{/if}
                   </TableCell>
                   <TableCell class="text-right tabular-nums text-xs">
@@ -1091,6 +1127,137 @@
         {/if}
       </Card>
     </TabsContent>
+
+    <!--
+      Replay tab (#259 PR-K): renders the persisted
+      `events.jsonl` written by the dispatcher when
+      `[run].emit_event_stream = true`. Only available on
+      finalized runs — for in-progress runs the Live tab is the
+      authoritative event surface. The same filter UI (hide noise,
+      kind chips) applies, sharing state with Live so an
+      operator's preferences carry across.
+    -->
+    {#if !inProgress}
+      <TabsContent value="replay" class="mt-4 space-y-4">
+        {#if !replayLoaded && !replayLoading}
+          <Card>
+            <CardContent class="flex items-start justify-between gap-3 pt-6">
+              <div class="space-y-1">
+                <p class="text-sm font-medium">Persisted control-event stream</p>
+                <p class="text-muted-foreground text-xs">
+                  Loads <code>events.jsonl</code> from the run directory. Available when the
+                  manifest enabled <code>[run].emit_event_stream</code>.
+                </p>
+              </div>
+              <Button size="sm" onclick={() => void loadReplay()}>Load events</Button>
+            </CardContent>
+          </Card>
+        {:else}
+          <Card>
+            <CardHeader class="flex-row items-start justify-between gap-2 pb-2 space-y-0">
+              <div>
+                <CardTitle class="text-base">Replay</CardTitle>
+                <CardDescription class="text-xs">
+                  {#if replayLoading}
+                    Loading…
+                  {:else if replayError}
+                    <span class="text-destructive">{replayError}</span>
+                  {:else if replayEvents.length === 0}
+                    No persisted envelopes — the run was dispatched with
+                    <code>emit_event_stream</code> disabled, or no events were ever emitted.
+                  {:else}
+                    {visibleReplayEvents.length} of {replayEvents.length} envelope{replayEvents.length ===
+                    1
+                      ? ''
+                      : 's'}{#if replayHiddenCount > 0}
+                      <span class="text-muted-foreground/70">
+                        · {replayHiddenCount} hidden</span
+                      >{/if}
+                  {/if}
+                </CardDescription>
+              </div>
+              <div class="flex gap-2">
+                <Button
+                  variant={filterPanelOpen ? 'default' : 'outline'}
+                  size="sm"
+                  onclick={() => (filterPanelOpen = !filterPanelOpen)}
+                  disabled={replayEvents.length === 0}
+                >
+                  <Filter class="mr-1.5 size-3.5" /> Filters
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onclick={() => void loadReplay()}
+                  disabled={replayLoading}
+                >
+                  <RefreshCw class="mr-1.5 size-3.5" /> Reload
+                </Button>
+              </div>
+            </CardHeader>
+            {#if filterPanelOpen && replayEvents.length > 0}
+              <div class="border-border/60 mx-6 mb-2 rounded-md border p-3 text-xs">
+                <div class="mb-2 flex items-center gap-2">
+                  <Switch id="replay-hide-noise" bind:checked={hideNoise} />
+                  <Label for="replay-hide-noise" class="cursor-pointer text-xs">
+                    Hide noise (empty <code>store_activity</code> heartbeats)
+                  </Label>
+                </div>
+                {#if replaySeenKinds.length > 0}
+                  <div class="text-muted-foreground mb-1.5 text-[11px]">Event kinds</div>
+                  <div class="flex flex-wrap gap-1.5">
+                    {#each replaySeenKinds as k (k)}
+                      <button
+                        onclick={() => toggleKind(k)}
+                        class="rounded border px-2 py-0.5 font-mono text-[11px] {disabledKinds[k]
+                          ? 'border-muted-foreground/20 text-muted-foreground/50 line-through'
+                          : 'border-sky-500/40 text-sky-700 dark:text-sky-400'}"
+                      >
+                        {k}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+            <CardContent class="pt-0">
+              {#if replayLoading}
+                <p class="text-muted-foreground py-4 text-center text-sm">Loading events…</p>
+              {:else if replayEvents.length === 0 && !replayError}
+                <p class="text-muted-foreground py-4 text-center text-sm">
+                  No persisted envelopes found.
+                </p>
+              {:else if visibleReplayEvents.length === 0}
+                <p class="text-muted-foreground py-4 text-center text-sm">
+                  All {replayEvents.length} envelope{replayEvents.length === 1 ? ' is' : 's are'} hidden
+                  by current filters.
+                </p>
+              {:else}
+                <div class="max-h-[60vh] space-y-1 overflow-auto font-mono text-xs">
+                  {#each visibleReplayEvents as e, idx (idx)}
+                    <div class="bg-muted/30 rounded border-l-2 border-sky-500/40 px-2 py-1">
+                      {#if typeof e.seq === 'number'}
+                        <span class="text-muted-foreground mr-2 tabular-nums">#{e.seq}</span>
+                      {/if}
+                      <span class="text-sky-700 dark:text-sky-400">{e.event}</span>
+                      {#if e.actor_path && Array.isArray(e.actor_path) && e.actor_path.length > 0}
+                        <span class="text-muted-foreground ml-2">{e.actor_path.join('/')}</span>
+                      {/if}
+                      <pre
+                        class="text-muted-foreground mt-0.5 overflow-x-auto whitespace-pre-wrap text-[11px]">{JSON.stringify(
+                          e,
+                          null,
+                          2
+                        )}</pre>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </CardContent>
+          </Card>
+        {/if}
+      </TabsContent>
+    {/if}
 
     <TabsContent value="manifest" class="mt-4">
       <Card>
