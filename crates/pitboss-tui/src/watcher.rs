@@ -1492,6 +1492,118 @@ mod tests {
         assert_eq!(recent[0].tool_name, "Bash");
     }
 
+    /// Tier 2 regression guard (#437): duplicate `task_id` rows in
+    /// `summary.jsonl` must dedupe last-wins after going through the
+    /// stateful `RunSnapshotReader`. Builds the same shape of fixture
+    /// the dispatcher produces on a reprompt / cancel / respawn cycle
+    /// and asserts the tile count, the failed count, and the rendered
+    /// status all reflect the deduped view — not the raw line count.
+    fn task_record_line(
+        id: &str,
+        status: pitboss_core::store::TaskStatus,
+        parent: Option<&str>,
+    ) -> String {
+        let t = chrono::Utc::now();
+        let rec = TaskRecord {
+            task_id: id.to_string(),
+            status,
+            exit_code: Some(0),
+            started_at: t,
+            ended_at: t,
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: std::path::PathBuf::from("/dev/null"),
+            token_usage: pitboss_core::parser::TokenUsage::default(),
+            claude_session_id: None,
+            final_message_preview: None,
+            final_message: None,
+            parent_task_id: parent.map(str::to_string),
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+            failure_reason: None,
+            cost_usd: None,
+            actor_type: None,
+        };
+        serde_json::to_string(&rec).unwrap()
+    }
+
+    #[test]
+    fn build_snapshot_dedupes_duplicate_task_id_rows() {
+        use pitboss_core::store::TaskStatus as TS;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+
+        // Hierarchical run: one lead + one worker. `tasks: []` mirrors
+        // a real lead-only manifest after resolve.
+        let resolved = serde_json::json!({
+            "max_parallel": 4,
+            "halt_on_failure": false,
+            "run_dir": run_dir.to_str(),
+            "worktree_cleanup": "OnSuccess",
+            "emit_event_stream": false,
+            "tasks": [],
+            "lead": {"id": "lead-1", "model": "claude-haiku-4-5"},
+            "max_workers": 4,
+            "budget_usd": 5.0,
+            "lead_timeout_secs": 900,
+        });
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+
+        // summary.jsonl with three lines — two for the same worker
+        // (Cancelled → Success, the reprompt-cancel-respawn shape) and
+        // one for the lead.
+        let payload = [
+            task_record_line("worker-A", TS::Cancelled, Some("lead-1")),
+            task_record_line("worker-A", TS::Success, Some("lead-1")), // newer row wins
+            task_record_line("lead-1", TS::Success, None),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(run_dir.join("summary.jsonl"), payload).unwrap();
+
+        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+
+        // The dispatcher wrote 3 lines; the TUI must show 2 tiles
+        // (lead + one worker), the worker's status must be the latest
+        // (Success), and failed count must NOT count the earlier
+        // Cancelled row.
+        assert_eq!(
+            snap.tasks.len(),
+            2,
+            "tile count = unique task_ids, not line count"
+        );
+        let worker = snap
+            .tasks
+            .iter()
+            .find(|t| t.id == "worker-A")
+            .expect("worker tile present");
+        assert!(
+            matches!(worker.status, TileStatus::Done(TS::Success)),
+            "worker tile shows the latest row (Success), not the earlier Cancelled",
+        );
+        let failed = snap
+            .tasks
+            .iter()
+            .filter(|t| matches!(&t.status, TileStatus::Done(s) if !matches!(s, TS::Success)))
+            .count();
+        assert_eq!(failed, 0, "no failed tiles after dedup");
+
+        // Idempotency: a second refresh against unchanged disk
+        // produces an identical snapshot.
+        let snap2 = build_snapshot(&run_dir, &mut summary_reader, None);
+        assert_eq!(snap2.tasks.len(), 2);
+    }
+
     /// End-to-end: a dynamic worker with three `tool_denied` rows in its
     /// `events.jsonl` must surface as `denials_count = 3` on its tile so
     /// the TUI render path picks it up.
