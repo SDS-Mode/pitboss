@@ -1,15 +1,18 @@
-//! Background watcher thread — polls the run directory every 500ms and
-//! emits `AppSnapshot` updates via an mpsc channel.
+//! Background watcher thread — consumes `pitboss_core::stream::tail_run_stream`
+//! and emits `AppSnapshot` updates via an mpsc channel. Per-task
+//! auxiliary disk reads (focus-pane log tail, `events.jsonl` denials)
+//! stay here.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
 
-use notify::Watcher;
 use pitboss_core::parser::{parse_line_all, Event};
 use pitboss_core::store::{TaskRecord, TaskStatus};
+use pitboss_core::stream::{tail_run_stream, LifecycleEvent, RunStreamPayload};
 use serde::Deserialize;
+use tokio_stream::StreamExt;
 
 use crate::state::{AppSnapshot, DenialRow, TileState, TileStatus};
 
@@ -19,7 +22,6 @@ use crate::state::{AppSnapshot, DenialRow, TileState, TileStatus};
 /// for post-mortem inspection. (#405)
 const RECENT_DENIALS_CAP: usize = 5;
 
-const POLL_INTERVAL_MS: u64 = 250;
 /// Number of parsed focus-pane lines to keep. Deep scroll-back on long
 /// runs is worth a few extra megabytes of in-memory state per focus
 /// change (each line is ~1 KB on average).
@@ -121,31 +123,6 @@ pub fn watch(
     std::thread::spawn(move || run_watch_loop(run_dir, snapshot_tx, focus_rx));
 }
 
-/// What woke the watcher thread on a given loop iteration. Each variant
-/// fans into the same `wake_rx` channel; the main loop reacts to it and
-/// rebuilds the snapshot.
-enum Wake {
-    /// Operator changed the focused tile via the UI thread.
-    Focus(String),
-    /// A filesystem event from `notify` landed somewhere under
-    /// `run_dir`. Most of these are `summary.jsonl` appends, but any
-    /// non-rescan event just triggers a snapshot rebuild.
-    FsEvent,
-    /// `Event::need_rescan()` flag: kernel notification buffer
-    /// overran, so `notify`'s view of what changed is incomplete.
-    /// We respond by dropping the [`RunSnapshotReader`]'s cached
-    /// tracking state — the next [`RunSnapshotReader::refresh`] will
-    /// do a full reparse rather than trust its byte-offset.
-    Rescan,
-    /// Periodic safety-net timer fired. Covers two failure modes:
-    /// (1) `notify` silently dropped an event we'd otherwise miss
-    /// (rare on local filesystems, more common on NFS); (2) `notify`
-    /// failed to register at all and we're in poll-only fallback
-    /// mode. With Tier 2's stateful reader, a periodic tick costs one
-    /// stat per file when nothing changed.
-    Periodic,
-}
-
 // The arguments are consumed by the thread when this function returns;
 // clippy's `needless_pass_by_value` doesn't see the implicit drop.
 #[allow(clippy::needless_pass_by_value)]
@@ -154,119 +131,116 @@ fn run_watch_loop(
     snapshot_tx: mpsc::SyncSender<AppSnapshot>,
     focus_rx: mpsc::Receiver<String>,
 ) {
+    // PR-F of #438: the watcher consumes from
+    // `pitboss_core::stream::tail_run_stream` instead of running its
+    // own `notify` watcher + `RunSnapshotReader` directly. The stream
+    // owns the canonical disk-tail engine; this thread maintains a
+    // local `tasks_map` accumulated from `Task` items and rebuilds
+    // `AppSnapshot` on each delta.
+    //
+    // The watcher thread is sync (held that way so callers don't have
+    // to live in a tokio context), so we spin a current-thread runtime
+    // here to drive the async stream.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!(error = %e, "watcher: failed to build tokio runtime");
+            return;
+        }
+    };
+
+    runtime.block_on(run_watch_loop_async(run_dir, snapshot_tx, focus_rx));
+}
+
+async fn run_watch_loop_async(
+    run_dir: PathBuf,
+    snapshot_tx: mpsc::SyncSender<AppSnapshot>,
+    focus_rx: mpsc::Receiver<String>,
+) {
+    let mut tasks_map: HashMap<String, TaskRecord> = HashMap::new();
     let mut focused_id: Option<String> = None;
-    // Tier 2 of #437: hold the canonical reader across ticks so we
-    // only re-parse new `summary.jsonl` bytes (and re-read
-    // `summary.json` only when its mtime advances).
-    let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
 
-    // Push the initial snapshot before `notify` subscribes (#437
-    // Tier 3 acceptance: historical / finalized runs must render
-    // entirely from the initial snapshot even when no FS events ever
-    // fire). The full-reparse cost here is unavoidable on first
-    // open — subsequent ticks ride the reader's incremental path.
-    let snapshot = build_snapshot(&run_dir, &mut summary_reader, focused_id.as_deref());
-    if matches!(
-        snapshot_tx.try_send(snapshot),
-        Err(mpsc::TrySendError::Disconnected(_))
-    ) {
-        return;
-    }
-
-    let (wake_tx, wake_rx) = mpsc::channel::<Wake>();
-
-    // Bridge: pump focus updates from the caller's channel into the
-    // unified wake channel. Owns its own thread so the public watch()
-    // API stays unchanged.
-    let wake_for_focus = wake_tx.clone();
+    // Bridge: pump focus updates from the caller's sync mpsc into a
+    // tokio channel so they participate in the `select!` below.
+    let (focus_async_tx, mut focus_async_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::spawn(move || {
         while let Ok(id) = focus_rx.recv() {
-            if wake_for_focus.send(Wake::Focus(id)).is_err() {
+            if focus_async_tx.send(id).is_err() {
                 break;
             }
         }
     });
 
-    // Try to register a recursive `notify` watcher on the run dir.
-    // On success, future loop ticks are driven by FS events plus a
-    // slow safety-net timer. On failure (out-of-watches, NFS without
-    // inotify, etc.), fall back to today's poll cadence so the TUI
-    // still updates — the cost profile is now O(0) per tick with
-    // Tier 2's reader, so the fallback isn't expensive either.
-    let wake_for_fs = wake_tx.clone();
-    let watcher_result: notify::Result<notify::RecommendedWatcher> =
-        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                let wake = if event.need_rescan() {
-                    Wake::Rescan
-                } else {
-                    Wake::FsEvent
-                };
-                let _ = wake_for_fs.send(wake);
-            }
-        });
-    let (notify_active, _watcher_guard) = match watcher_result {
-        Ok(mut w) => match w.watch(&run_dir, notify::RecursiveMode::Recursive) {
-            Ok(()) => (true, Some(w)),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    path = %run_dir.display(),
-                    "notify::watch failed; using poll-only fallback for the summary surface",
-                );
-                (false, None)
-            }
-        },
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "notify::recommended_watcher init failed; using poll-only fallback",
-            );
-            (false, None)
-        }
-    };
+    // Emit the initial snapshot before any stream items arrive. #437
+    // Tier 3 acceptance criterion: historical / finalized runs must
+    // render entirely from the initial snapshot even when no events
+    // ever fire. The map is empty at first; `tail_run_stream`'s initial
+    // replay fills it on the first poll within 250 ms.
+    let initial = build_snapshot(&run_dir, &tasks_map, focused_id.as_deref());
+    if matches!(
+        snapshot_tx.try_send(initial),
+        Err(mpsc::TrySendError::Disconnected(_))
+    ) {
+        return;
+    }
 
-    // Spawn the safety-net timer. When notify is alive, ticks every
-    // 5s catch any missed events on flakey backends. When notify is
-    // dead, ticks every POLL_INTERVAL_MS (matches the pre-#440
-    // cadence so the operator perceives no change in update speed).
-    let wake_for_timer = wake_tx.clone();
-    let tick_interval = if notify_active {
-        Duration::from_secs(5)
-    } else {
-        Duration::from_millis(POLL_INTERVAL_MS)
-    };
-    std::thread::spawn(move || loop {
-        std::thread::sleep(tick_interval);
-        if wake_for_timer.send(Wake::Periodic).is_err() {
-            break;
-        }
-    });
+    let mut stream_alive = true;
+    let stream = tail_run_stream(run_dir.clone());
+    let mut stream = std::pin::pin!(stream);
 
-    // Drop our own copy of wake_tx so wake_rx can observe a
-    // disconnect once every helper thread also drops its sender.
-    drop(wake_tx);
-
-    while let Ok(wake) = wake_rx.recv() {
-        match wake {
-            Wake::Focus(id) => focused_id = Some(id),
-            Wake::Rescan => {
-                // Drop the reader's cached byte-offset tracking so
-                // the next refresh does a full reparse from disk.
-                summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+    loop {
+        let mut rebuild = false;
+        tokio::select! {
+            item = stream.next(), if stream_alive => {
+                match item {
+                    Some(item) => match item.payload {
+                        RunStreamPayload::Task(t) => {
+                            tasks_map.insert(t.task_id.clone(), *t);
+                            rebuild = true;
+                        }
+                        RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary }) => {
+                            for t in &summary.tasks {
+                                tasks_map.insert(t.task_id.clone(), t.clone());
+                            }
+                            rebuild = true;
+                            stream_alive = false;
+                        }
+                        RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. }) => {}
+                    },
+                    None => {
+                        // Stream ended without a Finalized lifecycle —
+                        // rare (would require the underlying drive_tail
+                        // task to exit unexpectedly). Treat as
+                        // finalize: keep responding to focus changes.
+                        stream_alive = false;
+                    }
+                }
             }
-            Wake::FsEvent | Wake::Periodic => {}
+            id = focus_async_rx.recv() => {
+                match id {
+                    Some(id) => {
+                        focused_id = Some(id);
+                        rebuild = true;
+                    }
+                    None => {
+                        // Focus side disconnected — the TUI shut down.
+                        return;
+                    }
+                }
+            }
         }
 
-        let snapshot = build_snapshot(&run_dir, &mut summary_reader, focused_id.as_deref());
-        match snapshot_tx.try_send(snapshot) {
-            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        if rebuild {
+            let snap = build_snapshot(&run_dir, &tasks_map, focused_id.as_deref());
+            match snapshot_tx.try_send(snap) {
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            }
         }
     }
-    // _watcher_guard drops here, releasing the inotify/FSEvents
-    // registration. Helper threads observe wake_rx as disconnected
-    // and exit on their next send.
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +249,7 @@ fn run_watch_loop(
 
 fn build_snapshot(
     run_dir: &Path,
-    summary_reader: &mut pitboss_core::store::RunSnapshotReader,
+    completed: &std::collections::HashMap<String, TaskRecord>,
     focused_id: Option<&str>,
 ) -> AppSnapshot {
     // 1. Read resolved.json → get static task ids, models, lead (if any),
@@ -291,14 +265,13 @@ fn build_snapshot(
         &resolved.sublead_types,
     );
 
-    // 2. Refresh the cached snapshot reader (#437 Tier 2). The first
-    //    tick does a full reparse; subsequent ticks only re-parse new
-    //    bytes in `summary.jsonl` (and re-read `summary.json` only when
-    //    its mtime advances). Merge semantics are identical to the
-    //    stateless `read_run_snapshot` — last-wins-by-task_id dedup so
-    //    resume-after-finalize and reprompt / cancel / respawn
-    //    lifecycles reflect the freshest record.
-    let completed = &summary_reader.refresh().tasks;
+    // 2. PR-F of #438: `completed` is now passed in by the caller —
+    //    it's accumulated from `pitboss_core::stream::tail_run_stream`
+    //    items (Task + Lifecycle::Finalized.summary.tasks). The
+    //    canonical `RunSnapshotReader` that used to live here moved
+    //    into `tail_run_stream`'s engine. Merge semantics are
+    //    unchanged: last-wins-by-task_id (stream emits the freshest
+    //    row when a `task_id` reappears with a newer `ended_at`).
 
     // 3. Dynamic worker ids come from two sources:
     //    - `summary.jsonl`/`summary.json` records for completed workers not in
@@ -1081,8 +1054,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         assert_eq!(snap.tasks.len(), 1);
         assert_eq!(snap.tasks[0].id, "triage-lead");
     }
@@ -1130,8 +1103,8 @@ mod tests {
         jsonl_line.push(b'\n');
         std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         let ids: Vec<&str> = snap.tasks.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"lead"), "lead tile missing: {ids:?}");
         assert!(
@@ -1169,8 +1142,8 @@ mod tests {
         // Create a tasks/<worker-id>/ directory with no summary record yet.
         std::fs::create_dir_all(run_dir.join("tasks/worker-live")).unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         let ids: Vec<&str> = snap.tasks.iter().map(|t| t.id.as_str()).collect();
         assert!(
             ids.contains(&"worker-live"),
@@ -1216,8 +1189,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         // Untyped row + worker_type:writer = 2 rows.
         assert_eq!(snap.matrix_rows.len(), 2, "expected untyped + writer rows");
         let writer = snap
@@ -1277,8 +1250,8 @@ mod tests {
         jsonl_line.push(b'\n');
         std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         let tile = snap
             .tasks
             .iter()
@@ -1332,8 +1305,8 @@ mod tests {
         jsonl_line.push(b'\n');
         std::fs::write(run_dir.join("summary.jsonl"), jsonl_line).unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         let tile = snap
             .tasks
             .iter()
@@ -1688,8 +1661,8 @@ mod tests {
             + "\n";
         std::fs::write(run_dir.join("summary.jsonl"), payload).unwrap();
 
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
 
         // The dispatcher wrote 3 lines; the TUI must show 2 tiles
         // (lead + one worker), the worker's status must be the latest
@@ -1718,7 +1691,7 @@ mod tests {
 
         // Idempotency: a second refresh against unchanged disk
         // produces an identical snapshot.
-        let snap2 = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap2 = build_snapshot(&run_dir, &snap_source.tasks, None);
         assert_eq!(snap2.tasks.len(), 2);
     }
 
@@ -1762,8 +1735,8 @@ mod tests {
         .unwrap();
 
         // Lead has no events.jsonl — must default to 0 denials.
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-        let snap = build_snapshot(&run_dir, &mut summary_reader, None);
+        let snap_source = pitboss_core::store::read_run_snapshot(&run_dir);
+        let snap = build_snapshot(&run_dir, &snap_source.tasks, None);
         let lead_tile = snap.tasks.iter().find(|t| t.id == "lead").unwrap();
         let worker_tile = snap.tasks.iter().find(|t| t.id == "worker-noisy").unwrap();
         assert_eq!(lead_tile.denials_count, 0);
