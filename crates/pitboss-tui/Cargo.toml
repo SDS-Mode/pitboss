@@ -32,6 +32,10 @@ uuid         = { workspace = true }
 tracing      = { workspace = true }
 tui-textarea = { workspace = true }
 tokio        = { workspace = true }
+# #437 Tier 3: push-based summary.json[l] watch. inotify on Linux,
+# FSEvents on macOS, ReadDirectoryChangesW on Windows — all auto-
+# selected by `notify::recommended_watcher`.
+notify       = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
