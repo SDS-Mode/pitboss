@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use pitboss_cli::runs::{collect_run_entries, RunStatus};
-use pitboss_core::store::{FailureReason, RunSummary, TaskStatus};
+use pitboss_core::store::{FailureReason, TaskStatus};
 use serde::Deserialize;
 
 use super::digest::{RunDigest, TaskFailureDigest};
@@ -46,11 +46,12 @@ impl AggregateSet {
         let mut failures = Vec::new();
 
         for entry in entries {
-            let summary_path = entry.run_dir.join("summary.json");
-            let summary = match std::fs::read(&summary_path) {
-                Ok(bytes) => serde_json::from_slice::<RunSummary>(&bytes).ok(),
-                Err(_) => None,
-            };
+            // Canonical reader (#437): single point of summary.json
+            // parse-error logging. The aggregator still keys off the
+            // finalized snapshot — in-progress runs (run_summary =
+            // None) contribute only their resolved.json / meta.json
+            // breadcrumbs below.
+            let summary = pitboss_core::store::read_run_snapshot(&entry.run_dir).run_summary;
 
             // For in-progress / aborted runs without a summary.json,
             // attempt to read the (newer) name field from resolved.json.

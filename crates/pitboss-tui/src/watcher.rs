@@ -165,16 +165,11 @@ fn build_snapshot(run_dir: &Path, focused_id: Option<&str>) -> AppSnapshot {
         &resolved.sublead_types,
     );
 
-    // 2. Gather completed task records. Prefer summary.json (written on clean
-    //    finalize) since summary.jsonl may be empty or truncated after
-    //    finalization. Merge the jsonl records on top so in-progress runs
-    //    still show completed tiles live.
-    let mut completed: std::collections::HashMap<String, TaskRecord> =
-        read_summary_json(&run_dir.join("summary.json"));
-    let jsonl = read_summary_jsonl(&run_dir.join("summary.jsonl"));
-    for (k, v) in jsonl {
-        completed.entry(k).or_insert(v);
-    }
+    // 2. Gather completed task records via the canonical reader (#437).
+    //    summary.json seeds the map when finalized; summary.jsonl rows
+    //    overlay last-wins by task_id, so a resume-after-finalize or a
+    //    reprompt/cancel/respawn lifecycle reflects the freshest record.
+    let completed = pitboss_core::store::read_run_snapshot(run_dir).tasks;
 
     // 3. Dynamic worker ids come from two sources:
     //    - `summary.jsonl`/`summary.json` records for completed workers not in
@@ -636,39 +631,6 @@ fn scan_live_stats(path: &Path) -> (Option<String>, pitboss_core::parser::TokenU
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn read_summary_jsonl(path: &Path) -> std::collections::HashMap<String, TaskRecord> {
-    let mut map = std::collections::HashMap::new();
-    let Ok(file) = std::fs::File::open(path) else {
-        return map;
-    };
-    let reader = BufReader::new(file);
-    for line in reader.lines().map_while(Result::ok) {
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(rec) = serde_json::from_str::<TaskRecord>(&line) {
-            map.insert(rec.task_id.clone(), rec);
-        }
-    }
-    map
-}
-
-/// Reads the finalized summary.json (present only on clean exit) and returns
-/// a map of task records. Empty map if the file is missing or unreadable.
-fn read_summary_json(path: &Path) -> std::collections::HashMap<String, TaskRecord> {
-    let mut map = std::collections::HashMap::new();
-    let Ok(bytes) = std::fs::read(path) else {
-        return map;
-    };
-    if let Ok(summary) = serde_json::from_slice::<pitboss_core::store::RunSummary>(&bytes) {
-        for rec in summary.tasks {
-            map.insert(rec.task_id.clone(), rec);
-        }
-    }
-    map
-}
 
 /// Returns `Some(seconds_since_last_modification)` if the file exists,
 /// or `None` if it does not exist or metadata cannot be read.

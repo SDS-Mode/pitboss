@@ -226,10 +226,9 @@ fn cmd_screenshot(run: Option<&str>, cols: u16, rows: u16) -> Result<()> {
 /// Same shape as `watcher::build_snapshot` but synchronous and self-contained.
 #[allow(clippy::too_many_lines)] // mirror of watcher::build_snapshot; two fns share the schema
 fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
-    use pitboss_core::store::{TaskRecord, TaskStatus};
+    use pitboss_core::store::TaskStatus;
     use pitboss_tui::state::{AppSnapshot, TileState, TileStatus};
     use serde::Deserialize;
-    use std::io::BufRead;
 
     #[derive(Deserialize)]
     struct ResTask {
@@ -254,26 +253,12 @@ fn build_one_shot_snapshot(run_dir: &std::path::Path) -> state::AppSnapshot {
         .collect();
     let task_ids: Vec<String> = resolved_tasks.into_iter().map(|t| t.id).collect();
 
-    let mut completed: std::collections::HashMap<String, TaskRecord> =
-        std::collections::HashMap::new();
-    // Prefer summary.json (finalized) over summary.jsonl (which is cleared on
-    // finalize in some code paths). Fall back to jsonl when the run is in-progress.
-    if let Ok(bytes) = std::fs::read(run_dir.join("summary.json")) {
-        if let Ok(sum) = serde_json::from_slice::<pitboss_core::store::RunSummary>(&bytes) {
-            for rec in sum.tasks {
-                completed.insert(rec.task_id.clone(), rec);
-            }
-        }
-    }
-    if completed.is_empty() {
-        if let Ok(f) = std::fs::File::open(run_dir.join("summary.jsonl")) {
-            for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-                if let Ok(rec) = serde_json::from_str::<TaskRecord>(line.trim()) {
-                    completed.insert(rec.task_id.clone(), rec);
-                }
-            }
-        }
-    }
+    // Merged + deduped snapshot via the canonical reader (#437). Replaces
+    // the previous "summary.json OR fall back to summary.jsonl" branch —
+    // the canonical reader now overlays jsonl on top of json with
+    // last-wins by task_id, so resume-after-finalize and reprompt /
+    // cancel / respawn lifecycles all render the freshest record.
+    let completed = pitboss_core::store::read_run_snapshot(run_dir).tasks;
 
     let tasks_dir = run_dir.join("tasks");
     let mut tiles: Vec<TileState> = Vec::new();

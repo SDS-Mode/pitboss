@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use pitboss_core::store::TaskStatus;
 
 /// Entry point for the `status` subcommand.
@@ -14,7 +14,6 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
     let base = run_dir_override.unwrap_or_else(default_runs_dir);
     let run_dir = resolve_run_dir(&base, run_id_prefix)?;
 
-    // Prefer summary.json (finalized run) over summary.jsonl (in-flight).
     let summary_json = run_dir.join("summary.json");
     let summary_jsonl = run_dir.join("summary.jsonl");
 
@@ -25,40 +24,16 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         );
     }
 
-    // `notify_failures` only exists on a finalized `summary.json`; the
-    // in-flight `summary.jsonl` is per-task records and never carries
-    // run-scoped fields. Operators reading status during a live run see
-    // no notify count — that's correct (the count is only authoritative
-    // at finalize), and the journaled `notifications.jsonl` is still
-    // available for live debugging.
-    let (records, notify_failures) = if summary_json.exists() {
-        let bytes = std::fs::read(&summary_json)
-            .with_context(|| format!("read {}", summary_json.display()))?;
-        let summary: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let notify_failures = summary
-            .get("notify_failures")
-            .and_then(|v| v.as_u64())
-            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
-        let recs = summary
-            .get("tasks")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(serde_json::from_value::<pitboss_core::store::TaskRecord>)
-            .collect::<Result<Vec<_>, _>>()?;
-        (recs, notify_failures)
-    } else {
-        let content = std::fs::read_to_string(&summary_jsonl)
-            .with_context(|| format!("read {}", summary_jsonl.display()))?;
-        let recs = content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(serde_json::from_str::<pitboss_core::store::TaskRecord>)
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("parse {}", summary_jsonl.display()))?;
-        (recs, None)
-    };
+    // Canonical reader (#437): summary.json seeds, summary.jsonl
+    // overlays last-wins by task_id. `notify_failures` is only present
+    // on a finalized `summary.json`; in-flight runs report None — that's
+    // correct (the count is only authoritative at finalize), and the
+    // journaled `notifications.jsonl` is still available for live
+    // debugging. Reprompt / cancel / respawn lifecycles no longer
+    // over-count tasks_total (#437).
+    let snap = pitboss_core::store::read_run_snapshot(&run_dir);
+    let notify_failures = snap.run_summary.as_ref().and_then(|s| s.notify_failures);
+    let records: Vec<pitboss_core::store::TaskRecord> = snap.tasks.into_values().collect();
 
     if json {
         let out = serde_json::to_string_pretty(&records)?;

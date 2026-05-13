@@ -124,12 +124,13 @@ pub struct LogQuery {
 }
 
 /// `GET /api/runs/:run_id/tasks/:task_id` — single `TaskRecord` for one
-/// actor (lead, sub-lead, or worker). Reads `summary.jsonl` line by line
-/// and returns the first record whose `task_id` matches. `summary.jsonl`
-/// is the source of truth — it captures every actor across every layer
-/// (root + sub-leads + workers), unlike `summary.json` which is written
-/// once at finalize and aggregates only what the dispatcher had visible
-/// at that moment (#221).
+/// actor (lead, sub-lead, or worker). Uses the canonical reader (#437)
+/// so the returned record reflects last-wins dedup across the merged
+/// `summary.json` + `summary.jsonl` view — a reprompt / cancel /
+/// respawn lifecycle no longer leaks an earlier `Cancelled` row when
+/// the actor eventually succeeded. `summary.jsonl` remains the source
+/// of truth for in-progress runs and for cross-layer actors that
+/// `summary.json` may miss until finalize (#221).
 ///
 /// 404 when the run dir exists but no record carries the given task_id.
 pub async fn task_detail(
@@ -137,38 +138,25 @@ pub async fn task_detail(
     AxPath((run_id, task_id)): AxPath<(String, String)>,
 ) -> ApiResult<Response> {
     let run_dir = run_dir(state.runs_dir(), &run_id)?;
-    // task_id is rendered into a JSON string match below, not into a
-    // path, so the path-segment sanitizer doesn't apply here. We still
-    // bound the length to keep the substring scan cheap.
     if task_id.is_empty() || task_id.len() > 256 {
         return Err(ApiError::BadRequest("invalid task_id length".into()));
     }
-    let path = run_dir.join("summary.jsonl");
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ApiError::NotFound),
-        Err(e) => return Err(e.into()),
-    };
-    // Lossy decode: a partial-write tail (the dispatcher appends as
-    // each actor finishes) shouldn't 500 the request — better to skip
-    // a malformed line than to fail a perfectly-readable lookup.
-    let text = String::from_utf8_lossy(&bytes);
-    let needle = format!("\"task_id\":\"{task_id}\"");
-    for line in text.lines() {
-        if !line.contains(&needle) {
-            continue;
-        }
-        // Substring match isn't authoritative (the task_id could appear
-        // inside another field — a parent_task_id reference, the log
-        // path, etc.). Confirm with a real parse.
-        let Ok(rec) = serde_json::from_str::<pitboss_core::store::TaskRecord>(line) else {
-            continue;
-        };
-        if rec.task_id == task_id {
-            return Ok(Json(rec).into_response());
-        }
+    // 404 the request before snapshotting if neither summary file
+    // exists — covers the "run id directory present but never wrote
+    // summary.jsonl" race window.
+    let jsonl = run_dir.join("summary.jsonl");
+    let summary_json = run_dir.join("summary.json");
+    if !jsonl.exists() && !summary_json.exists() {
+        return Err(ApiError::NotFound);
     }
-    Err(ApiError::NotFound)
+    let snap =
+        tokio::task::spawn_blocking(move || pitboss_core::store::read_run_snapshot(&run_dir))
+            .await
+            .map_err(|e| std::io::Error::other(format!("snapshot read task panicked: {e}")))?;
+    match snap.tasks.get(&task_id).cloned() {
+        Some(rec) => Ok(Json(rec).into_response()),
+        None => Err(ApiError::NotFound),
+    }
 }
 
 /// `GET /api/runs/:id/tasks/:task_id/log` — task `stdout.log`.

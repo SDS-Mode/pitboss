@@ -12,6 +12,9 @@ pub use json_file::JsonFileStore;
 pub mod sqlite;
 pub use sqlite::SqliteStore;
 
+pub mod summary;
+pub use summary::{read_run_snapshot, RunSnapshot};
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;
