@@ -56,6 +56,16 @@ pub struct EventEnvelope {
     /// empty (e.g. run-level events with no actor context).
     #[serde(default, skip_serializing_if = "ActorPath::is_empty")]
     pub actor_path: ActorPath,
+    /// Dispatcher-assigned monotonic sequence number. Added in PR-B of
+    /// #438 (unified envelope API). Zero is the legacy sentinel: pre-PR-B
+    /// dispatchers don't write this field, and `#[serde(default)]`
+    /// deserializes its absence as 0. New envelopes start at 1.
+    ///
+    /// Today the counter is per-connection (resets on TUI reconnect);
+    /// when #259 adds `events.jsonl` persistence, the counter moves up
+    /// to per-run lifetime.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub seq: u64,
     /// The actual event payload, inlined into the same JSON object.
     #[serde(flatten)]
     pub event: ControlEvent,
@@ -649,6 +659,46 @@ mod tests {
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(!s.contains("parent_task_id"));
+    }
+
+    /// PR-B of #438: envelopes carry a `seq` field. Default (zero) is
+    /// omitted on the wire so legacy clients see byte-identical JSON.
+    #[test]
+    fn envelope_seq_omitted_when_zero() {
+        use crate::dispatch::actor::ActorPath;
+        let envelope = EventEnvelope {
+            actor_path: ActorPath::default(),
+            seq: 0,
+            event: ControlEvent::Superseded,
+        };
+        let s = serde_json::to_string(&envelope).unwrap();
+        assert!(!s.contains("\"seq\""), "default seq must be elided: {s}");
+    }
+
+    /// PR-B of #438: non-zero seq round-trips on the wire and can be
+    /// read by the consumer.
+    #[test]
+    fn envelope_seq_roundtrips_when_nonzero() {
+        use crate::dispatch::actor::ActorPath;
+        let envelope = EventEnvelope {
+            actor_path: ActorPath::default(),
+            seq: 42,
+            event: ControlEvent::Superseded,
+        };
+        let s = serde_json::to_string(&envelope).unwrap();
+        assert!(s.contains("\"seq\":42"), "seq must serialize: {s}");
+        let back: EventEnvelope = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.seq, 42);
+    }
+
+    /// PR-B back-compat: an envelope JSON written by a pre-PR-B
+    /// dispatcher (no seq field) deserializes with seq = 0.
+    #[test]
+    fn pre_pr_b_envelope_deserializes_as_seq_zero() {
+        let legacy = r#"{"event":"superseded"}"#;
+        let env: EventEnvelope = serde_json::from_str(legacy).unwrap();
+        assert_eq!(env.seq, 0);
+        assert!(matches!(env.event, ControlEvent::Superseded));
     }
 
     #[test]

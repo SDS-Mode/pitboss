@@ -139,6 +139,7 @@ async fn control_event_carries_actor_path() {
     // Build an envelope wrapping an existing event with a deep actor path.
     let envelope = EventEnvelope {
         actor_path: ActorPath::new(["root", "S1", "W3"]),
+        seq: 0,
         event: ControlEvent::Superseded,
     };
 
@@ -230,6 +231,7 @@ async fn event_envelope_empty_actor_path_omitted_on_wire() {
     // actor_path key (backward-compat: v0.5 clients parse unmodified events).
     let envelope = EventEnvelope {
         actor_path: ActorPath::default(),
+        seq: 0,
         event: ControlEvent::Superseded,
     };
     let s = serde_json::to_string(&envelope).unwrap();
@@ -242,6 +244,141 @@ async fn event_envelope_empty_actor_path_omitted_on_wire() {
     let back: EventEnvelope = serde_json::from_str(&s).unwrap();
     assert!(back.actor_path.is_empty());
     assert!(matches!(back.event, ControlEvent::Superseded));
+}
+
+/// PR-B of #438: the live control wire now carries a `seq` field on
+/// every envelope. The dispatcher's server emits monotonic per-connection
+/// seqs starting at 1. This is the foundation for the transport-switching
+/// algorithm spec'd in book/src/architecture/unified-envelope-api.md —
+/// PR-C consumes it.
+#[tokio::test]
+async fn server_emits_monotonic_seqs_on_wire() {
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    state.root.workers.write().await.insert(
+        "w-seq".into(),
+        WorkerState::Running {
+            started_at: chrono::Utc::now(),
+            session_id: Some("sess".into()),
+        },
+    );
+
+    let sock = dir.path().join("events-seq.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    // Connect raw so we can inspect the hello envelope's seq directly,
+    // bypassing FakeControlClient::connect which consumes the hello.
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    let mut reader = BufReader::new(r).lines();
+    let client_hello = serde_json::to_string(&ControlOp::Hello {
+        client_version: "0.4.0".into(),
+    })
+    .unwrap()
+        + "\n";
+    w.write_all(client_hello.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+
+    let hello_line = reader.next_line().await.unwrap().expect("hello");
+    let hello_env: pitboss_cli::control::protocol::EventEnvelope =
+        serde_json::from_str(&hello_line).unwrap();
+    assert_eq!(hello_env.seq, 1, "first envelope is seq=1");
+    assert!(matches!(hello_env.event, ControlEvent::Hello { .. }));
+
+    // Send two ops back-to-back; their OpAcked / OpFailed replies must
+    // carry monotonically increasing seqs.
+    let list_op = serde_json::to_string(&ControlOp::ListWorkers).unwrap() + "\n";
+    w.write_all(list_op.as_bytes()).await.unwrap();
+    let cancel_op = serde_json::to_string(&ControlOp::CancelWorker {
+        task_id: "w-seq".into(),
+    })
+    .unwrap()
+        + "\n";
+    w.write_all(cancel_op.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+
+    // Collect three envelopes (workers snapshot, two op replies). The
+    // exact order isn't pinned — the activity ticker may also fire — so
+    // assert monotonicity rather than specific values.
+    let mut seqs = Vec::new();
+    for _ in 0..3 {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), reader.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("envelope");
+        let env: pitboss_cli::control::protocol::EventEnvelope =
+            serde_json::from_str(&line).unwrap();
+        seqs.push(env.seq);
+    }
+    for window in seqs.windows(2) {
+        assert!(
+            window[1] > window[0],
+            "seqs must be strictly monotonic: saw {window:?} in {seqs:?}",
+        );
+    }
+    assert!(
+        *seqs.first().unwrap() >= 2,
+        "post-hello seqs must be >= 2: {seqs:?}",
+    );
 }
 
 #[tokio::test]

@@ -411,6 +411,9 @@ pub async fn spawn_sublead(
             };
             let ev = EventEnvelope {
                 actor_path: ActorPath::new(["root", sublead_id.as_str()]),
+                // Seq is reassigned by the server's pump; see comment in
+                // `failure_detection::broadcast_worker_failed`.
+                seq: 0,
                 event: ControlEvent::SubleadSpawned {
                     sublead_id: sublead_id.clone(),
                     budget_usd: budget_usd_val,
@@ -1112,6 +1115,9 @@ pub async fn reconcile_terminated_sublead(
     {
         let ev = EventEnvelope {
             actor_path: ActorPath::new(["root", sublead_id]),
+            // Seq is reassigned by the server's pump; see comment in
+            // `failure_detection::broadcast_worker_failed`.
+            seq: 0,
             event: ControlEvent::SubleadTerminated {
                 sublead_id: sublead_id.to_string(),
                 spent_usd: actual_spend,

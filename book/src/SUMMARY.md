@@ -51,6 +51,7 @@
 - [Overview](./architecture/overview.md)
 - [The two-layer model](./architecture/two-layer-model.md)
 - [Lease scope selection](./architecture/lease-scope-selection.md)
+- [Unified envelope API (design)](./architecture/unified-envelope-api.md)
 
 # Reference
 

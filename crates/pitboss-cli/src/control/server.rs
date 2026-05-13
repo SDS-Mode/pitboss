@@ -10,6 +10,7 @@
 #![allow(dead_code)] // Some fields are set by Phase 2 tasks.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,7 +21,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::control::protocol::{ControlEvent, ControlOp};
+use crate::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
+use crate::dispatch::actor::ActorPath;
 
 /// Handle returned from `start_control_server`. Drop terminates the accept loop
 /// and removes the socket file.
@@ -142,6 +144,11 @@ async fn serve_connection(
     let (read_half, write_half) = stream.into_split();
     let writer = Arc::new(Mutex::new(write_half));
     let mut reader = BufReader::new(read_half).lines();
+    // Per-connection monotonic seq counter for the `EventEnvelope.seq`
+    // field (PR-B of #438). Starts at 0; `fetch_add(1) + 1` makes the
+    // first emitted envelope's seq = 1. Reset on reconnect — #259's
+    // `events.jsonl` persistence will lift this to per-run lifetime.
+    let seq = Arc::new(AtomicU64::new(0));
 
     // Hello handshake.
     let first = match reader.next_line().await {
@@ -153,6 +160,7 @@ async fn serve_connection(
         Ok(other) => {
             let _ = send_event(
                 &writer,
+                &seq,
                 &ControlEvent::OpFailed {
                     op: format!("{other:?}"),
                     task_id: None,
@@ -165,6 +173,7 @@ async fn serve_connection(
         Err(e) => {
             let _ = send_event(
                 &writer,
+                &seq,
                 &ControlEvent::OpFailed {
                     op: "hello".into(),
                     task_id: None,
@@ -198,6 +207,7 @@ async fn serve_connection(
     // Send server hello.
     let _ = send_event(
         &writer,
+        &seq,
         &ControlEvent::Hello {
             server_version,
             run_id,
@@ -332,6 +342,7 @@ async fn serve_connection(
     // Falls back to the old per-message behaviour when no further
     // events are queued — latency is unchanged for sparse traffic.
     let writer_for_pump = writer.clone();
+    let seq_for_pump = seq.clone();
     let pump = tokio::spawn(async move {
         while let Some(ev) = ev_rx.recv().await {
             let mut batch: Vec<ControlEvent> = vec![ev];
@@ -341,7 +352,10 @@ async fn serve_connection(
             while let Ok(next) = ev_rx.try_recv() {
                 batch.push(next);
             }
-            if send_events_batch(&writer_for_pump, &batch).await.is_err() {
+            if send_events_batch(&writer_for_pump, &seq_for_pump, &batch)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -423,7 +437,7 @@ async fn serve_connection(
                 error: format!("parse error: {e}"),
             },
         };
-        if send_event(&writer, &reply).await.is_err() {
+        if send_event(&writer, &seq, &reply).await.is_err() {
             break;
         }
     }
@@ -591,11 +605,27 @@ async fn find_worker_layer(
 /// slower feels laggy. Constant so tests can match expected payloads.
 const STORE_ACTIVITY_INTERVAL_MS: u64 = 1000;
 
+/// Wrap a `ControlEvent` in an `EventEnvelope` with the next monotonic
+/// seq. PR-B of #438: every wire event now carries a `seq` field so
+/// consumers can implement transport-switching (disk-replay → live)
+/// without gap or duplicate. `actor_path` is left empty here — the
+/// server-side emit path is run-scoped, not actor-scoped; sub-actor
+/// paths get populated in a later PR if/when needed.
+fn wrap_with_seq(seq: &AtomicU64, ev: &ControlEvent) -> EventEnvelope {
+    EventEnvelope {
+        actor_path: ActorPath::default(),
+        seq: seq.fetch_add(1, Ordering::Relaxed) + 1,
+        event: ev.clone(),
+    }
+}
+
 async fn send_event(
     writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    seq: &AtomicU64,
     ev: &ControlEvent,
 ) -> Result<()> {
-    let mut line = serde_json::to_string(ev)?;
+    let envelope = wrap_with_seq(seq, ev);
+    let mut line = serde_json::to_string(&envelope)?;
     line.push('\n');
     let mut guard = writer.lock().await;
     guard.write_all(line.as_bytes()).await?;
@@ -610,6 +640,7 @@ async fn send_event(
 /// pump only; ad-hoc senders still use `send_event`. (#152 L5)
 async fn send_events_batch(
     writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    seq: &AtomicU64,
     batch: &[ControlEvent],
 ) -> Result<()> {
     if batch.is_empty() {
@@ -618,7 +649,8 @@ async fn send_events_batch(
     // Serialize first so the lock window is just the syscalls.
     let mut payload = Vec::with_capacity(batch.len() * 256 /* heuristic per-event size */);
     for ev in batch {
-        let line = serde_json::to_string(ev)?;
+        let envelope = wrap_with_seq(seq, ev);
+        let line = serde_json::to_string(&envelope)?;
         payload.extend_from_slice(line.as_bytes());
         payload.push(b'\n');
     }

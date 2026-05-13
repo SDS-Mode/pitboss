@@ -2079,6 +2079,7 @@ version = "0.13.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "git2",
  "libc",
  "pitboss-core",
@@ -2088,6 +2089,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-test",
  "uuid",
