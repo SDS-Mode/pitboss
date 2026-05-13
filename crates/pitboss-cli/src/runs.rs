@@ -40,7 +40,6 @@
 //! ECONNREFUSED almost instantly) and uses the `summary.jsonl` mtime as
 //! a recency floor.
 
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -276,7 +275,11 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
     };
 
     let jsonl = run_dir.join("summary.jsonl");
-    let (settled_total, failed) = count_jsonl_tasks(&jsonl);
+    // Canonical reader (#437): dedupe by task_id so reprompt /
+    // cancel / respawn lifecycles don't over-count the list view.
+    let snap = pitboss_core::store::read_run_snapshot(run_dir);
+    let settled_total = snap.task_count();
+    let failed = snap.failed_count();
     let spawned_count = count_tasks_subdirs(run_dir);
     let total = settled_total.max(spawned_count);
 
@@ -400,29 +403,6 @@ fn jsonl_recent(jsonl: &Path) -> bool {
         .unwrap_or(true)
 }
 
-/// Count total and failed task records from a `summary.jsonl` file.
-pub fn count_jsonl_tasks(path: &Path) -> (usize, usize) {
-    let Ok(file) = std::fs::File::open(path) else {
-        return (0, 0);
-    };
-    let reader = std::io::BufReader::new(file);
-    let mut total = 0;
-    let mut failed = 0;
-    for line in reader.lines().map_while(Result::ok) {
-        let trimmed = line.trim().to_string();
-        if trimmed.is_empty() {
-            continue;
-        }
-        total += 1;
-        if let Ok(r) = serde_json::from_str::<pitboss_core::store::TaskRecord>(&trimmed) {
-            if !matches!(r.status, pitboss_core::store::TaskStatus::Success) {
-                failed += 1;
-            }
-        }
-    }
-    (total, failed)
-}
-
 /// Format a [`SystemTime`] as `"YYYY-MM-DD HH:MM:SS UTC"`.
 pub fn format_mtime(mtime: SystemTime) -> String {
     use std::time::UNIX_EPOCH;
@@ -446,6 +426,40 @@ mod tests {
         let d = base.join(name);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Minimal valid `TaskRecord` serialized to one JSON line — used
+    /// by the stale-classification fixtures below. After #437 the
+    /// canonical reader only counts records that round-trip through
+    /// `TaskRecord` deserialization, so fixtures must produce real
+    /// records, not the malformed JSON the line-counter accepted.
+    fn task_line(task_id: &str, status: pitboss_core::store::TaskStatus) -> String {
+        let t = chrono::Utc::now();
+        let rec = pitboss_core::store::TaskRecord {
+            task_id: task_id.into(),
+            status,
+            exit_code: Some(0),
+            started_at: t,
+            ended_at: t,
+            duration_ms: 0,
+            worktree_path: None,
+            log_path: PathBuf::from("/dev/null"),
+            token_usage: pitboss_core::parser::TokenUsage::default(),
+            claude_session_id: None,
+            final_message_preview: None,
+            final_message: None,
+            parent_task_id: None,
+            pause_count: 0,
+            reprompt_count: 0,
+            approvals_requested: 0,
+            approvals_approved: 0,
+            approvals_rejected: 0,
+            model: None,
+            failure_reason: None,
+            cost_usd: None,
+            actor_type: None,
+        };
+        serde_json::to_string(&rec).unwrap()
     }
 
     #[test]
@@ -503,13 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn count_jsonl_tasks_missing_file_returns_zero() {
-        let tmp = TempDir::new().unwrap();
-        let (total, failed) = count_jsonl_tasks(&tmp.path().join("nonexistent.jsonl"));
-        assert_eq!((total, failed), (0, 0));
-    }
-
-    #[test]
     fn format_mtime_epoch() {
         let s = format_mtime(SystemTime::UNIX_EPOCH);
         assert!(s.starts_with("1970-01-01"));
@@ -558,15 +565,12 @@ mod tests {
     fn collect_run_entry_with_old_jsonl_no_socket_is_stale() {
         let tmp = TempDir::new().unwrap();
         let run_dir = make_run_dir(tmp.path(), "run-stale");
-        // Write a summary.jsonl with one row, then back-date its mtime
-        // past the staleness threshold. No control socket exists.
+        // Write a summary.jsonl with one valid TaskRecord row, then
+        // back-date its mtime past the staleness threshold. No control
+        // socket exists.
         let jsonl = run_dir.join("summary.jsonl");
-        fs::write(
-            &jsonl,
-            br#"{"task_id":"t","status":"failure","error":"x","cost_usd":0,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
-"#,
-        )
-        .unwrap();
+        let line = task_line("t", pitboss_core::store::TaskStatus::Failed);
+        fs::write(&jsonl, format!("{line}\n")).unwrap();
         // Back-date mtime past the staleness threshold.
         let five_h_ago =
             SystemTime::now() - Duration::from_secs(STALENESS_THRESHOLD.as_secs() + 3600);

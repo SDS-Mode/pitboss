@@ -32,41 +32,27 @@ use crate::mcp::{socket_path_for_run, McpServer};
 /// in-progress reads, or future format skew). Returns an io error if
 /// the file is missing — finalize callers always have the file because
 /// the lead's record was appended a few hundred lines above.
-async fn read_summary_jsonl_records(
-    path: &std::path::Path,
+/// Read summary.jsonl for finalize aggregation, returning the deduplicated
+/// records and their id set. Thin wrapper around the canonical
+/// [`pitboss_core::store::read_run_snapshot`] (#437) that adds the
+/// finalize-specific contract: the file MUST exist (the lead's own
+/// record was appended a few hundred lines above the call site).
+fn read_summary_jsonl_records(
+    run_dir: &std::path::Path,
 ) -> Result<(
     Vec<pitboss_core::store::TaskRecord>,
     std::collections::HashSet<String>,
 )> {
-    let bytes = tokio::fs::read(path).await.with_context(|| {
-        format!(
-            "read summary.jsonl for finalize aggregation: {}",
+    let path = run_dir.join("summary.jsonl");
+    if !path.exists() {
+        anyhow::bail!(
+            "read summary.jsonl for finalize aggregation: {} not found",
             path.display()
-        )
-    })?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| anyhow::anyhow!("summary.jsonl is not utf-8: {e}"))?;
-    let mut records: Vec<pitboss_core::store::TaskRecord> = Vec::new();
-    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<pitboss_core::store::TaskRecord>(trimmed) {
-            Ok(rec) => {
-                ids.insert(rec.task_id.clone());
-                records.push(rec);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    line = trimmed,
-                    "summary.jsonl: skipping unparseable line in finalize aggregation"
-                );
-            }
-        }
+        );
     }
+    let snap = pitboss_core::store::read_run_snapshot(run_dir);
+    let ids: std::collections::HashSet<String> = snap.tasks.keys().cloned().collect();
+    let records: Vec<pitboss_core::store::TaskRecord> = snap.tasks.into_values().collect();
     Ok((records, ids))
 }
 
@@ -638,8 +624,7 @@ pub async fn run_hierarchical(
     // workers live in their sub-lead's `LayerState`, not root, so a
     // 5-actor smoke run produced `tasks_total: 1` in the operational
     // console. Reading the JSONL captures every layer for free.
-    let (mut all_records, mut existing_ids) =
-        read_summary_jsonl_records(&run_subdir.join("summary.jsonl")).await?;
+    let (mut all_records, mut existing_ids) = read_summary_jsonl_records(&run_subdir)?;
 
     // Synthesise Cancelled `TaskRecord`s for every still-in-flight worker
     // across **every layer** (root + each sub-tree). A worker that
@@ -1414,8 +1399,8 @@ mod summary_jsonl_aggregation_tests {
 
     /// #221 regression: a hierarchical run's `summary.jsonl` carries the
     /// lead, every sub-lead, and every Done worker (root or sub-tree)
-    /// across all layers. `read_summary_jsonl_records` must aggregate
-    /// every parseable line in append order so the finalize phase can
+    /// across all layers. The wrapper around the canonical reader (#437)
+    /// must aggregate every parseable line so the finalize phase can
     /// build a `summary.json` with the full hierarchy.
     #[tokio::test]
     async fn read_summary_jsonl_aggregates_lead_subleads_and_workers() {
@@ -1436,7 +1421,7 @@ mod summary_jsonl_aggregation_tests {
             .collect();
         tokio::fs::write(&path, payload).await.unwrap();
 
-        let (records, ids) = read_summary_jsonl_records(&path).await.unwrap();
+        let (records, ids) = read_summary_jsonl_records(dir.path()).unwrap();
         assert_eq!(records.len(), 5, "all 5 actors present");
         assert_eq!(ids.len(), 5);
         for actor in [
@@ -1448,37 +1433,35 @@ mod summary_jsonl_aggregation_tests {
         ] {
             assert!(ids.contains(actor), "missing actor {actor}");
         }
-        // First-seen order is preserved (matters when callers want a
-        // chronological / append-order rendering).
-        assert_eq!(records[0].task_id, "worker-1");
-        assert_eq!(records[4].task_id, "smoke-lead");
     }
 
-    /// Unparseable lines (mid-write truncation, future format skew)
-    /// are skipped; the surrounding records still land.
+    /// #437: reprompt / cancel / respawn lifecycles append multiple
+    /// rows for one `task_id`. The finalize aggregator now dedupes
+    /// last-wins so the resulting `summary.json` doesn't over-count
+    /// tasks_total or tasks_failed.
     #[tokio::test]
-    async fn read_summary_jsonl_skips_unparseable_lines() {
+    async fn read_summary_jsonl_dedupes_duplicate_task_ids() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("summary.jsonl");
-        let mut payload = String::new();
-        payload.push_str(&format!(
-            "{}\n",
-            serde_json::to_string(&rec("a", None, TaskStatus::Success)).unwrap()
-        ));
-        payload.push_str("{\"task_id\":\"truncated\",\"sta\n"); // mid-write
-        payload.push('\n'); // empty line
-        payload.push_str("not even json\n");
-        payload.push_str(&format!(
-            "{}\n",
-            serde_json::to_string(&rec("b", None, TaskStatus::Failed)).unwrap()
-        ));
+        let lines = [
+            rec("worker-1", None, TaskStatus::Cancelled),
+            rec("worker-1", None, TaskStatus::Success), // newer row wins
+            rec("worker-2", None, TaskStatus::Failed),
+        ];
+        let payload: String = lines
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
         tokio::fs::write(&path, payload).await.unwrap();
 
-        let (records, ids) = read_summary_jsonl_records(&path).await.unwrap();
-        assert_eq!(records.len(), 2, "two valid records survive");
-        assert_eq!(records[0].task_id, "a");
-        assert_eq!(records[1].task_id, "b");
+        let (records, ids) = read_summary_jsonl_records(dir.path()).unwrap();
+        assert_eq!(records.len(), 2, "dedupe by task_id");
         assert_eq!(ids.len(), 2);
+        let worker_1 = records
+            .iter()
+            .find(|r| r.task_id == "worker-1")
+            .expect("worker-1 present");
+        assert!(matches!(worker_1.status, TaskStatus::Success));
     }
 
     /// Empty file (race: read before any record was appended) returns
@@ -1488,7 +1471,7 @@ mod summary_jsonl_aggregation_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("summary.jsonl");
         tokio::fs::write(&path, "").await.unwrap();
-        let (records, ids) = read_summary_jsonl_records(&path).await.unwrap();
+        let (records, ids) = read_summary_jsonl_records(dir.path()).unwrap();
         assert!(records.is_empty());
         assert!(ids.is_empty());
     }
@@ -1499,10 +1482,9 @@ mod summary_jsonl_aggregation_tests {
     #[tokio::test]
     async fn read_summary_jsonl_missing_file_errors() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("nope.jsonl");
-        let err = read_summary_jsonl_records(&path).await.unwrap_err();
+        let err = read_summary_jsonl_records(dir.path()).unwrap_err();
         assert!(
-            err.to_string().contains("read summary.jsonl"),
+            err.to_string().contains("not found"),
             "context attached: {err}"
         );
     }

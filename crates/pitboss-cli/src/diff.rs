@@ -1,7 +1,6 @@
 //! `pitboss diff <run-a> <run-b>` — compare two prior runs side-by-side.
 
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -42,43 +41,22 @@ pub fn resolve_run_under(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
 /// `summary.jsonl` and constructing a partial `RunSummary` with
 /// `was_interrupted = true`.
 pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
-    // Prefer the finalized summary.json.
-    let json_path = run_dir.join("summary.json");
-    if json_path.exists() {
-        let bytes =
-            std::fs::read(&json_path).with_context(|| format!("read {}", json_path.display()))?;
-        return serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse {}", json_path.display()));
+    // Canonical reader (#437): if `summary.json` parsed cleanly, return
+    // it directly. Otherwise reconstruct from the deduped task map +
+    // `meta.json`.
+    let snap = pitboss_core::store::read_run_snapshot(run_dir);
+    if let Some(summary) = snap.run_summary {
+        return Ok(summary);
     }
 
-    // Fall back to summary.jsonl (in-progress or interrupted run).
     let jsonl_path = run_dir.join("summary.jsonl");
-    let f = std::fs::File::open(&jsonl_path)
-        .with_context(|| format!("open {}", jsonl_path.display()))?;
-
-    let mut tasks = Vec::new();
-    for line in std::io::BufReader::new(f)
-        .lines()
-        .map_while(std::io::Result::ok)
-    {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<pitboss_core::store::TaskRecord>(trimmed) {
-            Ok(rec) => tasks.push(rec),
-            Err(e) => {
-                // Warn rather than silently skip — corrupt/truncated lines
-                // cause silent undercounting of tasks_total, tasks_failed,
-                // token sums, and cost (#107). In-progress runs can have a
-                // genuinely partial trailing line (mid-write truncation), but
-                // that is indistinguishable here from format skew or disk
-                // corruption, so we always surface it.
-                tracing::warn!(error = %e, line = trimmed, "summary.jsonl: skipping unparseable line — diff output may be incomplete");
-            }
-        }
+    if !jsonl_path.exists() {
+        anyhow::bail!(
+            "no summary found in {}: neither summary.json nor summary.jsonl present",
+            run_dir.display()
+        );
     }
-
+    let tasks: Vec<pitboss_core::store::TaskRecord> = snap.tasks.into_values().collect();
     let tasks_failed = tasks
         .iter()
         .filter(|t| !matches!(t.status, pitboss_core::store::TaskStatus::Success))
@@ -92,7 +70,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         .with_context(|| format!("parse {}", meta_path.display()))?;
 
     let started = meta.started_at;
-    let ended = tasks.last().map_or(started, |t| t.ended_at);
+    let ended = tasks.iter().map(|t| t.ended_at).max().unwrap_or(started);
 
     // Best-effort: pull manifest_name from resolved.json if present so partial
     // (in-progress) runs synthesized from summary.jsonl still surface the run
