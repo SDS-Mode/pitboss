@@ -164,11 +164,22 @@ struct JsonlTail {
     mtime: Option<SystemTime>,
     /// File identity. On unix, the inode discriminates "appended" from
     /// "replaced wholesale" (`pitboss resume` against a wiped run dir,
-    /// `mv` over the file, etc.). Without inode tracking, a same-size
-    /// replacement at the same path with advancing mtime would silently
-    /// tail past the wrong content.
+    /// `mv` over the file, etc.). Inode alone is insufficient — Linux
+    /// tmpfs (and ext4 under churn) readily reuses inodes when a file
+    /// is removed and a new one is created at the same path. We pair
+    /// inode with [`Self::created_at`] below for unambiguous rotation
+    /// detection.
     #[cfg(unix)]
     inode: Option<u64>,
+    /// File creation time (`statx::stx_btime` on Linux,
+    /// `st_birthtimespec` on macOS). Set once at file creation and
+    /// never updated, so a rotated file at the same path with a reused
+    /// inode is still distinguishable. Falls back to `None` on
+    /// filesystems that don't expose birthtime (legacy NFS, some
+    /// FUSE), in which case we rely on the inode + size + mtime
+    /// triple alone — which is what the pre-#440 code did and what
+    /// the macOS local tests passed under.
+    created_at: Option<SystemTime>,
 }
 
 /// Stateful reader for a run directory's summary artifacts.
@@ -254,6 +265,7 @@ impl RunSnapshotReader {
                 self.tail_jsonl(&jsonl_path, size);
             }
             self.jsonl.mtime = jm.modified().ok();
+            self.jsonl.created_at = jm.created().ok();
             #[cfg(unix)]
             {
                 self.jsonl.inode = Some(jm.ino());
@@ -289,9 +301,20 @@ impl RunSnapshotReader {
                 return false;
             }
         }
-        // Rotation detected (unix-only — non-unix targets fall back to
-        // size + mtime, which catches truncate and same-name rewrites
-        // that ext4/APFS tend to leave with a newer mtime).
+        // Rotation detected via birthtime. `rm path && create path`
+        // on Linux tmpfs readily reuses inodes — local macOS tests
+        // passed under inode-only detection, CI on Linux did not.
+        // Birthtime advances unconditionally on every fresh inode
+        // allocation. Missing on a filesystem that doesn't expose it
+        // (legacy NFS, some FUSE) → fall through to inode check.
+        if let (Some(prev), Ok(cur)) = (self.jsonl.created_at, meta.created()) {
+            if cur != prev {
+                return false;
+            }
+        }
+        // Rotation detected via inode (catches platforms that don't
+        // expose birthtime, and is correct on filesystems that don't
+        // reuse inodes promptly).
         #[cfg(unix)]
         {
             if let Some(prev) = self.jsonl.inode {
@@ -314,6 +337,7 @@ impl RunSnapshotReader {
         if let Some(m) = tail_meta {
             self.jsonl.offset = m.len();
             self.jsonl.mtime = m.modified().ok();
+            self.jsonl.created_at = m.created().ok();
             #[cfg(unix)]
             {
                 self.jsonl.inode = Some(m.ino());
