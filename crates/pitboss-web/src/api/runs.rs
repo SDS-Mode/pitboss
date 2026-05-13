@@ -111,6 +111,39 @@ pub async fn summary_jsonl(
     }
 }
 
+/// `GET /api/runs/:id/events-jsonl` — run-scoped `EventEnvelope` stream
+/// persisted by the dispatcher when the manifest sets
+/// `[run].emit_event_stream = true` (#259). Each line is one
+/// `EventEnvelope` with `seq`, `actor_path`, and a flattened
+/// `ControlEvent` payload (same wire shape as the live SSE
+/// `/runs/:id/events` endpoint). The SPA's replay tab consumes this
+/// to reconstruct a completed run's wire history offline.
+///
+/// 404 when:
+/// - the run dir is missing (no such run), or
+/// - the run never had `emit_event_stream` enabled, or
+/// - the flag was on but no envelopes have been persisted yet
+///   (the dispatcher creates the file lazily on first append).
+///
+/// The named-by-suffix convention (`events-jsonl`) avoids clashing
+/// with the existing live SSE route at `/runs/:id/events`.
+pub async fn events_jsonl(
+    State(state): State<AppState>,
+    AxPath(run_id): AxPath<String>,
+) -> ApiResult<Response> {
+    let run_dir = run_dir(state.runs_dir(), &run_id)?;
+    let path = run_dir.join("events.jsonl");
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/x-ndjson")
+            .body(Body::from(bytes))
+            .expect("ndjson response")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ApiError::NotFound),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct LogQuery {
     /// Maximum bytes returned. Default 1 MiB; capped at 8 MiB.
@@ -698,6 +731,92 @@ mod tests {
             AxPath((run_id.to_string(), "../../etc/passwd".to_string())),
         )
         .await;
+        assert!(matches!(resp, Err(ApiError::BadRequest(_))));
+    }
+
+    // ── #259 PR-I: events-jsonl endpoint ───────────────────────────────────
+
+    /// Lay down a run dir with an `events.jsonl` containing the given
+    /// raw lines. Returns the AppState anchored at the parent.
+    fn build_run_with_events_jsonl(run_id: &str, lines: &[&str]) -> (TempDir, AppState) {
+        let tmp = TempDir::new().unwrap();
+        let runs_dir = tmp.path().to_path_buf();
+        let run_dir = runs_dir.join(run_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut content = String::new();
+        for l in lines {
+            content.push_str(l);
+            content.push('\n');
+        }
+        std::fs::write(run_dir.join("events.jsonl"), content).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(runs_dir, manifests_dir, None);
+        (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn events_jsonl_serves_persisted_envelopes_as_ndjson() {
+        let run_id = "01950000-0000-7000-8000-00000000e001";
+        let line_a = "{\"actor_path\":\"/\",\"seq\":1,\"event\":\"superseded\"}";
+        let line_b =
+            "{\"actor_path\":\"/\",\"seq\":2,\"event\":{\"sublead_spawned\":{\"sublead_id\":\"s\"}}}";
+        let (_tmp, state) = build_run_with_events_jsonl(run_id, &[line_a, line_b]);
+
+        let resp = events_jsonl(State(state), AxPath(run_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-ndjson"),
+        );
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines, vec![line_a, line_b]);
+    }
+
+    #[tokio::test]
+    async fn events_jsonl_returns_404_when_file_missing() {
+        // Run dir exists (e.g., a flat-mode run that finished without
+        // `emit_event_stream`) but no events.jsonl was ever appended.
+        let run_id = "01950000-0000-7000-8000-00000000e002";
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(run_id)).unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(tmp.path().to_path_buf(), manifests_dir, None);
+
+        let resp = events_jsonl(State(state), AxPath(run_id.to_string())).await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn events_jsonl_returns_404_when_run_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(tmp.path().to_path_buf(), manifests_dir, None);
+        let resp = events_jsonl(
+            State(state),
+            AxPath("01950000-0000-7000-8000-00000000e003".to_string()),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn events_jsonl_rejects_run_id_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let manifests_dir = tmp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        let state = AppState::new(tmp.path().to_path_buf(), manifests_dir, None);
+        let resp = events_jsonl(State(state.clone()), AxPath("..".into())).await;
+        assert!(matches!(resp, Err(ApiError::BadRequest(_))));
+        let resp = events_jsonl(State(state), AxPath("a/b".into())).await;
         assert!(matches!(resp, Err(ApiError::BadRequest(_))));
     }
 
