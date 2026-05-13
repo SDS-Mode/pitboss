@@ -6,11 +6,14 @@
 //! PR-C of #438.
 
 use futures_util::StreamExt;
+use pitboss_cli::control::protocol::{ControlEvent, ControlOp};
 use pitboss_cli::control::server::start_control_server;
 use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
 use pitboss_cli::manifest::resolve::ResolvedManifest;
 use pitboss_cli::manifest::schema::WorktreeCleanup;
-use pitboss_cli::stream::{open_live_run_stream, LiveStreamMode, LiveStreamPayload};
+use pitboss_cli::stream::{
+    open_live_run_stream, open_run_session, LiveStreamMode, LiveStreamPayload,
+};
 use pitboss_core::parser::TokenUsage;
 use pitboss_core::process::{ProcessSpawner, TokioSpawner};
 use pitboss_core::session::CancelToken;
@@ -257,4 +260,104 @@ async fn replay_then_live_drains_disk_then_emits_socket_events() {
         saw_event,
         "live socket arm should produce at least one Event after disk drain"
     );
+}
+
+/// `open_run_session` returns a writer alongside the stream when a
+/// live socket is available. Sending an op through the writer must
+/// reach the server and produce an `OpAcked` envelope on the stream.
+#[tokio::test]
+async fn run_session_writer_send_op_round_trips_to_server() {
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest(dir.path().to_path_buf()),
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    let sock = dir.path().join("session.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.13.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    let session = open_run_session(
+        run_subdir.clone(),
+        Some(sock.clone()),
+        LiveStreamMode::LiveOnly,
+    )
+    .await;
+    let writer = session.writer.expect("writer present when socket exists");
+    let mut stream = std::pin::pin!(session.stream);
+
+    // Drain the hello.
+    let _hello = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .expect("hello envelope");
+
+    // Send an op via the writer; the server replies with a
+    // `WorkersSnapshot` envelope on the read stream. (ListWorkers is
+    // the op that exercises the read-back path without requiring
+    // worker state — it returns an empty snapshot.)
+    writer
+        .send_op(&ControlOp::ListWorkers)
+        .await
+        .expect("send_op succeeds");
+
+    let mut saw_snapshot = false;
+    for _ in 0..4 {
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        if let Ok(Some(item)) = next {
+            if let LiveStreamPayload::Event(env) = item.payload {
+                if matches!(env.event, ControlEvent::WorkersSnapshot { .. }) {
+                    saw_snapshot = true;
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(
+        saw_snapshot,
+        "writer.send_op should produce a WorkersSnapshot envelope back on the stream"
+    );
+}
+
+/// When the socket doesn't exist, `open_run_session` still returns a
+/// session but the writer is `None`. The stream completes promptly
+/// (no live items, no disk items in `LiveOnly` mode).
+#[tokio::test]
+async fn run_session_writer_none_when_socket_missing() {
+    let dir = TempDir::new().unwrap();
+    let run_subdir = dir.path().join("no-run");
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let bogus = dir.path().join("nope.sock");
+
+    let session = open_run_session(run_subdir, Some(bogus), LiveStreamMode::LiveOnly).await;
+    assert!(session.writer.is_none());
+    let items: Vec<_> = session.stream.collect().await;
+    assert!(items.is_empty());
 }

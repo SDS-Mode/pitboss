@@ -36,7 +36,9 @@
 //! rather than `seq` until #259 enables a unified counter.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::stream::Stream;
 use pitboss_core::store::record::TaskRecord;
@@ -44,8 +46,9 @@ use pitboss_core::stream::{
     open_run_stream, LifecycleEvent, RunStreamItem, RunStreamPayload, StreamMode,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -168,21 +171,32 @@ async fn drive_socket(socket_path: PathBuf, tx: mpsc::Sender<LiveStreamItem>) {
     };
     let (r, mut w) = stream.into_split();
 
-    // Send hello.
-    let hello = ControlOp::Hello {
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    let Ok(mut line) = serde_json::to_string(&hello) else {
-        return;
-    };
-    line.push('\n');
-    if w.write_all(line.as_bytes()).await.is_err() {
-        return;
-    }
-    if w.flush().await.is_err() {
+    if send_hello(&mut w).await.is_err() {
         return;
     }
 
+    drive_socket_reads(r, tx).await;
+}
+
+/// Write a `Hello` op to a fresh socket connection. The dispatcher's
+/// server requires this as the first message; without it the connection
+/// is dropped before any envelopes are emitted.
+async fn send_hello(w: &mut OwnedWriteHalf) -> Result<()> {
+    let hello = ControlOp::Hello {
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let mut line = serde_json::to_string(&hello)?;
+    line.push('\n');
+    w.write_all(line.as_bytes()).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+/// Pump envelopes from a pre-opened read half into `tx` as
+/// [`LiveStreamItem::Event`] items. Used by both [`drive_socket`] (one-
+/// shot stream consumer) and [`open_run_session`] (session that exposes
+/// a writer alongside the stream).
+async fn drive_socket_reads(r: OwnedReadHalf, tx: mpsc::Sender<LiveStreamItem>) {
     let mut reader = BufReader::new(r).lines();
     while let Ok(Some(text)) = reader.next_line().await {
         let envelope: EventEnvelope = match serde_json::from_str(&text) {
@@ -209,6 +223,123 @@ async fn drive_socket(socket_path: PathBuf, tx: mpsc::Sender<LiveStreamItem>) {
             return;
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Session API — for consumers that need to write ops in addition to read
+// envelopes. Used by the TUI cutover (PR-D of #438). The dispatcher allows
+// only one client connection per socket, so the read and write halves must
+// share one connection.
+// ----------------------------------------------------------------------------
+
+/// A run-stream session that owns one socket connection and exposes its
+/// read half as a [`Stream`] of [`LiveStreamItem`] and its write half via
+/// [`RunStreamSession::writer`]. Use [`open_run_session`] to construct.
+pub struct RunStreamSession {
+    /// The unified envelope stream. Items arrive in mode order:
+    /// `ReplayOnly` / `ReplayThenLive` drain disk first; live items
+    /// follow (or are the only output in `LiveOnly`).
+    pub stream: ReceiverStream<LiveStreamItem>,
+    /// Writer over the control socket, present iff a live socket
+    /// connection was established. Use [`RunStreamWriter::send_op`].
+    pub writer: Option<Arc<RunStreamWriter>>,
+}
+
+/// Owning handle to a control-socket writer. Cloneable via `Arc`. Drop
+/// or task abort tears down the underlying write half.
+#[derive(Debug)]
+pub struct RunStreamWriter {
+    inner: Mutex<OwnedWriteHalf>,
+}
+
+impl RunStreamWriter {
+    /// Send a single control op as one JSON line. Fails if the socket
+    /// is closed or the write errors.
+    pub async fn send_op(&self, op: &ControlOp) -> Result<()> {
+        let mut line = serde_json::to_string(op)?;
+        line.push('\n');
+        let mut guard = self.inner.lock().await;
+        guard.write_all(line.as_bytes()).await?;
+        guard.flush().await?;
+        Ok(())
+    }
+}
+
+/// Open a unified run-stream session that exposes both a read stream
+/// and (when a live socket is available) a writer.
+///
+/// Unlike [`open_live_run_stream`], this function is **async** —
+/// the socket connection happens before it returns, so callers receive
+/// the writer (or `None` for disconnected sessions) without waiting on
+/// a background task. The stream's items still flow asynchronously.
+///
+/// `socket_path = None` or a missing socket file → writer is `None`
+/// and the live arm is skipped (effectively `ReplayOnly` regardless of
+/// `mode`). This matches the existing fail-soft behavior of the
+/// TUI's `ControlClient::connect`.
+pub async fn open_run_session(
+    run_dir: PathBuf,
+    socket_path: Option<PathBuf>,
+    mode: LiveStreamMode,
+) -> RunStreamSession {
+    let (tx, rx) = mpsc::channel(64);
+
+    // Try to establish the live socket up front so the writer is
+    // available before this function returns. ReplayOnly skips this.
+    let live_state = if matches!(
+        mode,
+        LiveStreamMode::LiveOnly | LiveStreamMode::ReplayThenLive
+    ) {
+        if let Some(sock) = socket_path {
+            connect_session_socket(&sock).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let writer = live_state.as_ref().map(|(_, w)| w.clone());
+
+    // Spawn the drainers in order: disk first (if applicable), then
+    // socket reads.
+    tokio::spawn(async move {
+        if matches!(
+            mode,
+            LiveStreamMode::ReplayOnly | LiveStreamMode::ReplayThenLive
+        ) {
+            let disk = open_run_stream(&run_dir, StreamMode::ReplayOnly);
+            let mut disk = std::pin::pin!(disk);
+            while let Some(item) = disk.next().await {
+                if tx.send(item.into()).await.is_err() {
+                    return;
+                }
+            }
+        }
+        if let Some((read_half, _writer)) = live_state {
+            drive_socket_reads(read_half, tx).await;
+        }
+    });
+
+    RunStreamSession {
+        stream: ReceiverStream::new(rx),
+        writer,
+    }
+}
+
+/// Try to open a control socket, send Hello, and split into read+write
+/// halves wrapped for session use. Returns `None` on connect/handshake
+/// failure (fail-soft).
+async fn connect_session_socket(
+    socket_path: &std::path::Path,
+) -> Option<(OwnedReadHalf, Arc<RunStreamWriter>)> {
+    let stream = UnixStream::connect(socket_path).await.ok()?;
+    let (read_half, mut write_half) = stream.into_split();
+    send_hello(&mut write_half).await.ok()?;
+    let writer = Arc::new(RunStreamWriter {
+        inner: Mutex::new(write_half),
+    });
+    Some((read_half, writer))
 }
 
 #[cfg(test)]
