@@ -121,6 +121,40 @@ export function getSummaryJsonl(id: string): Promise<string> {
   return request<string>(`/api/runs/${enc(id)}/summary-jsonl`, { accept: 'text' });
 }
 
+/**
+ * GET /api/runs/:id/events-jsonl — persisted control-event stream
+ * (#259). Parses NDJSON into `ControlEnvelope`s for the Replay tab.
+ *
+ * 404 (run never had `[run].emit_event_stream = true`, or the file
+ * exists but no envelopes have been appended yet) returns an empty
+ * list rather than throwing, so the Replay tab can render an empty-
+ * state explaining the manifest flag instead of an error banner.
+ * Other errors propagate to the caller.
+ */
+export async function getEventsJsonl(id: string): Promise<ControlEnvelope[]> {
+  try {
+    const text = await request<string>(`/api/runs/${enc(id)}/events-jsonl`, { accept: 'text' });
+    return text
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as ControlEnvelope;
+        } catch {
+          // Partial-write tail caught mid-flush — skip silently.
+          // Matches the dispatcher's canonical "drop incomplete
+          // trailing line" semantics in `pitboss events` and the
+          // summary.jsonl reader.
+          return null;
+        }
+      })
+      .filter((e): e is ControlEnvelope => e !== null);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return [];
+    throw err;
+  }
+}
+
 export function getTaskLog(runId: string, taskId: string, opts: TaskLogOpts = {}): Promise<string> {
   const params = new URLSearchParams();
   if (opts.limit !== undefined) params.set('limit', String(opts.limit));
@@ -174,7 +208,13 @@ export type TaskEvent =
   | { kind: 'continue'; at: string; new_session_id: string; prompt_preview: string }
   | { kind: 'reprompt'; at: string; prompt_preview: string; prior_session_id: string }
   | { kind: 'approval_request'; at: string; request_id: string; summary_preview: string }
-  | { kind: 'approval_response'; at: string; request_id: string; approved: boolean; edited: boolean }
+  | {
+      kind: 'approval_response';
+      at: string;
+      request_id: string;
+      approved: boolean;
+      edited: boolean;
+    }
   | { kind: 'notification_failed'; at: string; sink_id: string; event_kind: string; error: string }
   | {
       kind: 'tool_denied';
@@ -184,7 +224,13 @@ export type TaskEvent =
       reason_kind: string;
       reason: string;
     }
-  | { kind: 'tool_auto_approved'; at: string; tool_name: string; actor_id: string; actor_type: string };
+  | {
+      kind: 'tool_auto_approved';
+      at: string;
+      tool_name: string;
+      actor_id: string;
+      actor_type: string;
+    };
 
 /** GET /api/runs/:id/tasks/:task_id/events — NDJSON parsed into rows.
  * 404 (no events.jsonl yet — task never paused/repromp ted/got an
@@ -192,10 +238,9 @@ export type TaskEvent =
  * inspector can render "no lifecycle events yet". */
 export async function getTaskEvents(runId: string, taskId: string): Promise<TaskEvent[]> {
   try {
-    const text = await request<string>(
-      `/api/runs/${enc(runId)}/tasks/${enc(taskId)}/events`,
-      { accept: 'text' }
-    );
+    const text = await request<string>(`/api/runs/${enc(runId)}/tasks/${enc(taskId)}/events`, {
+      accept: 'text'
+    });
     return text
       .split('\n')
       .filter((l) => l.trim().length > 0)
@@ -425,7 +470,10 @@ export function exportManifestUrl(name: string): string {
   return `/api/manifests/${enc(name)}?${params.toString()}`;
 }
 
-export function saveManifest(name: string, contents: string): Promise<{ name: string; bytes: number }> {
+export function saveManifest(
+  name: string,
+  contents: string
+): Promise<{ name: string; bytes: number }> {
   return request<{ name: string; bytes: number }>('/api/manifests', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -443,7 +491,9 @@ export function validateManifest(contents: string): Promise<ValidateResult> {
   });
 }
 
-export function dispatchManifest(manifest_name: string): Promise<{ descriptor: DispatchDescriptor }> {
+export function dispatchManifest(
+  manifest_name: string
+): Promise<{ descriptor: DispatchDescriptor }> {
   return request<{ descriptor: DispatchDescriptor }>('/api/runs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
