@@ -2130,6 +2130,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tui-textarea",
  "uuid",

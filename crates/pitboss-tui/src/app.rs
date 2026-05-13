@@ -35,12 +35,18 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
 
     let mut state = AppState::new(run_dir.clone(), run_id);
 
-    // Build a tokio runtime for the ControlClient + its background reader task.
+    // Build a tokio runtime for the live-stream session + its background
+    // reader task.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    // PR-D of #438: the inbound channel now carries `LiveStreamItem`
+    // (the unified envelope) rather than bare `ControlEvent`. Today only
+    // the `Event` payload arm is consumed; PR-E will route the disk-
+    // sourced `Task` and `Lifecycle` arms through this same channel and
+    // retire the watcher's separate snapshot path.
     let (ctrl_events_tx, ctrl_events_rx) =
-        std::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>();
+        std::sync::mpsc::channel::<pitboss_cli::stream::LiveStreamItem>();
 
     // Channel for asynchronously-computed git-diff summaries (#154 M3).
     // `enter_detail_for` spawns a worker thread that shells out to `git
@@ -68,52 +74,63 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     // events that would open a modal whose request_id the new
     // dispatcher cannot ack (#104, #154 L1+L3).
     let connect_control = |state: &mut AppState| -> Option<tokio::task::AbortHandle> {
-        let mut forwarder_abort: Option<tokio::task::AbortHandle> = None;
-        let client = match uuid::Uuid::parse_str(&state.run_id) {
-            Ok(uuid) => {
-                let socket_path = pitboss_cli::control::control_socket_path(uuid, &state.run_dir);
-                let (bridge_tx, mut bridge_rx) =
-                    tokio::sync::mpsc::channel::<pitboss_cli::control::protocol::ControlEvent>(64);
+        // Resolve the run's control-socket path. If the run-id isn't a
+        // UUID (e.g. fixture names in tests), or if the socket simply
+        // isn't there, we still construct a session — `open_run_session`
+        // returns a `writer: None` and an empty stream in that case,
+        // matching the pre-PR-D observe-only behavior.
+        let socket_path = uuid::Uuid::parse_str(&state.run_id)
+            .ok()
+            .map(|uuid| pitboss_cli::control::control_socket_path(uuid, &state.run_dir));
+        let run_dir = state.run_dir.clone();
+
+        // #154 M1: bound the connect by a short timeout so a slow
+        // dispatcher accept doesn't stall the 50 ms input loop for
+        // hundreds of milliseconds.
+        let session = runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    pitboss_cli::stream::open_run_session(
+                        run_dir,
+                        socket_path,
+                        pitboss_cli::stream::LiveStreamMode::LiveOnly,
+                    ),
+                )
+                .await
+            })
+            .ok();
+
+        let (client, forwarder_abort) = match session {
+            Some(mut session) => {
+                let client = session
+                    .writer
+                    .take()
+                    .map(|w| Arc::new(crate::control::ControlClient::new(w)));
+                // Drive the session's stream into the sync mpsc the
+                // main loop reads. The abort handle is stored so a
+                // SwitchRun can tear down the previous run's forwarder
+                // before connecting to the new one (#154 L1+L3, #104):
+                // without that, the prior session keeps pushing items
+                // onto the shared `ctrl_events_tx` and stale
+                // ApprovalRequest envelopes can open modals the new
+                // dispatcher cannot ack.
                 let forward_tx = ctrl_events_tx.clone();
                 let handle = runtime.spawn(async move {
-                    while let Some(ev) = bridge_rx.recv().await {
-                        if forward_tx.send(ev).is_err() {
+                    use tokio_stream::StreamExt;
+                    let mut stream = session.stream;
+                    while let Some(item) = stream.next().await {
+                        if forward_tx.send(item).is_err() {
                             break;
                         }
                     }
                 });
-                forwarder_abort = Some(handle.abort_handle());
-                // #154 M1: bound the connect by a short timeout so a
-                // slow dispatcher accept doesn't stall the 50ms input
-                // loop for hundreds of milliseconds. The connect path
-                // is otherwise blocking on the main UI thread because
-                // the rest of `connect_control` synchronously assigns
-                // into `state` before the next render. Worst case the
-                // client comes back as None, the operator sees the
-                // "no control" status, and a future SwitchRun/reset
-                // can rebuild it cheaply — same UX as before for that
-                // case but without the stall.
-                // `tokio::time::timeout(...)` registers with the timer
-                // driver at construction time and panics ("no reactor
-                // running") if called outside a runtime context. The
-                // argument to `block_on` is evaluated BEFORE block_on
-                // enters the runtime, so we wrap in an `async` block to
-                // ensure the timeout is constructed *inside* the runtime.
-                runtime
-                    .block_on(async {
-                        tokio::time::timeout(
-                            std::time::Duration::from_millis(200),
-                            crate::control::ControlClient::connect(socket_path, bridge_tx),
-                        )
-                        .await
-                    })
-                    .ok()
-                    .and_then(Result::ok)
-                    .map(Arc::new)
+                (client, Some(handle.abort_handle()))
             }
-            Err(_) => None,
+            None => (None, None),
         };
-        state.control_connected = client.as_ref().is_some_and(|c| c.is_connected());
+
+        state.control_connected = client.is_some();
         state.control_client = client;
         state.runtime_handle = Some(runtime.handle().clone());
         forwarder_abort
@@ -279,9 +296,15 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
             }
         }
 
-        // --- Drain any queued control events (non-blocking). ---
-        while let Ok(ev) = ctrl_events_rx.try_recv() {
-            apply_control_event(&mut state, ev);
+        // --- Drain any queued live-stream items (non-blocking). ---
+        // PR-D of #438: the channel carries `LiveStreamItem`. Only the
+        // `Event` payload is consumed here today; PR-E will route
+        // `Task`/`Lifecycle` payloads from the watcher through this
+        // same channel and the watcher will retire.
+        while let Ok(item) = ctrl_events_rx.try_recv() {
+            if let pitboss_cli::stream::LiveStreamPayload::Event(env) = item.payload {
+                apply_control_event(&mut state, env.event);
+            }
         }
 
         // --- Drain async git-diff results (non-blocking, #154 M3). ---
