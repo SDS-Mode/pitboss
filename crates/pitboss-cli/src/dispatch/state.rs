@@ -412,6 +412,12 @@ pub struct DispatchState {
     /// auto-deny short-circuit. `None`/missing entry means the sub-lead
     /// was spawned untyped — the bridge fallback runs as before.
     pub sublead_actor_types: RwLock<HashMap<String, String>>,
+    /// Per-run event-stream log (#259, co-spec'd with #438). Owns the
+    /// run-scoped monotonic seq counter and an optional append-only
+    /// `<run-dir>/events.jsonl` file gated by `[run].emit_event_stream`.
+    /// Live wire emits read seq from here; persistence is a no-op when
+    /// the flag is off. Cloneable via `Arc`.
+    pub event_log: Arc<crate::control::event_log::EventLog>,
 }
 
 impl std::fmt::Debug for DispatchState {
@@ -453,22 +459,29 @@ impl DispatchState {
     ) -> Self {
         let communication_config = manifest.communication.clone();
         let communication_dir = run_subdir.clone();
-        let root = Arc::new(LayerState::new(
-            run_id,
-            manifest,
-            store,
-            cancel,
-            lead_id,
-            spawner,
-            claude_binary,
-            wt_mgr,
-            cleanup_policy,
-            run_subdir,
-            approval_policy,
-            notification_router,
-            shared_store,
-            None,
+        let event_log = Arc::new(crate::control::event_log::EventLog::new(
+            &run_subdir,
+            manifest.emit_event_stream,
         ));
+        let root = Arc::new(
+            LayerState::new(
+                run_id,
+                manifest,
+                store,
+                cancel,
+                lead_id,
+                spawner,
+                claude_binary,
+                wt_mgr,
+                cleanup_policy,
+                run_subdir,
+                approval_policy,
+                notification_router,
+                shared_store,
+                None,
+            )
+            .with_event_log(event_log.clone()),
+        );
         Self {
             root,
             subleads: RwLock::new(HashMap::new()),
@@ -484,6 +497,7 @@ impl DispatchState {
             api_health: Arc::new(crate::dispatch::failure_detection::ApiHealth::new()),
             actor_tokens: RwLock::new(HashMap::new()),
             sublead_actor_types: RwLock::new(HashMap::new()),
+            event_log,
         }
     }
 

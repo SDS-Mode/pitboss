@@ -47,7 +47,12 @@ pub const CONTROL_EVENT_QUEUE_CAP: usize = 512;
 /// different id, and the clear is skipped.
 pub struct ControlWriterSlot {
     pub id: Uuid,
-    pub sender: mpsc::Sender<crate::control::protocol::ControlEvent>,
+    /// PR-G of #259: channel carries fully-wrapped envelopes (with
+    /// `seq` already assigned via the per-run `EventLog`) so the
+    /// pump just serializes; persistence happens at the broadcast
+    /// site, not at the pump, so headless dispatches still produce
+    /// `events.jsonl`.
+    pub sender: mpsc::Sender<crate::control::protocol::EventEnvelope>,
 }
 
 /// All state owned by a single coordination layer (root layer or a
@@ -137,6 +142,13 @@ pub struct LayerState {
     /// side — broadcasts use `try_send` and drop on a full queue rather
     /// than block the dispatcher.
     pub control_writer: Mutex<Option<ControlWriterSlot>>,
+    /// Per-run event-stream log (#259, co-spec'd with #438). Cloned
+    /// from `DispatchState.event_log` at LayerState construction so
+    /// the per-layer `broadcast_control_event` can assign the
+    /// run-scoped seq + persist envelopes without going through the
+    /// pump (which only runs when a client is connected). Shared
+    /// across the root layer and every sub-tree layer.
+    pub event_log: Arc<crate::control::event_log::EventLog>,
     /// Per-task event counters.
     pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
     /// v0.4.1: notification router.
@@ -220,6 +232,15 @@ impl LayerState {
         shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
         original_reservation_usd: Option<f64>,
     ) -> Self {
+        // PR-G of #259: default to a disabled, root-`/` event log so the
+        // 14-arg signature stays back-compat with the pre-PR-G call
+        // shape (tests + ad-hoc constructors). Prod callers
+        // (`DispatchState::new`, sub-lead spawn) override via
+        // [`Self::with_event_log`] immediately after constructing.
+        let event_log = Arc::new(crate::control::event_log::EventLog::new(
+            std::path::Path::new("/"),
+            false,
+        ));
         let (done_tx, _) = broadcast::channel(64);
         Self {
             run_id,
@@ -247,6 +268,7 @@ impl LayerState {
             approval_queue: Mutex::new(VecDeque::new()),
             approval_policy,
             control_writer: Mutex::new(None),
+            event_log,
             worker_counters: RwLock::new(HashMap::new()),
             notification_router,
             shared_store,
@@ -257,6 +279,19 @@ impl LayerState {
             reprompt_hook: Mutex::new(None),
             reprompt_tx: Mutex::new(None),
         }
+    }
+
+    /// Builder: install the run-scoped event log on this freshly-
+    /// constructed layer. PR-G of #259 — call sites that have an
+    /// `EventLog` available (`DispatchState::new` for the root,
+    /// `dispatch::sublead::spawn_sublead` for sub-trees) chain this
+    /// after [`Self::new`]. Test callers that don't care about
+    /// persistence can omit the builder and inherit the disabled
+    /// default.
+    #[must_use]
+    pub fn with_event_log(mut self, event_log: Arc<crate::control::event_log::EventLog>) -> Self {
+        self.event_log = event_log;
+        self
     }
 
     /// Install a `PolicyMatcher` on this layer. Called at run startup after
@@ -365,31 +400,37 @@ impl LayerState {
         }
     }
 
-    /// Broadcast a control-plane event wrapped in an `EventEnvelope` to any
-    /// connected TUI. The `actor_path` carried in the envelope is preserved
-    /// in the serialized JSON when non-empty (v0.6+ TUI clients); when empty
-    /// it is elided so v0.5 clients parse the event unchanged.
+    /// Broadcast a control-plane event. PR-G of #259: this call assigns
+    /// the run-scoped seq from [`Self::event_log`], persists the
+    /// envelope to `events.jsonl` (no-op when `emit_event_stream` is
+    /// off), and — if a TUI/web bridge is connected — forwards the
+    /// envelope to the pump for wire emission.
     ///
-    /// If no TUI is currently connected the event is silently dropped — the
-    /// control socket is best-effort (same semantics as the existing
-    /// `control_writer.send(...)` pattern throughout the codebase).
-    pub async fn broadcast_control_event(&self, envelope: crate::control::protocol::EventEnvelope) {
+    /// Persistence happens **regardless of whether a client is
+    /// connected**: headless dispatches still produce a complete
+    /// `events.jsonl` for post-run replay. The caller's `envelope.seq`
+    /// is overwritten; the caller is expected to construct envelopes
+    /// with `seq: 0` placeholders (pre-PR-G call sites still compile
+    /// unchanged).
+    ///
+    /// `try_send` drops the wire emission on a full queue (slow /
+    /// frozen TUI) rather than blocking the dispatcher — the archived
+    /// row is unaffected.
+    pub async fn broadcast_control_event(
+        &self,
+        mut envelope: crate::control::protocol::EventEnvelope,
+    ) {
+        envelope.seq = self.event_log.next_seq();
+        self.event_log.persist(&envelope).await;
+
         if let Some(w) = self.control_writer.lock().await.as_ref() {
-            // The channel carries ControlEvent; the actor_path in the
-            // envelope is available for future TUI display but is not
-            // threaded through the channel in this task. Emit the inner
-            // event so the TUI gets the lifecycle notification.
-            //
-            // `try_send` drops the event on a full queue (slow/frozen
-            // TUI) rather than blocking the broadcaster.
-            if let Err(e) = w.sender.try_send(envelope.event) {
+            if let Err(e) = w.sender.try_send(envelope) {
                 tracing::debug!(
-                    "control_writer try_send dropped event: {} ({})",
+                    "control_writer try_send dropped envelope: {}",
                     match &e {
                         tokio::sync::mpsc::error::TrySendError::Full(_) => "queue full",
                         tokio::sync::mpsc::error::TrySendError::Closed(_) => "receiver dropped",
                     },
-                    std::any::type_name::<crate::control::protocol::ControlEvent>(),
                 );
             }
         }

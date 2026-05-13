@@ -381,6 +381,198 @@ async fn server_emits_monotonic_seqs_on_wire() {
     );
 }
 
+/// PR-G of #259: when `[run].emit_event_stream = true`, the dispatcher
+/// persists every non-Hello envelope to `<run-dir>/events.jsonl` as it
+/// fires on the wire. Hello is skipped (handshake noise per the spec).
+/// Seqs in the file match seqs on the wire (single counter for both).
+#[tokio::test]
+async fn emit_event_stream_writes_envelopes_to_events_jsonl() {
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        // The flag this PR activates.
+        emit_event_stream: true,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    state.root.workers.write().await.insert(
+        "w-1".into(),
+        WorkerState::Running {
+            started_at: chrono::Utc::now(),
+            session_id: Some("sess".into()),
+        },
+    );
+
+    let sock = dir.path().join("events-stream.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.13.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    let mut client = FakeControlClient::connect(&sock, "0.13.0").await.unwrap();
+    client.send(&ControlOp::ListWorkers).await.unwrap();
+    // Wait for the OpAcked or WorkersSnapshot reply so the dispatcher
+    // has flushed at least one persisted envelope.
+    let _ = client
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    // Give the persistence write a beat to flush.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let events_path = run_subdir.join("events.jsonl");
+    let contents = tokio::fs::read_to_string(&events_path)
+        .await
+        .expect("events.jsonl must be created when emit_event_stream=true");
+    let lines: Vec<&str> = contents.lines().collect();
+    assert!(
+        !lines.is_empty(),
+        "events.jsonl should have at least one persisted envelope",
+    );
+    // Spec: Hello is NOT archived. The hello envelope has seq=1 on the
+    // wire, but persisted lines start with the second envelope.
+    for line in &lines {
+        assert!(
+            !line.contains("\"event\":\"hello\""),
+            "Hello envelope must not be archived: {line}",
+        );
+    }
+    // Every line carries a seq field.
+    for line in &lines {
+        assert!(line.contains("\"seq\":"), "missing seq in {line}");
+    }
+}
+
+#[tokio::test]
+async fn emit_event_stream_off_does_not_create_events_jsonl() {
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false, // back-compat default
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    let sock = dir.path().join("events-off.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.13.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    let mut client = FakeControlClient::connect(&sock, "0.13.0").await.unwrap();
+    client.send(&ControlOp::ListWorkers).await.unwrap();
+    let _ = client
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let events_path = run_subdir.join("events.jsonl");
+    assert!(
+        !events_path.exists(),
+        "events.jsonl must not be created when emit_event_stream=false",
+    );
+}
+
 #[tokio::test]
 async fn block_policy_queue_drains_on_tui_connect() {
     use std::time::Duration;
