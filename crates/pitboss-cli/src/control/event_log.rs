@@ -16,17 +16,37 @@
 //!   `[run].emit_event_stream = true`. Absent when the flag is off
 //!   (today's back-compat default).
 //!
+//! ## How persistence runs
+//!
+//! PR-H of #259 separates the *emission* of an envelope from its
+//! *persistence*. Emitters call
+//! [`crate::dispatch::layer::LayerState::broadcast_control_event`]
+//! which publishes onto the per-run broadcast bus
+//! ([`LayerState::events_tx`]). The bus has two subscribers:
+//!
+//! 1. A persistent task spawned in
+//!    [`crate::dispatch::state::DispatchState::new`] that drains the
+//!    bus and calls [`EventLog::persist`] for every envelope. This
+//!    task is alive for the whole run, so **headless** dispatches
+//!    (no TUI, no web bridge) still produce a complete
+//!    `events.jsonl`.
+//! 2. A per-connection bridge spawned in `control/server.rs` that
+//!    forwards the bus into the connected client's outbound mpsc.
+//!
 //! ## What this does not own
 //!
 //! - The decision of which events to emit; that stays in the
 //!   dispatcher's existing emit sites.
 //! - The HTTP endpoint, SPA replay, or `pitboss events` CLI
 //!   subcommand from #259's full scope — those are follow-up PRs.
-//! - Persisting events emitted via `broadcast_control_event` when
-//!   **no** client is connected (events are dropped at the channel
-//!   today; persistence today rides on the pump path). Lifting that
-//!   guarantee is a future PR; for typical pitboss runs the TUI or
-//!   web bridge is attached and the gap is empty.
+//! - Persisting connection-scoped envelopes (Hello reply, op replies,
+//!   queued-approval drain, bridge replay, Superseded sent to a
+//!   displaced client, `StoreActivity` ticks). These bypass the bus
+//!   on purpose — they're addressed to a specific client, not to
+//!   the run — and persist via the inline helpers in
+//!   `control/server.rs` whenever they fire. `Hello` itself is
+//!   filtered at the [`EventLog::persist`] boundary because it is
+//!   pure handshake noise.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

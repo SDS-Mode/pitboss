@@ -374,7 +374,8 @@ pub async fn spawn_sublead(
                 sub_store,
                 reserved_amount,
             )
-            .with_event_log(state.event_log.clone()),
+            .with_event_log(state.event_log.clone())
+            .with_events_tx(state.root.events_tx.clone()),
         );
 
         // 8. Register sub-tree LayerState on root DispatchState. Inserts into
