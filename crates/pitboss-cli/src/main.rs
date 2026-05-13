@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use pitboss_cli::{
-    agents_md, analyze, attach, capability_matrix, cli, diff, dispatch, list, manifest, mcp, prune,
-    status, tree,
+    agents_md, analyze, attach, capability_matrix, cli, diff, dispatch, events, list, manifest,
+    mcp, prune, status, tree,
 };
 
 use cli::{Cli, Command};
@@ -93,6 +93,13 @@ fn main() -> Result<()> {
             json,
         } => {
             std::process::exit(status::run(&run_id, json, run_dir)?);
+        }
+        Command::Events {
+            run_id,
+            run_dir,
+            json,
+        } => {
+            std::process::exit(events::run(&run_id, json, run_dir)?);
         }
         Command::Analyze {
             run_id,

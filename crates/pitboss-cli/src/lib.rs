@@ -13,6 +13,7 @@ pub mod communication;
 pub mod control;
 pub mod diff;
 pub mod dispatch;
+pub mod events;
 pub mod list;
 pub mod manifest;
 pub mod mcp;
