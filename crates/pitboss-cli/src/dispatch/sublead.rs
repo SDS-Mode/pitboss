@@ -355,24 +355,27 @@ pub async fn spawn_sublead(
         }
 
         // 7. Construct the sub-tree LayerState.
-        let sub_layer = Arc::new(LayerState::new(
-            state.root.run_id,
-            sub_manifest,
-            state.root.store.clone(),
-            CancelToken::new(),
-            sublead_id.clone(),
-            state.root.spawner.clone(),
-            state.root.claude_binary.clone(),
-            state.root.wt_mgr.clone(),
-            CleanupPolicy::Never, // sub-tree shares run cleanup behaviour; finalized by root
-            state.root.run_subdir.clone(),
-            // Inherit root approval policy; sub-leads can escalate via request_approval.
-            state.root.approval_policy,
-            // No notification router for sub-trees — root router handles run events.
-            None,
-            sub_store,
-            reserved_amount,
-        ));
+        let sub_layer = Arc::new(
+            LayerState::new(
+                state.root.run_id,
+                sub_manifest,
+                state.root.store.clone(),
+                CancelToken::new(),
+                sublead_id.clone(),
+                state.root.spawner.clone(),
+                state.root.claude_binary.clone(),
+                state.root.wt_mgr.clone(),
+                CleanupPolicy::Never, // sub-tree shares run cleanup behaviour; finalized by root
+                state.root.run_subdir.clone(),
+                // Inherit root approval policy; sub-leads can escalate via request_approval.
+                state.root.approval_policy,
+                // No notification router for sub-trees — root router handles run events.
+                None,
+                sub_store,
+                reserved_amount,
+            )
+            .with_event_log(state.event_log.clone()),
+        );
 
         // 8. Register sub-tree LayerState on root DispatchState. Inserts into
         // `state.subleads`, installs the per-sublead cancel-cascade watcher,
@@ -411,9 +414,7 @@ pub async fn spawn_sublead(
             };
             let ev = EventEnvelope {
                 actor_path: ActorPath::new(["root", sublead_id.as_str()]),
-                // Seq is reassigned by the server's pump; see comment in
-                // `failure_detection::broadcast_worker_failed`.
-                seq: 0,
+                seq: 0, // overwritten by broadcast_control_event
                 event: ControlEvent::SubleadSpawned {
                     sublead_id: sublead_id.clone(),
                     budget_usd: budget_usd_val,
@@ -1115,9 +1116,7 @@ pub async fn reconcile_terminated_sublead(
     {
         let ev = EventEnvelope {
             actor_path: ActorPath::new(["root", sublead_id]),
-            // Seq is reassigned by the server's pump; see comment in
-            // `failure_detection::broadcast_worker_failed`.
-            seq: 0,
+            seq: 0, // overwritten by broadcast_control_event
             event: ControlEvent::SubleadTerminated {
                 sublead_id: sublead_id.to_string(),
                 spent_usd: actual_spend,
