@@ -183,6 +183,12 @@ pub async fn broadcast_worker_failed(
 ) {
     let envelope = EventEnvelope {
         actor_path: ActorPath::new(actor_path_segments.iter().copied()),
+        // Seq is reassigned by the server's pump (see `send_events_batch`
+        // in `control/server.rs`); the value here is a placeholder. The
+        // `broadcast_control_event` path discards the envelope wrapper
+        // and only forwards `envelope.event`, so this never reaches the
+        // wire.
+        seq: 0,
         event: ControlEvent::WorkerFailed {
             task_id,
             parent_task_id,

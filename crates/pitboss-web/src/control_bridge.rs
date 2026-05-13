@@ -209,6 +209,9 @@ async fn reader_loop(
                         // empty-actor-path envelope for uniformity.
                         Ok(ev) => EventEnvelope {
                             actor_path: Default::default(),
+                            // Bare ControlEvent had no seq; treat as
+                            // legacy (seq = 0) per PR-B of #438.
+                            seq: 0,
                             event: ev,
                         },
                         Err(e) => {
