@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use notify::Watcher;
 use pitboss_core::parser::{parse_line_all, Event};
 use pitboss_core::store::{TaskRecord, TaskStatus};
 use serde::Deserialize;
@@ -117,38 +118,155 @@ pub fn watch(
     snapshot_tx: mpsc::SyncSender<AppSnapshot>,
     focus_rx: mpsc::Receiver<String>,
 ) {
+    std::thread::spawn(move || run_watch_loop(run_dir, snapshot_tx, focus_rx));
+}
+
+/// What woke the watcher thread on a given loop iteration. Each variant
+/// fans into the same `wake_rx` channel; the main loop reacts to it and
+/// rebuilds the snapshot.
+enum Wake {
+    /// Operator changed the focused tile via the UI thread.
+    Focus(String),
+    /// A filesystem event from `notify` landed somewhere under
+    /// `run_dir`. Most of these are `summary.jsonl` appends, but any
+    /// non-rescan event just triggers a snapshot rebuild.
+    FsEvent,
+    /// `Event::need_rescan()` flag: kernel notification buffer
+    /// overran, so `notify`'s view of what changed is incomplete.
+    /// We respond by dropping the [`RunSnapshotReader`]'s cached
+    /// tracking state — the next [`RunSnapshotReader::refresh`] will
+    /// do a full reparse rather than trust its byte-offset.
+    Rescan,
+    /// Periodic safety-net timer fired. Covers two failure modes:
+    /// (1) `notify` silently dropped an event we'd otherwise miss
+    /// (rare on local filesystems, more common on NFS); (2) `notify`
+    /// failed to register at all and we're in poll-only fallback
+    /// mode. With Tier 2's stateful reader, a periodic tick costs one
+    /// stat per file when nothing changed.
+    Periodic,
+}
+
+// The arguments are consumed by the thread when this function returns;
+// clippy's `needless_pass_by_value` doesn't see the implicit drop.
+#[allow(clippy::needless_pass_by_value)]
+fn run_watch_loop(
+    run_dir: PathBuf,
+    snapshot_tx: mpsc::SyncSender<AppSnapshot>,
+    focus_rx: mpsc::Receiver<String>,
+) {
+    let mut focused_id: Option<String> = None;
+    // Tier 2 of #437: hold the canonical reader across ticks so we
+    // only re-parse new `summary.jsonl` bytes (and re-read
+    // `summary.json` only when its mtime advances).
+    let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+
+    // Push the initial snapshot before `notify` subscribes (#437
+    // Tier 3 acceptance: historical / finalized runs must render
+    // entirely from the initial snapshot even when no FS events ever
+    // fire). The full-reparse cost here is unavoidable on first
+    // open — subsequent ticks ride the reader's incremental path.
+    let snapshot = build_snapshot(&run_dir, &mut summary_reader, focused_id.as_deref());
+    if matches!(
+        snapshot_tx.try_send(snapshot),
+        Err(mpsc::TrySendError::Disconnected(_))
+    ) {
+        return;
+    }
+
+    let (wake_tx, wake_rx) = mpsc::channel::<Wake>();
+
+    // Bridge: pump focus updates from the caller's channel into the
+    // unified wake channel. Owns its own thread so the public watch()
+    // API stays unchanged.
+    let wake_for_focus = wake_tx.clone();
     std::thread::spawn(move || {
-        let mut focused_id: Option<String> = None;
-        // Tier 2 of #437: hold the canonical reader across ticks so a
-        // 4 Hz poll only re-parses new `summary.jsonl` bytes (and
-        // re-reads `summary.json` only when its mtime advances).
-        let mut summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
-
-        loop {
-            // Drain any pending focus updates (non-blocking).
-            while let Ok(id) = focus_rx.try_recv() {
-                focused_id = Some(id);
-            }
-
-            let snapshot = build_snapshot(&run_dir, &mut summary_reader, focused_id.as_deref());
-            // Full channel means the UI is temporarily behind (e.g. a blocking
-            // render tick). Drop this snapshot — the next tick will publish
-            // a fresh one. Only a disconnected receiver ends the watcher.
-            match snapshot_tx.try_send(snapshot) {
-                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                Err(mpsc::TrySendError::Disconnected(_)) => break,
-            }
-
-            // Wait up to POLL_INTERVAL_MS for the next tick, OR wake early
-            // when the user changes focus so the new tile's log tails
-            // without an up-to-half-second delay.
-            match focus_rx.recv_timeout(Duration::from_millis(POLL_INTERVAL_MS)) {
-                Ok(id) => focused_id = Some(id),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        while let Ok(id) = focus_rx.recv() {
+            if wake_for_focus.send(Wake::Focus(id)).is_err() {
+                break;
             }
         }
     });
+
+    // Try to register a recursive `notify` watcher on the run dir.
+    // On success, future loop ticks are driven by FS events plus a
+    // slow safety-net timer. On failure (out-of-watches, NFS without
+    // inotify, etc.), fall back to today's poll cadence so the TUI
+    // still updates — the cost profile is now O(0) per tick with
+    // Tier 2's reader, so the fallback isn't expensive either.
+    let wake_for_fs = wake_tx.clone();
+    let watcher_result: notify::Result<notify::RecommendedWatcher> =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                let wake = if event.need_rescan() {
+                    Wake::Rescan
+                } else {
+                    Wake::FsEvent
+                };
+                let _ = wake_for_fs.send(wake);
+            }
+        });
+    let (notify_active, _watcher_guard) = match watcher_result {
+        Ok(mut w) => match w.watch(&run_dir, notify::RecursiveMode::Recursive) {
+            Ok(()) => (true, Some(w)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %run_dir.display(),
+                    "notify::watch failed; using poll-only fallback for the summary surface",
+                );
+                (false, None)
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "notify::recommended_watcher init failed; using poll-only fallback",
+            );
+            (false, None)
+        }
+    };
+
+    // Spawn the safety-net timer. When notify is alive, ticks every
+    // 5s catch any missed events on flakey backends. When notify is
+    // dead, ticks every POLL_INTERVAL_MS (matches the pre-#440
+    // cadence so the operator perceives no change in update speed).
+    let wake_for_timer = wake_tx.clone();
+    let tick_interval = if notify_active {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_millis(POLL_INTERVAL_MS)
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(tick_interval);
+        if wake_for_timer.send(Wake::Periodic).is_err() {
+            break;
+        }
+    });
+
+    // Drop our own copy of wake_tx so wake_rx can observe a
+    // disconnect once every helper thread also drops its sender.
+    drop(wake_tx);
+
+    while let Ok(wake) = wake_rx.recv() {
+        match wake {
+            Wake::Focus(id) => focused_id = Some(id),
+            Wake::Rescan => {
+                // Drop the reader's cached byte-offset tracking so
+                // the next refresh does a full reparse from disk.
+                summary_reader = pitboss_core::store::RunSnapshotReader::new(run_dir.clone());
+            }
+            Wake::FsEvent | Wake::Periodic => {}
+        }
+
+        let snapshot = build_snapshot(&run_dir, &mut summary_reader, focused_id.as_deref());
+        match snapshot_tx.try_send(snapshot) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        }
+    }
+    // _watcher_guard drops here, releasing the inotify/FSEvents
+    // registration. Helper threads observe wake_rx as disconnected
+    // and exit on their next send.
 }
 
 // ---------------------------------------------------------------------------
@@ -1650,5 +1768,112 @@ mod tests {
         let worker_tile = snap.tasks.iter().find(|t| t.id == "worker-noisy").unwrap();
         assert_eq!(lead_tile.denials_count, 0);
         assert_eq!(worker_tile.denials_count, 2);
+    }
+
+    // ------------------------------------------------------------------
+    // Tier 3 integration tests — exercise the full `watch()` thread,
+    // not just `build_snapshot`. These prove notify subscription is
+    // wired up and that the initial snapshot fires before any FS event.
+    // ------------------------------------------------------------------
+
+    fn minimal_hierarchical_run(run_dir: &std::path::Path) {
+        let resolved = serde_json::json!({
+            "max_parallel": 4,
+            "halt_on_failure": false,
+            "run_dir": run_dir.to_str(),
+            "worktree_cleanup": "OnSuccess",
+            "emit_event_stream": false,
+            "tasks": [],
+            "lead": {"id": "lead-1", "model": "claude-haiku-4-5"},
+            "max_workers": 4,
+            "budget_usd": 5.0,
+            "lead_timeout_secs": 900,
+        });
+        std::fs::write(
+            run_dir.join("resolved.json"),
+            serde_json::to_vec(&resolved).unwrap(),
+        )
+        .unwrap();
+        // Empty summary.jsonl so the canonical reader doesn't NotFound.
+        std::fs::write(run_dir.join("summary.jsonl"), b"").unwrap();
+    }
+
+    /// Acceptance criterion from #437 Tier 3: the watcher MUST push an
+    /// initial snapshot before subscribing to FS events, so historical
+    /// or finalized runs (which never fire FS events) still render.
+    #[test]
+    fn watch_emits_initial_snapshot_before_any_event() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+        minimal_hierarchical_run(&run_dir);
+
+        let (snap_tx, snap_rx) = std::sync::mpsc::sync_channel(1);
+        let (_focus_tx, focus_rx) = std::sync::mpsc::channel();
+        super::watch(run_dir, snap_tx, focus_rx);
+
+        // The initial snapshot lands quickly — no FS event needed.
+        let snap = snap_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("initial snapshot delivered without an FS event");
+        assert!(
+            snap.tasks.iter().any(|t| t.id == "lead-1"),
+            "initial snapshot includes the resolved.json lead",
+        );
+    }
+
+    /// An append to `summary.jsonl` after the initial snapshot must
+    /// produce a new snapshot reflecting the new row. The path can be
+    /// notify-driven (typical) or periodic-timer-driven (fallback) —
+    /// either way the consumer observes the update.
+    #[test]
+    fn watch_pushes_snapshot_after_summary_jsonl_append() {
+        use pitboss_core::store::TaskStatus as TS;
+        let dir = tempfile::TempDir::new().unwrap();
+        let run_dir = dir.path().to_path_buf();
+        minimal_hierarchical_run(&run_dir);
+
+        let (snap_tx, snap_rx) = std::sync::mpsc::sync_channel(4);
+        let (_focus_tx, focus_rx) = std::sync::mpsc::channel();
+        super::watch(run_dir.clone(), snap_tx, focus_rx);
+
+        // Drain the initial snapshot.
+        let _initial = snap_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("initial snapshot");
+
+        // Append a worker row. The watcher's snapshot for the next
+        // tick must include a tile for worker-A.
+        let line = task_record_line("worker-A", TS::Success, Some("lead-1"));
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(run_dir.join("summary.jsonl"))
+                .unwrap();
+            writeln!(f, "{line}").unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Wait up to 6s for a snapshot reflecting the append. That
+        // budget covers FSEvents latency on macOS (~10–100ms),
+        // inotify latency on Linux (~ms), and the 5s safety-net
+        // periodic on platforms where notify silently dropped the
+        // event.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        loop {
+            let remaining = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .max(std::time::Duration::from_millis(100));
+            let snap = snap_rx
+                .recv_timeout(remaining)
+                .expect("snapshot delivered before deadline");
+            if snap.tasks.iter().any(|t| t.id == "worker-A") {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no snapshot ever included worker-A within deadline",
+            );
+        }
     }
 }
