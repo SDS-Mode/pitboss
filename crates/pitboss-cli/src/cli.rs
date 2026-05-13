@@ -245,6 +245,31 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the persisted control-event stream for a prior run (#259).
+    ///
+    /// Reads `<run-dir>/events.jsonl`, which the dispatcher writes when
+    /// the manifest enables `[run].emit_event_stream = true`. Each line
+    /// is one `EventEnvelope` carrying `seq`, `actor_path`, and a
+    /// flattened `ControlEvent` payload — sub-lead lifecycle, worker
+    /// failures, approval requests, etc.
+    ///
+    /// Default output is a compact one-line-per-envelope summary
+    /// (`seq` · `actor_path` · `event_kind` · key detail). Use
+    /// `--json` for the raw NDJSON suitable for piping into `jq`.
+    Events {
+        /// Run id (full UUID or unique prefix).
+        run_id: String,
+        /// Override runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs`. Same semantics as `status`,
+        /// `list`, `prune`.
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+        /// Pass the file through as NDJSON (one envelope per line,
+        /// exactly as written to disk). Default mode renders a
+        /// human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Triage a single run or roll up recent runs.
     ///
     /// Single-run mode (`pitboss analyze <run-id>`): produces a
