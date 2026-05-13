@@ -105,7 +105,8 @@ impl ApiHealth {
             FailureReason::NetworkError { .. }
             | FailureReason::ContextExceeded
             | FailureReason::InvalidArgument { .. }
-            | FailureReason::Unknown { .. } => {}
+            | FailureReason::Unknown { .. }
+            | FailureReason::BudgetExceeded { .. } => {}
         }
     }
 
@@ -361,6 +362,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -458,6 +460,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

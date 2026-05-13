@@ -38,6 +38,11 @@ struct SpawnSubleadRequest {
     /// read_down=true (then None means "share root's pool").
     #[serde(default)]
     budget_usd: Option<f64>,
+    /// Optional per-sub-lead cap on the sub-lead's own token spend
+    /// (orchestration cost), independent of `budget_usd`. Falls back to
+    /// `[sublead_defaults].lead_budget_usd` when omitted. (#253)
+    #[serde(default)]
+    lead_budget_usd: Option<f64>,
     /// Hard worker count cap for this sub-tree.
     #[serde(default)]
     max_workers: Option<u32>,
@@ -561,6 +566,7 @@ impl PitbossHandler {
             prompt: req.prompt,
             model: req.model,
             budget_usd: resolved_budget,
+            lead_budget_usd: req.lead_budget_usd,
             max_workers: req.max_workers,
             lead_timeout_secs: resolved_timeout,
             initial_ref: req.initial_ref,
@@ -1691,6 +1697,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -1782,6 +1789,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -1867,6 +1875,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -2019,6 +2028,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(5.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

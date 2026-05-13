@@ -108,6 +108,19 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, P
             raw,
         ));
     }
+    // Surface per-message usage when claude carries it on the wire so
+    // the dispatcher can reconcile lead spend per-turn instead of
+    // only at terminal `Event::Result`. (#253) Optional: older builds
+    // and the fake-claude harness omit it, so absence is not an error.
+    if let Some(usage_val) = value.get("message").and_then(|m| m.get("usage")) {
+        let usage = TokenUsage {
+            input: u64_field(usage_val, "input_tokens"),
+            output: u64_field(usage_val, "output_tokens"),
+            cache_read: u64_field(usage_val, "cache_read_input_tokens"),
+            cache_creation: u64_field(usage_val, "cache_creation_input_tokens"),
+        };
+        events.push(Event::AssistantUsage { usage });
+    }
     Ok(events)
 }
 
@@ -282,6 +295,34 @@ mod tests {
         let line = br#"{"type":"assistant","message":{}}"#;
         let err = parse_line(line).unwrap_err();
         assert!(matches!(err, ParseError::Malformed { .. }));
+    }
+
+    #[test]
+    fn parses_assistant_emits_usage_event_when_present() {
+        // #253: per-turn usage surfaced alongside the text/tool_use blocks.
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":11,"output_tokens":22,"cache_read_input_tokens":3,"cache_creation_input_tokens":1}}}"#;
+        let events = parse_line_all(line).unwrap();
+        assert_eq!(events.len(), 2, "expected text + usage events");
+        assert!(matches!(events[0], Event::AssistantText { .. }));
+        match &events[1] {
+            Event::AssistantUsage { usage } => {
+                assert_eq!(usage.input, 11);
+                assert_eq!(usage.output, 22);
+                assert_eq!(usage.cache_read, 3);
+                assert_eq!(usage.cache_creation, 1);
+            }
+            other => panic!("expected AssistantUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_assistant_without_usage_emits_no_usage_event() {
+        // Absence of `message.usage` (older builds / fake-claude) is
+        // backward-compatible — only text/tool_use events are emitted.
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+        let events = parse_line_all(line).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Event::AssistantText { .. }));
     }
 
     #[test]

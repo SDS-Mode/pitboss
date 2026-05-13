@@ -121,6 +121,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         was_interrupted: true,
         notify_failures: None,
         tasks,
+        spend_breakdown: None,
     })
 }
 
@@ -546,6 +547,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks,
+            spend_breakdown: None,
         }
     }
 

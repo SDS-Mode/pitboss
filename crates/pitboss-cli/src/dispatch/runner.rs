@@ -526,6 +526,7 @@ async fn finalize_run(
             && !halt_drained.load(Ordering::Acquire),
         notify_failures,
         tasks: records,
+        spend_breakdown: None,
     };
     harness.store.finalize_run(&summary).await?;
 
@@ -1485,6 +1486,7 @@ mod tests {
             lead: None,
             max_workers: None,
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: Some(crate::dispatch::state::ApprovalPolicy::AutoApprove),
             denial_termination_policy: None,
@@ -1636,6 +1638,7 @@ mod tests {
             lead: None,
             max_workers: None,
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -1736,6 +1739,7 @@ mod tests {
             lead: None,
             max_workers: None,
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -1849,6 +1853,7 @@ mod tests {
             lead: None,
             max_workers: None,
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

@@ -504,6 +504,7 @@ fn failure_excerpt(rec: &TaskRecord) -> Option<String> {
             FailureReason::ContextExceeded => "context length exceeded".to_string(),
             FailureReason::InvalidArgument { message } => format!("invalid request: {message}"),
             FailureReason::Unknown { message } => message.clone(),
+            FailureReason::BudgetExceeded { message } => format!("budget exceeded: {message}"),
         });
     }
     rec.final_message_preview.clone()
@@ -686,6 +687,7 @@ fn failure_kind_label(reason: &FailureReason) -> String {
         FailureReason::ContextExceeded => "context_exceeded",
         FailureReason::InvalidArgument { .. } => "invalid_argument",
         FailureReason::Unknown { .. } => "unknown",
+        FailureReason::BudgetExceeded { .. } => "budget_exceeded",
     }
     .to_string()
 }
@@ -1095,6 +1097,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks,
+            spend_breakdown: None,
         }
     }
 

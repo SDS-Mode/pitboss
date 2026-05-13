@@ -30,6 +30,12 @@ pub enum FailureReason {
     /// Non-zero exit with no recognized marker. `message` is a short excerpt
     /// from the tail of stderr/stdout for triage.
     Unknown { message: String },
+    /// Dispatcher-initiated abort because the run exceeded its declared
+    /// `budget_usd` cap or a lead/sub-lead exceeded its `lead_budget_usd`
+    /// cap. Distinguished from `Cancelled` (operator-initiated) so the
+    /// TUI / `pitboss status` / notifications can flag the overspend
+    /// reason without re-parsing logs. (#253)
+    BudgetExceeded { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +158,66 @@ pub struct RunSummary {
     #[serde(default)]
     pub notify_failures: Option<u32>,
     pub tasks: Vec<TaskRecord>,
+    /// Per-actor-class spend totals at finalize time. `None` for pre-v0.14
+    /// summaries; recomputed from `tasks` so older `summary.json` files
+    /// still load. (#253)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_breakdown: Option<SpendBreakdown>,
+}
+
+impl SpendBreakdown {
+    /// Classify a slice of `TaskRecord`s into a `SpendBreakdown`.
+    ///
+    /// Classification rules:
+    /// * `task_id == root_lead_id` → counted in `lead_usd`.
+    /// * `task_id` starts with `sublead-` → counted in `subleads_usd`.
+    /// * everything else → counted in `workers_usd`.
+    ///
+    /// The `sublead-` prefix is coupled to the id minted by
+    /// `pitboss_cli::dispatch::sublead::spawn_sublead`. If that
+    /// convention ever changes, update this classifier together with
+    /// it (or grow an explicit `is_sublead` field on `TaskRecord`).
+    ///
+    /// Records without a `cost_usd` contribute 0; pre-v0.11 records and
+    /// tasks priced at models outside the price table simply don't move
+    /// the totals. (#253)
+    #[must_use]
+    pub fn from_tasks(tasks: &[TaskRecord], root_lead_id: &str) -> Self {
+        let mut out = Self::default();
+        for r in tasks {
+            let cost = r.cost_usd.unwrap_or(0.0);
+            if r.task_id == root_lead_id {
+                out.lead_usd += cost;
+            } else if r.task_id.starts_with("sublead-") {
+                out.subleads_usd += cost;
+            } else {
+                out.workers_usd += cost;
+            }
+        }
+        out.total_usd = out.workers_usd + out.lead_usd + out.subleads_usd;
+        out
+    }
+}
+
+/// Per-actor-class USD cost breakdown for a finalized run. Each field is
+/// the sum of `cost_usd` over the relevant `TaskRecord`s; the residual
+/// difference between `total` and the sum of the three classes is zero
+/// when every task has a populated `cost_usd`. (#253)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct SpendBreakdown {
+    /// Sum of `cost_usd` over every worker `TaskRecord` (root layer
+    /// workers + sub-tree workers). `parent_task_id.is_some()` is the
+    /// marker — root lead and sub-leads have `None`.
+    pub workers_usd: f64,
+    /// Sum of `cost_usd` over the root lead's `TaskRecord`.
+    pub lead_usd: f64,
+    /// Sum of `cost_usd` over every sub-lead `TaskRecord` (identified
+    /// by `parent_task_id == Some(root_lead_id)` and acting itself as
+    /// a lead in its sub-tree).
+    pub subleads_usd: f64,
+    /// Sum of the three classes above. Persisted for parity with the
+    /// rest of the surface and so consumers can avoid a re-summation.
+    pub total_usd: f64,
 }
 
 #[cfg(test)]
@@ -431,6 +497,7 @@ mod tests {
             was_interrupted: false,
             notify_failures: None,
             tasks: vec![],
+            spend_breakdown: None,
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("nightly"));

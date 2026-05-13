@@ -338,6 +338,27 @@ pub async fn run_hierarchical(
         env: lead_env,
     };
 
+    // 3d. Budget watcher — installs a per-message usage observer that
+    //     updates `state.root.lead_spent_usd` live and aborts the lead
+    //     when `budget_usd` (run-wide total) or `lead_budget_usd`
+    //     (orchestration-only) caps are exceeded. (#253)
+    let baseline = crate::dispatch::budget_watch::LeadSpendBaseline::new();
+    let usage_observer = crate::dispatch::budget_watch::build_lead_usage_observer(
+        state.root.clone(),
+        Arc::clone(&state),
+        lead.model.clone(),
+        lead.id.clone(),
+        Arc::clone(&baseline),
+        resolved.budget_usd,
+        resolved.lead_budget_usd,
+    );
+    let commit_baseline = Arc::clone(&baseline);
+    let commit_model = lead.model.clone();
+    let on_iteration_done: Arc<dyn Fn(&pitboss_core::parser::TokenUsage) + Send + Sync> =
+        Arc::new(move |usage| {
+            crate::dispatch::budget_watch::commit_iteration(&commit_baseline, &commit_model, usage);
+        });
+
     let kr_result = crate::dispatch::kill_resume::run_kill_resume_loop(
         state.root.clone(),
         crate::dispatch::kill_resume::KillResumeArgs {
@@ -346,6 +367,8 @@ pub async fn run_hierarchical(
             timeout: std::time::Duration::from_secs(lead.timeout_secs),
             log_path: lead_log_path.clone(),
             stderr_path: lead_stderr_path.clone(),
+            usage_observer: Some(usage_observer),
+            on_iteration_done: Some(on_iteration_done),
         },
         reprompt_rx,
         |sid, new_prompt| {
@@ -444,22 +467,37 @@ pub async fn run_hierarchical(
         approvals_approved: lead_counters.approvals_approved,
         approvals_rejected: lead_counters.approvals_rejected,
         model: Some(lead.model.clone()),
-        failure_reason: crate::dispatch::failure_detection::detect_failure_reason(
-            final_outcome.exit_code,
-            Some(&lead_log_path),
-            Some(&lead_stderr_path),
-        )
-        .map(|r| {
-            // #184: when --resume was used and we got an unhelpful
-            // Unknown classification, surface a hint about the session
-            // id potentially being invalid. Specific markers
-            // (RateLimit / AuthFailure / etc.) pass through unchanged.
-            if let Some(sid) = lead.resume_session_id.as_deref() {
-                pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+        failure_reason: {
+            // (#253) The budget watcher's abort wins over generic
+            // classification — the operator wants to see "exceeded
+            // budget_usd" not "Cancelled".
+            let budget_reason = state
+                .root
+                .budget_abort_reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(msg) = budget_reason {
+                Some(pitboss_core::store::FailureReason::BudgetExceeded { message: msg })
             } else {
-                r
+                crate::dispatch::failure_detection::detect_failure_reason(
+                    final_outcome.exit_code,
+                    Some(&lead_log_path),
+                    Some(&lead_stderr_path),
+                )
+                .map(|r| {
+                    // #184: when --resume was used and we got an unhelpful
+                    // Unknown classification, surface a hint about the session
+                    // id potentially being invalid. Specific markers
+                    // (RateLimit / AuthFailure / etc.) pass through unchanged.
+                    if let Some(sid) = lead.resume_session_id.as_deref() {
+                        pitboss_core::failure_classify::enrich_with_resume_hint(r, sid)
+                    } else {
+                        r
+                    }
+                })
             }
-        }),
+        },
         cost_usd: lead_cost_usd,
         actor_type: None,
     };
@@ -726,6 +764,7 @@ pub async fn run_hierarchical(
     let notify_failures = notification_router
         .as_ref()
         .map(|r| u32::try_from(r.failed_emits_total()).unwrap_or(u32::MAX));
+    let spend_breakdown = pitboss_core::store::SpendBreakdown::from_tasks(&all_records, &lead.id);
     let summary = RunSummary {
         run_id,
         manifest_path,
@@ -740,6 +779,7 @@ pub async fn run_hierarchical(
         was_interrupted,
         notify_failures,
         tasks: all_records,
+        spend_breakdown: Some(spend_breakdown),
     };
     store.finalize_run(&summary).await?;
 
@@ -1147,6 +1187,7 @@ mod await_drained_tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

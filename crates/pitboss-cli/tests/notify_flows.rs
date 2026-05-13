@@ -248,6 +248,7 @@ async fn approval_pending_notification_fires_on_enqueue() {
         lead: None,
         max_workers: Some(4),
         budget_usd: Some(1.0),
+        lead_budget_usd: None,
         lead_timeout_secs: None,
         default_approval_policy: Some(ApprovalPolicy::Block),
         denial_termination_policy: None,

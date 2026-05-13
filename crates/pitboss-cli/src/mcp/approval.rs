@@ -464,6 +464,7 @@ mod tests {
             lead: None,
             max_workers: Some(4),
             budget_usd: Some(1.0),
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: Some(policy),
             denial_termination_policy: None,

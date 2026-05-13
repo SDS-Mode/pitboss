@@ -27,6 +27,17 @@ pub enum Event {
     ToolResult {
         content_summary: String,
     },
+    /// Per-assistant-message usage snapshot, surfaced alongside the
+    /// `AssistantText` / `AssistantToolUse` blocks of the same message
+    /// when claude's wire format includes `message.usage`. The usage
+    /// reported here is the cumulative session total at this point
+    /// (claude reports `usage` cumulatively within a stream-json
+    /// session), letting the dispatcher reconcile lead/sub-lead cost
+    /// per-turn rather than waiting for the terminal `Event::Result`.
+    /// (#253)
+    AssistantUsage {
+        usage: TokenUsage,
+    },
     Result {
         subtype: Option<String>,
         session_id: String,

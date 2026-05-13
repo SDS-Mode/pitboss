@@ -252,6 +252,10 @@ pub enum ControlEvent {
         /// (read_down=true, no explicit allocation).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget_usd: Option<f64>,
+        /// Optional sub-lead-specific cap on the sub-lead's own token
+        /// spend (orchestration cost). `None` when unset. (#253)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lead_budget_usd: Option<f64>,
         /// Maximum workers the sub-lead may spawn concurrently. `None`
         /// for shared-pool mode.
         #[serde(default, skip_serializing_if = "Option::is_none")]

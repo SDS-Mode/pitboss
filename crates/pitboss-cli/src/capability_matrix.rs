@@ -264,6 +264,7 @@ mod tests {
             lead: None,
             max_workers: None,
             budget_usd: None,
+            lead_budget_usd: None,
             lead_timeout_secs: None,
             default_approval_policy: None,
             denial_termination_policy: None,

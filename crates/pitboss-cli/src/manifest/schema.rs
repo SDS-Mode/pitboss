@@ -979,15 +979,27 @@ pub struct Lead {
         help = "Hard cap on the lead's concurrent + queued worker pool (1–16). Required when the lead spawns workers."
     )]
     pub max_workers: Option<u32>,
-    /// Soft cap on lead's spend (USD) with reservation accounting.
+    /// Soft cap on the run's total spend (USD): workers + lead + sub-leads.
     /// `spawn_worker` fails with `budget exceeded` once
-    /// `spent + reserved + next_estimate > budget`.
+    /// `total_spent + reserved + next_estimate > budget`, and the lead is
+    /// aborted if accumulated lead/sub-lead token spend pushes `total_spent`
+    /// past this cap on any reconciled turn.
     #[serde(default)]
     #[field(
         label = "Budget (USD)",
-        help = "Soft cap on lead spend with reservation accounting. spawn_worker fails once spent + reserved + next_estimate > budget."
+        help = "Soft cap on the run's total spend (workers + lead + sub-leads). spawn_worker fails once total_spent + reserved + next_estimate > budget; the lead is aborted if a reconciled turn drives total_spent past the cap."
     )]
     pub budget_usd: Option<f64>,
+    /// Optional separate cap on the lead's own + sub-lead's own token spend
+    /// (USD). Independent of `budget_usd` (which is the run-wide total).
+    /// When set, the lead is aborted once accumulated lead/sub-lead spend
+    /// exceeds this cap, even if `budget_usd` still has headroom.
+    #[serde(default)]
+    #[field(
+        label = "Lead budget (USD)",
+        help = "Optional separate cap on lead + sub-lead token spend (orchestration cost). Independent of budget_usd. Lead is aborted when reached."
+    )]
+    pub lead_budget_usd: Option<f64>,
     /// Wall-clock cap on the lead session (seconds). Distinct from
     /// `timeout_secs` (which becomes the claude `--timeout` flag for
     /// per-actor subprocess wall-clock). Default 3600 if unset.
@@ -1058,6 +1070,11 @@ pub struct SubleadDefaults {
         help = "Per-sub-lead envelope when read_down = false."
     )]
     pub budget_usd: Option<f64>,
+    #[field(
+        label = "Lead budget (USD)",
+        help = "Per-sub-lead cap on the sub-lead's own token spend (orchestration cost), independent of budget_usd. Honored when read_down = false."
+    )]
+    pub lead_budget_usd: Option<f64>,
     #[field(
         label = "Max workers",
         help = "Per-sub-lead worker pool when read_down = false."

@@ -102,6 +102,10 @@ pub struct SubleadSpawnRequest {
     pub prompt: String,
     pub model: String,
     pub budget_usd: Option<f64>,
+    /// Optional sub-lead-specific cap on the sub-lead's own token spend
+    /// (orchestration cost), independent of `budget_usd`. Resolved from
+    /// `[sublead_defaults].lead_budget_usd` when omitted. (#253)
+    pub lead_budget_usd: Option<f64>,
     pub max_workers: Option<u32>,
     pub lead_timeout_secs: Option<u64>,
     pub initial_ref: HashMap<String, Value>,
@@ -134,6 +138,11 @@ pub struct SubleadSpawnRequest {
 pub enum ResolvedEnvelope {
     Owned {
         budget_usd: f64,
+        /// Optional per-sub-lead cap on the sub-lead's own token spend
+        /// (orchestration cost). Independent of `budget_usd`; resolved
+        /// from the spawn request or `[sublead_defaults].lead_budget_usd`.
+        /// (#253)
+        lead_budget_usd: Option<f64>,
         max_workers: u32,
         lead_timeout_secs: u64,
     },
@@ -236,8 +245,13 @@ pub async fn resolve_envelope(
         }
     }
 
+    let effective_lead_budget_usd = req
+        .lead_budget_usd
+        .or_else(|| defaults.and_then(|d| d.lead_budget_usd));
+
     Ok(ResolvedEnvelope::Owned {
         budget_usd,
+        lead_budget_usd: effective_lead_budget_usd,
         max_workers,
         lead_timeout_secs,
     })
@@ -386,19 +400,21 @@ pub async fn spawn_sublead(
 
         // Emit SubleadSpawned lifecycle event to the control plane.
         {
-            let (budget_usd_val, max_workers_val) = match &envelope {
+            let (budget_usd_val, lead_budget_usd_val, max_workers_val) = match &envelope {
                 ResolvedEnvelope::Owned {
                     budget_usd,
+                    lead_budget_usd,
                     max_workers,
                     ..
-                } => (Some(*budget_usd), Some(*max_workers)),
-                ResolvedEnvelope::SharedPool => (None, None),
+                } => (Some(*budget_usd), *lead_budget_usd, Some(*max_workers)),
+                ResolvedEnvelope::SharedPool => (None, None, None),
             };
             let ev = EventEnvelope {
                 actor_path: ActorPath::new(["root", sublead_id.as_str()]),
                 event: ControlEvent::SubleadSpawned {
                     sublead_id: sublead_id.clone(),
                     budget_usd: budget_usd_val,
+                    lead_budget_usd: lead_budget_usd_val,
                     max_workers: max_workers_val,
                     read_down: req.read_down,
                 },
@@ -465,10 +481,12 @@ fn derive_sublead_manifest(
     match envelope {
         ResolvedEnvelope::Owned {
             budget_usd,
+            lead_budget_usd,
             max_workers,
             lead_timeout_secs,
         } => {
             sub.budget_usd = Some(*budget_usd);
+            sub.lead_budget_usd = *lead_budget_usd;
             sub.max_workers = Some(*max_workers);
             sub.lead_timeout_secs = Some(*lead_timeout_secs);
         }
@@ -668,6 +686,38 @@ async fn spawn_sublead_session(
     // the actor to its `[[sublead_type]]` profile (#252).
     let sublead_type_bg = sublead_type.clone();
 
+    // Sub-lead budget watcher — mirrors the root lead's observer:
+    // updates `sub_layer.lead_spent_usd` live per assistant turn and
+    // aborts the sub-lead when its own `lead_budget_usd` cap (if any)
+    // or the run-wide `budget_usd` cap is exceeded. (#253)
+    let sublead_lead_budget_usd = match &envelope {
+        ResolvedEnvelope::Owned {
+            lead_budget_usd, ..
+        } => *lead_budget_usd,
+        ResolvedEnvelope::SharedPool => None,
+    };
+    let run_budget_usd = state.root.manifest.budget_usd;
+    let sublead_baseline = crate::dispatch::budget_watch::LeadSpendBaseline::new();
+    let sublead_usage_observer = Some(crate::dispatch::budget_watch::build_lead_usage_observer(
+        sub_layer_bg.clone(),
+        state_bg.clone(),
+        model_bg.clone(),
+        sublead_id_bg.clone(),
+        Arc::clone(&sublead_baseline),
+        run_budget_usd,
+        sublead_lead_budget_usd,
+    ));
+    let sublead_commit_baseline = Arc::clone(&sublead_baseline);
+    let sublead_commit_model = model_bg.clone();
+    let sublead_on_iteration_done: Arc<dyn Fn(&pitboss_core::parser::TokenUsage) + Send + Sync> =
+        Arc::new(move |usage| {
+            crate::dispatch::budget_watch::commit_iteration(
+                &sublead_commit_baseline,
+                &sublead_commit_model,
+                usage,
+            );
+        });
+
     tokio::spawn(async move {
         // Run the kill+resume loop via the shared helper. The closure
         // captures sub-lead-specific resume-args / env / cwd resolution
@@ -683,6 +733,8 @@ async fn spawn_sublead_session(
                 timeout: Duration::from_secs(timeout_secs),
                 log_path: log_path.clone(),
                 stderr_path: stderr_path.clone(),
+                usage_observer: sublead_usage_observer,
+                on_iteration_done: Some(sublead_on_iteration_done),
             },
             reprompt_rx,
             |sid, new_prompt| {
