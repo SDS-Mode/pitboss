@@ -13,6 +13,7 @@ pub mod prices;
 pub mod process;
 pub mod session;
 pub mod store;
+pub mod stream;
 pub mod worktree;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
