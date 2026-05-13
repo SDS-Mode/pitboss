@@ -20,15 +20,18 @@
 //! is a non-breaking change for the in-tree consumers that exist in
 //! this PR (only tests).
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::store::record::{RunSummary, TaskRecord};
-use crate::store::summary::read_run_snapshot;
+use crate::store::summary::{read_run_snapshot, RunSnapshotReader};
 
 /// One item in the unified run stream.
 ///
@@ -116,6 +119,147 @@ pub fn open_run_stream(
 ) -> impl Stream<Item = RunStreamItem> + Send + 'static {
     let items = build_replay_items(run_dir);
     tokio_stream::iter(items)
+}
+
+/// Polling interval for [`tail_run_stream`]. The current implementation
+/// is poll-only; PR-F can add a notify-driven fast-path that wakes the
+/// poll loop on FS events.
+const TAIL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Open a *continuous* run stream that replays existing
+/// `summary.json[l]` then keeps tailing for new rows.
+///
+/// PR-E of #438. This is the disk-side analogue of PR-D's
+/// `pitboss-cli::stream::open_run_session` socket consumer: a
+/// long-lived stream that surfaces new [`RunStreamPayload::Task`] items
+/// as the dispatcher appends them to `summary.jsonl`, plus a single
+/// [`RunStreamPayload::Lifecycle`] when `summary.json` finalizes.
+///
+/// The stream terminates when:
+/// - the run finalizes (`summary.json` arrives and is parsed), **or**
+/// - the receiving side drops the stream.
+///
+/// Internals: a 250 ms poll loop drives [`RunSnapshotReader::refresh`].
+/// New rows are diff'd against a last-emitted `ended_at` map keyed by
+/// `task_id` and only fresh or newer rows are emitted. PR-F will layer
+/// `notify` on top so events arrive sooner than the next tick.
+///
+/// `seq` is a per-stream monotonic counter (same caveat as
+/// [`open_run_stream`]) until #259 lifts it to per-run lifetime.
+pub fn tail_run_stream(run_dir: PathBuf) -> impl Stream<Item = RunStreamItem> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<RunStreamItem>(64);
+    tokio::spawn(drive_tail(run_dir, tx));
+    ReceiverStream::new(rx)
+}
+
+/// Async tail loop: poll `RunSnapshotReader`, emit deltas, sleep, repeat.
+/// Exits on finalize or when the receiver drops.
+async fn drive_tail(run_dir: PathBuf, tx: mpsc::Sender<RunStreamItem>) {
+    let mut reader = RunSnapshotReader::new(run_dir.clone());
+    let mut emitted: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut seq: u64 = 0;
+    let mut finalized = false;
+
+    loop {
+        if !emit_diff(
+            &run_dir,
+            &mut reader,
+            &mut emitted,
+            &mut seq,
+            &mut finalized,
+            &tx,
+        )
+        .await
+        {
+            return;
+        }
+        if finalized {
+            return;
+        }
+        // Sleep responsively: wake early if the receiver disappears
+        // so the task doesn't sit idle for a tick before noticing.
+        tokio::select! {
+            () = tokio::time::sleep(TAIL_POLL_INTERVAL) => {}
+            () = tx.closed() => return,
+        }
+    }
+}
+
+/// Refresh the reader, diff against `emitted`, and push new items
+/// through `tx`. Returns `false` if the receiver dropped (caller
+/// should exit).
+async fn emit_diff(
+    run_dir: &Path,
+    reader: &mut RunSnapshotReader,
+    emitted: &mut HashMap<String, DateTime<Utc>>,
+    seq: &mut u64,
+    finalized: &mut bool,
+    tx: &mpsc::Sender<RunStreamItem>,
+) -> bool {
+    let snap = reader.refresh();
+
+    // Resolve a run_id from the finalized summary when available; else
+    // fall back to the dir name (uuid-parsed) or `Uuid::nil`.
+    let run_id = snap.run_summary.as_ref().map_or_else(
+        || {
+            run_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| Uuid::parse_str(n).ok())
+                .unwrap_or_else(Uuid::nil)
+        },
+        |s| s.run_id,
+    );
+
+    // Collect newly-seen or newer-than-last-seen tasks.
+    let mut fresh: Vec<TaskRecord> = Vec::new();
+    for (id, rec) in &snap.tasks {
+        let last = emitted.get(id);
+        if last.is_none_or(|prev| rec.ended_at > *prev) {
+            fresh.push(rec.clone());
+        }
+    }
+    // Emit in `ended_at` order, ties on `task_id` (matches
+    // `open_run_stream` semantics).
+    fresh.sort_by(|a, b| {
+        a.ended_at
+            .cmp(&b.ended_at)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+
+    for rec in fresh {
+        *seq += 1;
+        emitted.insert(rec.task_id.clone(), rec.ended_at);
+        let item = RunStreamItem {
+            seq: *seq,
+            ts: rec.ended_at,
+            run_id,
+            payload: RunStreamPayload::Task(Box::new(rec)),
+        };
+        if tx.send(item).await.is_err() {
+            return false;
+        }
+    }
+
+    if let Some(summary) = &snap.run_summary {
+        if !*finalized {
+            *finalized = true;
+            *seq += 1;
+            let item = RunStreamItem {
+                seq: *seq,
+                ts: summary.ended_at,
+                run_id,
+                payload: RunStreamPayload::Lifecycle(LifecycleEvent::Finalized {
+                    summary: Box::new(summary.clone()),
+                }),
+            };
+            if tx.send(item).await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 fn build_replay_items(run_dir: &Path) -> Vec<RunStreamItem> {
@@ -308,11 +452,11 @@ mod tests {
 
         let items = collect(tmp.path(), StreamMode::ReplayOnly).await;
         assert_eq!(items.len(), 2, "one task + one finalized lifecycle");
-        match &items.last().unwrap().payload {
-            RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary }) => {
-                assert_eq!(summary.tasks_total, 1);
-            }
-            other => panic!("expected Finalized lifecycle, got {other:?}"),
+        let last_payload = &items.last().unwrap().payload;
+        if let RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary }) = last_payload {
+            assert_eq!(summary.tasks_total, 1);
+        } else {
+            panic!("expected Finalized lifecycle, got {last_payload:?}");
         }
     }
 
@@ -346,6 +490,140 @@ mod tests {
         assert_eq!(r.len(), rl.len());
         assert_eq!(r.len(), l.len());
         assert_eq!(r.len(), 2);
+    }
+
+    // ------------------------------------------------------------
+    // tail_run_stream — PR-E of #438.
+    // ------------------------------------------------------------
+
+    fn append_record(path: &Path, r: &TaskRecord) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(f, "{}", serde_json::to_string(r).unwrap()).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    /// Pre-existing rows are replayed immediately; new rows appended
+    /// after the stream is open arrive as additional Task items.
+    #[tokio::test]
+    async fn tail_emits_initial_replay_and_then_new_rows() {
+        let tmp = TempDir::new().unwrap();
+        let jsonl = tmp.path().join("summary.jsonl");
+        append_record(&jsonl, &rec("seed", TaskStatus::Success, 10));
+
+        let stream = tail_run_stream(tmp.path().to_path_buf());
+        let mut stream = std::pin::pin!(stream);
+
+        // First item — the existing row.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .expect("seed item");
+        match first.payload {
+            RunStreamPayload::Task(t) => assert_eq!(t.task_id, "seed"),
+            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+        }
+
+        // Append a fresh row; the watcher (or fallback timer) should
+        // deliver it within the safety-net cadence.
+        append_record(&jsonl, &rec("fresh", TaskStatus::Success, 20));
+
+        // The fallback poll is 250ms when notify is dead; the notify
+        // case fires almost immediately. Allow up to 3s for either.
+        let next = tokio::time::timeout(std::time::Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .expect("fresh item");
+        match next.payload {
+            RunStreamPayload::Task(t) => assert_eq!(t.task_id, "fresh"),
+            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+        }
+
+        // Seqs must be monotonic.
+        assert!(next.seq > first.seq);
+    }
+
+    /// When `summary.json` finalizes, the tail emits a single
+    /// `Lifecycle::Finalized` and the stream ends.
+    #[tokio::test]
+    async fn tail_terminates_on_finalize() {
+        let tmp = TempDir::new().unwrap();
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let summary = RunSummary {
+            run_id: Uuid::now_v7(),
+            manifest_path: PathBuf::from("/x.toml"),
+            manifest_name: None,
+            pitboss_version: "test".into(),
+            claude_version: None,
+            started_at: t,
+            ended_at: t,
+            total_duration_ms: 0,
+            tasks_total: 0,
+            tasks_failed: 0,
+            was_interrupted: false,
+            notify_failures: None,
+            tasks: vec![],
+            spend_breakdown: None,
+        };
+        std::fs::write(
+            tmp.path().join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+
+        let stream = tail_run_stream(tmp.path().to_path_buf());
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0].payload,
+            RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { .. })
+        ));
+    }
+
+    /// A task that appears with a newer `ended_at` (reprompt/respawn
+    /// lifecycle) is re-emitted; same-or-older rows are deduped.
+    #[tokio::test]
+    async fn tail_re_emits_task_when_ended_at_advances() {
+        let tmp = TempDir::new().unwrap();
+        let jsonl = tmp.path().join("summary.jsonl");
+        append_record(&jsonl, &rec("w", TaskStatus::Cancelled, 10));
+
+        let stream = tail_run_stream(tmp.path().to_path_buf());
+        let mut stream = std::pin::pin!(stream);
+
+        // First — Cancelled.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .expect("first item");
+        match first.payload {
+            RunStreamPayload::Task(t) => {
+                assert_eq!(t.task_id, "w");
+                assert!(matches!(t.status, TaskStatus::Cancelled));
+            }
+            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+        }
+
+        // Append same task_id with a later ended_at and Success status
+        // (reprompt-success lifecycle).
+        append_record(&jsonl, &rec("w", TaskStatus::Success, 25));
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .expect("second item");
+        match next.payload {
+            RunStreamPayload::Task(t) => {
+                assert_eq!(t.task_id, "w");
+                assert!(matches!(t.status, TaskStatus::Success));
+            }
+            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+        }
+        assert!(next.seq > first.seq);
     }
 
     /// Item shape round-trips through JSON — necessary for the future
