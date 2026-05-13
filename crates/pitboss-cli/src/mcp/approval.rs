@@ -263,6 +263,18 @@ impl ApprovalBridge {
                 plan: plan.map(approval_plan_to_wire),
                 kind,
             };
+            // PR-G of #259: wrap + persist inline rather than calling
+            // `broadcast_control_event` because we're holding the
+            // writer lock (per #151 M4's insert-then-send-under-lock
+            // invariant). The envelope's seq comes from the run-scoped
+            // EventLog; `persist` is a no-op when emit_event_stream is
+            // off.
+            let envelope = crate::control::protocol::EventEnvelope {
+                actor_path: crate::dispatch::actor::ActorPath::default(),
+                seq: self.state.root.event_log.next_seq(),
+                event: ev,
+            };
+            self.state.root.event_log.persist(&envelope).await;
             // Best-effort send. A full queue used to silently drop the
             // event AND leave the bridge entry alive, so the caller
             // waited the full timeout for an ApprovalRequest the TUI
@@ -271,7 +283,7 @@ impl ApprovalBridge {
             // fallback path (timeout/auto-allow/reject) immediately
             // — same outcome as a permanently-disconnected TUI but
             // without the bridge-timeout stall. (#151 M4)
-            if let Err(e) = w.sender.try_send(ev) {
+            if let Err(e) = w.sender.try_send(envelope) {
                 tracing::warn!(
                     request_id = %request_id,
                     error = %e,
@@ -551,12 +563,12 @@ mod tests {
     /// control writer was connected, silently bypassing the policy.
     #[tokio::test]
     async fn auto_approve_short_circuits_with_tui_attached() {
-        use crate::control::protocol::ControlEvent;
+        use crate::control::protocol::EventEnvelope;
         use tokio::sync::mpsc;
 
         let state = mk_state(ApprovalPolicy::AutoApprove).await;
         // Simulate a connected TUI by registering a control writer.
-        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<EventEnvelope>(8);
         *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
             id: Uuid::now_v7(),
             sender: tx,
@@ -592,11 +604,11 @@ mod tests {
     /// short-circuit even when a TUI/web console is attached.
     #[tokio::test]
     async fn auto_reject_short_circuits_with_tui_attached() {
-        use crate::control::protocol::ControlEvent;
+        use crate::control::protocol::EventEnvelope;
         use tokio::sync::mpsc;
 
         let state = mk_state(ApprovalPolicy::AutoReject).await;
-        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<EventEnvelope>(8);
         *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
             id: Uuid::now_v7(),
             sender: tx,
@@ -681,17 +693,21 @@ mod tests {
     /// auto-rejects. Both `requested` and `rejected` must bump.
     #[tokio::test]
     async fn queue_full_safe_rejection_bumps_requested_and_rejected() {
-        use crate::control::protocol::ControlEvent;
+        use crate::control::protocol::{ControlEvent, EventEnvelope};
         use tokio::sync::mpsc;
 
         let state = mk_state(ApprovalPolicy::Block).await;
         // Capacity-1 channel filled to force `try_send` to fail. We must not
         // drain the receiver — the bridge's send needs to fail synchronously.
-        let (tx, _rx) = mpsc::channel::<ControlEvent>(1);
-        // Pre-fill with one event so the bridge's try_send is guaranteed to fail.
-        tx.try_send(ControlEvent::OpAcked {
-            op: "noop".into(),
-            task_id: None,
+        let (tx, _rx) = mpsc::channel::<EventEnvelope>(1);
+        // Pre-fill with one envelope so the bridge's try_send is guaranteed to fail.
+        tx.try_send(EventEnvelope {
+            actor_path: Default::default(),
+            seq: 0,
+            event: ControlEvent::OpAcked {
+                op: "noop".into(),
+                task_id: None,
+            },
         })
         .unwrap();
         *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
@@ -720,11 +736,11 @@ mod tests {
     /// bumps `approved` or `rejected`. Together they yield (1, 1, 0) or (1, 0, 1).
     #[tokio::test]
     async fn respond_path_bumps_approved() {
-        use crate::control::protocol::ControlEvent;
+        use crate::control::protocol::{ControlEvent, EventEnvelope};
         use tokio::sync::mpsc;
 
         let state = mk_state(ApprovalPolicy::Block).await;
-        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<EventEnvelope>(8);
         *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
             id: Uuid::now_v7(),
             sender: tx,
@@ -748,7 +764,7 @@ mod tests {
 
         // Wait for the bridge to emit the ApprovalRequest event, capture the
         // request_id, then call respond().
-        let request_id = match rx.recv().await.unwrap() {
+        let request_id = match rx.recv().await.unwrap().event {
             ControlEvent::ApprovalRequest { request_id, .. } => request_id,
             other => panic!("unexpected event: {other:?}"),
         };
@@ -777,14 +793,14 @@ mod tests {
     /// empty and the lead's file ambiguous.
     #[tokio::test]
     async fn approval_audit_rows_go_to_caller_actor_dir() {
-        use crate::control::protocol::ControlEvent;
+        use crate::control::protocol::{ControlEvent, EventEnvelope};
         use tokio::sync::mpsc;
 
         let run_subdir = TempDir::new().unwrap();
         let run_subdir_path = run_subdir.path().to_path_buf();
         let state = mk_state_with_run_subdir(ApprovalPolicy::Block, run_subdir_path.clone()).await;
 
-        let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<EventEnvelope>(8);
         *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
             id: Uuid::now_v7(),
             sender: tx,
@@ -808,7 +824,7 @@ mod tests {
                 .await
         });
 
-        let request_id = match rx.recv().await.unwrap() {
+        let request_id = match rx.recv().await.unwrap().event {
             ControlEvent::ApprovalRequest { request_id, .. } => request_id,
             other => panic!("unexpected event: {other:?}"),
         };

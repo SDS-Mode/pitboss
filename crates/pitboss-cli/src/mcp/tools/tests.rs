@@ -2770,13 +2770,13 @@ async fn approval_driven_termination_reclassify_policy_fires_after_denial() {
 /// should produce `OperatorRejected`.
 #[tokio::test]
 async fn permission_prompt_operator_driven_reject_records_operator_rejected() {
-    use crate::control::protocol::ControlEvent;
+    use crate::control::protocol::{ControlEvent, EventEnvelope};
     use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
     let state = mk_plan_state(ApprovalPolicy::Block, false).await;
-    let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+    let (tx, mut rx) = mpsc::channel::<EventEnvelope>(8);
     *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
         id: uuid::Uuid::now_v7(),
         sender: tx,
@@ -2788,7 +2788,7 @@ async fn permission_prompt_operator_driven_reject_records_operator_rejected() {
     // `BRIDGE_AUTO_REJECT_COMMENT`).
     let state_for_resp = std::sync::Arc::clone(&state);
     let driver = tokio::spawn(async move {
-        let request_id = match rx.recv().await.unwrap() {
+        let request_id = match rx.recv().await.unwrap().event {
             ControlEvent::ApprovalRequest { request_id, .. } => request_id,
             other => panic!("unexpected event: {other:?}"),
         };
@@ -2873,7 +2873,7 @@ async fn permission_prompt_operator_driven_reject_records_operator_rejected() {
 ///   in `pitboss status` / `summary.json`.
 #[tokio::test]
 async fn permission_prompt_ttl_driven_reject_records_ttl_expired() {
-    use crate::control::protocol::ControlEvent;
+    use crate::control::protocol::{ControlEvent, EventEnvelope};
     use crate::dispatch::state::{ApprovalPolicy, ApprovalResponse, DenialTerminationPolicy};
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -2885,7 +2885,7 @@ async fn permission_prompt_ttl_driven_reject_records_ttl_expired() {
         DenialTerminationPolicy::Reclassify,
     )
     .await;
-    let (tx, mut rx) = mpsc::channel::<ControlEvent>(8);
+    let (tx, mut rx) = mpsc::channel::<EventEnvelope>(8);
     *state.root.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
         id: uuid::Uuid::now_v7(),
         sender: tx,
@@ -2893,7 +2893,7 @@ async fn permission_prompt_ttl_driven_reject_records_ttl_expired() {
 
     let state_for_resp = std::sync::Arc::clone(&state);
     let driver = tokio::spawn(async move {
-        let request_id = match rx.recv().await.unwrap() {
+        let request_id = match rx.recv().await.unwrap().event {
             ControlEvent::ApprovalRequest { request_id, .. } => request_id,
             other => panic!("unexpected event: {other:?}"),
         };

@@ -181,13 +181,11 @@ pub async fn broadcast_worker_failed(
     reason: FailureReason,
     actor_path_segments: &[&str],
 ) {
+    // PR-G of #259: `broadcast_control_event` assigns the run-scoped
+    // seq + persists; callers still pass an envelope but its seq=0 is
+    // overwritten.
     let envelope = EventEnvelope {
         actor_path: ActorPath::new(actor_path_segments.iter().copied()),
-        // Seq is reassigned by the server's pump (see `send_events_batch`
-        // in `control/server.rs`); the value here is a placeholder. The
-        // `broadcast_control_event` path discards the envelope wrapper
-        // and only forwards `envelope.event`, so this never reaches the
-        // wire.
         seq: 0,
         event: ControlEvent::WorkerFailed {
             task_id,
@@ -405,7 +403,7 @@ mod tests {
             Arc::new(SharedStore::new()),
             None,
         );
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ControlEvent>(
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<EventEnvelope>(
             crate::dispatch::layer::CONTROL_EVENT_QUEUE_CAP,
         );
         *layer.control_writer.lock().await = Some(crate::dispatch::layer::ControlWriterSlot {
@@ -422,11 +420,11 @@ mod tests {
         )
         .await;
 
-        let ev = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+        let envelope = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
             .expect("event should arrive before timeout")
-            .expect("channel should deliver one event");
-        match ev {
+            .expect("channel should deliver one envelope");
+        match envelope.event {
             ControlEvent::WorkerFailed {
                 task_id,
                 parent_task_id,

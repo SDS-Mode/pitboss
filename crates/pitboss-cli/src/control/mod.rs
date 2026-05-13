@@ -7,6 +7,7 @@
 //! See `docs/superpowers/specs/2026-04-17-pitboss-v0.4-live-control-design.md`
 //! §4–§6 for the design.
 
+pub mod event_log;
 pub mod protocol;
 pub mod server;
 
