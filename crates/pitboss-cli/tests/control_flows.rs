@@ -1152,3 +1152,141 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         );
     }
 }
+
+/// PR-N of #438: the unified streaming consumer in `pitboss-core` sends
+/// `Subscribe { since_seq }` right after Hello. The dispatcher acks the
+/// op and continues normal event handling — so a subsequent ListWorkers
+/// still round-trips. Pin the wire format + ack semantics so a future
+/// server-side fast-forward implementation can drop in without
+/// disturbing existing clients.
+#[tokio::test]
+async fn subscribe_op_acks_and_keeps_dispatcher_responsive() {
+    let dir = TempDir::new().unwrap();
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    let sock = dir.path().join("subscribe.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    let mut reader = BufReader::new(r).lines();
+
+    // Hello.
+    let client_hello = serde_json::to_string(&ControlOp::Hello {
+        client_version: "pitboss-core/test".into(),
+    })
+    .unwrap()
+        + "\n";
+    w.write_all(client_hello.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+    let _hello = reader.next_line().await.unwrap().expect("server hello");
+
+    // Subscribe with since_seq advisory.
+    let subscribe = serde_json::to_string(&ControlOp::Subscribe { since_seq: 42 }).unwrap() + "\n";
+    w.write_all(subscribe.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+
+    // Read until we find the subscribe ack (the activity ticker may
+    // also fire; tolerate intervening envelopes).
+    let mut saw_ack = false;
+    for _ in 0..6 {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), reader.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("envelope");
+        let env: pitboss_cli::control::protocol::EventEnvelope =
+            serde_json::from_str(&line).unwrap();
+        if let ControlEvent::OpAcked { op, .. } = &env.event {
+            if op == "subscribe" {
+                saw_ack = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_ack,
+        "expected an OpAcked for 'subscribe' within 6 envelopes",
+    );
+
+    // Normal op handling still works after Subscribe.
+    let list = serde_json::to_string(&ControlOp::ListWorkers).unwrap() + "\n";
+    w.write_all(list.as_bytes()).await.unwrap();
+    w.flush().await.unwrap();
+    let mut saw_snapshot = false;
+    for _ in 0..6 {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), reader.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("envelope");
+        let env: pitboss_cli::control::protocol::EventEnvelope =
+            serde_json::from_str(&line).unwrap();
+        if matches!(env.event, ControlEvent::WorkersSnapshot { .. }) {
+            saw_snapshot = true;
+            break;
+        }
+    }
+    assert!(
+        saw_snapshot,
+        "Subscribe must not block subsequent op handling",
+    );
+}

@@ -180,6 +180,17 @@ pub enum ControlOp {
     UpdatePolicy {
         rules: Vec<crate::mcp::policy::ApprovalRule>,
     },
+    /// PR-N of #438: consumer-side subscribe op for the unified
+    /// streaming consumer in `pitboss_core::stream`. The dispatcher
+    /// acks the op so the consumer knows the live transport is wired
+    /// up. `since_seq` is reserved for a future server-side
+    /// fast-forward — today the consumer reconciles its own disk-replay
+    /// against the live stream (the dispatcher echoes everything from
+    /// the moment of subscribe onward).
+    Subscribe {
+        #[serde(default)]
+        since_seq: u64,
+    },
 }
 
 /// An event pushed from the dispatcher (server) to the TUI (client).

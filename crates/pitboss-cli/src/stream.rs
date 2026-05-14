@@ -85,6 +85,27 @@ impl From<RunStreamItem> for LiveStreamItem {
         let payload = match item.payload {
             RunStreamPayload::Task(t) => LiveStreamPayload::Task(t),
             RunStreamPayload::Lifecycle(l) => LiveStreamPayload::Lifecycle(l),
+            // PR-N of #438 added `Event` to `pitboss-core`'s
+            // `RunStreamPayload`. This crate's `open_live_run_stream`
+            // only feeds `StreamMode::ReplayOnly` items through this
+            // conversion (the live socket path is handled by
+            // `drive_socket` below, which builds typed envelopes
+            // directly). So an `Event` arriving here would be a bug in
+            // a future caller — log it and skip rather than panic.
+            RunStreamPayload::Event(_) => {
+                tracing::warn!(
+                    "live stream: unexpected RunStreamPayload::Event from disk arm; skipping",
+                );
+                return LiveStreamItem {
+                    seq: item.seq,
+                    ts: item.ts,
+                    run_id: item.run_id,
+                    payload: LiveStreamPayload::Lifecycle(LifecycleEvent::Started {
+                        run_id: item.run_id,
+                        started_at: item.ts,
+                    }),
+                };
+            }
         };
         LiveStreamItem {
             seq: item.seq,

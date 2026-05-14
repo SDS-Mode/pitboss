@@ -208,7 +208,13 @@ async fn run_watch_loop_async(
                             rebuild = true;
                             stream_alive = false;
                         }
-                        RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. }) => {}
+                        // The Started lifecycle and the live-socket
+                        // Event arm (added by PR-N of #438) are both
+                        // silently ignored here — `tail_run_stream` is
+                        // disk-only and never produces Event items,
+                        // and Started has no rebuild trigger.
+                        RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. })
+                        | RunStreamPayload::Event(_) => {}
                     },
                     None => {
                         // Stream ended without a Finalized lifecycle —

@@ -24,16 +24,13 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         );
     }
 
-    // Canonical reader (#437): summary.json seeds, summary.jsonl
-    // overlays last-wins by task_id. `notify_failures` is only present
-    // on a finalized `summary.json`; in-flight runs report None — that's
-    // correct (the count is only authoritative at finalize), and the
-    // journaled `notifications.jsonl` is still available for live
-    // debugging. Reprompt / cancel / respawn lifecycles no longer
-    // over-count tasks_total (#437).
-    let snap = pitboss_core::store::read_run_snapshot(&run_dir);
-    let notify_failures = snap.run_summary.as_ref().and_then(|s| s.notify_failures);
-    let records: Vec<pitboss_core::store::TaskRecord> = snap.tasks.into_values().collect();
+    // Canonical reader (#437 + #438): consume the unified replay stream
+    // and bin items back into `(records, notify_failures)`. `notify_failures`
+    // only appears on a finalized run (`Finalized` lifecycle); in-flight
+    // runs report None — that's correct (the count is only authoritative
+    // at finalize), and the journaled `notifications.jsonl` is still
+    // available for live debugging.
+    let (records, notify_failures) = collect_replay(&run_dir)?;
 
     if json {
         let out = serde_json::to_string_pretty(&records)?;
@@ -56,6 +53,44 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
     )?;
 
     Ok(0)
+}
+
+/// Drain `open_run_stream(ReplayOnly)` into the snapshot shape this
+/// renderer expects. The unified API replaces the legacy
+/// `read_run_snapshot` call (#438 Step 4): same on-disk reader under
+/// the hood, but routes the data through the consumer-facing stream so
+/// `status` stays API-aligned with the TUI and SPA. Inline rather than
+/// promoted to `pitboss-core` because `diff` is the only other site
+/// and rule-of-three isn't met yet.
+fn collect_replay(run_dir: &Path) -> Result<(Vec<pitboss_core::store::TaskRecord>, Option<u32>)> {
+    use futures_util::StreamExt;
+    use pitboss_core::stream::{open_run_stream, LifecycleEvent, RunStreamPayload, StreamMode};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let items = rt.block_on(async {
+        open_run_stream(run_dir, StreamMode::ReplayOnly)
+            .collect::<Vec<_>>()
+            .await
+    });
+
+    let mut records = Vec::with_capacity(items.len());
+    let mut notify_failures = None;
+    for item in items {
+        match item.payload {
+            RunStreamPayload::Task(t) => records.push(*t),
+            RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary }) => {
+                notify_failures = summary.notify_failures;
+            }
+            // `ReplayOnly` never emits Started lifecycles or live Event
+            // items; ignore both so a future stream-mode change is
+            // additive rather than breaking. (#438)
+            RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. })
+            | RunStreamPayload::Event(_) => {}
+        }
+    }
+    Ok((records, notify_failures))
 }
 
 /// Count `tool_denied` rows in each task's `<run_dir>/tasks/<id>/events.jsonl`.
