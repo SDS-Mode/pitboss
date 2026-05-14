@@ -263,9 +263,10 @@ To pre-flight a container-mode manifest without dispatching, use `pitboss valida
 |---|---|---|---|
 | `image` | string | `ghcr.io/sds-mode/pitboss-with-claude:latest` | Container image to run. |
 | `runtime` | `"docker"` \| `"podman"` \| `"auto"` | `"auto"` | Runtime selector. `"auto"` prefers podman when available. |
-| `extra_args` | array of string | `[]` | Verbatim flags for `podman run` / `docker run`. The escape hatch for any container-runtime concern: networking (`--network=corp-fw`, `--dns=10.0.0.53`, `--add-host=svc:1.2.3.4`), capabilities (`--cap-add=NET_ADMIN`), security (`--security-opt=…`), resource limits (`--memory=4g`, `--cpus=2`). |
-| `extra_apt` | array of string | `[]` | Debian/Ubuntu packages installed inside the container. Two paths: by default they are installed at dispatch start (~30–90 s per run); after `pitboss container-build`, they are baked into a derived image and dispatch picks up the cached tag automatically. Each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*`; rejected at validate time otherwise. |
+| `extra_args` | array of string | `[]` | Verbatim flags for `podman run` / `docker run`. The escape hatch for any container-runtime concern: networking (`--network=corp-fw`, `--dns=10.0.0.53`, `--add-host=svc:1.2.3.4`), narrow capabilities (`--cap-add=NET_ADMIN`), resource limits (`--memory=4g`, `--cpus=2`). **Validated denylist** (`validate` rejects at parse time): `--privileged`, `--{pid,ipc,uts,userns,cgroupns}=host`, `--cap-add={ALL,SYS_ADMIN,SYS_PTRACE,SYS_MODULE}`, `--security-opt={seccomp,apparmor}=unconfined` / `label=disable`, `--device=…`, `-v` / `--volume` / `--mount` (use `[[container.mount]]`), `-u` / `--user` (UID alignment is pitboss-managed), `--entrypoint`. Each container-dispatch invocation is recorded NDJSON-style at `<runs-base>/container-dispatch.log` for post-facto audit. |
+| `extra_apt` | array of string | `[]` | Debian/Ubuntu packages installed inside the container. Two paths: by default they are installed at dispatch start (~30–90 s per run, **running as UID 0 during the apt phase** before `runuser` drops to `pitboss`); after `pitboss container-build`, they are baked into a derived image and dispatch starts as the unprivileged `pitboss` user. Each entry must match `[a-zA-Z0-9][a-zA-Z0-9.+-]*`; rejected at validate time otherwise. For production, prefer the `pitboss container-build` derived-image path to avoid the apt-phase root window. |
 | `workdir` | string | first mount's container path, else `/home/pitboss` | Working directory inside the container. |
+| `claude_mount_rw` | bool | `false` | Auto-injected `~/.claude` mount mode. `false` (default) = read-only — prevents a buggy/compromised worker from rewriting host credentials or injecting `settings.json` hooks. `true` = read-write, needed only for in-place OAuth token refresh. |
 
 #### `[[container.mount]]`
 
@@ -275,7 +276,7 @@ To pre-flight a container-mode manifest without dispatching, use `pitboss valida
 | `container` | yes | Absolute path inside the container. |
 | `readonly` | no | Default `false`. |
 
-Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
+Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth — **read-only by default**; set `[container].claude_mount_rw = true` to allow OAuth token refresh) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
 
 #### `[[container.copy]]`
 

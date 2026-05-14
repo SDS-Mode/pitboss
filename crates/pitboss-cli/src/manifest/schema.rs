@@ -135,6 +135,23 @@ pub struct ContainerConfig {
         help = "cwd inside the container; defaults to the first mount's container path."
     )]
     pub workdir: Option<PathBuf>,
+    /// Auto-injected `~/.claude` mount mode. Default `false` mounts the
+    /// host's `~/.claude` as read-only — sufficient for static OAuth
+    /// tokens and `settings.json`-driven configuration, and prevents a
+    /// compromised or buggy worker from writing host credentials or
+    /// injecting `settings.json` hooks. Set `true` to restore the
+    /// pre-v0.15 behaviour (`rw,z`) when claude needs to refresh OAuth
+    /// tokens in-place. (#525 / F-SEC-11)
+    ///
+    /// An explicit `[[container.mount]]` targeting `/home/pitboss/.claude`
+    /// always wins — its `readonly` field controls the mode, this flag
+    /// is consulted only for the auto-inject path.
+    #[serde(default)]
+    #[field(
+        label = "Claude mount rw",
+        help = "Set true to mount the auto-injected ~/.claude as rw (needed for OAuth token refresh). Default false = read-only."
+    )]
+    pub claude_mount_rw: bool,
 }
 
 /// A single host→container bind mount entry.

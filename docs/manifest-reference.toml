@@ -48,6 +48,7 @@ runtime = "docker"
 extra_args = []
 extra_apt = []
 workdir = "/path/to/value"
+claude_mount_rw = false
 
 [[container.mount]]
 host = "/path/to/value"

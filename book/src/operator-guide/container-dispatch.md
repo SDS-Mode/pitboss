@@ -47,10 +47,17 @@ Two mounts are always added automatically (unless you declare them yourself):
 
 | Host path | Container path | Notes |
 |-----------|----------------|-------|
-| `~/.claude` | `/home/pitboss/.claude` | OAuth auth; read-write |
+| `~/.claude` | `/home/pitboss/.claude` | OAuth auth; **read-only** by default (set `[container].claude_mount_rw = true` to allow OAuth token refresh) |
 | `~/.local/share/pitboss/runs` | `/home/pitboss/.local/share/pitboss/runs` | Run artifacts; read-write |
 
 The manifest itself is always injected at `/run/pitboss.toml` (read-only).
+
+The `~/.claude` mount holds OAuth credentials and `settings.json` (which
+may include hooks). Defaulting to read-only prevents a buggy or
+compromised worker from rewriting host credentials or injecting hooks
+that would fire the next time `claude` runs on the host. If you rely on
+in-place OAuth token refresh, opt back into the previous read-write
+behaviour via `[container].claude_mount_rw = true`.
 
 ## Running
 

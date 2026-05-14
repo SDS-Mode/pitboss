@@ -337,6 +337,10 @@ fn validate_container(r: &ResolvedManifest) -> Result<()> {
             );
         }
     }
+    // F-SEC-9: deny dangerous container runtime flags. Same helper that
+    // `build_run_args` re-checks at dispatch time so test fixtures and
+    // programmatic callers cannot bypass.
+    crate::dispatch::container::validate_extra_args(&container.extra_args)?;
     for spec in &container.copy {
         if !spec.container.is_absolute() {
             bail!(
@@ -353,6 +357,83 @@ fn validate_container(r: &ResolvedManifest) -> Result<()> {
             bail!(
                 "[[container.copy]].host must be an absolute or tilde-prefixed path, got {:?}",
                 spec.host
+            );
+        }
+    }
+    // F-SEC-10: validate [[container.mount]] entries the same way as
+    // [[container.copy]] above. The previous code only validated copy.
+    for spec in &container.mounts {
+        if !spec.container.is_absolute() {
+            bail!(
+                "[[container.mount]].container must be an absolute path, got {:?}",
+                spec.container
+            );
+        }
+        // Host: same rule as copy — absolute or tilde-prefixed only.
+        // Relative paths have no canonical anchor in the manifest schema.
+        let host_str = spec.host.to_string_lossy();
+        let is_tilde = host_str.starts_with('~');
+        if !spec.host.is_absolute() && !is_tilde {
+            bail!(
+                "[[container.mount]].host must be an absolute or tilde-prefixed path, got {:?}",
+                spec.host
+            );
+        }
+        // Hard-reject host paths that would defeat the container
+        // sandbox. The denylist is short: each entry is either a known
+        // container-escape vector (docker/podman socket → root on the
+        // host) or a wholesale namespace bypass (/, /proc, /sys).
+        //
+        // /etc, /var/log, /home/<other-user> are NOT in the denylist —
+        // they are sensitive but operators have legitimate use cases
+        // (config reads, log capture, peer-user collaboration). The
+        // line is "would a buggy/malicious worker get host-root or
+        // host-namespace visibility from this mount?".
+        check_mount_host_path(&host_str)?;
+    }
+    Ok(())
+}
+
+/// Reject host paths that defeat container isolation. Called per-mount
+/// from `validate_container`. (#524 / F-SEC-10)
+///
+/// The check is exact-match (after lossy stringification) for socket
+/// paths and full-tree mounts. Substring matching would over-block
+/// legitimate workspace paths like `/data/proc-recordings`.
+fn check_mount_host_path(host: &str) -> Result<()> {
+    // Trim any trailing slash so `/proc` and `/proc/` are equivalent.
+    let trimmed = host.trim_end_matches('/');
+    let denylist: &[(&str, &str)] = &[
+        (
+            "/var/run/docker.sock",
+            "the docker socket grants root on the host",
+        ),
+        (
+            "/run/docker.sock",
+            "the docker socket grants root on the host",
+        ),
+        (
+            "/var/run/podman/podman.sock",
+            "the podman socket grants root on the host",
+        ),
+        (
+            "/run/podman/podman.sock",
+            "the podman socket grants root on the host",
+        ),
+        ("/proc", "exposes the host process namespace"),
+        (
+            "/sys",
+            "exposes host kernel sysfs (a common container-breakout vector)",
+        ),
+        ("/", "mounts the entire host root filesystem"),
+        ("/etc/shadow", "exposes the host root password hashes"),
+    ];
+    for (bad, why) in denylist {
+        if trimmed == *bad || trimmed == bad.trim_end_matches('/') {
+            bail!(
+                "[[container.mount]].host = {host:?} is forbidden ({why}). \
+                 If you genuinely need this mount, run docker/podman \
+                 directly rather than through `pitboss container-dispatch`."
             );
         }
     }
@@ -1825,6 +1906,158 @@ mod tests {
             ..ContainerConfig::default()
         });
         validate(&m).expect("realistic apt package names must validate");
+    }
+
+    #[test]
+    fn extra_args_dangerous_flag_fails_validate() {
+        // F-SEC-9: dangerous container runtime flags must be rejected at
+        // `pitboss validate` time — not deferred to dispatch — so
+        // operators see the gate in their CI / pre-flight checks.
+        use super::super::schema::ContainerConfig;
+        for bad in [
+            "--privileged",
+            "--pid=host",
+            "--cap-add=SYS_ADMIN",
+            "-v",
+            "--user",
+            "--security-opt=seccomp=unconfined",
+        ] {
+            let d = with_tmp_repo(true);
+            let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+            m.container = Some(ContainerConfig {
+                extra_args: vec![bad.into()],
+                ..ContainerConfig::default()
+            });
+            let err = validate(&m).expect_err(&format!("{bad} must fail validate"));
+            assert!(
+                err.to_string().contains("extra_args"),
+                "error must reference extra_args: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_relative_container_path_fails_validate() {
+        // F-SEC-10: [[container.mount]].container must be absolute, same
+        // rule as [[container.copy]].container.
+        use super::super::schema::{ContainerConfig, MountSpec};
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            mounts: vec![MountSpec {
+                host: PathBuf::from("/abs/host"),
+                container: PathBuf::from("relative/path"),
+                readonly: false,
+            }],
+            ..ContainerConfig::default()
+        });
+        let err = validate(&m).expect_err("relative container path must fail");
+        assert!(
+            err.to_string()
+                .contains("container.mount]].container must be an absolute path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn mount_relative_host_path_fails_validate() {
+        use super::super::schema::{ContainerConfig, MountSpec};
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            mounts: vec![MountSpec {
+                host: PathBuf::from("./relative"),
+                container: PathBuf::from("/abs/container"),
+                readonly: false,
+            }],
+            ..ContainerConfig::default()
+        });
+        let err = validate(&m).expect_err("relative host path must fail");
+        assert!(
+            err.to_string()
+                .contains("container.mount]].host must be an absolute or tilde-prefixed path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn mount_dangerous_host_paths_fail_validate() {
+        // F-SEC-10: catastrophic host paths are hard-rejected.
+        use super::super::schema::{ContainerConfig, MountSpec};
+        for bad in [
+            "/var/run/docker.sock",
+            "/run/docker.sock",
+            "/var/run/podman/podman.sock",
+            "/run/podman/podman.sock",
+            "/proc",
+            "/sys",
+            "/",
+            "/etc/shadow",
+            // Trailing-slash form is canonicalised in the check; must
+            // still fail.
+            "/proc/",
+        ] {
+            let d = with_tmp_repo(true);
+            let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+            m.container = Some(ContainerConfig {
+                mounts: vec![MountSpec {
+                    host: PathBuf::from(bad),
+                    container: PathBuf::from("/mnt/host"),
+                    readonly: false,
+                }],
+                ..ContainerConfig::default()
+            });
+            let err = validate(&m).expect_err(&format!("{bad} must fail validate"));
+            assert!(
+                err.to_string().contains("forbidden"),
+                "rejection must label as forbidden: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_sensitive_but_legitimate_host_paths_pass_validate() {
+        // F-SEC-10: paths that are sensitive-but-have-legitimate-uses
+        // (/etc, /var/log, peer home dirs) are NOT in the denylist —
+        // they pass validation. The line is "would this give the
+        // worker host-root or host-namespace authority?". Sensitive ≠
+        // catastrophic.
+        use super::super::schema::{ContainerConfig, MountSpec};
+        for ok in ["/etc", "/var/log", "/home/alice", "/tmp"] {
+            let d = with_tmp_repo(true);
+            let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+            m.container = Some(ContainerConfig {
+                mounts: vec![MountSpec {
+                    host: PathBuf::from(ok),
+                    container: PathBuf::from("/mnt/host"),
+                    readonly: true,
+                }],
+                ..ContainerConfig::default()
+            });
+            validate(&m).unwrap_or_else(|e| {
+                panic!("{ok} should pass validation: {e}");
+            });
+        }
+    }
+
+    #[test]
+    fn extra_args_safe_flags_pass_validate() {
+        // Common legitimate flags continue to validate. This pins the
+        // boundary: if a future change accidentally over-blocks (e.g.
+        // rejects every --cap-add), this test catches it.
+        use super::super::schema::ContainerConfig;
+        let d = with_tmp_repo(true);
+        let mut m = rm(vec![rt("t", d.path().to_path_buf(), false, None)]);
+        m.container = Some(ContainerConfig {
+            extra_args: vec![
+                "--network=host".into(),
+                "--cap-drop=ALL".into(),
+                "--cap-add=NET_ADMIN".into(),
+                "--memory=4g".into(),
+            ],
+            ..ContainerConfig::default()
+        });
+        validate(&m).expect("realistic safe extra_args must validate");
     }
 
     #[test]

@@ -35,7 +35,7 @@ Pitboss has two dispatch modes. Choosing the right one before writing a manifest
 
 ```toml
 [run]
-max_parallel = 3
+max_parallel_tasks = 3
 
 [defaults]
 model = "claude-haiku-4-5"
