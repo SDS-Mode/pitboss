@@ -10,38 +10,81 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
-## [0.13.0] — 2026-05-08
+## [0.14.0] — 2026-05-14
 
-v0.13.0 reworks the pitboss-web Graph tab from a live-only ornament into
-the natural first stop for run forensics, and surfaces the v0.12
-typed-actor capability work everywhere an operator might look for it.
-The Graph tab now persists past run finalize, every node densifies with
-timestamps / tokens / cost / counters / failure-reason, and clicking
-opens a side-panel inspector with parent/child click-jump plus an inline
-live log tail. Per-server `[[mcp_server]].tools` allowlists land both as
-a schema knob and a runtime enforcement gate, with the resolved
-capability matrix surfacing in the TUI Detail view, the manifest detail
-page, and `pitboss validate --capability-matrix`. Tool denials get
-first-class treatment in the TUI and `pitboss status`. `pitboss validate
---container` finally lets operators pre-flight container manifests from
-outside the container.
+v0.14.0 closes out the **unified envelope API** (#438): a single
+`RunStreamItem` stream in `pitboss-core::stream` is now the canonical
+read path for live + historical run state across CLI, TUI, and web.
+The dispatcher accepts subscriber-mode client handshakes so multiple
+read-only viewers (web SPA in two tabs, TUI mirror, a future `pitboss
+tail`) coexist on one run without displacing each other or the writer.
+Op replies moved to the broadcast bus, which unblocks the web SSE
+cutover and lands op replies in `events.jsonl` for post-run audit.
+
+The `[communication]` plane now journals every mailbox / artifact
+mutation to `<run-dir>/communication/messages.jsonl`; `pitboss resume`
+rehydrates the pre-crash mailbox + artifact metadata + per-actor
+activity counters so the resumed lead doesn't come back blind (#282).
+A new run-wide audit log lands at `<run-dir>/audit.jsonl` (#414) —
+every per-actor `TaskEvent` row tee'd into one chronological file with
+`actor_id` attribution. Query via `pitboss audit <run-id>` (filters:
+`--actor`, `--kind`, `--since`, `--reason-kind`) or `GET
+/api/runs/:id/audit` with the same surface as query params.
 
 Highlights:
 
-- **Graph inspector** — Click any actor to drill in. Persists past run
-  finalize. Inline live log tail with a Pretty/Raw stream-json renderer
-  that collapses tool_use / tool_result / thinking / assistant text into
-  styled rows. (#260)
-- **Per-server tool allowlists + capability matrix UI** —
-  Defense-in-depth narrowing: typed profiles cap which tools an actor
-  class may request; per-server allowlists cap which tools each MCP
-  server will even expose. Both axes now visible across the TUI Detail
-  view, the manifest detail page, and `validate --capability-matrix`.
-- **`pitboss validate --container`** — Pre-flight a container-mode
-  manifest without the host-side directory check failing on in-container
-  mount paths.
-- **Tool denials surface in TUI + `pitboss status`** — Per-tile denial
-  counter, recent-denials panel, and `DENIED` column in status output.
+- **Unified envelope API (#438)** — `open_run_stream(StreamMode::ReplayThenLive)` collapses the per-surface readers in `pitboss-cli`, `pitboss-tui`, and `pitboss-web`. PR-A through PR-Q close the arc.
+- **Subscriber-mode handshakes (#438, PR-P)** — `ControlOp::Hello { mode: ClientMode }` lets multiple read-only consumers coexist with one writer on a run's control socket.
+- **Communication-plane resume (#282)** — `messages.jsonl` journal + replay in `CommunicationStore::new` so `pitboss resume` doesn't lose pre-crash mailbox state.
+- **Aggregated audit log (#414)** — `<run-dir>/audit.jsonl` + `pitboss audit` CLI + `GET /api/runs/:id/audit` web endpoint with `--actor` / `--kind` / `--since` / `--reason-kind` filters.
+
+### Added
+
+- Per-run aggregated audit log + pitboss audit CLI + /api/runs/:id/audit ([#470](https://github.com/SDS-Mode/pitboss/pull/470))
+- Persist mailbox + activity to messages.jsonl for resume ([#469](https://github.com/SDS-Mode/pitboss/pull/469))
+- Web SSE bridge cutover to unified envelope API (#438, PR-Q) ([#467](https://github.com/SDS-Mode/pitboss/pull/467))
+- Subscriber-mode client handshake for multi-consumer streams (#438, PR-P) ([#466](https://github.com/SDS-Mode/pitboss/pull/466))
+- Live-socket transport for unified consumer API (#438, PR-N) ([#464](https://github.com/SDS-Mode/pitboss/pull/464))
+- SPA Replay tab for persisted events.jsonl (#259, PR-K) ([#454](https://github.com/SDS-Mode/pitboss/pull/454))
+- Pitboss events <run-id> prints persisted control-event stream (#259, PR-J) ([#461](https://github.com/SDS-Mode/pitboss/pull/461))
+- GET /api/runs/:id/events-jsonl serves persisted envelopes (#259, PR-I) ([#452](https://github.com/SDS-Mode/pitboss/pull/452))
+- Persistent events.jsonl bus subscriber (#259, PR-H) ([#451](https://github.com/SDS-Mode/pitboss/pull/451))
+- Events.jsonl writer + run-scoped seq counter (#259, PR-G) ([#460](https://github.com/SDS-Mode/pitboss/pull/460))
+- Tail_run_stream — continuous disk-tail mode (PR-E of #438) ([#458](https://github.com/SDS-Mode/pitboss/pull/458))
+- Live-side cutover to unified consumer (PR-D of #438) ([#457](https://github.com/SDS-Mode/pitboss/pull/457))
+- Live + historical unified consumer (PR-C of #438) ([#456](https://github.com/SDS-Mode/pitboss/pull/456))
+- Dispatcher-assigned seq on EventEnvelope (PR-B of #438) ([#445](https://github.com/SDS-Mode/pitboss/pull/445))
+- Unified run-stream foundation (PR-A of #438) ([#444](https://github.com/SDS-Mode/pitboss/pull/444))
+- Notify-driven watcher with periodic safety net ([#441](https://github.com/SDS-Mode/pitboss/pull/441))
+- Incremental tail reader for summary.json[l] ([#440](https://github.com/SDS-Mode/pitboss/pull/440))
+- Canonical summary.json[l] reader for TUI/web/CLI ([#439](https://github.com/SDS-Mode/pitboss/pull/439))
+- Track lead+sublead token spend against budget_usd ([#434](https://github.com/SDS-Mode/pitboss/pull/434))
+
+
+### Changed
+
+- Route status + diff through unified replay stream (#438, PR-M) ([#463](https://github.com/SDS-Mode/pitboss/pull/463))
+- Rewire watcher onto tail_run_stream (PR-F of #438) ([#459](https://github.com/SDS-Mode/pitboss/pull/459))
+
+
+### Dependencies
+
+- Bump the rust-minor-and-patch group across 1 directory with 4 updates ([#442](https://github.com/SDS-Mode/pitboss/pull/442))
+- Bump sha2 from 0.10.9 to 0.11.0 ([#278](https://github.com/SDS-Mode/pitboss/pull/278))
+
+
+### Fixed
+
+- Show in-progress children in graph inspector ([#468](https://github.com/SDS-Mode/pitboss/pull/468))
+- Build pitboss-web SPA before dist build + cargo test ([#436](https://github.com/SDS-Mode/pitboss/pull/436))
+- Close out sub-lead's own worker-row on termination ([#432](https://github.com/SDS-Mode/pitboss/pull/432))
+- Exclude host user-scope claude settings inside containers ([#430](https://github.com/SDS-Mode/pitboss/pull/430))
+- Dedupe summary.jsonl rows by task_id (run-view tabs crash) ([#429](https://github.com/SDS-Mode/pitboss/pull/429))
+- Wrap connect timeout in async block (panic on launch) ([#428](https://github.com/SDS-Mode/pitboss/pull/428))
+- Pr-gate stops requiring test job on docs-only PRs ([#424](https://github.com/SDS-Mode/pitboss/pull/424))
+
+
+## [0.13.0] — 2026-05-08
 
 ### Added
 
