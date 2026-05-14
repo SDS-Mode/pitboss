@@ -41,11 +41,13 @@ pub fn resolve_run_under(base: &Path, id_or_prefix: &str) -> Result<PathBuf> {
 /// `summary.jsonl` and constructing a partial `RunSummary` with
 /// `was_interrupted = true`.
 pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
-    // Canonical reader (#437): if `summary.json` parsed cleanly, return
-    // it directly. Otherwise reconstruct from the deduped task map +
-    // `meta.json`.
-    let snap = pitboss_core::store::read_run_snapshot(run_dir);
-    if let Some(summary) = snap.run_summary {
+    // Canonical reader (#437 + #438 Step 4): drain the unified replay
+    // stream and bin items back into `(tasks, summary?)`. The Finalized
+    // lifecycle carries the run-wide `RunSummary` when `summary.json`
+    // exists; an absent lifecycle is the in-progress fast-path that
+    // falls through to the meta.json synthesis below.
+    let (tasks, summary) = collect_replay(run_dir)?;
+    if let Some(summary) = summary {
         return Ok(summary);
     }
 
@@ -56,7 +58,6 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
             run_dir.display()
         );
     }
-    let tasks: Vec<pitboss_core::store::TaskRecord> = snap.tasks.into_values().collect();
     let tasks_failed = tasks
         .iter()
         .filter(|t| !matches!(t.status, pitboss_core::store::TaskStatus::Success))
@@ -101,6 +102,39 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         tasks,
         spend_breakdown: None,
     })
+}
+
+/// Drain `open_run_stream(ReplayOnly)` into `(tasks, finalized_summary?)`.
+/// Inline adapter — same rationale as `status::collect_replay`. Two
+/// call sites doesn't meet rule-of-three for promoting to
+/// `pitboss-core`.
+fn collect_replay(
+    run_dir: &Path,
+) -> Result<(Vec<pitboss_core::store::TaskRecord>, Option<RunSummary>)> {
+    use futures_util::StreamExt;
+    use pitboss_core::stream::{open_run_stream, LifecycleEvent, RunStreamPayload, StreamMode};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let items = rt.block_on(async {
+        open_run_stream(run_dir, StreamMode::ReplayOnly)
+            .collect::<Vec<_>>()
+            .await
+    });
+
+    let mut tasks = Vec::with_capacity(items.len());
+    let mut summary = None;
+    for item in items {
+        match item.payload {
+            RunStreamPayload::Task(t) => tasks.push(*t),
+            RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary: s }) => {
+                summary = Some(*s);
+            }
+            RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. }) => {}
+        }
+    }
+    Ok((tasks, summary))
 }
 
 // ---------------------------------------------------------------------------
