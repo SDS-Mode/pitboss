@@ -25,6 +25,13 @@ This is a research/design issue. Landing it produces:
 
 #259 lands the writer side (`<run-dir>/events.jsonl`, `seq` field on `EventEnvelope`). The two issues are co-spec'd so they can land in either order without version skew.
 
+### Implementation status
+
+- PR-A–PR-F shipped the disk-side foundation and the TUI cutover.
+- **PR-N (#464) shipped the live-socket transport** for `StreamMode::LiveOnly` and `StreamMode::ReplayThenLive`, plus the `Subscribe { since_seq }` op.
+- **PR-M (#463) shipped the CLI cold-path migration** for `status` and `diff`.
+- The web SSE bridge migration is blocked on a dispatcher-side change — see the [Web migration](#2-web-pitboss-web) section for the gap and two unblocking options.
+
 ## Sum type: `RunStreamItem`
 
 A consumer receives an async stream of `RunStreamItem`. Every item carries a common header plus a typed payload:
@@ -130,7 +137,7 @@ This means a slow consumer no longer drops envelopes silently; it pays the cost 
 
 ## Server-side protocol bump: `Subscribe { since_seq }`
 
-The control protocol gains one new op:
+The control protocol gained one new op in PR-N of #438:
 
 ```rust
 enum ControlOp {
@@ -139,13 +146,13 @@ enum ControlOp {
 }
 ```
 
-Server behavior:
+Server behavior (as shipped):
 
-- On `Subscribe { since_seq: 0 }`: normal subscription. No fast-forward. (Equivalent to today's implicit subscribe.)
-- On `Subscribe { since_seq: N }` where `N > 0`: server reads its in-memory broadcast tail, skips any frames with `seq < N`, sends remaining buffered frames in order, then enters normal broadcast mode. If the requested `N` is older than the oldest buffered frame, server replies with `OpFailed { reason: "seq too old, replay from disk" }` and the consumer falls back to a full disk replay.
+- The dispatcher accepts `Subscribe { since_seq: N }` and replies with `OpAcked { op: "subscribe" }`. The `since_seq` value is **advisory** today — the server does not yet do a fast-forward over its in-memory broadcast tail. New envelopes flow through the existing bus → mpsc → socket pipeline from the moment the subscribe ack is sent.
+- Consumer-side reconciliation handles the small race window between disk-replay-EOF and live subscribe. `ReplayThenLive` clients dedupe arriving live events against what they already saw on disk (via `EventEnvelope.seq`).
 - Single-client slot collision behavior (today's `Superseded`) is unchanged.
 
-The `Subscribe` op replaces the implicit "subscription begins on connect" today; legacy clients that don't send `Subscribe` are treated as `Subscribe { since_seq: 0 }`.
+Server-side fast-forward is a future optimization. The shape of the op was pinned in PR-N so a future PR can drop in the fast-forward semantics without changing the wire — the protocol field is already there.
 
 ## API surface
 
@@ -155,25 +162,26 @@ The consumer-facing entry point lives in `pitboss-core` and returns a stream:
 pub fn open_run_stream(
     run_dir: &Path,
     mode: StreamMode,
-) -> impl Stream<Item = Result<RunStreamItem>> { ... }
+) -> impl Stream<Item = RunStreamItem> + Send + 'static { ... }
 
 pub enum StreamMode {
     /// Replay disk until end-of-stream, never connect to socket.
     /// Use for `pitboss status` / `pitboss diff` / cold-run web pages.
     ReplayOnly,
 
-    /// Replay disk, then attempt socket subscribe. Returns Replay-Only
-    /// behavior for cold runs. Use for TUI / live web SSE.
+    /// Replay disk, then attempt socket subscribe. Falls back to
+    /// `ReplayOnly` behavior for cold runs (no live socket). Use for
+    /// TUI / live web SSE.
     ReplayThenLive,
 
-    /// Skip disk; subscribe to socket only. Errors if the socket
-    /// doesn't exist. Use for cases where you only care about
-    /// from-now-forward.
+    /// Skip disk; subscribe to socket only. Closes silently (empty
+    /// stream) when no socket exists. Use for cases where you only
+    /// care about from-now-forward.
     LiveOnly,
 }
 ```
 
-The stream item is `Result<RunStreamItem>`. Errors propagate; the consumer can choose to retry (e.g., resubscribe after a lag) or terminate. The `Lagged` → resync path is hidden inside the adapter — consumers see a clean stream of items.
+Note that the stream item is bare `RunStreamItem`, not `Result<RunStreamItem>`. Transport failures (no socket, dispatcher EOF, malformed envelope) terminate the stream cleanly rather than surfacing as items — consumers see end-of-stream and reconnect at their own cadence. This matches the existing fail-soft behavior in `pitboss-cli`'s socket consumer and keeps the SPA's `EventSource` auto-reconnect path the source of truth for retry. The `Lagged` → resync path is hidden inside the broadcast bus → mpsc bridge in `pitboss-cli::control::server`; consumers see a clean stream of items.
 
 ## Reuse
 
@@ -199,9 +207,20 @@ The TUI slice keeps the ad-hoc reader for per-actor `tasks/<id>/events.jsonl` (d
 
 `control_bridge.rs` becomes a `ReplayThenLive` consumer per run, fanning out to SSE clients. The historical readers in `api/runs.rs`, `api/events.rs`, and `insights/aggregator.rs` become `ReplayOnly` consumers. The on-the-wire SSE shape is unchanged — the migration is internal.
 
+**Blocked on the single-control_writer constraint (discovered during PR-O implementation, #438 Step 4).** The dispatcher's `serve_connection` binds each accepted client into the `control_writer` slot, displacing any prior client with a `Superseded` event. Today's `control_bridge` holds the slot for the lifetime of the run and fans events out to SSE clients via a broadcast channel; `send_op` reuses the same connection's write half. Cutting the read side over to `open_run_stream(ReplayThenLive)` would make the unified API client a second simultaneous control client — every POST to `/api/runs/:id/control` would supersede it (and vice versa).
+
+Two ways to unblock:
+
+- **Dispatcher feature**: add a "subscribe-only" client mode that does not bind the writer slot. The unified-API consumer would announce this in its handshake (e.g., a new field on `ControlOp::Hello` or a separate op). Multiple subscribe-only clients can coexist with one writer; the existing single-writer invariant is preserved. This is the cleaner end state.
+- **`pitboss-core::stream` writer support**: lift `pitboss-cli::stream::open_run_session`'s read + write split down into `pitboss-core::stream`, exposing a `RunStreamSession { stream, writer }` with a type-erased writer. `control_bridge.rs` then collapses into a thin fan-out over one session per run. Tracked as adjacent work; doesn't require a dispatcher change.
+
+Until one of these lands, the web SSE bridge stays on `control_bridge.rs`'s direct UnixStream usage. The historical readers in `api/runs.rs` are all already short-circuit reads of single files (manifest, resolved, summary) and don't benefit from `open_run_stream`. `insights/aggregator.rs` was evaluated for migration; the per-run overhead of spawning a tokio task and draining an mpsc channel for what is otherwise a sync `read_run_snapshot` call makes it a perf regression at the scale the aggregator runs (hundreds of run dirs). The migration is correct but unprofitable, and is deferred.
+
 ### 3. CLI one-shots (`status`, `diff`, `list`, dispatch finalize)
 
-All become `ReplayOnly` consumers. The post-#437 calls to `read_run_snapshot` collapse into a single `open_run_stream(..., ReplayOnly)` and an item-by-item fold.
+`status` and `diff` migrated in PR-M (#463). They drain `open_run_stream(StreamMode::ReplayOnly).collect()` via an inline `collect_replay` adapter and bin items back into the snapshot shape each renderer expects. Two call sites is below rule-of-three for a shared helper.
+
+`list` (`runs::collect_run_entries`) and `analyze` are hot paths over many run directories — spinning up a tokio task and mpsc channel per directory is a measurable perf regression versus a sync `read_run_snapshot` call. They stay on the canonical reader. `dispatch::hierarchical::finalize`'s resume-time read is rare and not worth the boilerplate. None of these regress correctness — they just don't benefit from the unified surface.
 
 ### After migration
 
