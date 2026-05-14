@@ -1640,3 +1640,93 @@ async fn legacy_hello_without_mode_defaults_to_writer() {
         "legacy Hello (no mode field) must still take the writer slot",
     );
 }
+
+/// PR-Q of #438: writer-mode op replies (`OpAcked`, `OpFailed`,
+/// `WorkersSnapshot`, etc.) are routed via `events_tx` so every
+/// connected client — writer AND every subscriber — sees them. This
+/// pins the cross-connection visibility the web SSE bridge depends on
+/// after its read side switched to the unified API.
+#[tokio::test]
+async fn op_replies_broadcast_to_subscribers() {
+    let dir = TempDir::new().unwrap();
+    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+
+    // Install a worker so ListWorkers has a non-empty snapshot to return.
+    state.root.workers.write().await.insert(
+        "w-1".into(),
+        WorkerState::Running {
+            started_at: chrono::Utc::now(),
+            session_id: Some("sess".into()),
+        },
+    );
+    state
+        .root
+        .worker_prompts
+        .write()
+        .await
+        .insert("w-1".into(), "investigate failure".into());
+
+    let sock = dir.path().join("op-reply-broadcast.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    // Writer attaches first.
+    let mut writer = FakeControlClient::connect(&sock, "writer/0.0.0")
+        .await
+        .unwrap();
+    // Subscriber attaches second; PR-P guarantees it does not displace
+    // the writer.
+    let mut subscriber = FakeControlClient::connect_subscriber(&sock, "pitboss-core/0.14.0")
+        .await
+        .unwrap();
+
+    // Writer sends ListWorkers. The reply is broadcast on the bus, so
+    // both clients should see it.
+    writer.send(&ControlOp::ListWorkers).await.unwrap();
+
+    let mut writer_saw = false;
+    for _ in 0..6 {
+        let ev = writer
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .await
+            .unwrap()
+            .expect("writer envelope");
+        if let ControlEvent::WorkersSnapshot { workers } = &ev {
+            assert!(
+                workers.iter().any(|w| w.task_id == "w-1"),
+                "writer snapshot must include w-1: {workers:?}",
+            );
+            writer_saw = true;
+            break;
+        }
+    }
+    assert!(writer_saw, "writer must see its own ListWorkers reply");
+
+    let mut subscriber_saw = false;
+    for _ in 0..6 {
+        let ev = subscriber
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .await
+            .unwrap()
+            .expect("subscriber envelope");
+        if let ControlEvent::WorkersSnapshot { workers } = &ev {
+            assert!(
+                workers.iter().any(|w| w.task_id == "w-1"),
+                "subscriber snapshot must include w-1: {workers:?}",
+            );
+            subscriber_saw = true;
+            break;
+        }
+    }
+    assert!(
+        subscriber_saw,
+        "subscriber must see the writer's ListWorkers reply via broadcast bus",
+    );
+}

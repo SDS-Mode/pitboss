@@ -1,45 +1,54 @@
-//! Per-run control-socket bridge. Each subscribed run gets ONE
-//! `UnixStream` connection to its dispatcher; events are fanned out to N
-//! SSE clients via a `tokio::sync::broadcast` channel and outbound
-//! control ops are serialized through the shared write-half.
+//! Per-run control-socket bridge.
+//!
+//! After PR-Q of #438 each run carries two dispatcher connections:
+//!
+//! - **Writer connection** (writer-mode Hello — `ClientMode::Writer`,
+//!   elided on the wire for byte-identical legacy bytes). Owns the
+//!   single `OwnedWriteHalf` that `send_op` writes through. A drain
+//!   task reads-and-discards from the writer's read half so the
+//!   kernel buffer doesn't backpressure dispatcher fan-out — we don't
+//!   need its envelope stream because the subscriber arm covers SSE.
+//!
+//! - **Subscriber-mode unified-API pump.** Drives
+//!   `pitboss_core::stream::open_run_stream(StreamMode::ReplayThenLive)`,
+//!   filters to `RunStreamPayload::Event(_)` items, and pushes the
+//!   inner envelope into the per-run `broadcast::Sender<EventEnvelope>`
+//!   that SSE clients subscribe to. PR-P's subscriber-mode handshake
+//!   guarantees this connection doesn't displace the writer.
+//!
+//! Op replies (`OpAcked`, `OpFailed`, `OpUnknownState`,
+//! `WorkersSnapshot`) reach SSE clients via the dispatcher's broadcast
+//! bus rather than via the writer's read half — PR-Q changed the
+//! dispatcher's read loop to route them through `events_tx`.
 //!
 //! ## Lifecycle
 //!
-//! 1. First `subscribe(run_id)` (or `send_op(run_id, _)`) opens the
-//!    socket, sends `Hello`, splits the stream, spawns a reader task,
-//!    and registers an `Entry { tx, write }` in the bridge map.
+//! 1. First `subscribe(run_id)` or `send_op(run_id, _)` opens the
+//!    writer socket, spawns the writer-drain task, spawns the unified-API
+//!    pump, and registers an `Entry { tx, write }` in the bridge map.
 //! 2. Subsequent `subscribe(run_id)` calls return additional receivers
-//!    against the same sender — no second connection.
-//! 3. `send_op(run_id, op)` serializes the op as a single JSON line and
+//!    against the same sender — no second connection pair.
+//! 3. `send_op(run_id, op)` serializes the op as one JSON line and
 //!    writes it to the shared write-half under a tokio mutex.
-//! 4. Reader task pumps `EventEnvelope`s from the socket into the
-//!    broadcast channel until the socket EOFs.
-//! 5. On exit, the reader removes the entry from the bridge map; the
-//!    next subscribe/send_op will reconnect.
-//!
-//! ## Single-client constraint
-//!
-//! The dispatcher accepts at-most-one control client at a time. If a TUI
-//! is already connected when the web bridge tries to take the slot, the
-//! dispatcher emits `Superseded` to the TUI and binds us. v1 takes the
-//! slot opportunistically — the SPA surfaces a banner if WE in turn get
-//! superseded by another client (the bridge sees `Superseded` in the
-//! event stream, fans it out, and the reader EOFs shortly after).
+//! 4. The unified-API pump exits when the dispatcher EOFs the
+//!    subscriber socket or `open_run_stream` ends; on exit the entry is
+//!    removed from the map so the next call reconnects.
 //!
 //! ## Lost-wakeup safety
 //!
-//! `broadcast::channel` buffers up to `CHANNEL_CAPACITY` events for each
-//! receiver, so the gap between `subscribe()` returning and the SSE
-//! handler starting to consume cannot lose the dispatcher's initial
-//! `Hello`. If a subscriber falls behind by more than the capacity, the
-//! channel emits `Lagged(n)` — the SSE handler surfaces this as a typed
-//! `lagged` SSE event so the client can resync (re-fetch state).
+//! `broadcast::channel` buffers up to `CHANNEL_CAPACITY` events for
+//! each receiver, so the gap between `subscribe()` returning and the
+//! SSE handler starting to consume cannot lose the dispatcher's
+//! initial `Hello`. If a subscriber falls behind by more than the
+//! capacity, the channel emits `Lagged(n)` — the SSE handler surfaces
+//! this as a typed `lagged` SSE event so the client can resync.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pitboss_cli::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
+use futures_util::StreamExt;
+use pitboss_cli::control::protocol::{ControlOp, EventEnvelope};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
@@ -84,9 +93,9 @@ impl ControlBridge {
         }
     }
 
-    /// Subscribe to a run's control events. Reuses an existing socket
-    /// connection if one is already established; otherwise opens a new
-    /// one and spawns the reader task.
+    /// Subscribe to a run's control events. Reuses an existing
+    /// connection pair if one is already established; otherwise opens
+    /// a new one and spawns the writer-drain + unified-API pump tasks.
     pub async fn subscribe(
         &self,
         run_id: &str,
@@ -103,8 +112,9 @@ impl ControlBridge {
     ///
     /// Returns `Ok(())` once the bytes are flushed to the socket. The
     /// dispatcher's `OpAcked` / `OpFailed` reply is delivered out-of-band
-    /// over the event stream — callers that need it should subscribe to
-    /// the event stream first.
+    /// over the event stream (PR-Q of #438 routes op replies through the
+    /// broadcast bus, so subscribers see them too) — callers that need
+    /// the reply should subscribe to the event stream first.
     pub async fn send_op(&self, run_id: &str, op: &ControlOp) -> Result<(), BridgeError> {
         // Block server-only handshake variant: clients must not impersonate
         // the dispatcher's Hello; the bridge sends its own client Hello
@@ -125,18 +135,20 @@ impl ControlBridge {
         Ok(())
     }
 
-    /// Returns the per-run `Entry`, opening the socket on first use.
+    /// Returns the per-run `Entry`, opening the writer connection and
+    /// spawning the writer-drain + unified-API pump tasks on first use.
     async fn ensure_connected(&self, run_id: &str) -> Result<Entry, BridgeError> {
         let mut map = self.inner.lock().await;
         if let Some(entry) = map.get(run_id) {
             return Ok(entry.clone());
         }
 
-        // Mirror pitboss_cli::runs::resolve_socket_path: prefer the
-        // XDG_RUNTIME_DIR socket the dispatcher actually publishes to,
-        // and fall back to the in-run-dir path for environments without
-        // an XDG runtime dir (the CLI's `pub`-able resolver should
-        // ultimately replace this duplication — tracked separately).
+        // Resolve the socket path. PR-Q preserves the pre-existing
+        // 404-on-cold-runs contract: if neither the XDG path nor the
+        // run-dir fallback exists, return `NotFound` rather than
+        // silently letting `open_run_stream(ReplayThenLive)` replay
+        // disk events.jsonl over the SSE feed — that's the dedicated
+        // Replay tab's job via `/api/runs/:id/events-jsonl`.
         let socket_path = std::env::var_os("XDG_RUNTIME_DIR")
             .map(|x| {
                 std::path::PathBuf::from(x)
@@ -149,17 +161,14 @@ impl ControlBridge {
             return Err(BridgeError::NotFound);
         }
 
-        let mut stream = match UnixStream::connect(&socket_path).await {
+        // 1. Writer connection: writer-mode Hello, owns the write half.
+        let mut writer_stream = match UnixStream::connect(&socket_path).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 return Err(BridgeError::Dead);
             }
             Err(e) => return Err(BridgeError::Io(e)),
         };
-
-        // Send the Hello handshake. The dispatcher replies with its own
-        // Hello as the first event on the wire — our reader task picks
-        // it up after we register the broadcast sender.
         let hello = ControlOp::Hello {
             client_version: format!("pitboss-web/{}", env!("CARGO_PKG_VERSION")),
             mode: pitboss_cli::control::protocol::ClientMode::default(),
@@ -167,88 +176,103 @@ impl ControlBridge {
         let mut hello_line =
             serde_json::to_string(&hello).map_err(|e| BridgeError::Handshake(e.to_string()))?;
         hello_line.push('\n');
-        stream.write_all(hello_line.as_bytes()).await?;
+        writer_stream.write_all(hello_line.as_bytes()).await?;
 
-        let (read_half, write_half) = stream.into_split();
+        let (writer_read_half, writer_write_half) = writer_stream.into_split();
         let (tx, _initial_rx) = broadcast::channel::<EventEnvelope>(CHANNEL_CAPACITY);
         let entry = Entry {
             tx: tx.clone(),
-            write: Arc::new(Mutex::new(write_half)),
+            write: Arc::new(Mutex::new(writer_write_half)),
         };
 
-        let tx_for_task = tx.clone();
-        let run_id_for_task = run_id.to_string();
-        let inner_for_task = Arc::clone(&self.inner);
+        // 2. Writer-drain task: read-and-discard envelopes the dispatcher
+        //    sends to this writer connection (its own Hello, broadcast
+        //    fan-out, etc.). The subscriber arm covers SSE delivery; the
+        //    drain just keeps the kernel buffer from filling up and
+        //    backpressuring dispatcher writes.
+        let run_id_drain = run_id.to_string();
         tokio::spawn(async move {
-            reader_loop(read_half, tx_for_task, run_id_for_task, inner_for_task).await;
-        });
-        map.insert(run_id.to_string(), entry.clone());
-        info!(run_id, "control bridge connection opened");
-        Ok(entry)
-    }
-}
-
-async fn reader_loop(
-    read_half: tokio::net::unix::OwnedReadHalf,
-    tx: broadcast::Sender<EventEnvelope>,
-    run_id: String,
-    registry: Arc<Mutex<HashMap<String, Entry>>>,
-) {
-    let mut lines = BufReader::new(read_half).lines();
-
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if line.trim().is_empty() {
-                    continue;
+            let mut lines = BufReader::new(writer_read_half).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(_)) => {} // discard
+                    Ok(None) => {
+                        debug!(run_id = %run_id_drain, "writer-side drain task: socket EOF");
+                        break;
+                    }
+                    Err(e) => {
+                        debug!(run_id = %run_id_drain, error = %e, "writer-side drain task: read error");
+                        break;
+                    }
                 }
-                let envelope = match serde_json::from_str::<EventEnvelope>(&line) {
-                    Ok(e) => e,
-                    Err(_) => match serde_json::from_str::<ControlEvent>(&line) {
-                        // Pre-v0.6 dispatchers wire bare ControlEvent
-                        // without the EventEnvelope wrapper. Lift to
-                        // empty-actor-path envelope for uniformity.
-                        Ok(ev) => EventEnvelope {
-                            actor_path: Default::default(),
-                            // Bare ControlEvent had no seq; treat as
-                            // legacy (seq = 0) per PR-B of #438.
-                            seq: 0,
-                            event: ev,
-                        },
+            }
+        });
+
+        // 3. Unified-API pump: drive `open_run_stream(ReplayThenLive)`
+        //    against the per-run dir, filter to `Event` payloads, and
+        //    forward into the broadcast tx. The unified API opens its own
+        //    subscriber-mode UnixStream internally (PR-P), so this is a
+        //    separate, non-displacing connection.
+        let run_dir = self.runs_dir.join(run_id);
+        let tx_for_pump = tx.clone();
+        let run_id_for_pump = run_id.to_string();
+        let inner_for_pump = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let stream = pitboss_core::stream::open_run_stream(
+                &run_dir,
+                pitboss_core::stream::StreamMode::ReplayThenLive,
+            );
+            tokio::pin!(stream);
+            while let Some(item) = stream.next().await {
+                if let pitboss_core::stream::RunStreamPayload::Event(env) = item.payload {
+                    // `pitboss_core::control_protocol::EventEnvelope`
+                    // holds the inner event as `serde_json::Value`; the
+                    // SSE handler downstream expects
+                    // `pitboss_cli::control::protocol::EventEnvelope`
+                    // with the typed `ControlEvent`. Re-parse via JSON
+                    // — one alloc per envelope, negligible at SSE rates.
+                    let json = match serde_json::to_string(&*env) {
+                        Ok(s) => s,
                         Err(e) => {
-                            warn!(run_id, error = %e, line = %line, "control event parse failed");
+                            warn!(run_id = %run_id_for_pump, error = %e,
+                                  "control bridge: serialize-then-reparse failed");
                             continue;
                         }
-                    },
-                };
-                // tx.send returns Err(()) only when there are zero
-                // receivers AND zero buffered items. The bridge is
-                // designed to outlive subscriber gaps (a control-only
-                // POST keeps the entry alive without a receiver), so we
-                // tolerate send errors by simply dropping the event —
-                // the entry stays registered until reader EOF.
-                let _ = tx.send(envelope);
+                    };
+                    let typed: EventEnvelope = match serde_json::from_str(&json) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!(run_id = %run_id_for_pump, error = %e, line = %json,
+                                  "control bridge: typed envelope reparse failed");
+                            continue;
+                        }
+                    };
+                    // `tx.send` returns Err only when zero subscribers AND
+                    // zero buffered slots. We tolerate that — a
+                    // control-only POST can keep the entry alive without
+                    // an SSE subscriber.
+                    let _ = tx_for_pump.send(typed);
+                }
             }
-            Ok(None) => {
-                debug!(run_id, "control socket closed by server (EOF)");
-                break;
+            // Stream EOF — either disk replay ran out on a finalized
+            // run, or the live socket dropped. Either way, the entry is
+            // stale; remove so the next subscribe() / send_op() opens a
+            // fresh pair. Race-safe against `ensure_connected`
+            // re-registering: only remove if it's still OUR tx.
+            let mut map = inner_for_pump.lock().await;
+            if let Some(existing) = map.get(&run_id_for_pump) {
+                if existing.tx.same_channel(&tx_for_pump) {
+                    map.remove(&run_id_for_pump);
+                }
             }
-            Err(e) => {
-                warn!(run_id, error = %e, "control socket read error");
-                break;
-            }
-        }
-    }
+            info!(run_id = %run_id_for_pump, "control bridge unified-API pump exited");
+        });
 
-    // Best-effort cleanup; the next subscribe()/send_op() will
-    // re-establish if the dispatcher is back. If the entry has already
-    // been replaced by a newer reader (race on `ensure_connected`
-    // between two callers), only remove our own.
-    let mut map = registry.lock().await;
-    if let Some(existing) = map.get(&run_id) {
-        if existing.tx.same_channel(&tx) {
-            map.remove(&run_id);
-        }
+        map.insert(run_id.to_string(), entry.clone());
+        info!(
+            run_id,
+            "control bridge connection opened (writer + subscriber pump)"
+        );
+        Ok(entry)
     }
-    info!(run_id, "control bridge reader exited");
 }
