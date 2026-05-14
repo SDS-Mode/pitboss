@@ -193,7 +193,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-This triggers three GitHub Actions workflows in parallel:
+This triggers two GitHub Actions workflows in parallel:
 
 ### `.github/workflows/release.yml` (cargo-dist)
 
@@ -203,38 +203,66 @@ commits an updated formula to the [Homebrew tap](https://github.com/SDS-Mode/hom
 
 Duration: ~10-15 minutes. Watch with `gh run watch`.
 
-### `.github/workflows/container.yml`
+### `.github/workflows/ci.yml` (combined CI + Container)
 
-Builds and pushes multi-arch container images to
-`ghcr.io/sds-mode/pitboss:<X.Y.Z>` and
-`ghcr.io/sds-mode/pitboss-with-claude:<X.Y.Z>`. Also updates the
-`:latest` tag on both images. Includes a post-merge smoke test.
+The `ci.yml` workflow runs the test/lint/fmt matrix AND the container
+build pipeline as a single workflow — the container build jobs
+declare `needs: [test]` so they only fire when CI passes, and a single
+file is GHA's only way to express cross-job dependency. See the
+header comment on `ci.yml` for the full job graph.
 
-Duration: ~5-7 minutes. Runs in parallel with the release workflow.
+On a release-tag push the container pipeline:
+
+- builds the `pitboss` and `pitboss-with-claude` images for linux/amd64
+  + linux/arm64;
+- merges the per-arch builds into multi-arch OCI image indexes at
+  `ghcr.io/sds-mode/pitboss:<X.Y.Z>` plus the `<X.Y>` and `<X>`
+  rolling tags (and `pitboss-with-claude` likewise);
+- runs an in-CI smoke test: `docker pull` + `docker run --rm $IMAGE pitboss
+  --version` on both architectures. The smoke step gates the rest of the
+  workflow, so a green CI run is itself the post-release container check.
+
+Duration: ~15-20 minutes (test matrix + build + merge + smoke).
 
 ### `.github/workflows/book.yml`
 
-Rebuilds the mdBook site and deploys it to GitHub Pages. The updated
-`## Current version` section appears on the landing page immediately.
-
-Duration: ~1-2 minutes.
+Note: `book.yml` does NOT fire on the tag push — it triggered earlier
+on the release-prep PR merge to `main`, which is when the README +
+`book/src/intro.md` "Current version" paragraphs were updated. By the
+time you push the tag, the rebuilt Pages site is already live.
 
 ---
 
 ## Post-release verification
 
-After all three workflows complete:
+After both workflows complete:
 
 ### Container image sanity
 
+The in-CI smoke step on `ci.yml` already pulls + runs `pitboss --version`
+on both architectures before the workflow can pass, so a green CI run is
+itself the canonical container check. Confirm the tags resolved at the
+registry (the tags-list endpoint is eventually-consistent, so probe the
+manifest directly):
+
+```bash
+TOK=$(curl -s "https://ghcr.io/token?scope=repository:sds-mode/pitboss:pull&service=ghcr.io" \
+      | jq -r .token)
+for tag in X.Y.Z X.Y latest; do
+  curl -sI -H "Authorization: Bearer $TOK" \
+       -H "Accept: application/vnd.oci.image.index.v1+json" \
+       "https://ghcr.io/v2/sds-mode/pitboss/manifests/$tag" \
+       | head -1
+done
+# → three HTTP/2 200
+```
+
+Optional external pull (requires a running container engine):
+
 ```bash
 podman pull ghcr.io/sds-mode/pitboss-with-claude:X.Y.Z
-podman inspect ghcr.io/sds-mode/pitboss-with-claude:X.Y.Z \
-  --format '{{index .Config.Labels "ai.anthropic.claude-code.version"}}'
 podman run --rm ghcr.io/sds-mode/pitboss-with-claude:X.Y.Z pitboss --version
 # → pitboss X.Y.Z
-podman run --rm ghcr.io/sds-mode/pitboss-with-claude:X.Y.Z pitboss agents-md | head -5
-# → frontmatter with pitboss_version: X.Y.Z
 ```
 
 ### Homebrew tap sanity
