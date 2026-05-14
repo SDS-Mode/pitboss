@@ -426,6 +426,8 @@ max_artifacts_per_actor = 128               # per-actor publish ceiling per run
 
 **Artifact storage** lands at `<run_dir>/communication/artifacts/<artifact_id>`. Auto-mounted under `pitboss container-dispatch`; cleaned with the run dir by `pitboss prune --remove`.
 
+**Resume persistence (v0.14+, #282).** Every mutating handler (`message_send`, `message_ack`, `artifact_put`, `artifact_grant`) appends a typed JSON record to `<run_dir>/communication/messages.jsonl` after its in-memory write succeeds. `CommunicationStore::new` replays the file at run-start, so `pitboss resume` rehydrates the pre-crash mailbox + artifact metadata + per-actor activity counters. Replay is tolerant of torn trailing writes (warns + skips, same pattern as `summary.jsonl`); artifact bytes on disk under `communication/artifacts/<id>` survive independently. Pre-v0.14 runs have no journal and resume with an empty mailbox as before.
+
 **Disabled mode** (the default) hides the 8 tools from `list_tools` and rejects every handler call with `CommunicationError::Disabled`. Tool names still appear in the lead/sublead/worker `--allowedTools` argv (cosmetic only — Claude does not call tools missing from `list_tools`).
 
 See `examples/communication-parent-child-demo.toml` for a full walkthrough.
