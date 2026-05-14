@@ -16,25 +16,29 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.13.0** turns the `pitboss-web` Graph tab into the natural first
-stop for run forensics and surfaces the v0.12 typed-actor capability
-work everywhere an operator might look. The Graph tab persists past run
-finalize, every node densifies with timestamps / tokens / cost /
-counters / failure-reason, and clicking opens a side-panel inspector
-with parent/child click-jump plus an inline live log tail (with a
-Pretty/Raw toggle that parses the underlying stream-json into styled
-rows for tool_use / tool_result / thinking / assistant text). On the
-permissions side, per-server `[[mcp_server]].tools` allowlists land both
-as a schema knob and a runtime enforcement gate, complementing the
-v0.12 typed-profile allowlists for defense-in-depth narrowing — typed
-profiles cap which tools an actor class may *request*, per-server
-allowlists cap which tools each MCP server will even *expose*. The
-resolved capability matrix surfaces in the TUI Detail view, the
-manifest detail page, and `pitboss validate --capability-matrix`. Tool
-denials get first-class treatment: per-tile counter, recent-denials
-panel, `DENIED` column in `pitboss status`. `pitboss validate
---container` finally lets operators pre-flight container manifests
-from outside the container. See `CHANGELOG.md` for the full per-version
+**v0.14.0** closes out the **unified envelope API** (#438): a single
+`RunStreamItem` stream in `pitboss-core::stream` replaces the
+per-surface readers that pitboss-cli, pitboss-tui, and pitboss-web
+each used to roll independently. `status`, `diff`, and the web SSE
+bridge all read from `open_run_stream(StreamMode::ReplayThenLive)` now;
+the dispatcher accepts subscriber-mode client handshakes so multiple
+read-only consumers (web SPA in two tabs, TUI mirror, a future
+`pitboss tail`) coexist on one run without displacing each other or
+the writer. Op replies (`op_acked` / `op_failed` / `workers_snapshot`)
+moved from per-connection delivery to the broadcast bus, which both
+unblocks the SSE migration and starts persisting them in
+`events.jsonl` for post-run audit. The `[communication]` plane (v0.10+)
+now journals every mailbox / artifact mutation to
+`<run-dir>/communication/messages.jsonl`; `pitboss resume` rehydrates
+the pre-crash mailbox + artifact metadata + per-actor activity
+counters from disk (#282) so the resumed lead doesn't come back blind.
+A new run-wide audit log lands at `<run-dir>/audit.jsonl` (#414) —
+every per-actor `TaskEvent` row (pause, continue, reprompt, approval
+request/response, tool denial, profile auto-approve) tee'd into one
+chronological file with `actor_id` attribution. Query it via
+`pitboss audit <run-id>` (filters: `--actor`, `--kind`, `--since`,
+`--reason-kind`) or `GET /api/runs/:id/audit` with the same filter
+surface as query params. See `CHANGELOG.md` for the full per-version
 history and `AGENTS.md` for the MCP tool reference, keybindings, and
 manifest schema.
 

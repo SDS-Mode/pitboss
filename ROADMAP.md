@@ -20,7 +20,7 @@ GitHub issue, not here.
 - **No version targeting.** Use GitHub Milestones for release-train
   scheduling. Strategic horizons can stay inline as `parked:` notes.
 
-Last refreshed: v0.13.0 (2026-05-08).
+Last refreshed: v0.14.0 (2026-05-14).
 
 ---
 
@@ -59,17 +59,6 @@ the existing single-run view and the new compare route.
 
 **Status:** scoped.
 **Tracking:** #250.
-
-### Lead+sublead budget accounting
-
-Today `[run].budget_usd` accounts only for `spawn_worker` spend; the
-lead's own tokens are unbounded. Reconcile lead and sublead spend
-into the same `spent_usd` mutex, add an optional `lead_budget_usd`
-separate cap, and surface running lead-spend live in
-`worker_status`. Backstop for runaway-lead failure modes.
-
-**Status:** scoped — sibling to the typed-profiles work that landed in v0.12 (#252).
-**Tracking:** #253.
 
 ### Non-Anthropic model support (v1.0 destination)
 
