@@ -498,8 +498,25 @@ async fn serve_connection(
     });
 
     // Read loop.
+    //
+    // Op-reply routing (PR-Q of #438):
+    //
+    // - **Writer's `dispatch_op` result** (`OpAcked` / `OpFailed` /
+    //   `OpUnknown` / `OpUnknownState` / `WorkersSnapshot`) is broadcast
+    //   via `events_tx`. Every connected client's `bus_bridge` picks it
+    //   up — including THIS writer's own bus_bridge, which forwards the
+    //   envelope to this connection's pump as before. Subscribers see
+    //   the reply too, which is exactly what `pitboss-web`'s SSE bridge
+    //   needs after its read side switched to the unified API.
+    //
+    // - **Subscriber-mode rejection** (writer op sent by a subscriber
+    //   client) and **parse errors** stay per-connection via
+    //   `send_event`: they're feedback specifically to the misbehaving
+    //   connection, not run-wide events worth broadcasting to every
+    //   subscriber.
     while let Ok(Some(line)) = reader.next_line().await {
-        let reply = match serde_json::from_str::<ControlOp>(&line) {
+        let parsed = serde_json::from_str::<ControlOp>(&line);
+        match parsed {
             Ok(op) => {
                 // PR-P of #438: subscriber-mode clients are read-only. Reject
                 // writer ops at the front gate with a typed `OpFailed` rather
@@ -508,16 +525,27 @@ async fn serve_connection(
                 // already past the handshake (a duplicate is a no-op ack) and
                 // Subscribe is the consumer-side advisory ack from PR-N.
                 if client_mode == ClientMode::Subscriber && !is_subscriber_safe_op(&op) {
-                    ControlEvent::OpFailed {
+                    let reply = ControlEvent::OpFailed {
                         op: op_tag(&op).into(),
                         task_id: None,
                         error: "subscriber mode forbids writer ops".into(),
+                    };
+                    if send_event(&writer, &event_log, &reply).await.is_err() {
+                        break;
                     }
                 } else {
-                    dispatch_op(&state, op).await
+                    let reply = dispatch_op(&state, op).await;
+                    state
+                        .root
+                        .broadcast_control_event(EventEnvelope {
+                            actor_path: ActorPath::default(),
+                            seq: 0, // overwritten by broadcast_control_event
+                            event: reply,
+                        })
+                        .await;
                 }
             }
-            Err(e) => ControlEvent::OpFailed {
+            Err(e) => {
                 // Best-effort: extract the `op` string from the raw JSON
                 // so the TUI can correlate the failure with the request
                 // that triggered it. Falls back to a `parse_error`
@@ -525,13 +553,15 @@ async fn serve_connection(
                 // JSON or the `op` discriminator is missing. The empty
                 // string used to be the only signal here, leaving the
                 // TUI no way to attribute the failure. (#152 L4)
-                op: extract_op_tag_from_raw(&line),
-                task_id: None,
-                error: format!("parse error: {e}"),
-            },
-        };
-        if send_event(&writer, &event_log, &reply).await.is_err() {
-            break;
+                let reply = ControlEvent::OpFailed {
+                    op: extract_op_tag_from_raw(&line),
+                    task_id: None,
+                    error: format!("parse error: {e}"),
+                };
+                if send_event(&writer, &event_log, &reply).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 

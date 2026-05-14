@@ -1,127 +1,191 @@
-//! Integration test for the control-socket → SSE bridge happy path.
+//! Integration tests for the control-socket bridge.
 //!
-//! Spins up a fake dispatcher (UnixListener) at a temp path that mimics
-//! the per-run `<run_id>/control.sock` layout, then drives the bridge
-//! with subscribe → reader → assert-on-receive. No real `pitboss
-//! dispatch` needed.
-//!
-//! The fake dispatcher only implements what the bridge cares about:
-//! - Accept ONE connection.
-//! - Read the client's `Hello` line (and discard it; verifying we sent
-//!   one is sufficient).
-//! - Write a fixed sequence of events as line-delimited JSON.
-//! - Hold the connection open until the bridge drops it.
+//! After PR-Q of #438, the bridge no longer rolls its own UnixStream
+//! reader — the read side is driven by
+//! `pitboss_core::stream::open_run_stream(ReplayThenLive)` (in subscriber
+//! mode), and op replies reach SSE subscribers via the dispatcher's
+//! broadcast bus rather than the writer's read half. Mocking that with
+//! a fake `UnixListener` is no longer practical, so these tests spin up
+//! a real dispatcher via `pitboss_cli::control::server::start_control_server`
+//! and exercise the full path end-to-end.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use pitboss_cli::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use pitboss_cli::control::protocol::{ControlEvent, ControlOp};
+use pitboss_cli::control::server::start_control_server;
+use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
+use pitboss_cli::manifest::resolve::ResolvedManifest;
+use pitboss_cli::manifest::schema::WorktreeCleanup;
+use pitboss_core::process::{ProcessSpawner, TokioSpawner};
+use pitboss_core::session::CancelToken;
+use pitboss_core::store::{JsonFileStore, SessionStore};
+use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+use tempfile::TempDir;
 use tokio::time::timeout;
 
-// Re-import the bridge from our own crate. Note: this requires
-// `control_bridge` to be a `pub mod` in lib.rs OR a `pub(crate)` mod
-// reachable via a tests-only re-export. We expose it via a tests-only
-// shim to keep the binary surface clean.
-//
-// Bridge is normally a private module of the bin crate; for this
-// integration test we hard-link it via #[path]. Cargo treats `tests/`
-// as separate compilation units that can pull in any module by path.
 #[path = "../src/control_bridge.rs"]
 mod control_bridge;
 
 use control_bridge::{BridgeError, ControlBridge};
 
-#[tokio::test]
-async fn bridge_subscribe_returns_dispatcher_events() {
-    let tmp = tempfile::tempdir().unwrap();
-    let runs_dir = tmp.path().to_path_buf();
-    let run_id = "01950000-0000-7000-8000-000000000001";
-    let run_dir = runs_dir.join(run_id);
-    std::fs::create_dir_all(&run_dir).unwrap();
-    let socket_path = run_dir.join("control.sock");
-
-    let listener = UnixListener::bind(&socket_path).unwrap();
-
-    // Spawn the fake dispatcher.
-    let server_handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept");
-        let (read, mut write) = stream.into_split();
-        let mut reader = BufReader::new(read).lines();
-
-        // Read the Hello sent by the bridge — assert non-empty.
-        let hello_line = reader
-            .next_line()
-            .await
-            .expect("read hello")
-            .expect("hello present");
-        assert!(
-            hello_line.contains("\"op\":\"hello\""),
-            "missing hello op: {hello_line}"
-        );
-
-        // Write back a Hello event (pre-v0.6 bare ControlEvent shape).
-        let hello_event = ControlEvent::Hello {
-            server_version: "test-0.0.1".into(),
-            run_id: "01950000-0000-7000-8000-000000000001".into(),
-            run_kind: "flat".into(),
-            workers: vec!["w-1".into()],
-            policy_rules: vec![],
-        };
-        let mut line = serde_json::to_string(&hello_event).unwrap();
-        line.push('\n');
-        write.write_all(line.as_bytes()).await.unwrap();
-
-        // Then a WorkerFailed event for variety.
-        let worker_failed = ControlEvent::WorkerFailed {
-            task_id: "w-1".into(),
-            parent_task_id: None,
-            reason: pitboss_core::store::FailureReason::AuthFailure,
-        };
-        let mut line2 = serde_json::to_string(&worker_failed).unwrap();
-        line2.push('\n');
-        write.write_all(line2.as_bytes()).await.unwrap();
-
-        // Hold the connection until the bridge drops.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    });
-
-    // Drive the bridge from the client side.
-    let bridge = ControlBridge::new(runs_dir);
-    let mut rx = bridge.subscribe(run_id).await.expect("subscribe");
-
-    // First event should be the Hello.
-    let envelope: EventEnvelope = timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("hello timeout")
-        .expect("hello recv");
-    match envelope.event {
-        ControlEvent::Hello { server_version, .. } => {
-            assert_eq!(server_version, "test-0.0.1");
+/// Wait until the dispatcher's broadcast bus has at least `n` receivers
+/// attached. Tokio `broadcast::Receiver` only sees messages sent after
+/// it subscribed, so tests that broadcast a single envelope after
+/// `bridge.subscribe()` must wait for the bridge's subscriber-mode
+/// pump to attach via its bus_bridge before sending — otherwise the
+/// envelope is delivered only to whoever was attached at send time
+/// (the persistence subscriber alone, which silently drops with
+/// `emit_event_stream = false`).
+///
+/// The initial baseline is 1 (the persistence subscriber spawned by
+/// `DispatchState::new`). Each connected control client adds one. For
+/// the bridge we expect baseline + 1 (the subscriber pump's connection).
+async fn wait_for_bus_receivers(state: &Arc<DispatchState>, target: usize, deadline: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        if state.root.events_tx.receiver_count() >= target {
+            return;
         }
-        other => panic!("expected Hello, got {other:?}"),
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-
-    // Second event: WorkerFailed.
-    let envelope: EventEnvelope = timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("failure timeout")
-        .expect("failure recv");
-    match envelope.event {
-        ControlEvent::WorkerFailed { task_id, .. } => {
-            assert_eq!(task_id, "w-1");
-        }
-        other => panic!("expected WorkerFailed, got {other:?}"),
-    }
-
-    drop(rx);
-    drop(bridge);
-    let _ = server_handle.await;
+    panic!(
+        "bus receiver count did not reach {target} within {deadline:?} (have {})",
+        state.root.events_tx.receiver_count()
+    );
 }
 
+/// Build a minimal `DispatchState` + run subdir + run id sufficient for
+/// the control-socket lifecycle. The bridge talks to it via the same
+/// per-run socket path it would use in production.
+async fn make_test_state(runs_dir: &TempDir) -> (Arc<DispatchState>, uuid::Uuid, PathBuf) {
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = runs_dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: runs_dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(runs_dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    (state, run_id, run_subdir)
+}
+
+/// PR-Q regression: the bridge's unified-API pump forwards envelopes
+/// broadcast by `broadcast_control_event` to SSE subscribers.
+#[tokio::test]
+async fn bridge_subscribe_returns_dispatcher_events() {
+    let runs_dir = TempDir::new().unwrap();
+    let (state, run_id, run_subdir) = make_test_state(&runs_dir).await;
+    // Park the socket inside the per-run dir so the bridge's
+    // run-dir-fallback resolver finds it without an XDG_RUNTIME_DIR
+    // shim.
+    let sock = run_subdir.join("control.sock");
+    let _h = start_control_server(
+        sock,
+        "test-0.0.1".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+
+    let bridge = ControlBridge::new(runs_dir.path().to_path_buf());
+    let mut rx = bridge
+        .subscribe(&run_id.to_string())
+        .await
+        .expect("subscribe");
+
+    // Wait for the bridge's subscriber-mode pump to attach its
+    // bus_bridge inside the dispatcher before we broadcast — otherwise
+    // a Tokio broadcast send would only reach the persistence
+    // subscriber (which is the baseline).
+    // 1 baseline (persistence) + 2 from the bridge's two connections
+    // (writer's bus_bridge + subscriber-mode pump's bus_bridge).
+    wait_for_bus_receivers(&state, 3, Duration::from_secs(3)).await;
+
+    // Broadcast a recognizable event on the dispatcher's bus. The
+    // bridge's unified-API pump receives it via its subscriber-mode
+    // socket and re-broadcasts to SSE clients.
+    let envelope = pitboss_cli::control::protocol::EventEnvelope {
+        actor_path: pitboss_cli::dispatch::actor::ActorPath::default(),
+        seq: 0, // overwritten
+        event: ControlEvent::RunFinished {
+            summary: pitboss_cli::control::protocol::RunFinishedSummary {
+                tasks_total: 3,
+                tasks_failed: 1,
+            },
+        },
+    };
+    state.root.broadcast_control_event(envelope).await;
+
+    // Skim until we find the RunFinished envelope. Tolerate intervening
+    // bus traffic (the dispatcher's own Hello can land here via the
+    // subscriber socket's bus_bridge, and store-activity ticks at 1 s).
+    let mut saw = false;
+    for _ in 0..8 {
+        let env = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("envelope timeout")
+            .expect("recv");
+        if let ControlEvent::RunFinished { summary } = &env.event {
+            assert_eq!(summary.tasks_total, 3);
+            assert_eq!(summary.tasks_failed, 1);
+            saw = true;
+            break;
+        }
+    }
+    assert!(saw, "subscriber must receive broadcast envelope");
+}
+
+/// Cold runs (no live socket) return 404 — the SSE feed is strictly
+/// live; disk replay belongs to the dedicated Replay tab.
 #[tokio::test]
 async fn bridge_returns_not_found_when_no_socket() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = TempDir::new().unwrap();
     let bridge = ControlBridge::new(tmp.path().to_path_buf());
     let err = bridge
         .subscribe("nonexistent-run-id-12345")
@@ -130,162 +194,173 @@ async fn bridge_returns_not_found_when_no_socket() {
     assert!(matches!(err, BridgeError::NotFound), "got {err:?}");
 }
 
+/// Multiple `subscribe()` callers share one `Entry` (one
+/// writer-mode + one subscriber-mode dispatcher connection regardless
+/// of how many SSE clients attach).
 #[tokio::test]
 async fn bridge_subscribe_shares_connection_for_multiple_subscribers() {
-    let tmp = tempfile::tempdir().unwrap();
-    let runs_dir = tmp.path().to_path_buf();
-    let run_id = "01950000-0000-7000-8000-000000000002";
-    let run_dir = runs_dir.join(run_id);
-    std::fs::create_dir_all(&run_dir).unwrap();
-    let socket_path = run_dir.join("control.sock");
+    let runs_dir = TempDir::new().unwrap();
+    let (state, run_id, run_subdir) = make_test_state(&runs_dir).await;
+    let sock = run_subdir.join("control.sock");
+    let _h = start_control_server(
+        sock,
+        "test-0.0.1".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
 
-    let listener = UnixListener::bind(&socket_path).unwrap();
-
-    // Track how many connections the dispatcher accepts. Should be 1
-    // even though we subscribe twice.
-    let server_handle = tokio::spawn(async move {
-        let mut accepted = 0u32;
-        loop {
-            tokio::select! {
-                accept = listener.accept() => {
-                    if let Ok((stream, _)) = accept {
-                        accepted += 1;
-                        let (_read, mut write) = stream.into_split();
-                        // Single broadcast event so both subscribers see something.
-                        let ev = ControlEvent::Hello {
-                            server_version: "shared".into(),
-                            run_id: "shared".into(),
-                            run_kind: "flat".into(),
-                            workers: vec![],
-                            policy_rules: vec![],
-                        };
-                        let mut line = serde_json::to_string(&ev).unwrap();
-                        line.push('\n');
-                        let _ = write.write_all(line.as_bytes()).await;
-                        // Hold the connection.
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_secs(3)) => break accepted,
-            }
-        }
-    });
-
-    let bridge = ControlBridge::new(runs_dir);
-    let mut rx1 = bridge.subscribe(run_id).await.expect("subscribe 1");
-    let mut rx2 = bridge.subscribe(run_id).await.expect("subscribe 2");
-
-    let e1 = timeout(Duration::from_secs(2), rx1.recv())
+    let bridge = ControlBridge::new(runs_dir.path().to_path_buf());
+    let mut rx1 = bridge
+        .subscribe(&run_id.to_string())
         .await
-        .expect("rx1")
-        .expect("rx1 recv");
-    let e2 = timeout(Duration::from_secs(2), rx2.recv())
+        .expect("subscribe 1");
+    let mut rx2 = bridge
+        .subscribe(&run_id.to_string())
         .await
-        .expect("rx2")
-        .expect("rx2 recv");
+        .expect("subscribe 2");
 
-    assert!(matches!(e1.event, ControlEvent::Hello { .. }));
-    assert!(matches!(e2.event, ControlEvent::Hello { .. }));
-
-    drop(rx1);
-    drop(rx2);
-    drop(bridge);
-
-    let accepted = server_handle.await.unwrap();
+    // Same Entry → same bus_bridge → baseline + 1. Two `subscribe()`
+    // calls don't open two dispatcher connections.
+    // 1 baseline (persistence) + 2 from the bridge's two connections
+    // (writer's bus_bridge + subscriber-mode pump's bus_bridge).
+    wait_for_bus_receivers(&state, 3, Duration::from_secs(3)).await;
     assert_eq!(
-        accepted, 1,
-        "bridge must reuse connection across subscribers"
+        state.root.events_tx.receiver_count(),
+        3,
+        "two subscribe() calls must share one dispatcher connection pair \
+         (writer + subscriber + baseline persistence = 3 bus receivers)",
     );
+
+    // Broadcast one envelope; both receivers must observe it via the
+    // shared Entry's broadcast tx.
+    let envelope = pitboss_cli::control::protocol::EventEnvelope {
+        actor_path: pitboss_cli::dispatch::actor::ActorPath::default(),
+        seq: 0,
+        event: ControlEvent::SubleadTerminated {
+            sublead_id: "S1".into(),
+            spent_usd: 0.5,
+            unspent_usd: 0.5,
+            outcome: "success".into(),
+        },
+    };
+    state.root.broadcast_control_event(envelope).await;
+
+    let mut saw1 = false;
+    for _ in 0..8 {
+        let env = timeout(Duration::from_secs(2), rx1.recv())
+            .await
+            .expect("rx1 timeout")
+            .expect("rx1");
+        if matches!(env.event, ControlEvent::SubleadTerminated { .. }) {
+            saw1 = true;
+            break;
+        }
+    }
+    let mut saw2 = false;
+    for _ in 0..8 {
+        let env = timeout(Duration::from_secs(2), rx2.recv())
+            .await
+            .expect("rx2 timeout")
+            .expect("rx2");
+        if matches!(env.event, ControlEvent::SubleadTerminated { .. }) {
+            saw2 = true;
+            break;
+        }
+    }
+    assert!(saw1, "rx1 must see the broadcast event");
+    assert!(saw2, "rx2 must see the broadcast event");
 }
 
+/// PR-Q end-to-end: bridge.send_op writes via the writer-mode
+/// connection, the dispatcher processes the op, the reply is broadcast
+/// via `events_tx`, and the bridge's subscriber-mode pump delivers it
+/// to the SSE receiver.
 #[tokio::test]
 async fn bridge_send_op_round_trips_through_dispatcher() {
-    // End-to-end: subscribe to the bridge, send an op via send_op, the
-    // fake dispatcher echoes an OpAcked, the bridge's reader_loop
-    // delivers the OpAcked envelope to the subscriber. This exercises
-    // the full Phase 3 control-write path without any side-channel
-    // assertions on raw socket bytes (which were flaky under tokio's
-    // current_thread test runtime — the broadcast receiver path is the
-    // one the SPA actually relies on).
-    let tmp = tempfile::tempdir().unwrap();
-    let runs_dir = tmp.path().to_path_buf();
-    let run_id = "01950000-0000-7000-8000-000000000003";
-    let run_dir = runs_dir.join(run_id);
-    std::fs::create_dir_all(&run_dir).unwrap();
-    let socket_path = run_dir.join("control.sock");
+    let runs_dir = TempDir::new().unwrap();
+    let (state, run_id, run_subdir) = make_test_state(&runs_dir).await;
 
-    let listener = UnixListener::bind(&socket_path).unwrap();
+    // Install a worker so ListWorkers returns a non-empty snapshot —
+    // makes the assertion specific.
+    state.root.workers.write().await.insert(
+        "w-1".into(),
+        WorkerState::Running {
+            started_at: chrono::Utc::now(),
+            session_id: Some("sess".into()),
+        },
+    );
+    state
+        .root
+        .worker_prompts
+        .write()
+        .await
+        .insert("w-1".into(), "look into the bug".into());
 
-    let server_handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept");
-        let (read, mut write) = stream.into_split();
-        let mut reader = BufReader::new(read).lines();
-        // Read until we see a cancel_worker, then ack it. Dispatcher
-        // implementations always respond to a recognised op with either
-        // OpAcked or OpFailed; we only need the happy path here.
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.contains("\"op\":\"cancel_worker\"") {
-                let ack = ControlEvent::OpAcked {
-                    op: "cancel_worker".into(),
-                    task_id: Some("w-1".into()),
-                };
-                let mut s = serde_json::to_string(&ack).unwrap();
-                s.push('\n');
-                let _ = write.write_all(s.as_bytes()).await;
-                break;
-            }
-        }
-        // Hold the connection long enough for the bridge's reader to
-        // drain the ack into the broadcast channel before we EOF.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    });
+    let sock = run_subdir.join("control.sock");
+    let _h = start_control_server(
+        sock,
+        "test-0.0.1".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
 
-    let bridge = ControlBridge::new(runs_dir);
-    // Subscribe FIRST so the dispatcher's OpAcked is visible to the
-    // receiver — tokio broadcast only delivers messages sent after a
-    // receiver is created.
-    let mut rx = bridge.subscribe(run_id).await.expect("subscribe");
+    let bridge = ControlBridge::new(runs_dir.path().to_path_buf());
+    let mut rx = bridge
+        .subscribe(&run_id.to_string())
+        .await
+        .expect("subscribe");
 
+    // Wait for the writer + subscriber connections' bus_bridges to
+    // attach before POSTing the op — otherwise the WorkersSnapshot
+    // broadcast might fire while the subscriber pump is still mid-handshake.
+    wait_for_bus_receivers(&state, 3, Duration::from_secs(3)).await;
+
+    // POST ListWorkers via the bridge's writer connection.
     bridge
-        .send_op(
-            run_id,
-            &ControlOp::CancelWorker {
-                task_id: "w-1".into(),
-            },
-        )
+        .send_op(&run_id.to_string(), &ControlOp::ListWorkers)
         .await
         .expect("send_op");
 
-    let envelope = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .expect("recv timeout")
-        .expect("recv chan");
-    match envelope.event {
-        ControlEvent::OpAcked { op, task_id } => {
-            assert_eq!(op, "cancel_worker");
-            assert_eq!(task_id.as_deref(), Some("w-1"));
+    let mut saw = false;
+    for _ in 0..8 {
+        let env = timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("recv timeout")
+            .expect("recv");
+        if let ControlEvent::WorkersSnapshot { workers } = &env.event {
+            assert!(
+                workers.iter().any(|w| w.task_id == "w-1"),
+                "snapshot must include w-1: {workers:?}"
+            );
+            saw = true;
+            break;
         }
-        other => panic!("expected OpAcked, got {other:?}"),
     }
-
-    drop(rx);
-    drop(bridge);
-    let _ = server_handle.await;
+    assert!(
+        saw,
+        "WorkersSnapshot must reach the subscriber receiver via the broadcast bus",
+    );
 }
 
+/// The bridge owns the Hello handshake; clients can't smuggle their
+/// own Hello through `send_op`.
 #[tokio::test]
 async fn bridge_send_op_rejects_client_hello() {
-    let tmp = tempfile::tempdir().unwrap();
-    let runs_dir = tmp.path().to_path_buf();
+    let runs_dir = TempDir::new().unwrap();
     let run_id = "01950000-0000-7000-8000-000000000004";
-    let run_dir = runs_dir.join(run_id);
+    let run_dir = runs_dir.path().join(run_id);
     std::fs::create_dir_all(&run_dir).unwrap();
-
     // Bind a listener so the path exists but never accept — Rejected
     // must fire on the up-front variant check before any IO.
-    let _listener = UnixListener::bind(run_dir.join("control.sock")).unwrap();
+    let _listener = tokio::net::UnixListener::bind(run_dir.join("control.sock")).unwrap();
 
-    let bridge = ControlBridge::new(runs_dir);
+    let bridge = ControlBridge::new(runs_dir.path().to_path_buf());
     let err = bridge
         .send_op(
             run_id,

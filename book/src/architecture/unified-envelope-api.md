@@ -30,8 +30,8 @@ This is a research/design issue. Landing it produces:
 - PR-A–PR-F shipped the disk-side foundation and the TUI cutover.
 - **PR-N (#464) shipped the live-socket transport** for `StreamMode::LiveOnly` and `StreamMode::ReplayThenLive`, plus the `Subscribe { since_seq }` op.
 - **PR-M (#463) shipped the CLI cold-path migration** for `status` and `diff`.
-- **PR-P shipped subscriber-mode client handshakes** — `ControlOp::Hello` gained a `mode: ClientMode` field. Subscriber connections coexist with one writer instead of displacing it, unblocking the web SSE bridge migration.
-- The actual web SSE bridge cutover is tracked as the PR-Q follow-on — the constraint that gated it is resolved; the migration itself is the remaining work.
+- **PR-P (#466) shipped subscriber-mode client handshakes** — `ControlOp::Hello` gained a `mode: ClientMode` field. Subscriber connections coexist with one writer instead of displacing it.
+- **PR-Q shipped the web SSE bridge cutover.** The dispatcher's read loop now broadcasts op replies (`OpAcked` / `OpFailed` / `OpUnknownState` / `WorkersSnapshot`) onto `events_tx` instead of writing them per-connection. `pitboss-web::control_bridge` runs two dispatcher connections per run: a writer-mode `UnixStream` for `send_op`, and a `pitboss_core::stream::open_run_stream(ReplayThenLive)`-driven subscriber pump for SSE fan-out. The on-the-wire SSE shape (`event: control` + envelope JSON) is unchanged.
 
 ## Sum type: `RunStreamItem`
 
@@ -236,15 +236,20 @@ The TUI slice keeps the ad-hoc reader for per-actor `tasks/<id>/events.jsonl` (d
 
 ### 2. Web (`pitboss-web`)
 
-`control_bridge.rs` becomes a `ReplayThenLive` consumer per run, fanning out to SSE clients. The historical readers in `api/runs.rs`, `api/events.rs`, and `insights/aggregator.rs` become `ReplayOnly` consumers. The on-the-wire SSE shape is unchanged — the migration is internal.
+Shipped in **PR-Q**. The on-the-wire SSE shape (`event: control` + envelope JSON) is unchanged — the migration is internal.
 
-The single-`control_writer`-slot constraint that originally blocked this migration (`serve_connection` superseding the previous client on every accept) is resolved by **PR-P**. `ControlOp::Hello` now carries an optional `mode: ClientMode` field; subscriber-mode clients skip the writer-slot install, the approval-queue drain, and the bridge replay. Multiple subscribers coexist with one writer over the broadcast bus — exactly the topology this migration needs. `pitboss-core::stream::drive_live` already announces `"mode":"subscriber"` in its Hello, so any `open_run_stream(LiveOnly | ReplayThenLive)` consumer is non-displacing by construction.
+`control_bridge.rs` now holds two dispatcher connections per run:
 
-The remaining work (PR-Q) is the actual web cutover:
+- A **writer-mode `UnixStream`** for `send_op`. Owns the write half; a drain task on the read half reads-and-discards (the subscriber arm covers SSE delivery; the drain just prevents kernel-buffer backpressure).
+- A **subscriber-mode pump** driven by `pitboss_core::stream::open_run_stream(run_dir, StreamMode::ReplayThenLive)`. Filters `RunStreamPayload::Event` items and forwards the inner envelope into the existing `broadcast::Sender<EventEnvelope>` that SSE clients subscribe to. `Task` and `Lifecycle` payloads are dropped — disk-replay items belong to the dedicated Replay tab via `/api/runs/:id/events-jsonl`, not the live SSE feed.
 
-- The SSE handler reads from `open_run_stream(ReplayThenLive)` per run, fan-out unchanged.
-- `control_bridge.rs` shrinks to a writer-only single-connection shim for `send_op` (still in `Writer` mode — only one writer is needed per run).
-- The historical readers in `api/runs.rs` are short-circuit reads of single files (manifest, resolved, summary) and don't benefit from `open_run_stream` — they stay on `read_run_snapshot`. `insights/aggregator.rs` was evaluated; the per-run overhead of spawning a tokio task and draining an mpsc channel for what is otherwise a sync `read_run_snapshot` call makes it a perf regression at the scale the aggregator runs (hundreds of run dirs). The migration there is correct but unprofitable, and is deferred.
+Op replies (`OpAcked` / `OpFailed` / `OpUnknownState` / `WorkersSnapshot`) reach SSE clients via the dispatcher's broadcast bus rather than the writer's read half. PR-Q changed `serve_connection`'s read loop to route the `dispatch_op` result through `broadcast_control_event` instead of `send_event`. Every connected client's `bus_bridge` picks the envelope up, including the writer's own bus_bridge — so the writer still sees its own replies. Side effects of the routing change: op replies become run-wide observable (multi-viewer parity), and they appear in `events.jsonl` when `[run].emit_event_stream = true` (richer audit log).
+
+Subscriber-mode rejection (writer ops on a subscriber connection) and parse errors continue to use direct `send_event` — they're feedback specifically to the misbehaving connection, not broadcast-worthy.
+
+Cold-run 404 contract preserved: `ensure_connected` checks for socket existence before opening the unified stream. `open_run_stream(ReplayThenLive)` on a finalized run would otherwise replay disk events.jsonl over the SSE feed, which the SPA expects not to happen.
+
+The historical readers in `api/runs.rs` are short-circuit reads of single files (manifest, resolved, summary) and don't benefit from `open_run_stream` — they stay on `read_run_snapshot`. `insights/aggregator.rs` was evaluated; the per-run overhead of spawning a tokio task and draining an mpsc channel for what is otherwise a sync `read_run_snapshot` call makes it a perf regression at the scale the aggregator runs (hundreds of run dirs). The migration there is correct but unprofitable, and is deferred.
 
 ### 3. CLI one-shots (`status`, `diff`, `list`, dispatch finalize)
 

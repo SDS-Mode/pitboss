@@ -847,10 +847,13 @@ Wire shape:
 **What's in the log:** every envelope produced by the dispatcher's
 `broadcast_control_event` path — `sublead_spawned`,
 `sublead_terminated`, `worker_failed`, run-wide `approval_request`
-(including ones queued before any client connected). Also
-connection-scoped envelopes that ran during an attached session:
-`approval_request` replay, `op_acked` / `op_failed`,
-`store_activity` ticks, `superseded`.
+(including ones queued before any client connected). As of v0.14
+(PR-Q of #438) this also includes **op replies** — `op_acked`,
+`op_failed`, `op_unknown_state`, `workers_snapshot` — which were
+previously connection-scoped. The log now records every accepted
+control op alongside what the dispatcher did with it (audit trail).
+Also connection-scoped envelopes that ran during an attached session:
+`approval_request` replay, `store_activity` ticks, `superseded`.
 
 **What's not in the log:**
 
@@ -859,8 +862,8 @@ connection-scoped envelopes that ran during an attached session:
 - Connection-scoped envelopes that fired during periods when no
   client was attached (e.g. `store_activity` ticks only run while
   a TUI / web bridge is connected). The bus-routed events
-  (sub-lead lifecycle, worker failures, approvals) persist
-  unconditionally.
+  (sub-lead lifecycle, worker failures, approvals, op replies)
+  persist unconditionally.
 
 Three ways to consume the log:
 
@@ -994,9 +997,17 @@ PR-N); every other op returns `OpFailed`.
 
 The dispatcher fans out broadcast envelopes (`broadcast_control_event`)
 to every connected client — writer and all subscribers — via the
-per-run `events_tx: broadcast::Sender<EventEnvelope>`. Connection-scoped
-envelopes (op replies, `store_activity` ticks, queued-approval drain)
-go only to the originating connection.
+per-run `events_tx: broadcast::Sender<EventEnvelope>`. As of v0.14
+(PR-Q of #438) this includes **op replies** (`OpAcked`, `OpFailed`,
+`OpUnknownState`, `WorkersSnapshot`) — they're routed through the bus
+so multi-viewer SSE bridges and unified-API consumers all see the same
+reply stream, and the replies persist in `events.jsonl` when
+`emit_event_stream = true`. Connection-scoped envelopes that remain
+direct: server `Hello` (per-connection bootstrap), `Superseded`
+(targeted at the displaced writer), `StoreActivity` ticks
+(per-connection ticker), and the queued-approval drain / bridge replay
+(a reconnecting TUI needs its own re-delivery, but a fresh subscriber
+doesn't).
 
 ---
 
