@@ -192,8 +192,12 @@ fn main() -> Result<()> {
             clap_complete::generate(shell, &mut cmd, "pitboss", &mut std::io::stdout());
             std::process::exit(0);
         }
-        Command::Schema { format, check } => {
-            std::process::exit(run_schema(format, check.as_deref()));
+        Command::Schema {
+            format,
+            check,
+            manifest,
+        } => {
+            std::process::exit(run_schema(format, check.as_deref(), manifest.as_deref()));
         }
         Command::Init {
             output,
@@ -275,11 +279,48 @@ fn run_init(
 }
 
 /// Drive `pitboss schema --format=...`. Returns the exit code.
-fn run_schema(format: cli::SchemaFormat, check: Option<&std::path::Path>) -> i32 {
+fn run_schema(
+    format: cli::SchemaFormat,
+    check: Option<&std::path::Path>,
+    manifest_path: Option<&std::path::Path>,
+) -> i32 {
     let (generated, format_flag) = match format {
         cli::SchemaFormat::Map => (crate::manifest::map_doc::render(), "map"),
         cli::SchemaFormat::Example => (crate::manifest::example_doc::render(), "example"),
         cli::SchemaFormat::Migration => (crate::manifest::migration_doc::render(), "migration"),
+        cli::SchemaFormat::AgentProfiles => {
+            // Load the manifest's agent_profiles when --manifest is set.
+            // We deliberately use the raw schema (not resolved) so we
+            // see the operator's declared list, not the merged catalogue
+            // (built-ins are added by the renderer itself).
+            let manifest_profiles: Vec<crate::manifest::schema::AgentProfile> = match manifest_path
+            {
+                Some(p) => match std::fs::read_to_string(p) {
+                    Ok(s) => match toml::from_str::<crate::manifest::schema::Manifest>(&s) {
+                        Ok(m) => m.agent_profiles,
+                        Err(e) => {
+                            eprintln!(
+                                "pitboss schema --format=agent-profiles: cannot parse {}: {e}",
+                                p.display()
+                            );
+                            return 2;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!(
+                            "pitboss schema --format=agent-profiles: cannot read {}: {e}",
+                            p.display()
+                        );
+                        return 2;
+                    }
+                },
+                None => Vec::new(),
+            };
+            (
+                crate::manifest::agent_profile_doc::render(&manifest_profiles),
+                "agent-profiles",
+            )
+        }
     };
     match check {
         None => {

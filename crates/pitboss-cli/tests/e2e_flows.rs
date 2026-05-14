@@ -87,6 +87,7 @@ fn mk_state(
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(run_dir.to_path_buf()));
     // Worker-side spawner: emits a complete stream-json run then exits 0.
@@ -402,6 +403,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let hold_script = FakeScript::new().hold_until_signal();
@@ -673,6 +675,7 @@ async fn e2e_lead_reprompts_running_worker() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     // Worker script emits init+result so session_id gets captured via the
@@ -882,6 +885,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let worker_script = FakeScript::new()
@@ -1193,6 +1197,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeClaudeWorkerSpawner {

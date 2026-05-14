@@ -386,7 +386,20 @@ pub async fn handle_spawn_worker(
     let target_layer_bg = Arc::clone(&target_layer);
     let task_id_bg = task_id.clone();
     let lead_id_bg = target_layer.lead_id.clone();
-    let prompt_bg = args.prompt.clone();
+    // Compose the worker prompt: if the matched `[[worker_type]]` binds
+    // an `agent_profile`, prepend the profile's `system_prompt` to the
+    // operator-supplied prompt with `\n\n--- TASK ---\n\n` separator.
+    // Untyped spawns / typeless / dangling references → operator prompt
+    // verbatim.
+    let worker_type_for_profile = match &profile_resolution {
+        crate::manifest::actor_type::WorkerProfileResolution::Typed(p) => Some(*p),
+        crate::manifest::actor_type::WorkerProfileResolution::Untyped => None,
+    };
+    let agent_profile = crate::manifest::actor_type::worker_agent_profile(
+        worker_type_for_profile,
+        &state.root.manifest.agent_profiles,
+    );
+    let prompt_bg = crate::manifest::resolve::compose_prompt(agent_profile, &args.prompt);
 
     let worker_type_id_bg = resolved_worker_type_id.clone();
     tokio::spawn(async move {
@@ -578,13 +591,34 @@ async fn run_worker(
     // though the operator set `[defaults.env]` at the manifest level.
     // Fall back through the root lead (always populated, carries the
     // merged [defaults.env] + [lead.env]) before defaulting to empty.
-    let lead_env_for_worker = layer
+    let mut lead_env_for_worker = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
         .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
         .unwrap_or_default();
+    // Merge the agent_profile env (bound via `[[worker_type]].agent_profile`)
+    // on top of the inherited lead env. Profile env wins over inherited
+    // lead env on collision; pitboss defaults (CLAUDE_CODE_ENTRYPOINT,
+    // etc.) still fill any remaining slot inside `compose_sublead_env`.
+    let agent_profile_env: std::collections::HashMap<String, String> = actor_type
+        .as_deref()
+        .and_then(|t| {
+            state
+                .root
+                .manifest
+                .worker_types
+                .iter()
+                .find(|wt| wt.id == t)
+        })
+        .and_then(|wt| wt.agent_profile.as_deref())
+        .and_then(|id| state.root.manifest.agent_profiles.get(id))
+        .map(|p| p.env.clone())
+        .unwrap_or_default();
+    for (k, v) in agent_profile_env {
+        lead_env_for_worker.insert(k, v);
+    }
     let worker_routing = layer
         .manifest
         .lead

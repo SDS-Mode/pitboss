@@ -25,6 +25,7 @@
 //! | `[[notification]]`        | `NotificationConfig`  | no       | Notification sinks                                   |
 //! | `[[approval_policy]]`     | `ApprovalRuleSpec`    | no       | Declarative approval rules (matched in order)        |
 //! | `[[template]]`            | `Template`            | no       | Prompt templates referenced by `[[task]]`            |
+//! | `[[agent_profile]]`       | `AgentProfile`        | no       | Reusable role prelude + env/model/tools defaults     |
 //!
 //! ## Migration from v0.8 → v0.9
 //!
@@ -362,6 +363,14 @@ pub struct Manifest {
     pub defaults: Defaults,
     #[serde(default, rename = "template")]
     pub templates: Vec<Template>,
+    /// Reusable role profiles (`[[agent_profile]]`). The effective
+    /// catalogue at resolve time is the union of bundled built-ins
+    /// (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
+    /// `pitboss/worker-haiku`) and these manifest-declared entries;
+    /// manifest entries shadow built-ins by matching id exactly. See
+    /// [`AgentProfile`].
+    #[serde(default, rename = "agent_profile")]
+    pub agent_profiles: Vec<AgentProfile>,
     #[serde(default, rename = "task")]
     pub tasks: Vec<Task>,
     /// Single-table `[lead]` for hierarchical mode. Exactly one is required
@@ -701,6 +710,73 @@ pub enum WorktreeCleanup {
     Never,
 }
 
+/// Reusable role profile (`[[agent_profile]]`). Carries a prepended
+/// system-prompt body plus optional model/tools/env *defaults*. Unlike
+/// [`WorkerType`]/[`SubleadType`] which encode capability **caps**,
+/// agent profiles supply role conventions and fallbacks the operator's
+/// `[lead]`/`[[task]]` config can override.
+///
+/// Referenced by id from `[lead]`, `[[task]]`, `[[worker_type]]`, and
+/// `[[sublead_type]]`. The catalogue is the union of three bundled
+/// built-ins (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
+/// `pitboss/worker-haiku`) and any manifest-declared profiles; manifest
+/// entries shadow built-ins by matching id exactly.
+///
+/// Precedence (later wins): `DEFAULT_*` → `profile` → `[defaults]` →
+/// per-actor (`[lead]` / `[[task]]` / spawn args). Operator config
+/// always wins; the profile is a default-provider, never an override.
+/// The `system_prompt` is **prepended** to the operator's prompt with a
+/// fixed `\n\n--- TASK ---\n\n` separator (never replaced).
+#[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfile {
+    /// Unique id. Must match `^[A-Za-z0-9_/-]+$` (validate-time check).
+    /// The `pitboss/` namespace is reserved for built-ins — a manifest
+    /// may shadow a built-in by matching its id exactly, but may not
+    /// introduce novel `pitboss/<other>` ids.
+    #[field(
+        label = "Profile id",
+        help = "Unique id referenced from [lead]/[[task]]/[[worker_type]]/[[sublead_type]] .agent_profile. Match: ^[A-Za-z0-9_/-]+$. The pitboss/ namespace is reserved for built-ins."
+    )]
+    pub id: String,
+    /// Role prelude prepended to the operator's prompt with a
+    /// `\n\n--- TASK ---\n\n` separator. Empty (default) means no
+    /// prelude — profile is just an env/model/tools default-provider.
+    #[serde(default)]
+    #[field(
+        label = "System prompt",
+        help = "Role-shared prelude prepended to the operator's prompt with `\\n\\n--- TASK ---\\n\\n` separator.",
+        form_type = "long_text"
+    )]
+    pub system_prompt: String,
+    /// Default model. The operator's `model =` on the actor wins; this
+    /// fills any slot the operator didn't fill. Distinct from
+    /// `[[worker_type]].allowed_models` which is a *cap*.
+    #[serde(default)]
+    #[field(
+        label = "Model",
+        help = "Default Claude model id when the actor's `model =` is unset. Not a cap — operator config wins."
+    )]
+    pub model: Option<String>,
+    /// Env vars merged in between `[defaults].env` and the per-actor
+    /// env. Operator env wins on collision.
+    #[serde(default)]
+    #[field(
+        label = "Env vars",
+        help = "Env merged between [defaults].env and the per-actor env. Operator wins on collision."
+    )]
+    pub env: HashMap<String, String>,
+    /// Default tool allowlist. The operator's `tools =` wins; this
+    /// fills any slot the operator didn't fill. Distinct from
+    /// `[[worker_type]].tools` which is a *cap*.
+    #[serde(default)]
+    #[field(
+        label = "Tools",
+        help = "Default tool allowlist when the actor's `tools =` is unset. Not a cap — operator config wins."
+    )]
+    pub tools: Option<Vec<String>>,
+}
+
 /// Typed worker profile (`[[worker_type]]`). Caps the capability
 /// surface a `spawn_worker(worker_type = "<id>")` call may request.
 /// The lead-supplied `tools` arg must be a subset of `tools`;
@@ -743,6 +819,17 @@ pub struct WorkerType {
         help = "Hard cap on spawn_worker(timeout_secs=...). Lead values clamp DOWN; smaller values pass through."
     )]
     pub max_timeout_secs: Option<u64>,
+    /// Optional reference to an [`AgentProfile`] id (built-in or
+    /// manifest-declared). When set, every `spawn_worker(worker_type =
+    /// "<id>")` call gets the profile's `system_prompt` prepended to its
+    /// operator prompt and inherits the profile's env/model/tools
+    /// defaults for any slot the call didn't fill.
+    #[serde(default)]
+    #[field(
+        label = "Agent profile",
+        help = "Reference to an [[agent_profile]].id. Workers spawned under this worker_type inherit the profile's system_prompt prelude + env/model/tools defaults."
+    )]
+    pub agent_profile: Option<String>,
 }
 
 /// Typed sub-lead profile (`[[sublead_type]]`). Same enforcement model
@@ -786,6 +873,17 @@ pub struct SubleadType {
         help = "Hard cap on spawn_sublead(budget_usd=...). Clamps DOWN."
     )]
     pub max_budget_usd: Option<f64>,
+    /// Optional reference to an [`AgentProfile`] id (built-in or
+    /// manifest-declared). When set, every
+    /// `spawn_sublead(sublead_type = "<id>")` call gets the profile's
+    /// `system_prompt` prepended to its operator prompt and inherits
+    /// the profile's env/model/tools defaults.
+    #[serde(default)]
+    #[field(
+        label = "Agent profile",
+        help = "Reference to an [[agent_profile]].id. Sub-leads spawned under this sublead_type inherit the profile's system_prompt prelude + env/model/tools defaults."
+    )]
+    pub agent_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, FieldMetadata)]
@@ -909,6 +1007,16 @@ pub struct Task {
         help = "Per-task env vars merged on top of [defaults].env."
     )]
     pub env: HashMap<String, String>,
+    /// Optional reference to an [`AgentProfile`] id (built-in or
+    /// manifest-declared). When set, the profile's `system_prompt` is
+    /// prepended to the task prompt at resolve time, and the profile's
+    /// env/model/tools defaults fill any slot the task didn't fill.
+    #[serde(default)]
+    #[field(
+        label = "Agent profile",
+        help = "Reference to an [[agent_profile]].id. The profile's system_prompt is prepended; its env/model/tools defaults fill any slot the task didn't set."
+    )]
+    pub agent_profile: Option<String>,
 }
 
 /// Single canonical lead shape (v0.9). Replaces the v0.8 `[[lead]]`/`[lead]` split.
@@ -1075,6 +1183,16 @@ pub struct Lead {
         help = "Cap on total live workers across the entire tree (root + sub-trees)."
     )]
     pub max_total_workers: Option<u32>,
+    /// Optional reference to an [`AgentProfile`] id (built-in or
+    /// manifest-declared). When set, the profile's `system_prompt` is
+    /// prepended to `[lead].prompt` at resolve time, and the profile's
+    /// env/model/tools defaults fill any slot the lead didn't fill.
+    #[serde(default)]
+    #[field(
+        label = "Agent profile",
+        help = "Reference to an [[agent_profile]].id. The profile's system_prompt is prepended to [lead].prompt; its env/model/tools defaults fill any slot the lead didn't set."
+    )]
+    pub agent_profile: Option<String>,
 }
 
 /// Top-level `[sublead_defaults]` block (promoted from `[lead.sublead_defaults]`

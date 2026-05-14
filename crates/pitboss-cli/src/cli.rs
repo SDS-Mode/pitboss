@@ -484,6 +484,12 @@ pub enum Command {
         /// path and exit non-zero if they differ. Otherwise prints to stdout.
         #[arg(long, value_name = "PATH")]
         check: Option<PathBuf>,
+        /// Optional manifest path. Currently only meaningful for
+        /// `--format=agent-profiles`: when set, the renderer merges the
+        /// manifest's `[[agent_profile]]` entries (marked `source=manifest`)
+        /// with the bundled built-ins. Ignored for other formats.
+        #[arg(long, value_name = "PATH")]
+        manifest: Option<PathBuf>,
     },
 }
 
@@ -501,6 +507,11 @@ pub enum SchemaFormat {
     /// the operator customizes `tools`, `allowed_models`, and the
     /// numeric caps to fit their run.
     Migration,
+    /// Reusable role profiles (`[[agent_profile]]`). Lists the bundled
+    /// built-ins (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
+    /// `pitboss/worker-haiku`); pass `--manifest <path>` to also include
+    /// the manifest-declared profiles.
+    AgentProfiles,
 }
 
 /// Starter templates supported by `pitboss init`.

@@ -70,6 +70,7 @@ tools = []
 timeout_secs = 0
 use_worktree = false
 env = { EXAMPLE_KEY = "value" }
+agent_profile = "<value>"
 
 [lead]
 id = "<value>"
@@ -93,6 +94,7 @@ allow_subleads = false
 max_subleads = 0
 max_sublead_budget_usd = 0.0
 max_total_workers = 0
+agent_profile = "<value>"
 
 [sublead_defaults]
 budget_usd = 0.0
@@ -117,6 +119,7 @@ id = "<value>"
 tools = []
 allowed_models = []
 max_timeout_secs = 0
+agent_profile = "<value>"
 
 [[sublead_type]]
 id = "<value>"
@@ -124,6 +127,7 @@ tools = []
 allowed_models = []
 max_timeout_secs = 0
 max_budget_usd = 0.0
+agent_profile = "<value>"
 
 [communication]
 mode = "disabled"

@@ -7,8 +7,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
-    CommunicationConfig, ContainerConfig, Defaults, Effort, Lead, Manifest, SubleadDefaults, Task,
-    Template, WorktreeCleanup,
+    AgentProfile, CommunicationConfig, ContainerConfig, Defaults, Effort, Lead, Manifest,
+    SubleadDefaults, Task, Template, WorktreeCleanup,
 };
 
 /// Fully resolved task ready for dispatch.
@@ -217,6 +217,15 @@ pub struct ResolvedManifest {
     /// auto-denies via `denied_by_profile`. (#252)
     #[serde(default)]
     pub untyped_actor_policy: crate::manifest::schema::UntypedActorPolicy,
+    /// Effective [`AgentProfile`] catalogue: bundled built-ins union
+    /// with manifest-declared `[[agent_profile]]` entries. Manifest
+    /// entries shadow built-ins by matching id exactly. Looked up at
+    /// MCP-spawn time by `worker_type`/`sublead_type` →
+    /// `agent_profile` references to compose worker/sublead prompts +
+    /// env defaults. Serialised so `resolved.json` round-trips through
+    /// resume.
+    #[serde(default)]
+    pub agent_profiles: HashMap<String, AgentProfile>,
 }
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -240,9 +249,64 @@ pub fn resolve(
         .map(|t| (t.id.clone(), t))
         .collect();
 
+    // Reject duplicate manifest-declared agent_profile ids up-front: a
+    // duplicate would silently shadow the earlier entry once we collapse
+    // into a HashMap, matching the dedup posture of [[worker_type]] in
+    // validate.rs.
+    {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for p in &manifest.agent_profiles {
+            if !seen.insert(p.id.as_str()) {
+                bail!(
+                    "[[agent_profile]].id {:?}: duplicate; ids must be \
+                     unique within the manifest (catalogue lookup collapses \
+                     duplicates and would silently shadow the earlier entry)",
+                    p.id
+                );
+            }
+        }
+    }
+    // Build the effective agent-profile catalogue: bundled built-ins
+    // first, manifest entries last so a manifest entry sharing a
+    // built-in id shadows it via HashMap::insert's last-wins semantics.
+    let agent_profiles: HashMap<String, AgentProfile> =
+        crate::manifest::builtin_profiles::load_builtins()
+            .into_iter()
+            .chain(manifest.agent_profiles.iter().cloned())
+            .map(|p| (p.id.clone(), p))
+            .collect();
+
+    // Lookup helper: dangling agent_profile references on `[lead]` /
+    // `[[task]]` hard-fail at resolve so a typo doesn't silently fall
+    // back to "no prelude" — operator intent is lost otherwise.
+    let lookup_profile = |surface: &str,
+                          maybe_ref: Option<&str>|
+     -> Result<Option<&AgentProfile>> {
+        match maybe_ref {
+            Some(id) => match agent_profiles.get(id) {
+                Some(p) => Ok(Some(p)),
+                None => {
+                    let mut known: Vec<&str> = agent_profiles.keys().map(String::as_str).collect();
+                    known.sort();
+                    bail!(
+                        "{surface}: agent_profile {id:?} not found. \
+                         Declared profiles (built-ins + manifest): {}. \
+                         See `pitboss schema --format=agent-profiles`.",
+                        known.join(", ")
+                    );
+                }
+            },
+            None => Ok(None),
+        }
+    };
+
     let mut resolved_tasks = Vec::with_capacity(manifest.tasks.len());
     for task in &manifest.tasks {
-        resolved_tasks.push(resolve_task(task, &manifest.defaults, &templates)?);
+        let profile = lookup_profile(
+            &format!("[[task]] id={:?}", task.id),
+            task.agent_profile.as_deref(),
+        )?;
+        resolved_tasks.push(resolve_task(task, &manifest.defaults, &templates, profile)?);
     }
 
     let resolved_sublead_defaults = manifest
@@ -251,10 +315,12 @@ pub fn resolve(
         .map(resolve_sublead_defaults);
 
     let resolved_lead = if let Some(l) = &manifest.lead {
+        let profile = lookup_profile(&format!("[lead] id={:?}", l.id), l.agent_profile.as_deref())?;
         Some(resolve_lead(
             l,
             &manifest.defaults,
             resolved_sublead_defaults.clone(),
+            profile,
         )?)
     } else {
         None
@@ -331,15 +397,39 @@ pub fn resolve(
         sublead_types: manifest.sublead_types,
         require_actor_type: manifest.run.require_actor_type,
         untyped_actor_policy: manifest.run.untyped_actor_policy,
+        agent_profiles,
     })
+}
+
+/// Compose the worker/lead/task prompt by prepending the profile's
+/// `system_prompt` (if any) to the operator's prompt with a fixed
+/// `\n\n--- TASK ---\n\n` separator. Operator content is never
+/// replaced — the profile only contributes the prelude.
+pub fn compose_prompt(profile: Option<&AgentProfile>, operator_prompt: &str) -> String {
+    match profile
+        .map(|p| p.system_prompt.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(prelude) => format!("{prelude}\n\n--- TASK ---\n\n{operator_prompt}"),
+        None => operator_prompt.to_string(),
+    }
 }
 
 fn resolve_lead(
     lead: &Lead,
     defaults: &Defaults,
     sublead_defaults: Option<ResolvedSubleadDefaults>,
+    profile: Option<&AgentProfile>,
 ) -> Result<ResolvedLead> {
+    // Env precedence (later wins): defaults.env → profile.env → lead.env.
+    // Operator-supplied per-actor env beats the profile's role default,
+    // which beats the manifest-wide defaults block.
     let mut env = defaults.env.clone();
+    if let Some(p) = profile {
+        for (k, v) in &p.env {
+            env.insert(k.clone(), v.clone());
+        }
+    }
     env.extend(lead.env.clone());
 
     // Lead timeout cascade: per-lead timeout_secs > lead.lead_timeout_secs
@@ -350,21 +440,30 @@ fn resolve_lead(
         .or(defaults.timeout_secs)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+    let prompt = compose_prompt(profile, &lead.prompt);
+
     Ok(ResolvedLead {
         id: lead.id.clone(),
         directory: lead.directory.clone(),
-        prompt: lead.prompt.clone(),
+        prompt,
         branch: lead.branch.clone(),
+        // Model precedence: lead.model > defaults.model > profile.model
+        // > DEFAULT_MODEL. The profile is a default-provider, not an
+        // override.
         model: lead
             .model
             .clone()
             .or_else(|| defaults.model.clone())
+            .or_else(|| profile.and_then(|p| p.model.clone()))
             .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
         effort: lead.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
+        // Tools precedence mirrors model: lead.tools > defaults.tools
+        // > profile.tools > default_tools().
         tools: lead
             .tools
             .clone()
             .or_else(|| defaults.tools.clone())
+            .or_else(|| profile.and_then(|p| p.tools.clone()))
             .unwrap_or_else(default_tools),
         timeout_secs,
         use_worktree: lead.use_worktree.or(defaults.use_worktree).unwrap_or(true),
@@ -383,8 +482,9 @@ fn resolve_task(
     task: &Task,
     defaults: &Defaults,
     templates: &HashMap<String, &Template>,
+    profile: Option<&AgentProfile>,
 ) -> Result<ResolvedTask> {
-    let prompt = match (&task.prompt, &task.template) {
+    let raw_prompt = match (&task.prompt, &task.template) {
         (Some(p), None) => p.clone(),
         (None, Some(tid)) => {
             let tmpl = templates.get(tid).ok_or_else(|| {
@@ -396,8 +496,15 @@ fn resolve_task(
         (Some(_), Some(_)) => bail!("task '{}' sets both prompt and template", task.id),
         (None, None) => bail!("task '{}' has no prompt and no template", task.id),
     };
+    let prompt = compose_prompt(profile, &raw_prompt);
 
+    // Env precedence (later wins): defaults.env → profile.env → task.env.
     let mut env = defaults.env.clone();
+    if let Some(p) = profile {
+        for (k, v) in &p.env {
+            env.insert(k.clone(), v.clone());
+        }
+    }
     env.extend(task.env.clone());
 
     Ok(ResolvedTask {
@@ -405,16 +512,19 @@ fn resolve_task(
         directory: task.directory.clone(),
         prompt,
         branch: task.branch.clone(),
+        // Model/tools precedence: per-task > defaults > profile > built-in.
         model: task
             .model
             .clone()
             .or_else(|| defaults.model.clone())
+            .or_else(|| profile.and_then(|p| p.model.clone()))
             .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
         effort: task.effort.or(defaults.effort).unwrap_or(DEFAULT_EFFORT),
         tools: task
             .tools
             .clone()
             .or_else(|| defaults.tools.clone())
+            .or_else(|| profile.and_then(|p| p.tools.clone()))
             .unwrap_or_else(default_tools),
         timeout_secs: task
             .timeout_secs

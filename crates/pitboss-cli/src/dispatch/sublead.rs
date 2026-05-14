@@ -574,9 +574,26 @@ async fn spawn_sublead_session(
         .as_ref()
         .map(|l| l.permission_routing)
         .unwrap_or_default();
+    // Compose the sub-lead prompt: if the matched `[[sublead_type]]`
+    // binds an `agent_profile`, prepend its `system_prompt` to the
+    // operator-supplied prompt with `\n\n--- TASK ---\n\n` separator.
+    // Untyped spawns / dangling references → operator prompt verbatim.
+    let sublead_type_resolved = sublead_type.as_deref().and_then(|id| {
+        state
+            .root
+            .manifest
+            .sublead_types
+            .iter()
+            .find(|st| st.id == id)
+    });
+    let sublead_agent_profile = crate::manifest::actor_type::sublead_agent_profile(
+        sublead_type_resolved,
+        &state.root.manifest.agent_profiles,
+    );
+    let composed_prompt = crate::manifest::resolve::compose_prompt(sublead_agent_profile, &prompt);
     let args = sublead_spawn_args(
         &sublead_id,
-        &prompt,
+        &composed_prompt,
         &model,
         &mcp_config_path,
         resume_session_id.as_deref(),
@@ -623,13 +640,22 @@ async fn spawn_sublead_session(
     //    blocks like `[defaults.env]` (WORK_DIR/ARTIFACTS_DIR/etc.)
     //    reach subleads automatically; the lead doesn't have to re-pass
     //    them in every spawn_sublead call.
-    let lead_env = state
+    let mut lead_env = state
         .root
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
         .unwrap_or_default();
+    // Merge the agent_profile env (bound via `[[sublead_type]].agent_profile`)
+    // on top of inherited lead env. Profile env wins over inherited lead env
+    // on collision; operator_env (from the spawn_sublead MCP call) wins
+    // over profile env inside `compose_sublead_env`.
+    if let Some(p) = sublead_agent_profile {
+        for (k, v) in &p.env {
+            lead_env.insert(k.clone(), v.clone());
+        }
+    }
     let routing = state
         .root
         .manifest
