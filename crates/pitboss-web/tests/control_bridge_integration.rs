@@ -291,6 +291,7 @@ async fn bridge_send_op_rejects_client_hello() {
             run_id,
             &ControlOp::Hello {
                 client_version: "spoof/0.0.0".into(),
+                mode: pitboss_cli::control::protocol::ClientMode::default(),
             },
         )
         .await

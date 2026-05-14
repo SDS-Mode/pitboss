@@ -162,6 +162,7 @@ impl ControlBridge {
         // it up after we register the broadcast sender.
         let hello = ControlOp::Hello {
             client_version: format!("pitboss-web/{}", env!("CARGO_PKG_VERSION")),
+            mode: pitboss_cli::control::protocol::ClientMode::default(),
         };
         let mut hello_line =
             serde_json::to_string(&hello).map_err(|e| BridgeError::Handshake(e.to_string()))?;

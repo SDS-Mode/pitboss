@@ -205,6 +205,7 @@ async fn drive_socket(socket_path: PathBuf, tx: mpsc::Sender<LiveStreamItem>) {
 async fn send_hello(w: &mut OwnedWriteHalf) -> Result<()> {
     let hello = ControlOp::Hello {
         client_version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: crate::control::protocol::ClientMode::default(),
     };
     let mut line = serde_json::to_string(&hello)?;
     line.push('\n');
