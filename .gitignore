@@ -71,3 +71,10 @@ NOTES-*.md
 # session doesn't accidentally promote them to a commit.
 /work.md
 /CLAUDE.md
+
+# Local-only manifest scratch — operators keep their own
+# `pitboss dispatch` / `container-dispatch` manifests here so they're
+# reachable from the working tree (relative paths in launcher scripts,
+# easier `pitboss validate <path>` invocation) without polluting git
+# history. Anchored to the repo root.
+/pb_manifests/
