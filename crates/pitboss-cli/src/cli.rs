@@ -270,6 +270,49 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the per-run aggregated audit log (#414).
+    ///
+    /// Reads `<run-dir>/audit.jsonl`, which the dispatcher tees from
+    /// every per-actor `tasks/<actor>/events.jsonl` write — every
+    /// pause, continue, reprompt, approval request/response,
+    /// notification failure, and tool-permission decision across the
+    /// entire actor tree, in chronological order, attributed to its
+    /// actor.
+    ///
+    /// Default output is a fixed-width columnar render (ts · actor_id
+    /// · kind · detail). Use `--json` for the raw NDJSON suitable for
+    /// piping into `jq`. Filters compose: `--actor`, `--kind`,
+    /// `--since`, `--reason-kind` all narrow the rendered rows
+    /// independently.
+    Audit {
+        /// Run id (full UUID or unique prefix).
+        run_id: String,
+        /// Override runs base directory. Defaults to
+        /// `~/.local/share/pitboss/runs`.
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+        /// Keep only rows whose `actor_id` exactly matches this value.
+        #[arg(long)]
+        actor: Option<String>,
+        /// Keep only rows whose `event.kind` matches (one of:
+        /// `pause`, `continue`, `reprompt`, `approval_request`,
+        /// `approval_response`, `notification_failed`, `tool_denied`,
+        /// `tool_auto_approved`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Keep only rows with `event.at >= <RFC3339>`. Example:
+        /// `--since 2026-05-14T03:00:00Z`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Keep only `tool_denied` rows with the given `reason_kind`
+        /// (e.g. `denied_by_rule`, `operator_rejected`). Implicitly
+        /// filters out every other variant.
+        #[arg(long = "reason-kind")]
+        reason_kind: Option<String>,
+        /// Emit raw NDJSON instead of the columnar render.
+        #[arg(long)]
+        json: bool,
+    },
     /// Triage a single run or roll up recent runs.
     ///
     /// Single-run mode (`pitboss analyze <run-id>`): produces a

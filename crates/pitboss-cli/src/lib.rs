@@ -7,6 +7,7 @@
 pub mod agents_md;
 pub mod analyze;
 pub mod attach;
+pub mod audit;
 pub mod capability_matrix;
 pub mod cli;
 pub mod communication;

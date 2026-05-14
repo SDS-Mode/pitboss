@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use pitboss_cli::{
-    agents_md, analyze, attach, capability_matrix, cli, diff, dispatch, events, list, manifest,
-    mcp, prune, status, tree,
+    agents_md, analyze, attach, audit, capability_matrix, cli, diff, dispatch, events, list,
+    manifest, mcp, prune, status, tree,
 };
 
 use cli::{Cli, Command};
@@ -100,6 +100,31 @@ fn main() -> Result<()> {
             json,
         } => {
             std::process::exit(events::run(&run_id, json, run_dir)?);
+        }
+        Command::Audit {
+            run_id,
+            run_dir,
+            actor,
+            kind,
+            since,
+            reason_kind,
+            json,
+        } => {
+            let since_parsed = match since {
+                None => None,
+                Some(s) => Some(
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .map_err(|e| anyhow::anyhow!("--since must be RFC3339: {e}"))?,
+                ),
+            };
+            let filter = audit::AuditFilter {
+                actor,
+                kind,
+                since: since_parsed,
+                reason_kind,
+            };
+            std::process::exit(audit::run(&run_id, filter, json, run_dir)?);
         }
         Command::Analyze {
             run_id,

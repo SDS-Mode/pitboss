@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::{assets, state::AppState};
 
+mod audit;
 mod control;
 mod events;
 mod insights;
@@ -26,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/{run_id}/resolved", get(runs::resolved))
         .route("/runs/{run_id}/summary-jsonl", get(runs::summary_jsonl))
         .route("/runs/{run_id}/events-jsonl", get(runs::events_jsonl))
+        .route("/runs/{run_id}/audit", get(audit::audit))
         .route("/runs/{run_id}/tasks/{task_id}", get(runs::task_detail))
         .route("/runs/{run_id}/tasks/{task_id}/log", get(runs::task_log))
         .route(
