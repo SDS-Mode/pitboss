@@ -774,6 +774,7 @@ fn op_tag(op: &ControlOp) -> &'static str {
         ControlOp::Approve { .. } => "approve",
         ControlOp::ListWorkers => "list_workers",
         ControlOp::UpdatePolicy { .. } => "update_policy",
+        ControlOp::Subscribe { .. } => "subscribe",
     }
 }
 
@@ -1342,6 +1343,20 @@ async fn dispatch_op(
             state.root.set_policy_matcher(matcher).await;
             ControlEvent::OpAcked {
                 op: "update_policy".into(),
+                task_id: None,
+            }
+        }
+        ControlOp::Subscribe { since_seq: _ } => {
+            // PR-N of #438. The unified streaming consumer in
+            // `pitboss_core::stream` sends this op right after Hello to
+            // signal it's ready to receive events. The `since_seq`
+            // field is reserved for a future server-side fast-forward
+            // (skip in-flight buffered envelopes <= since_seq); today
+            // the consumer reconciles client-side, so the dispatcher
+            // simply acks. New envelopes naturally flow through the
+            // existing bus → mpsc → socket pipeline.
+            ControlEvent::OpAcked {
+                op: "subscribe".into(),
                 task_id: None,
             }
         }

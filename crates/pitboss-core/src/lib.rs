@@ -5,6 +5,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 pub mod atomic_write;
+pub mod control_protocol;
 pub mod error;
 pub mod failure_classify;
 pub mod fmt;
