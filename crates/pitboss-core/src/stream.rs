@@ -8,17 +8,19 @@
 //! and the live per-run control socket (see
 //! `crates/pitboss-cli/src/control`) into one envelope-shaped stream.
 //!
-//! Status: foundation. This PR ships [`StreamMode::ReplayOnly`] only;
-//! [`StreamMode::ReplayThenLive`] and [`StreamMode::LiveOnly`] return
-//! the same `ReplayOnly` stream until PR-B wires the live transport
-//! (`Subscribe { since_seq }` op + dispatcher-assigned `seq` on
-//! `EventEnvelope`).
+//! Three transport modes:
+//! - [`StreamMode::ReplayOnly`] — disk only; closes on EOF.
+//! - [`StreamMode::LiveOnly`] — control socket only; closes when the
+//!   dispatcher EOFs the socket. Errors silently (empty stream) when
+//!   no socket exists for the run.
+//! - [`StreamMode::ReplayThenLive`] — drain disk, then subscribe to the
+//!   live socket. Falls back to `ReplayOnly` behavior when the run is
+//!   cold (no live socket).
 //!
-//! The [`RunStreamPayload::Event`] arm is reserved for PR-B as well.
-//! Today's [`RunStreamPayload`] carries only [`RunStreamPayload::Task`]
-//! and [`RunStreamPayload::Lifecycle`] — adding a new variant later
-//! is a non-breaking change for the in-tree consumers that exist in
-//! this PR (only tests).
+//! The live-socket arms speak the same wire protocol as `pitboss-cli`'s
+//! control bridge: client `Hello` → server `Hello` → client
+//! `Subscribe { since_seq }` → server pushes `EventEnvelope`s.
+//! Envelopes are surfaced as [`RunStreamPayload::Event`] items.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::control_protocol::{resolve_control_socket, EventEnvelope};
 use crate::store::record::{RunSummary, TaskRecord};
 use crate::store::summary::{read_run_snapshot, RunSnapshotReader};
 
@@ -52,9 +55,8 @@ pub struct RunStreamItem {
     pub payload: RunStreamPayload,
 }
 
-/// The payload variants. Extended in subsequent PRs:
-/// PR-B adds `Event(EventEnvelope)`; future PRs add `Message`,
-/// `Notification`, etc., per the RFC.
+/// The payload variants. Future PRs may add `Message`, `Notification`,
+/// etc., per the RFC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunStreamPayload {
@@ -63,6 +65,13 @@ pub enum RunStreamPayload {
     Task(Box<TaskRecord>),
     /// Run-level bookend. See [`LifecycleEvent`].
     Lifecycle(LifecycleEvent),
+    /// Raw control-socket envelope, as pushed by the dispatcher. Only
+    /// emitted by [`StreamMode::LiveOnly`] and the live tail of
+    /// [`StreamMode::ReplayThenLive`]. The inner event is held
+    /// type-erased ([`serde_json::Value`]) so consumers can typed-parse
+    /// downstream without forcing a `pitboss-cli` dependency on this
+    /// crate. See [`crate::control_protocol`].
+    Event(Box<EventEnvelope>),
 }
 
 /// Run-level lifecycle markers.
@@ -84,41 +93,198 @@ pub enum LifecycleEvent {
 }
 
 /// Transport selector for [`open_run_stream`].
-///
-/// In this PR (PR-A), all three modes behave identically — they all
-/// return a `ReplayOnly` stream. PR-B implements `ReplayThenLive`
-/// (replay disk to last seen seq, then subscribe to the live socket)
-/// and `LiveOnly` (skip disk, subscribe to socket only).
 #[derive(Debug, Clone, Copy)]
 pub enum StreamMode {
     /// Replay disk until end-of-stream, never connect to socket.
     /// Use for `pitboss status` / `pitboss diff` / cold-run web pages.
     ReplayOnly,
-    /// Replay disk, then attempt socket subscribe. Returns `ReplayOnly`
-    /// behavior for cold (finalized) runs.
+    /// Drain disk, then subscribe to the live control socket. Falls
+    /// back to `ReplayOnly` behavior when no live socket exists (cold
+    /// run, finalized).
     ReplayThenLive,
-    /// Skip disk; subscribe to socket only. Errors if the socket
-    /// doesn't exist.
+    /// Skip disk; subscribe to socket only. Closes silently (empty
+    /// stream) when no socket exists.
     LiveOnly,
 }
+
+/// Buffer depth for the cross-task feeder. Bounded so a slow consumer
+/// applies backpressure to the disk replay + socket reader rather than
+/// leaking memory unboundedly. Tuned to the same scale as
+/// [`tail_run_stream`].
+const FEEDER_CHANNEL_CAP: usize = 64;
 
 /// Open a unified stream over a run directory.
 ///
 /// Returns an async [`Stream`] of [`RunStreamItem`] values. See the
 /// module-level docs and the RFC for semantics.
-///
-/// # Mode semantics in PR-A
-///
-/// All three [`StreamMode`] variants currently return the same
-/// `ReplayOnly` stream. The other modes get their real transports
-/// in PR-B. Callers can already pick the mode that matches their
-/// intent — once PR-B lands, the behavior changes transparently.
 pub fn open_run_stream(
     run_dir: &Path,
-    _mode: StreamMode,
+    mode: StreamMode,
 ) -> impl Stream<Item = RunStreamItem> + Send + 'static {
+    let (tx, rx) = mpsc::channel::<RunStreamItem>(FEEDER_CHANNEL_CAP);
+    let run_dir = run_dir.to_path_buf();
+    tokio::spawn(async move {
+        match mode {
+            StreamMode::ReplayOnly => {
+                drive_replay(&run_dir, &tx).await;
+            }
+            StreamMode::ReplayThenLive => {
+                let next_seq = drive_replay(&run_dir, &tx).await;
+                // Best-effort: continue into live transport. Cold-run
+                // (no socket) is the silent fallback — the stream ends.
+                drive_live(&run_dir, &tx, next_seq).await;
+            }
+            StreamMode::LiveOnly => {
+                drive_live(&run_dir, &tx, 1).await;
+            }
+        }
+    });
+    ReceiverStream::new(rx)
+}
+
+/// Drain `summary.json[l]` into `tx`. Returns the next seq the live
+/// arm should use so the per-stream counter stays monotonic across the
+/// disk → live transition.
+async fn drive_replay(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>) -> u64 {
     let items = build_replay_items(run_dir);
-    tokio_stream::iter(items)
+    let mut next_seq = items.last().map_or(1, |i| i.seq + 1);
+    for item in items {
+        next_seq = item.seq + 1;
+        if tx.send(item).await.is_err() {
+            return next_seq;
+        }
+    }
+    next_seq
+}
+
+/// Connect to the run's control socket, perform the Hello + Subscribe
+/// handshake, then forward dispatcher envelopes as `Event` items.
+///
+/// `start_seq` is the per-stream seq counter the live items use, picked
+/// up where disk replay left off. Each emitted item's `seq` field comes
+/// from this per-stream counter; the dispatcher-assigned seq lives on
+/// the inner `EventEnvelope.seq` and is preserved verbatim for
+/// consumers that care.
+///
+/// Returns silently when no socket exists or the socket EOFs — the
+/// caller's stream then ends.
+async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq: u64) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // Run-id is the run-dir's basename (uuid). Used both for socket
+    // resolution and for the `RunStreamItem.run_id` field on emitted
+    // events.
+    let Some(run_id_str) = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
+    else {
+        tracing::debug!(
+            "live transport: run_dir has no basename, can't resolve socket: {}",
+            run_dir.display()
+        );
+        return;
+    };
+    let run_id = Uuid::parse_str(&run_id_str).unwrap_or_else(|_| Uuid::nil());
+
+    let Some(sock_path) = resolve_control_socket(&run_id_str, run_dir) else {
+        tracing::debug!(run_id = %run_id_str, "live transport: no control socket");
+        return;
+    };
+
+    let mut stream = match UnixStream::connect(&sock_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(run_id = %run_id_str, error = %e, "live transport: connect failed");
+            return;
+        }
+    };
+
+    // Client hello.
+    let hello = format!(
+        r#"{{"op":"hello","client_version":"pitboss-core/{}"}}{}"#,
+        crate::VERSION,
+        "\n"
+    );
+    if stream.write_all(hello.as_bytes()).await.is_err() {
+        return;
+    }
+    if stream.flush().await.is_err() {
+        return;
+    }
+
+    // Client subscribe. Sent immediately after Hello — the wire is
+    // full-duplex and the dispatcher processes ops in order, so this
+    // doesn't race the server-side Hello reply. `since_seq: 0`
+    // requests everything; consumer-side reconciliation in
+    // `ReplayThenLive` dedupes against its disk replay. A future PR can
+    // plumb the actual last-seen dispatcher seq and have the server
+    // fast-forward — today the dispatcher just acks and emits new
+    // envelopes onward.
+    let subscribe = "{\"op\":\"subscribe\",\"since_seq\":0}\n";
+    if stream.write_all(subscribe.as_bytes()).await.is_err() {
+        return;
+    }
+    if stream.flush().await.is_err() {
+        return;
+    }
+
+    let (read_half, _write_half) = stream.into_split();
+    let mut lines = BufReader::new(read_half).lines();
+
+    // Forward envelopes.
+    let mut seq = start_seq;
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let envelope: EventEnvelope = match serde_json::from_str(&line) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        // Server may emit non-envelope replies (OpAcked
+                        // for the subscribe op, op-replies for future
+                        // ops). Best-effort: keep parsing. A typed
+                        // EventEnvelope with Value-inner parses any
+                        // valid control event, so a parse failure here
+                        // is genuinely malformed JSON or a non-event
+                        // op-reply — log + continue.
+                        tracing::debug!(
+                            run_id = %run_id_str,
+                            error = %e,
+                            line = %line,
+                            "live transport: envelope parse failed; skipping",
+                        );
+                        continue;
+                    }
+                };
+                let item = RunStreamItem {
+                    seq,
+                    ts: Utc::now(),
+                    run_id,
+                    payload: RunStreamPayload::Event(Box::new(envelope)),
+                };
+                seq = seq.saturating_add(1);
+                if tx.send(item).await.is_err() {
+                    return;
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(run_id = %run_id_str, "live transport: socket EOF");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    run_id = %run_id_str,
+                    error = %e,
+                    "live transport: socket read error",
+                );
+                return;
+            }
+        }
+    }
 }
 
 /// Polling interval for [`tail_run_stream`]. The current implementation
@@ -387,7 +553,7 @@ mod tests {
             .iter()
             .filter_map(|i| match &i.payload {
                 RunStreamPayload::Task(t) => Some(t.task_id.as_str()),
-                RunStreamPayload::Lifecycle(_) => None,
+                RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_) => None,
             })
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
@@ -416,7 +582,7 @@ mod tests {
             .iter()
             .filter_map(|i| match &i.payload {
                 RunStreamPayload::Task(t) => Some(t.as_ref()),
-                RunStreamPayload::Lifecycle(_) => None,
+                RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_) => None,
             })
             .collect();
         assert_eq!(tasks.len(), 2, "deduped to two unique task_ids");
@@ -472,10 +638,34 @@ mod tests {
         assert!(matches!(items[0].payload, RunStreamPayload::Task(_)));
     }
 
-    /// In PR-A, all three modes alias to `ReplayOnly` behavior so that
-    /// callers can already write to the final API. PR-B differentiates.
+    /// `LiveOnly` on a cold run (no socket file) closes silently with
+    /// an empty stream. This is the documented fallback path — consumers
+    /// that observe an empty `LiveOnly` stream know there's no live
+    /// dispatcher (either the run finalized or never started). Distinct
+    /// from `ReplayOnly`, which still emits the disk-replay items.
     #[tokio::test]
-    async fn all_modes_behave_as_replay_only_in_pr_a() {
+    async fn live_only_on_cold_run_yields_no_items() {
+        let tmp = TempDir::new().unwrap();
+        write_jsonl(
+            &tmp.path().join("summary.jsonl"),
+            &[rec("a", TaskStatus::Success, 10)],
+        );
+        // Point XDG at an empty dir so no stray socket on the host
+        // matches by accident.
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("xdg-empty"));
+        let items = collect(tmp.path(), StreamMode::LiveOnly).await;
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        assert!(items.is_empty(), "LiveOnly with no socket must be empty");
+    }
+
+    /// `ReplayThenLive` on a cold run delivers the disk-replay items
+    /// and then closes when the live transport can't find a socket.
+    /// This is the headline back-compat: callers that switch from
+    /// `ReplayOnly` to `ReplayThenLive` see identical behavior on
+    /// finalized runs — the live arm is a pure addition that activates
+    /// only when a dispatcher is up.
+    #[tokio::test]
+    async fn replay_then_live_on_cold_run_matches_replay_only() {
         let tmp = TempDir::new().unwrap();
         write_jsonl(
             &tmp.path().join("summary.jsonl"),
@@ -484,12 +674,179 @@ mod tests {
                 rec("b", TaskStatus::Failed, 20),
             ],
         );
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("xdg-empty"));
         let r = collect(tmp.path(), StreamMode::ReplayOnly).await;
         let rl = collect(tmp.path(), StreamMode::ReplayThenLive).await;
-        let l = collect(tmp.path(), StreamMode::LiveOnly).await;
-        assert_eq!(r.len(), rl.len());
-        assert_eq!(r.len(), l.len());
+        std::env::remove_var("XDG_RUNTIME_DIR");
         assert_eq!(r.len(), 2);
+        assert_eq!(rl.len(), 2);
+        // Same task ids in the same order — proves the live arm
+        // didn't double-emit or reorder anything.
+        let r_ids: Vec<_> = r.iter().filter_map(item_task_id).collect();
+        let rl_with_tasks: Vec<_> = rl.iter().filter_map(item_task_id).collect();
+        assert_eq!(r_ids, rl_with_tasks);
+    }
+
+    fn item_task_id(item: &RunStreamItem) -> Option<&str> {
+        match &item.payload {
+            RunStreamPayload::Task(t) => Some(t.task_id.as_str()),
+            _ => None,
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Live-socket transport — PR-N of #438.
+    // ------------------------------------------------------------
+
+    /// Spawn a one-shot mock dispatcher on a unix socket. Speaks the
+    /// real handshake (waits for Hello + Subscribe), writes `lines` as
+    /// the response envelopes, then closes. Used in lieu of the real
+    /// dispatcher so the transport contract can be pinned without
+    /// pulling pitboss-cli into pitboss-core's tests.
+    fn spawn_mock_dispatcher(socket: &Path, response_lines: Vec<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let listener = UnixListener::bind(socket).expect("bind mock socket");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut lines = BufReader::new(read_half).lines();
+            // Expect client hello.
+            let _client_hello = lines.next_line().await;
+            // Send server hello.
+            let server_hello = "{\"event\":\"hello\",\"server_version\":\"mock\",\"run_id\":\"mock\",\"run_kind\":\"test\",\"workers\":[]}\n";
+            let _ = write_half.write_all(server_hello.as_bytes()).await;
+            let _ = write_half.flush().await;
+            // Expect client subscribe.
+            let _subscribe = lines.next_line().await;
+            // Push payload envelopes.
+            for line in response_lines {
+                let with_nl = format!("{line}\n");
+                if write_half.write_all(with_nl.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            let _ = write_half.flush().await;
+            // Drop write_half — client sees EOF and ends the stream.
+        });
+    }
+
+    /// `LiveOnly` against a connected dispatcher forwards every
+    /// envelope the server writes — including the server Hello — as a
+    /// [`RunStreamPayload::Event`] item. The inner dispatcher-assigned
+    /// seq lives on `EventEnvelope.seq`; the outer `RunStreamItem.seq`
+    /// advances as a per-stream counter.
+    #[tokio::test]
+    async fn live_only_forwards_socket_envelopes_as_events() {
+        let tmp = TempDir::new().unwrap();
+        // Real socket path the unified API will discover via the
+        // run-dir fallback (XDG branch turned off below).
+        let run_dir = tmp.path().join("019d-fake-run-id");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let sock = run_dir.join("control.sock");
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("xdg-empty"));
+
+        spawn_mock_dispatcher(
+            &sock,
+            vec![
+                r#"{"seq":7,"event":"op_acked","op":"cancel_worker","task_id":"w"}"#.into(),
+                r#"{"actor_path":["lead","w"],"seq":8,"event":"worker_failed","task_id":"w","reason":{"kind":"auth_failure"}}"#.into(),
+            ],
+        );
+        // Give the listener a tick to be ready before the consumer
+        // dials in — tokio's spawn is eager so this is usually instant,
+        // but a single yield closes the race deterministically.
+        tokio::task::yield_now().await;
+
+        let items = collect(&run_dir, StreamMode::LiveOnly).await;
+        std::env::remove_var("XDG_RUNTIME_DIR");
+
+        // Three items: the mock's server hello + the two response
+        // envelopes. The unified API forwards everything verbatim — the
+        // hello carries server_version/workers/policy info that typed
+        // consumers may want.
+        assert_eq!(items.len(), 3, "expected three Event items: {items:#?}");
+        // Item 1 — server hello.
+        match &items[0].payload {
+            RunStreamPayload::Event(env) => {
+                assert_eq!(
+                    env.event.get("event").and_then(|v| v.as_str()),
+                    Some("hello")
+                );
+            }
+            other => panic!("expected hello Event, got {other:?}"),
+        }
+        // Item 2 — op_acked, dispatcher seq 7.
+        match &items[1].payload {
+            RunStreamPayload::Event(env) => {
+                assert_eq!(env.seq, 7);
+                assert_eq!(
+                    env.event.get("event").and_then(|v| v.as_str()),
+                    Some("op_acked")
+                );
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+        // Item 3 — worker_failed, dispatcher seq 8, with actor_path.
+        match &items[2].payload {
+            RunStreamPayload::Event(env) => {
+                assert_eq!(env.seq, 8);
+                assert_eq!(env.actor_path.0, vec!["lead", "w"]);
+                assert_eq!(
+                    env.event.get("event").and_then(|v| v.as_str()),
+                    Some("worker_failed")
+                );
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+        // Per-stream seq is strictly monotonic across the three items.
+        assert!(items[0].seq < items[1].seq);
+        assert!(items[1].seq < items[2].seq);
+    }
+
+    /// `ReplayThenLive` against a connected dispatcher emits the disk
+    /// items first, then the live envelopes — proving the disk →
+    /// live transition is a continuation rather than a parallel stream.
+    #[tokio::test]
+    async fn replay_then_live_emits_disk_then_socket() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join("019d-fake-run-id");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        write_jsonl(
+            &run_dir.join("summary.jsonl"),
+            &[rec("seed", TaskStatus::Success, 10)],
+        );
+        let sock = run_dir.join("control.sock");
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("xdg-empty"));
+
+        spawn_mock_dispatcher(&sock, vec![r#"{"seq":3,"event":"superseded"}"#.into()]);
+        tokio::task::yield_now().await;
+
+        let items = collect(&run_dir, StreamMode::ReplayThenLive).await;
+        std::env::remove_var("XDG_RUNTIME_DIR");
+
+        // Disk task + server hello + the response envelope.
+        assert_eq!(
+            items.len(),
+            3,
+            "expected disk task + 2 live events: {items:#?}"
+        );
+        assert!(matches!(items[0].payload, RunStreamPayload::Task(_)));
+        // First live item is the mock's server hello.
+        assert!(matches!(&items[1].payload, RunStreamPayload::Event(env)
+            if env.event.get("event").and_then(|v| v.as_str()) == Some("hello")));
+        // Second live item is the payload envelope from the mock.
+        match &items[2].payload {
+            RunStreamPayload::Event(env) => {
+                assert_eq!(env.seq, 3);
+                assert_eq!(
+                    env.event.get("event").and_then(|v| v.as_str()),
+                    Some("superseded")
+                );
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
     }
 
     // ------------------------------------------------------------
@@ -525,7 +882,9 @@ mod tests {
             .expect("seed item");
         match first.payload {
             RunStreamPayload::Task(t) => assert_eq!(t.task_id, "seed"),
-            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+            other @ (RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_)) => {
+                panic!("expected Task, got {other:?}");
+            }
         }
 
         // Append a fresh row; the watcher (or fallback timer) should
@@ -540,7 +899,9 @@ mod tests {
             .expect("fresh item");
         match next.payload {
             RunStreamPayload::Task(t) => assert_eq!(t.task_id, "fresh"),
-            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+            other @ (RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_)) => {
+                panic!("expected Task, got {other:?}");
+            }
         }
 
         // Seqs must be monotonic.
@@ -605,7 +966,9 @@ mod tests {
                 assert_eq!(t.task_id, "w");
                 assert!(matches!(t.status, TaskStatus::Cancelled));
             }
-            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+            other @ (RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_)) => {
+                panic!("expected Task, got {other:?}");
+            }
         }
 
         // Append same task_id with a later ended_at and Success status
@@ -621,7 +984,9 @@ mod tests {
                 assert_eq!(t.task_id, "w");
                 assert!(matches!(t.status, TaskStatus::Success));
             }
-            other @ RunStreamPayload::Lifecycle(_) => panic!("expected Task, got {other:?}"),
+            other @ (RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_)) => {
+                panic!("expected Task, got {other:?}");
+            }
         }
         assert!(next.seq > first.seq);
     }
@@ -641,7 +1006,9 @@ mod tests {
         assert_eq!(back.seq, 42);
         match back.payload {
             RunStreamPayload::Task(t) => assert_eq!(t.task_id, "t"),
-            RunStreamPayload::Lifecycle(_) => panic!("payload variant changed across round-trip"),
+            RunStreamPayload::Lifecycle(_) | RunStreamPayload::Event(_) => {
+                panic!("payload variant changed across round-trip");
+            }
         }
     }
 }

@@ -90,6 +90,89 @@ fn manifest(run_dir: PathBuf) -> ResolvedManifest {
 /// consumer at it in `LiveOnly` mode, confirm that the server's Hello
 /// arrives as a `LiveStreamPayload::Event` carrying a non-zero seq
 /// (PR-B's per-connection counter).
+/// PR-N of #438: end-to-end smoke for `pitboss-core::stream`'s
+/// LiveOnly transport. Connects to a real dispatcher, performs the
+/// Hello + Subscribe handshake, and asserts that dispatcher-pushed
+/// envelopes surface as `RunStreamPayload::Event` items. The
+/// pitboss-core unit tests use a mock dispatcher; this test pins the
+/// integration end with the real server handler.
+#[tokio::test]
+async fn pitboss_core_live_only_against_real_dispatcher() {
+    use futures_util::StreamExt as _;
+    use pitboss_core::stream::{open_run_stream, RunStreamPayload, StreamMode};
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let run_id = Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest(dir.path().to_path_buf()),
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+
+    // The unified API resolves the socket via `resolve_control_socket`
+    // (XDG or run_dir/control.sock). Point both branches at this run's
+    // dir so the listener path lines up with what the consumer dials.
+    let sock = run_subdir.join("control.sock");
+    let _h = start_control_server(
+        sock,
+        "0.13.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    // Force the XDG branch off so the resolver falls through to
+    // run_dir/control.sock — keeps the test hermetic on hosts with a
+    // populated XDG_RUNTIME_DIR.
+    std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("xdg-empty"));
+    let stream = open_run_stream(&run_subdir, StreamMode::LiveOnly);
+    let mut stream = std::pin::pin!(stream);
+
+    // The first envelope the dispatcher emits is its server Hello
+    // (seq=1 on the wire, surfaced as a `RunStreamPayload::Event` by
+    // the unified API). Plus the subscribe-ack and possibly an
+    // activity tick; tolerate one or two intervening items.
+    let mut saw_hello = false;
+    for _ in 0..4 {
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        let Ok(Some(item)) = next else { break };
+        match &item.payload {
+            RunStreamPayload::Event(env) => {
+                if env.event.get("event").and_then(|v| v.as_str()) == Some("hello") {
+                    saw_hello = true;
+                    assert_eq!(env.seq, 1, "server hello carries dispatcher seq=1");
+                    break;
+                }
+            }
+            other => panic!("LiveOnly must only emit Event items; got {other:?}"),
+        }
+    }
+    std::env::remove_var("XDG_RUNTIME_DIR");
+    assert!(
+        saw_hello,
+        "expected server Hello within first few envelopes"
+    );
+}
+
 #[tokio::test]
 async fn live_only_receives_server_hello_envelope() {
     let dir = TempDir::new().unwrap();
