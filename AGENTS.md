@@ -778,9 +778,10 @@ Files in the run dir:
 | `summary.json` | Written on clean finalize. Full structured summary of the run. |
 | `summary.jsonl` | Appended incrementally as tasks finish. Useful for live observation. |
 | `events.jsonl` | **Opt-in** (v0.13+, `[run].emit_event_stream = true`). Run-wide control-event log: every `EventEnvelope` the dispatcher would have sent on the wire, persisted as it fires. Survives headless dispatches (no TUI / web bridge). See [`events.jsonl` structure](#eventsjsonl-structure-v013-opt-in). |
+| `audit.jsonl` | **v0.14+** (#414). Run-wide aggregated audit log: every per-actor `TaskEvent` row (`pause` / `continue` / `reprompt` / `approval_request` / `approval_response` / `notification_failed` / `tool_denied` / `tool_auto_approved`) tee'd from the per-actor file with an explicit `actor_id` field. Always-on, created lazily on first event. Query via `pitboss audit <run-id> [--actor X] [--kind K] [--since T] [--reason-kind R]` or `GET /api/runs/<id>/audit` with the same filters as query params. |
 | `tasks/<id>/stdout.log` | Raw stream-json from the task's claude subprocess. |
 | `tasks/<id>/stderr.log` | Stderr. |
-| `tasks/<id>/events.jsonl` | **Distinct from the run-level file above.** Per-actor audit log: `pause` / `continue` / `reprompt` / `tool_denied` / `tool_auto_approved` / `approval_request` rows. Always-on (created lazily on first append). |
+| `tasks/<id>/events.jsonl` | **Distinct from the run-level file above.** Per-actor audit log: `pause` / `continue` / `reprompt` / `tool_denied` / `tool_auto_approved` / `approval_request` rows. Always-on (created lazily on first append). The same rows are tee'd into the run-wide `audit.jsonl` for chronological cross-actor queries. |
 | `lead-mcp-config.json` | Hierarchical only. The `--mcp-config` file pointed at `pitboss mcp-bridge <socket>`. |
 
 ### `summary.json` structure
@@ -881,6 +882,45 @@ curl -H "Authorization: Bearer $TOKEN" \
 # SPA: the "Replay" tab on the run-detail page (finalized runs only;
 # in-progress runs still use the live SSE Live tab).
 ```
+
+### `audit.jsonl` structure (v0.14+, #414)
+
+Always-on. The dispatcher tees every per-actor `TaskEvent` write into
+this run-wide file with an explicit `actor_id` field, giving operators
+a chronological cross-actor view without walking
+`tasks/*/events.jsonl` by hand.
+
+```json
+{"actor_id":"lead","event":{"kind":"approval_request","at":"2026-05-14T03:42:00Z","request_id":"r-1","summary_preview":"spawn 3 workers"}}
+{"actor_id":"worker-7","event":{"kind":"tool_denied","at":"2026-05-14T03:42:05Z","tool_name":"Bash","actor_id":"worker-7","reason_kind":"denied_by_rule","reason":"shell access denied"}}
+```
+
+Wire shape: `{actor_id, event}` — `actor_id` is the run-wide
+attribution key; `event` carries the existing per-actor `TaskEvent`
+JSON verbatim (the `kind`-discriminated enum with payload fields). The
+per-actor `tasks/<id>/events.jsonl` files remain durable; the audit
+file is the run-wide companion.
+
+Three ways to consume:
+
+```bash
+# CLI: columnar one-line-per-event with filters; --json for raw NDJSON.
+pitboss audit <run-id>
+pitboss audit <run-id> --actor worker-7 --kind tool_denied
+pitboss audit <run-id> --since 2026-05-14T03:00:00Z --reason-kind operator_rejected
+pitboss audit <run-id> --json | jq 'select(.event.kind == "approval_response")'
+
+# HTTP: NDJSON over the web server with the same filter surface as
+# query params (auth-gated).
+curl -H "Authorization: Bearer $TOKEN" \
+     'http://localhost:8080/api/runs/<run-id>/audit?actor=lead&kind=approval_response'
+```
+
+Write semantics: the tee is best-effort — a transient filesystem
+failure on `audit.jsonl` logs a warning but doesn't break the durable
+per-actor write. So a crashed dispatcher might leave the audit file
+slightly stale relative to the per-actor files; the per-actor files
+remain the source of truth.
 
 ---
 

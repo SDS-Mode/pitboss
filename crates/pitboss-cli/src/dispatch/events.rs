@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt;
 /// #370 (item 4) since the duplication couldn't actually diverge:
 /// adding a variant on either side broke the `From` impl at compile
 /// time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeniedReasonKind {
     /// An operator-declared `[[approval_policy]]` rule with
@@ -112,7 +112,7 @@ impl DeniedReasonKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskEvent {
     Pause {
@@ -183,20 +183,77 @@ pub enum TaskEvent {
     },
 }
 
+/// Wrapper for a row in `<run_subdir>/audit.jsonl` (#414).
+///
+/// `actor_id` is the run-wide attribution key; `event` carries the
+/// existing [`TaskEvent`] payload verbatim.
+///
+/// (A `#[serde(flatten)]` design was rejected because the
+/// `ToolDenied` and `ToolAutoApproved` variants already carry an
+/// inner `actor_id` field — flatten would consume the wrapper's
+/// `actor_id` and leave the variant unable to deserialize its
+/// required payload field. The nested `event` shape avoids the
+/// collision and round-trips cleanly through serde.)
+#[derive(Debug, Serialize)]
+struct AuditEntry<'a> {
+    actor_id: &'a str,
+    event: &'a TaskEvent,
+}
+
 /// Append one event to `<run_subdir>/tasks/<task_id>/events.jsonl`.
 /// Creates the directory if absent.
+///
+/// PR #414 of issue #414 also tees a wrapped record to
+/// `<run_subdir>/audit.jsonl` so operators can query a single run-wide
+/// audit trail without walking the per-actor tree. The tee is
+/// best-effort: a failure on the run-wide write logs and falls
+/// through; the per-actor record (the durable per-task audit source
+/// used by the TUI denial counter and `pitboss status`) is still
+/// written.
 pub async fn append_event(run_subdir: &Path, task_id: &str, event: &TaskEvent) -> Result<()> {
     let dir = run_subdir.join("tasks").join(task_id);
     tokio::fs::create_dir_all(&dir).await?;
     let path = dir.join("events.jsonl");
+    let mut line = serde_json::to_string(event)?;
+    line.push('\n');
+    write_jsonl_line(&path, line.as_bytes()).await?;
+
+    // #414: run-wide audit log tee. Logged-and-swallowed so a
+    // transient failure on the aggregated file doesn't break the
+    // per-actor record. Re-serialise rather than re-using `line`
+    // because the audit row has the extra `actor_id` field.
+    let audit_path = run_subdir.join("audit.jsonl");
+    match serde_json::to_string(&AuditEntry {
+        actor_id: task_id,
+        event,
+    }) {
+        Ok(mut audit_line) => {
+            audit_line.push('\n');
+            if let Err(e) = write_jsonl_line(&audit_path, audit_line.as_bytes()).await {
+                tracing::warn!(
+                    error = %e,
+                    path = %audit_path.display(),
+                    "audit.jsonl: tee append failed (per-actor record still written)",
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "audit.jsonl: serialize failed; tee skipped");
+        }
+    }
+    Ok(())
+}
+
+/// Open-create-append + flush. Single-shot write of an already-serialised
+/// JSONL line (caller supplies the trailing newline). Factored so the
+/// per-actor write and the #414 audit tee share one syscall sequence.
+async fn write_jsonl_line(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .await?;
-    let mut line = serde_json::to_string(event)?;
-    line.push('\n');
-    f.write_all(line.as_bytes()).await?;
+    f.write_all(bytes).await?;
     f.flush().await?;
     Ok(())
 }
@@ -247,5 +304,67 @@ mod tests {
         let path = dir.path().join("tasks").join("w-2").join("events.jsonl");
         let content = tokio::fs::read_to_string(path).await.unwrap();
         assert_eq!(content.lines().count(), 2);
+    }
+
+    /// #414: `append_event` writes the per-actor file (durable trail
+    /// the TUI / `pitboss status` already consume) AND tees a wrapped
+    /// row with explicit `actor_id` into the run-wide audit log.
+    #[tokio::test]
+    async fn append_tees_into_run_wide_audit_log() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        append_event(
+            dir.path(),
+            "lead",
+            &TaskEvent::Pause {
+                at: now,
+                reason: Some("operator".into()),
+            },
+        )
+        .await
+        .unwrap();
+        append_event(
+            dir.path(),
+            "worker-7",
+            &TaskEvent::ToolDenied {
+                at: now,
+                tool_name: "Bash".into(),
+                actor_id: "worker-7".into(),
+                reason_kind: DeniedReasonKind::DeniedByRule,
+                reason: "shell access denied".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let audit = tokio::fs::read_to_string(dir.path().join("audit.jsonl"))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = audit.lines().collect();
+        assert_eq!(lines.len(), 2, "tee'd into two rows: {audit}");
+        assert!(
+            lines[0].contains("\"actor_id\":\"lead\""),
+            "first row must carry lead actor_id: {}",
+            lines[0]
+        );
+        assert!(lines[0].contains("\"event\":{\"kind\":\"pause\""));
+        assert!(
+            lines[1].starts_with("{\"actor_id\":\"worker-7\""),
+            "second row must lead with worker-7 actor_id: {}",
+            lines[1]
+        );
+        assert!(lines[1].contains("\"event\":{\"kind\":\"tool_denied\""));
+        assert!(lines[1].contains("\"reason_kind\":\"denied_by_rule\""));
+
+        // Per-actor files still got their copy (the tee doesn't replace
+        // them; both writes are durable).
+        let lead_per_actor = dir.path().join("tasks").join("lead").join("events.jsonl");
+        assert!(lead_per_actor.exists());
+        let worker_per_actor = dir
+            .path()
+            .join("tasks")
+            .join("worker-7")
+            .join("events.jsonl");
+        assert!(worker_per_actor.exists());
     }
 }
