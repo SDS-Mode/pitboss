@@ -83,7 +83,11 @@ fn collect_replay(run_dir: &Path) -> Result<(Vec<pitboss_core::store::TaskRecord
             RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary }) => {
                 notify_failures = summary.notify_failures;
             }
-            RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. }) => {}
+            // `ReplayOnly` never emits Started lifecycles or live Event
+            // items; ignore both so a future stream-mode change is
+            // additive rather than breaking. (#438)
+            RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. })
+            | RunStreamPayload::Event(_) => {}
         }
     }
     Ok((records, notify_failures))

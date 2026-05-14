@@ -131,7 +131,11 @@ fn collect_replay(
             RunStreamPayload::Lifecycle(LifecycleEvent::Finalized { summary: s }) => {
                 summary = Some(*s);
             }
-            RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. }) => {}
+            // `ReplayOnly` never emits Started lifecycles or live Event
+            // items; ignore both so a future stream-mode change is
+            // additive rather than breaking. (#438)
+            RunStreamPayload::Lifecycle(LifecycleEvent::Started { .. })
+            | RunStreamPayload::Event(_) => {}
         }
     }
     Ok((tasks, summary))
