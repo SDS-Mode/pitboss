@@ -1319,7 +1319,7 @@
     failure={selectedTaskId ? failures[selectedTaskId] : undefined}
     sublead={selectedTaskId ? subleads[selectedTaskId] : undefined}
     activity={selectedTaskId ? storeActivity[selectedTaskId] : undefined}
-    allTasks={tasksToRender as TaskRecord[]}
+    allActors={allWorkers}
     {inProgress}
     onJumpTo={(id) => (selectedTaskId = id === '' ? null : id)}
   />

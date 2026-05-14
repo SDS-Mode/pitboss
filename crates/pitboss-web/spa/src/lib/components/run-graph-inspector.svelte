@@ -33,7 +33,7 @@
     failure,
     sublead,
     activity,
-    allTasks,
+    allActors,
     inProgress,
     onJumpTo
   }: {
@@ -49,9 +49,12 @@
     failure: FailureReason | undefined;
     sublead: SubleadInfo | undefined;
     activity: ActorActivity | undefined;
-    /** Full task list — used to compute parent/children for the
-     *  hierarchy section. Same source the graph already consumes. */
-    allTasks: TaskRecord[];
+    /** Merged actor list (live `WorkersSnapshot` + finalized
+     *  `summary.jsonl`) — same shape the graph consumes. Used to compute
+     *  the Hierarchy section's Parent / Children rows, so in-progress
+     *  children appear under their parent immediately rather than
+     *  only after finalization. */
+    allActors: WorkerEntry[];
     /** Whether the run is still in progress. Drives whether the log
      *  pane auto-tails. Post-run inspectors render a frozen tail. */
     inProgress: boolean;
@@ -211,9 +214,9 @@
 
   const parentId = $derived(task?.parent_task_id ?? worker?.parent_task_id ?? null);
   const childrenIds = $derived(
-    allTasks
-      .filter((t) => t.parent_task_id === selectedTaskId)
-      .map((t) => t.task_id)
+    allActors
+      .filter((a) => a.parent_task_id === selectedTaskId)
+      .map((a) => a.task_id)
   );
 
   const totalTokens = $derived(
