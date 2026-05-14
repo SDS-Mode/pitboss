@@ -313,6 +313,8 @@ pub(crate) fn derived_fallback_warning(
     let tag = derived_tag?;
     Some(format!(
         "warning: derived image {tag} not found locally; falling back to apt-at-spin-up.\n\
+         Note: apt-at-spin-up runs the entry process as UID 0 until `runuser` drops to \
+         the unprivileged pitboss user — the derived-image path avoids that root window. \
          Re-run `pitboss container-build {}` to restore the cached fast-path.",
         manifest_path.display()
     ))
@@ -579,6 +581,28 @@ mod tests {
             msg.contains("pitboss container-build /tmp/manifest.toml"),
             "missing rebuild hint with manifest path: {msg}"
         );
+    }
+
+    #[test]
+    fn fallback_warning_mentions_root_window() {
+        // F-SEC-12: the slow-path warning piggybacks a note that the
+        // apt-bootstrap phase runs as UID 0 until runuser drops to the
+        // pitboss user. Operators choosing between the slow path and
+        // the derived-image path should see the security tradeoff
+        // alongside the performance one.
+        let c = ContainerConfig {
+            extra_apt: vec!["mdbook".into()],
+            ..cfg()
+        };
+        let msg = derived_fallback_warning(
+            &c,
+            Some("pitboss-derived-abc123:local"),
+            false,
+            &PathBuf::from("/tmp/manifest.toml"),
+        )
+        .expect("warning should fire");
+        assert!(msg.contains("UID 0"), "missing root-window note: {msg}");
+        assert!(msg.contains("runuser"), "missing runuser-drop note: {msg}");
     }
 
     #[test]

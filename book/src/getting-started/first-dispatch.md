@@ -8,7 +8,7 @@ Create `pitboss.toml`:
 
 ```toml
 [run]
-max_parallel = 2
+max_parallel_tasks = 2
 
 [[task]]
 id = "hello-a"
@@ -41,7 +41,7 @@ Exit code 0 means the manifest is valid. Non-zero prints the error and exits.
 pitboss dispatch pitboss.toml
 ```
 
-Pitboss fans out both tasks in parallel (up to `max_parallel = 2`), streams progress to your terminal, and blocks until all tasks finish.
+Pitboss fans out both tasks in parallel (up to `max_parallel_tasks = 2`), streams progress to your terminal, and blocks until all tasks finish.
 
 **Exit codes:**
 - `0` — all tasks succeeded
@@ -98,7 +98,7 @@ Follow-mode log viewer for a single task. Run-id is resolved by prefix (first 8 
 
 | Field | Default | Notes |
 |-------|---------|-------|
-| `[run].max_parallel` | 4 | How many tasks run concurrently |
+| `[run].max_parallel_tasks` | 4 | How many tasks run concurrently |
 | `[run].halt_on_failure` | false | Stop remaining tasks if any task fails |
 | `[run].worktree_cleanup` | `"on_success"` | `"always"`, `"on_success"`, `"never"` |
 | `[[task]].use_worktree` | true | Set `false` for read-only analysis (no branch needed) |

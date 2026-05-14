@@ -96,6 +96,7 @@ pub fn run_container_dispatch(
         None
     };
 
+    let audit_runs_base = run_dir_override.clone().unwrap_or_else(default_run_dir);
     let args = build_run_args(
         &runtime,
         container,
@@ -112,6 +113,20 @@ pub fn run_container_dispatch(
             .join(" ");
         println!("{}", cmd_str);
         return Ok(());
+    }
+
+    // Best-effort audit log: write the resolved container argv to
+    // `<runs_base_dir>/container-dispatch.log` (NDJSON, one record per
+    // invocation) before exec replaces the process. This is the only
+    // post-facto trail of what flags the container actually received —
+    // the inner `pitboss dispatch` writes its own run dir, but it
+    // doesn't see the host-side container flags. Failure to write is
+    // logged but does not abort dispatch (the operator's run shouldn't
+    // hinge on the audit log being writable). (#476 / F-SEC-9)
+    if let Err(e) =
+        append_container_dispatch_audit(&audit_runs_base, &runtime, &args, &manifest_abs)
+    {
+        eprintln!("pitboss container-dispatch: warning: could not write argv audit log: {e}");
     }
 
     let err = Command::new(&runtime).args(&args).exec();
@@ -180,15 +195,31 @@ fn build_run_args(
     }
 
     // ── Auto-inject ~/.claude ─────────────────────────────────────────────────
-    // Required for OAuth auth (Linux) unless the operator already declared
-    // a mount targeting /home/pitboss/.claude.
+    // Required for OAuth auth (Linux) unless the operator already
+    // declared a mount targeting /home/pitboss/.claude.
+    //
+    // F-SEC-11: the auto-inject defaults to `ro,z`. The host's
+    // `~/.claude` holds OAuth credentials, `settings.json` (which may
+    // include hooks), and other long-lived state. Mounting it
+    // read-write into every container run means a compromised or
+    // buggy worker can rewrite host credentials or inject malicious
+    // hooks that would fire the next time claude runs on the host.
+    // Default to read-only and provide an opt-in
+    // (`[container].claude_mount_rw = true`) for the OAuth-refresh
+    // scenario. An explicit `[[container.mount]]` for
+    // /home/pitboss/.claude continues to win.
     let claude_container = PathBuf::from("/home/pitboss/.claude");
     if !covered_container_paths.contains(&claude_container) {
         if let Some(home) = home_dir() {
             let host_claude = home.join(".claude");
+            let mode = if container.claude_mount_rw {
+                "rw,z"
+            } else {
+                "ro,z"
+            };
             args.push("-v".into());
             args.push(format!(
-                "{}:{}:rw,z",
+                "{}:{}:{mode}",
                 host_claude.display(),
                 claude_container.display()
             ));
@@ -234,6 +265,11 @@ fn build_run_args(
     args.push(workdir.display().to_string());
 
     // ── Extra operator args ───────────────────────────────────────────────────
+    // Defense in depth: `validate_extra_args` is also called from
+    // `manifest::validate::validate_container`, but a test or
+    // programmatic caller that skipped validate must not be able to
+    // smuggle in `--privileged` (etc.). Validate before extending. (#476)
+    validate_extra_args(&container.extra_args)?;
     args.extend(container.extra_args.clone());
 
     // ── extra_apt: validate + override user to root for the apt step ─────────
@@ -294,6 +330,133 @@ fn build_run_args(
     }
 
     Ok(args)
+}
+
+/// Reject `extra_args` entries that defeat the container sandbox or
+/// override pitboss-managed settings.
+///
+/// Validation runs in two places: at `pitboss validate` time (via
+/// `manifest::validate::validate_container`) and again defensively in
+/// `build_run_args` so a manifest that skipped validate (test fixtures,
+/// programmatic callers) cannot bypass the gate.
+///
+/// The denylist enumerates **specific dangerous tokens** rather than
+/// trying to whitelist the whole `docker run` flag surface. It covers
+/// the four classes that matter:
+///
+/// 1. **Namespace breakouts** — `--pid=host`, `--ipc=host`, `--uts=host`,
+///    `--userns=host`, `--cgroupns=host` and the `--pid=container:<id>`
+///    join form. Each one defeats one of the namespaces the container
+///    runtime is set up to provide.
+/// 2. **Capability / privilege escalation** — `--privileged`,
+///    `--cap-add=ALL`, `--cap-add=SYS_ADMIN`, `--cap-add=SYS_PTRACE`,
+///    `--cap-add=SYS_MODULE` (parsed out of comma-separated lists).
+///    `--security-opt={seccomp,apparmor}=unconfined` and
+///    `--security-opt=label=disable` disable LSM enforcement.
+/// 3. **Pitboss-managed flags** — `-v` / `--volume` / `--mount` go around
+///    the validated `[[container.mount]]` path; `-u` / `--user` overrides
+///    the UID alignment logic that the apt-bootstrap path depends on;
+///    `--entrypoint` bypasses the `pitboss dispatch` entrypoint.
+/// 4. **Host device passthrough** — `--device=…`, `--device-cgroup-rule=…`.
+///
+/// (#476 / F-SEC-9)
+pub(crate) fn validate_extra_args(extra_args: &[String]) -> Result<()> {
+    // (pattern, why) — exact-match denylist. Reasons appear verbatim in
+    // the error so operators see why a flag was rejected.
+    const EXACT: &[(&str, &str)] = &[
+        ("--privileged", "grants the container near-root on the host"),
+        (
+            "-v",
+            "use [[container.mount]] for bind mounts (path-validated)",
+        ),
+        (
+            "--volume",
+            "use [[container.mount]] for bind mounts (path-validated)",
+        ),
+        (
+            "--mount",
+            "use [[container.mount]] for bind mounts (path-validated)",
+        ),
+        (
+            "-u",
+            "pitboss controls UID alignment; do not override -u in extra_args",
+        ),
+        (
+            "--user",
+            "pitboss controls UID alignment; do not override --user in extra_args",
+        ),
+        (
+            "--entrypoint",
+            "the pitboss dispatch entrypoint must remain in place",
+        ),
+        ("--pid=host", "shares the host PID namespace"),
+        ("--ipc=host", "shares the host IPC namespace"),
+        ("--uts=host", "shares the host UTS namespace"),
+        ("--userns=host", "disables UID namespacing"),
+        ("--cgroupns=host", "shares the host cgroup namespace"),
+        (
+            "--security-opt=seccomp=unconfined",
+            "disables seccomp filtering",
+        ),
+        ("--security-opt=apparmor=unconfined", "disables AppArmor"),
+        ("--security-opt=label=disable", "disables SELinux labels"),
+        ("--security-opt=label:disable", "disables SELinux labels"),
+    ];
+    // Prefix-match denylist for flags with attached values.
+    const PREFIX: &[(&str, &str)] = &[
+        (
+            "--pid=container:",
+            "joins another container's PID namespace",
+        ),
+        ("--device=", "exposes a host device into the container"),
+        ("--device-cgroup-rule=", "rewrites the device cgroup rules"),
+        (
+            "--entrypoint=",
+            "the pitboss dispatch entrypoint must remain in place",
+        ),
+        (
+            "--volume=",
+            "use [[container.mount]] for bind mounts (path-validated)",
+        ),
+        (
+            "--user=",
+            "pitboss controls UID alignment; do not override --user in extra_args",
+        ),
+    ];
+    // `--cap-add` accepts comma-separated capability lists. Parse out
+    // the individual caps so `--cap-add=NET_ADMIN,SYS_ADMIN` is caught.
+    const FORBIDDEN_CAPS: &[&str] = &["ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE"];
+
+    for arg in extra_args {
+        for (pat, why) in EXACT {
+            if arg == pat {
+                bail!(
+                    "[container].extra_args: {arg:?} is forbidden ({why}). \
+                     If you genuinely need this, invoke docker/podman directly \
+                     rather than through `pitboss container-dispatch`."
+                );
+            }
+        }
+        for (pat, why) in PREFIX {
+            if arg.starts_with(pat) {
+                bail!("[container].extra_args: {arg:?} is forbidden ({why}).");
+            }
+        }
+        if let Some(rest) = arg.strip_prefix("--cap-add=") {
+            for cap in rest.split(',') {
+                let cap = cap.trim();
+                if FORBIDDEN_CAPS.iter().any(|c| c.eq_ignore_ascii_case(cap)) {
+                    bail!(
+                        "[container].extra_args: --cap-add includes {cap:?} \
+                         which is too broad. Forbidden caps: {FORBIDDEN_CAPS:?}. \
+                         Use narrower caps (e.g. NET_ADMIN) or invoke docker/podman \
+                         directly."
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate a debian/ubuntu package name for shell-safe interpolation
@@ -423,6 +586,48 @@ fn default_run_dir() -> PathBuf {
         .join(".local/share/pitboss/runs")
 }
 
+/// Append a single NDJSON record to `<runs_base>/container-dispatch.log`
+/// describing the about-to-exec container invocation. Used as a post-facto
+/// audit trail for `extra_args` and other host-side container flags.
+///
+/// Format:
+/// ```jsonc
+/// {"at":"2026-05-14T12:34:56Z","manifest":"/abs/path/pitboss.toml",
+///  "runtime":"podman","argv":["run","--rm",…]}
+/// ```
+fn append_container_dispatch_audit(
+    runs_base: &Path,
+    runtime: &str,
+    args: &[String],
+    manifest_abs: &Path,
+) -> Result<()> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(runs_base).with_context(|| {
+        format!(
+            "creating runs base dir for audit log: {}",
+            runs_base.display()
+        )
+    })?;
+    let log_path = runs_base.join("container-dispatch.log");
+
+    let record = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "manifest": manifest_abs.display().to_string(),
+        "runtime": runtime,
+        "argv": args,
+    });
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening audit log {}", log_path.display()))?;
+    writeln!(f, "{record}")
+        .with_context(|| format!("appending to audit log {}", log_path.display()))?;
+    Ok(())
+}
+
 /// Read `manifest_abs`, remove the `[container]` key, and write the result to
 /// a temp file. Returns the temp file path, which is mounted read-only into the
 /// container in place of the original manifest.
@@ -484,13 +689,8 @@ mod tests {
 
     fn make_config(mounts: Vec<MountSpec>) -> ContainerConfig {
         ContainerConfig {
-            image: None,
-            runtime: None,
-            extra_args: vec![],
-            extra_apt: vec![],
             mounts,
-            copy: vec![],
-            workdir: None,
+            ..ContainerConfig::default()
         }
     }
 
@@ -604,6 +804,45 @@ prompt = "hi"
         assert!(
             joined.contains("/home/pitboss/.claude"),
             "auto-inject claude: {joined}"
+        );
+    }
+
+    #[test]
+    fn auto_inject_claude_defaults_to_read_only() {
+        // F-SEC-11: the auto-injected ~/.claude mount must be read-only
+        // by default. A compromised worker cannot rewrite host
+        // credentials or inject malicious hooks via the rw mount.
+        let cfg = make_config(vec![]);
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let claude_mount = args
+            .windows(2)
+            .find(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.claude:"))
+            .expect("auto-injected claude mount must be present");
+        assert!(
+            claude_mount[1].ends_with(":ro,z"),
+            "auto-injected ~/.claude mount must default to ro,z, got: {}",
+            claude_mount[1]
+        );
+    }
+
+    #[test]
+    fn auto_inject_claude_uses_rw_when_opted_in() {
+        // The operator can opt back into the pre-v0.15 rw mount for
+        // OAuth-refresh scenarios via `[container].claude_mount_rw =
+        // true`. This keeps the escape valve documented and testable.
+        let cfg = ContainerConfig {
+            claude_mount_rw: true,
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let claude_mount = args
+            .windows(2)
+            .find(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.claude:"))
+            .expect("auto-injected claude mount must be present");
+        assert!(
+            claude_mount[1].ends_with(":rw,z"),
+            "opt-in must produce rw,z, got: {}",
+            claude_mount[1]
         );
     }
 
@@ -884,6 +1123,194 @@ prompt = "hi"
             .expect("dispatch arg present");
         assert_eq!(args[dispatch_pos - 1], "pitboss");
         assert_eq!(args[dispatch_pos + 1], "/run/pitboss.toml");
+    }
+
+    #[test]
+    fn extra_args_rejects_privileged() {
+        // F-SEC-9: --privileged is the canonical sandbox-break flag.
+        let cfg = ContainerConfig {
+            extra_args: vec!["--privileged".into()],
+            ..ContainerConfig::default()
+        };
+        let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+            .expect_err("--privileged must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--privileged") && msg.contains("forbidden"),
+            "error must name the flag and reason: {msg}"
+        );
+    }
+
+    #[test]
+    fn extra_args_rejects_namespace_host_flags() {
+        // Each namespace-breakout flag rejected independently.
+        for bad in [
+            "--pid=host",
+            "--ipc=host",
+            "--uts=host",
+            "--userns=host",
+            "--cgroupns=host",
+        ] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into()],
+                ..ContainerConfig::default()
+            };
+            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+                .expect_err(&format!("{bad} must be rejected"));
+            assert!(
+                err.to_string().contains(bad),
+                "rejection must name the flag: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_args_rejects_v_mount_in_extra_args() {
+        // -v / --volume / --mount are pitboss-managed via [[container.mount]];
+        // operators may not smuggle a raw mount through extra_args.
+        for bad in ["-v", "--volume", "--mount"] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into(), "/etc:/etc:rw".into()],
+                ..ContainerConfig::default()
+            };
+            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+                .expect_err(&format!("{bad} must be rejected"));
+            assert!(
+                err.to_string().contains("container.mount"),
+                "rejection must point at the [[container.mount]] alternative: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_args_rejects_fused_volume_flag() {
+        // The fused `--volume=src:dst` form is just as dangerous as the
+        // standalone `-v src:dst` form — both must fail closed.
+        let cfg = ContainerConfig {
+            extra_args: vec!["--volume=/etc:/etc:rw".into()],
+            ..ContainerConfig::default()
+        };
+        let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+            .expect_err("--volume=src:dst must be rejected");
+        assert!(
+            err.to_string().contains("--volume=/etc:/etc:rw"),
+            "rejection must echo the offending arg: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_args_rejects_dangerous_cap_add() {
+        // --cap-add=SYS_ADMIN gives the container near-root authority.
+        // Validation must split comma-separated lists so a sneaky
+        // `NET_ADMIN,SYS_ADMIN` is caught.
+        for bad in [
+            "--cap-add=ALL",
+            "--cap-add=SYS_ADMIN",
+            "--cap-add=NET_ADMIN,SYS_ADMIN",
+            "--cap-add=sys_admin",
+        ] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into()],
+                ..ContainerConfig::default()
+            };
+            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+                .expect_err(&format!("{bad} must be rejected"));
+            assert!(
+                err.to_string().contains("cap-add"),
+                "rejection must mention cap-add: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_args_rejects_user_override() {
+        // -u / --user overrides the UID alignment that the apt-bootstrap
+        // path depends on. The fused `--user=0:0` form must also fail.
+        for bad in ["-u", "--user"] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into(), "0:0".into()],
+                ..ContainerConfig::default()
+            };
+            assert!(
+                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        let cfg = ContainerConfig {
+            extra_args: vec!["--user=0:0".into()],
+            ..ContainerConfig::default()
+        };
+        assert!(
+            build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+            "--user=0:0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn extra_args_rejects_entrypoint_override() {
+        for bad in ["--entrypoint", "--entrypoint=/bin/sh"] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into()],
+                ..ContainerConfig::default()
+            };
+            assert!(
+                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_args_rejects_security_opt_unconfined() {
+        for bad in [
+            "--security-opt=seccomp=unconfined",
+            "--security-opt=apparmor=unconfined",
+            "--security-opt=label=disable",
+        ] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into()],
+                ..ContainerConfig::default()
+            };
+            assert!(
+                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_args_rejects_device_passthrough() {
+        for bad in ["--device=/dev/kvm", "--device-cgroup-rule=a *:* rwm"] {
+            let cfg = ContainerConfig {
+                extra_args: vec![bad.into()],
+                ..ContainerConfig::default()
+            };
+            assert!(
+                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_args_accepts_realistic_safe_flags() {
+        // Common legitimate flags must pass: dns config, narrow caps,
+        // resource limits, network override (commonly required in corp
+        // firewall scenarios — broad but the operator chose this manifest).
+        let cfg = ContainerConfig {
+            extra_args: vec![
+                "--network=host".into(),
+                "--dns=10.0.0.53".into(),
+                "--cap-drop=ALL".into(),
+                "--cap-add=NET_ADMIN".into(),
+                "--memory=4g".into(),
+                "--cpus=2".into(),
+                "--add-host=internal:10.0.0.1".into(),
+            ],
+            ..ContainerConfig::default()
+        };
+        build_run_args("podman", &cfg, &temp_manifest(), None, None)
+            .expect("realistic safe extra_args must pass validation");
     }
 
     #[test]
