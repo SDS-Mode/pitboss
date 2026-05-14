@@ -331,6 +331,7 @@ async fn server_emits_monotonic_seqs_on_wire() {
     let mut reader = BufReader::new(r).lines();
     let client_hello = serde_json::to_string(&ControlOp::Hello {
         client_version: "0.4.0".into(),
+        mode: pitboss_cli::control::protocol::ClientMode::Writer,
     })
     .unwrap()
         + "\n";
@@ -1232,6 +1233,7 @@ async fn subscribe_op_acks_and_keeps_dispatcher_responsive() {
     // Hello.
     let client_hello = serde_json::to_string(&ControlOp::Hello {
         client_version: "pitboss-core/test".into(),
+        mode: pitboss_cli::control::protocol::ClientMode::Writer,
     })
     .unwrap()
         + "\n";
@@ -1288,5 +1290,353 @@ async fn subscribe_op_acks_and_keeps_dispatcher_responsive() {
     assert!(
         saw_snapshot,
         "Subscribe must not block subsequent op handling",
+    );
+}
+
+// ----------------------------------------------------------------------
+// PR-P of #438 — subscriber-mode client flows.
+// ----------------------------------------------------------------------
+
+/// Build a minimal `DispatchState` + run id + run subdir for PR-P's
+/// subscriber-mode tests. Manifest fields stay at defaults; the tests
+/// below only need the control-socket lifecycle, not the dispatch loop.
+async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid, PathBuf) {
+    let run_id = uuid::Uuid::now_v7();
+    let run_subdir = dir.path().join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
+    let manifest = ResolvedManifest {
+        manifest_schema_version: 0,
+        name: None,
+        max_parallel_tasks: Some(4),
+        halt_on_failure: false,
+        run_dir: dir.path().to_path_buf(),
+        worktree_cleanup: WorktreeCleanup::OnSuccess,
+        emit_event_stream: false,
+        tasks: vec![],
+        lead: None,
+        max_workers: Some(4),
+        budget_usd: Some(1.0),
+        lead_budget_usd: None,
+        lead_timeout_secs: None,
+        default_approval_policy: Some(ApprovalPolicy::Block),
+        denial_termination_policy: None,
+        notifications: vec![],
+        dump_shared_store: false,
+        require_plan_approval: false,
+        approval_rules: vec![],
+        container: None,
+        mcp_servers: vec![],
+        communication: Default::default(),
+        lifecycle: None,
+        worker_types: vec![],
+        sublead_types: vec![],
+        require_actor_type: false,
+        untyped_actor_policy: Default::default(),
+    };
+    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
+    let wt_mgr = Arc::new(WorktreeManager::new());
+    let state = Arc::new(DispatchState::new(
+        run_id,
+        manifest,
+        store,
+        CancelToken::new(),
+        String::new(),
+        spawner,
+        PathBuf::from("/bin/true"),
+        wt_mgr,
+        CleanupPolicy::Never,
+        run_subdir.clone(),
+        ApprovalPolicy::Block,
+        None,
+        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
+    ));
+    (state, run_id, run_subdir)
+}
+
+/// A second client attaching in subscriber mode must not displace the
+/// connected writer: the dispatcher's `control_writer` slot stays bound
+/// to the first client, no `Superseded` envelope is emitted, and the
+/// writer keeps serving op replies.
+#[tokio::test]
+async fn subscriber_hello_does_not_supersede_writer() {
+    let dir = TempDir::new().unwrap();
+    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+
+    let sock = dir.path().join("subscriber-coexist.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    // Writer attaches first.
+    let mut writer = FakeControlClient::connect(&sock, "writer/0.0.0")
+        .await
+        .unwrap();
+
+    // Subscriber attaches second — historically this would have
+    // displaced the writer.
+    let mut subscriber = FakeControlClient::connect_subscriber(&sock, "pitboss-core/0.14.0")
+        .await
+        .unwrap();
+
+    // The writer must NOT receive a Superseded within a reasonable
+    // window. Drain any incidental traffic (e.g. activity ticks) and
+    // assert no Superseded landed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    while std::time::Instant::now() < deadline {
+        match writer
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .await
+            .unwrap()
+        {
+            Some(ev) => {
+                assert!(
+                    !matches!(ev, ControlEvent::Superseded),
+                    "subscriber attach must not displace writer; got {ev:?}",
+                );
+            }
+            None => break,
+        }
+    }
+
+    // Writer still serves op replies after the subscriber attached.
+    writer.send(&ControlOp::ListWorkers).await.unwrap();
+    let mut saw_snapshot = false;
+    for _ in 0..6 {
+        let ev = writer
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .await
+            .unwrap()
+            .expect("envelope");
+        if matches!(ev, ControlEvent::WorkersSnapshot { .. }) {
+            saw_snapshot = true;
+            break;
+        }
+    }
+    assert!(saw_snapshot, "writer must keep serving ops");
+
+    // Subscriber connection is healthy — drain one envelope so a
+    // dangling task doesn't leak when the server handle drops.
+    let _ = subscriber
+        .recv_timeout(std::time::Duration::from_millis(50))
+        .await;
+}
+
+/// Subscriber connections are read-only: any writer op must come back
+/// as a typed `OpFailed` rather than mutating dispatcher state.
+#[tokio::test]
+async fn subscriber_writer_op_returns_op_failed() {
+    let dir = TempDir::new().unwrap();
+    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+
+    // Install a worker so a misrouted CancelWorker has something to find.
+    // The cancel must NOT fire — we rely on the worker_cancels token
+    // staying un-cancelled to prove the op was rejected before
+    // dispatch_op ran.
+    let worker_token = CancelToken::new();
+    state
+        .root
+        .worker_cancels
+        .write()
+        .await
+        .insert("w-1".into(), worker_token.clone());
+    state.root.workers.write().await.insert(
+        "w-1".into(),
+        WorkerState::Running {
+            started_at: chrono::Utc::now(),
+            session_id: Some("sess".into()),
+        },
+    );
+
+    let sock = dir.path().join("subscriber-readonly.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    let mut sub = FakeControlClient::connect_subscriber(&sock, "pitboss-core/0.14.0")
+        .await
+        .unwrap();
+
+    sub.send(&ControlOp::CancelWorker {
+        task_id: "w-1".into(),
+    })
+    .await
+    .unwrap();
+
+    // Skim envelopes until we hit OpFailed for cancel_worker. Tolerate
+    // intervening activity ticks.
+    let mut saw_failure = false;
+    for _ in 0..6 {
+        let ev = sub
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .await
+            .unwrap()
+            .expect("envelope");
+        if let ControlEvent::OpFailed { op, error, .. } = &ev {
+            if op == "cancel_worker" {
+                assert!(
+                    error.contains("subscriber"),
+                    "error must explain subscriber-mode rejection: {error:?}",
+                );
+                saw_failure = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_failure,
+        "writer op must return OpFailed in subscriber mode"
+    );
+    assert!(
+        !worker_token.is_terminated(),
+        "subscriber-mode op must NOT terminate the worker token",
+    );
+    assert!(
+        !worker_token.is_draining(),
+        "subscriber-mode op must NOT drain the worker token either",
+    );
+}
+
+/// Multiple subscriber clients can coexist: every connection's
+/// bus-bridge subscribes to the run's broadcast bus, so a single
+/// `broadcast_control_event` fan-outs to all of them.
+#[tokio::test]
+async fn multiple_subscribers_coexist() {
+    let dir = TempDir::new().unwrap();
+    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+
+    let sock = dir.path().join("multi-subscriber.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+
+    let mut subs = Vec::with_capacity(3);
+    for _ in 0..3 {
+        subs.push(
+            FakeControlClient::connect_subscriber(&sock, "pitboss-core/0.14.0")
+                .await
+                .unwrap(),
+        );
+    }
+
+    // Wait briefly for every bus-bridge subscriber to attach before we
+    // publish — `events_tx.subscribe()` is spawned on each connection's
+    // task, so a publish too early can miss a slow subscriber. The 100ms
+    // here is generous for an in-process broadcast bus.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Publish a recognizable envelope onto the broadcast bus. Using
+    // RunFinished because it's a leaf event with no state dependencies
+    // beyond the wire shape — perfect for fan-out assertions.
+    let envelope = pitboss_cli::control::protocol::EventEnvelope {
+        actor_path: pitboss_cli::dispatch::actor::ActorPath::default(),
+        seq: 0, // overwritten by broadcast_control_event
+        event: ControlEvent::RunFinished {
+            summary: pitboss_cli::control::protocol::RunFinishedSummary {
+                tasks_total: 7,
+                tasks_failed: 1,
+            },
+        },
+    };
+    state.root.broadcast_control_event(envelope).await;
+
+    for (idx, sub) in subs.iter_mut().enumerate() {
+        let mut saw = false;
+        for _ in 0..6 {
+            let ev = sub
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .await
+                .unwrap()
+                .expect("envelope");
+            if let ControlEvent::RunFinished { summary } = &ev {
+                assert_eq!(summary.tasks_total, 7);
+                assert_eq!(summary.tasks_failed, 1);
+                saw = true;
+                break;
+            }
+        }
+        assert!(saw, "subscriber {idx} did not see the broadcast event");
+    }
+}
+
+/// Pre-PR-P clients send `Hello` without a `mode` field. The
+/// dispatcher must continue to install them as the writer (the
+/// historical behavior) — verified by observing that a second
+/// no-mode-field client displaces the first with `Superseded`.
+#[tokio::test]
+async fn legacy_hello_without_mode_defaults_to_writer() {
+    let dir = TempDir::new().unwrap();
+    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+
+    let sock = dir.path().join("legacy-hello.sock");
+    let _h = start_control_server(
+        sock.clone(),
+        "0.4.0".into(),
+        run_id.to_string(),
+        "flat".into(),
+        state,
+    )
+    .await
+    .unwrap();
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // First client: bare legacy Hello (no `mode` field).
+    let stream1 = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    let (r1, mut w1) = stream1.into_split();
+    let mut reader1 = BufReader::new(r1).lines();
+    w1.write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+        .await
+        .unwrap();
+    w1.flush().await.unwrap();
+    let line = reader1.next_line().await.unwrap().expect("server hello");
+    let env: pitboss_cli::control::protocol::EventEnvelope = serde_json::from_str(&line).unwrap();
+    assert!(matches!(env.event, ControlEvent::Hello { .. }));
+
+    // Second client: same legacy Hello shape. If the first connection
+    // had been classified as a subscriber, no Superseded would fire.
+    let stream2 = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    let (_r2, mut w2) = stream2.into_split();
+    w2.write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+        .await
+        .unwrap();
+    w2.flush().await.unwrap();
+
+    // First client should now receive Superseded.
+    let mut saw_superseded = false;
+    for _ in 0..6 {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), reader1.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("envelope");
+        let env: pitboss_cli::control::protocol::EventEnvelope =
+            serde_json::from_str(&line).unwrap();
+        if matches!(env.event, ControlEvent::Superseded) {
+            saw_superseded = true;
+            break;
+        }
+    }
+    assert!(
+        saw_superseded,
+        "legacy Hello (no mode field) must still take the writer slot",
     );
 }

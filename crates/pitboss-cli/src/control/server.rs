@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
+use crate::control::protocol::{ClientMode, ControlEvent, ControlOp, EventEnvelope};
 use crate::dispatch::actor::ActorPath;
 
 /// Handle returned from `start_control_server`. Drop terminates the accept loop
@@ -155,8 +155,8 @@ async fn serve_connection(
         Ok(Some(line)) => line,
         _ => return,
     };
-    match serde_json::from_str::<ControlOp>(&first) {
-        Ok(ControlOp::Hello { .. }) => {}
+    let client_mode = match serde_json::from_str::<ControlOp>(&first) {
+        Ok(ControlOp::Hello { mode, .. }) => mode,
         Ok(other) => {
             let _ = send_event(
                 &writer,
@@ -183,7 +183,7 @@ async fn serve_connection(
             .await;
             return;
         }
-    }
+    };
 
     // Snapshot the current worker set *after* receiving the client Hello,
     // not at accept time. Any worker that spawned between accept and this
@@ -218,125 +218,143 @@ async fn serve_connection(
     )
     .await;
 
-    // Install this connection as the control_writer (displace any prior).
-    //
-    // LOAD-BEARING: the connection-unique `writer_id` is checked by the
-    // disconnect cleanup block at the bottom of this function before it
-    // clears `state.root.control_writer`. Without that id-match guard,
-    // a TUI that reconnects in the narrow window between this read loop
-    // exiting and the cleanup block running would have its own writer
-    // slot silently cleared by the previous connection's cleanup —
-    // leading to a connected TUI that receives no events with no
-    // diagnostic surface. **Do not remove the writer_id field, the slot
-    // assignment, or the id-match check at the disconnect site without
-    // first introducing an equivalent reconnect-safety mechanism.**
-    let writer_id = uuid::Uuid::now_v7();
     // PR-G of #259: channel carries fully-wrapped envelopes (seq +
     // persistence already done at the broadcast site). The pump
-    // serializes; no wrap step.
+    // serializes; no wrap step. Both writer and subscriber connections
+    // need the channel — the bus-bridge / pump / activity-pump all push
+    // through it, and subscribers are exactly read-only consumers of
+    // the same fan-out.
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<EventEnvelope>(
         crate::dispatch::layer::CONTROL_EVENT_QUEUE_CAP,
     );
-    {
-        let mut cw = state.root.control_writer.lock().await;
-        if let Some(old) = cw.take() {
-            // `try_send` fails when the prior connection's outbound
-            // queue is already full — its TUI is unresponsive or its
-            // socket is wedged. Log the drop so the silent failure is
-            // observable: the displaced TUI will not learn it was
-            // superseded and may keep rendering stale tiles until its
-            // socket EOFs. (#152 M1)
-            let superseded = wrap_with_seq(&state.event_log, &ControlEvent::Superseded);
-            state.event_log.persist(&superseded).await;
-            if let Err(e) = old.sender.try_send(superseded) {
-                tracing::warn!(
-                    new_writer_id = %writer_id,
-                    error = %e,
-                    "could not deliver Superseded to displaced TUI; \
-                     prior connection's queue full or closed"
+
+    // Writer-mode-only setup. PR-P of #438: subscriber connections skip
+    // the writer-slot install, the approval-queue drain, and the
+    // approval-bridge replay — approvals require a responder, and a
+    // read-only subscriber has no way to act on them.
+    //
+    // `writer_id` is `Some(_)` only for writer connections; the
+    // disconnect cleanup block at the bottom of this function uses that
+    // to decide whether to even contend on `state.root.control_writer`.
+    let writer_id = if client_mode == ClientMode::Writer {
+        // Install this connection as the control_writer (displace any prior).
+        //
+        // LOAD-BEARING: the connection-unique `writer_id` is checked by the
+        // disconnect cleanup block at the bottom of this function before it
+        // clears `state.root.control_writer`. Without that id-match guard,
+        // a TUI that reconnects in the narrow window between this read loop
+        // exiting and the cleanup block running would have its own writer
+        // slot silently cleared by the previous connection's cleanup —
+        // leading to a connected TUI that receives no events with no
+        // diagnostic surface. **Do not remove the writer_id field, the slot
+        // assignment, or the id-match check at the disconnect site without
+        // first introducing an equivalent reconnect-safety mechanism.**
+        let writer_id = uuid::Uuid::now_v7();
+        {
+            let mut cw = state.root.control_writer.lock().await;
+            if let Some(old) = cw.take() {
+                // `try_send` fails when the prior connection's outbound
+                // queue is already full — its TUI is unresponsive or its
+                // socket is wedged. Log the drop so the silent failure is
+                // observable: the displaced TUI will not learn it was
+                // superseded and may keep rendering stale tiles until its
+                // socket EOFs. (#152 M1)
+                let superseded = wrap_with_seq(&state.event_log, &ControlEvent::Superseded);
+                state.event_log.persist(&superseded).await;
+                if let Err(e) = old.sender.try_send(superseded) {
+                    tracing::warn!(
+                        new_writer_id = %writer_id,
+                        error = %e,
+                        "could not deliver Superseded to displaced TUI; \
+                         prior connection's queue full or closed"
+                    );
+                }
+            }
+            *cw = Some(crate::dispatch::layer::ControlWriterSlot {
+                id: writer_id,
+                sender: ev_tx.clone(),
+            });
+        }
+
+        // Drain any queued approvals now that a TUI is connected.
+        {
+            let mut queue = state.root.approval_queue.lock().await;
+            while let Some(q) = queue.pop_front() {
+                // Transfer responder into the bridge map, preserving TTL metadata
+                // and display fields so expire_layer_approvals can still expire
+                // the entry and — per #102 — a subsequent TUI reconnect can
+                // replay pending approvals held by the bridge.
+                state.root.approval_bridge.lock().await.insert(
+                    q.request_id.clone(),
+                    crate::dispatch::state::BridgeEntry {
+                        responder: q.responder,
+                        task_id: q.task_id.clone(),
+                        summary: q.summary.clone(),
+                        plan: q.plan.clone(),
+                        kind: q.kind,
+                        ttl_secs: q.ttl_secs,
+                        fallback: q.fallback,
+                        created_at: q.created_at,
+                    },
                 );
+                // And push the event (wrapped + persisted via the helper).
+                let _ = enqueue_envelope(
+                    &ev_tx,
+                    &event_log,
+                    ControlEvent::ApprovalRequest {
+                        request_id: q.request_id,
+                        task_id: q.task_id,
+                        summary: q.summary,
+                        plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
+                        kind: q.kind,
+                    },
+                )
+                .await;
             }
         }
-        *cw = Some(crate::dispatch::layer::ControlWriterSlot {
-            id: writer_id,
-            sender: ev_tx.clone(),
-        });
-    }
 
-    // Drain any queued approvals now that a TUI is connected.
-    {
-        let mut queue = state.root.approval_queue.lock().await;
-        while let Some(q) = queue.pop_front() {
-            // Transfer responder into the bridge map, preserving TTL metadata
-            // and display fields so expire_layer_approvals can still expire
-            // the entry and — per #102 — a subsequent TUI reconnect can
-            // replay pending approvals held by the bridge.
-            state.root.approval_bridge.lock().await.insert(
-                q.request_id.clone(),
-                crate::dispatch::state::BridgeEntry {
-                    responder: q.responder,
-                    task_id: q.task_id.clone(),
-                    summary: q.summary.clone(),
-                    plan: q.plan.clone(),
-                    kind: q.kind,
-                    ttl_secs: q.ttl_secs,
-                    fallback: q.fallback,
-                    created_at: q.created_at,
-                },
-            );
-            // And push the event (wrapped + persisted via the helper).
-            let _ = enqueue_envelope(
-                &ev_tx,
-                &event_log,
-                ControlEvent::ApprovalRequest {
-                    request_id: q.request_id,
-                    task_id: q.task_id,
-                    summary: q.summary,
-                    plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
-                    kind: q.kind,
-                },
-            )
-            .await;
+        // Replay any approvals already in the bridge (#102). A bridge entry with
+        // a still-live responder means a prior TUI received the ApprovalRequest
+        // event but died without approving/rejecting (or was displaced by this
+        // new connection). Without this replay, the new TUI sees nothing for the
+        // pending responder — the queue is empty, the bridge holds the responder
+        // but emits no event, and the lead blocks until TTL fallback fires.
+        // The responder oneshot stays in the bridge; a subsequent approve/reject
+        // op still delivers correctly.
+        // Collect live entries into a Vec while holding the lock (no async work),
+        // then drop the guard before calling ev_tx.send().await. Holding the lock
+        // across send() suspends while the channel is full, blocking every other
+        // lock waiter (expire_layer_approvals, the Approve op handler, concurrent
+        // Hello drain) for the full duration of the backpressure stall (#105).
+        let pending: Vec<ControlEvent> = {
+            let bridge = state.root.approval_bridge.lock().await;
+            bridge
+                .iter()
+                .filter(|(_, entry)| !entry.responder.is_closed())
+                // is_closed is the best proxy without racing the receiver; a
+                // concurrent TTL expiry between this filter and the send below
+                // is accepted — the TUI briefly renders a card that vanishes
+                // when the expiry is processed (#109).
+                .map(|(request_id, entry)| ControlEvent::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    task_id: entry.task_id.clone(),
+                    summary: entry.summary.clone(),
+                    plan: entry
+                        .plan
+                        .clone()
+                        .map(crate::mcp::approval::approval_plan_to_wire),
+                    kind: entry.kind,
+                })
+                .collect()
+        }; // lock released here
+        for ev in pending {
+            let _ = enqueue_envelope(&ev_tx, &event_log, ev).await;
         }
-    }
 
-    // Replay any approvals already in the bridge (#102). A bridge entry with
-    // a still-live responder means a prior TUI received the ApprovalRequest
-    // event but died without approving/rejecting (or was displaced by this
-    // new connection). Without this replay, the new TUI sees nothing for the
-    // pending responder — the queue is empty, the bridge holds the responder
-    // but emits no event, and the lead blocks until TTL fallback fires.
-    // The responder oneshot stays in the bridge; a subsequent approve/reject
-    // op still delivers correctly.
-    // Collect live entries into a Vec while holding the lock (no async work),
-    // then drop the guard before calling ev_tx.send().await. Holding the lock
-    // across send() suspends while the channel is full, blocking every other
-    // lock waiter (expire_layer_approvals, the Approve op handler, concurrent
-    // Hello drain) for the full duration of the backpressure stall (#105).
-    let pending: Vec<ControlEvent> = {
-        let bridge = state.root.approval_bridge.lock().await;
-        bridge
-            .iter()
-            .filter(|(_, entry)| !entry.responder.is_closed())
-            // is_closed is the best proxy without racing the receiver; a
-            // concurrent TTL expiry between this filter and the send below
-            // is accepted — the TUI briefly renders a card that vanishes
-            // when the expiry is processed (#109).
-            .map(|(request_id, entry)| ControlEvent::ApprovalRequest {
-                request_id: request_id.clone(),
-                task_id: entry.task_id.clone(),
-                summary: entry.summary.clone(),
-                plan: entry
-                    .plan
-                    .clone()
-                    .map(crate::mcp::approval::approval_plan_to_wire),
-                kind: entry.kind,
-            })
-            .collect()
-    }; // lock released here
-    for ev in pending {
-        let _ = enqueue_envelope(&ev_tx, &event_log, ev).await;
-    }
+        Some(writer_id)
+    } else {
+        None
+    };
 
     // PR-H of #259: bus → mpsc bridge. The per-run events broadcast
     // bus carries every `broadcast_control_event` emission. A
@@ -482,7 +500,23 @@ async fn serve_connection(
     // Read loop.
     while let Ok(Some(line)) = reader.next_line().await {
         let reply = match serde_json::from_str::<ControlOp>(&line) {
-            Ok(op) => dispatch_op(&state, op).await,
+            Ok(op) => {
+                // PR-P of #438: subscriber-mode clients are read-only. Reject
+                // writer ops at the front gate with a typed `OpFailed` rather
+                // than letting them mutate state via `dispatch_op`. The two
+                // no-op ops (Hello, Subscribe) are still allowed — Hello is
+                // already past the handshake (a duplicate is a no-op ack) and
+                // Subscribe is the consumer-side advisory ack from PR-N.
+                if client_mode == ClientMode::Subscriber && !is_subscriber_safe_op(&op) {
+                    ControlEvent::OpFailed {
+                        op: op_tag(&op).into(),
+                        task_id: None,
+                        error: "subscriber mode forbids writer ops".into(),
+                    }
+                } else {
+                    dispatch_op(&state, op).await
+                }
+            }
             Err(e) => ControlEvent::OpFailed {
                 // Best-effort: extract the `op` string from the raw JSON
                 // so the TUI can correlate the failure with the request
@@ -508,7 +542,10 @@ async fn serve_connection(
     // the window between our read loop exiting and this cleanup block
     // running; a blind clear would silently disconnect the reconnected
     // client.
-    {
+    //
+    // Subscriber connections (`writer_id == None`) never took the slot,
+    // so the cleanup is a no-op for them.
+    if let Some(writer_id) = writer_id {
         let mut cw = state.root.control_writer.lock().await;
         if cw.as_ref().is_some_and(|slot| slot.id == writer_id) {
             *cw = None;
@@ -517,6 +554,15 @@ async fn serve_connection(
     pump.abort();
     activity_pump.abort();
     bus_bridge.abort();
+}
+
+/// Whether a `ControlOp` is safe to accept from a subscriber-mode
+/// (read-only) connection. Hello is already past the handshake (a
+/// duplicate is a no-op ack) and Subscribe is the consumer-side
+/// advisory ack from PR-N of #438. Every other op mutates dispatcher
+/// state and is rejected up-front in the read loop.
+fn is_subscriber_safe_op(op: &ControlOp) -> bool {
+    matches!(op, ControlOp::Hello { .. } | ControlOp::Subscribe { .. })
 }
 
 /// Best-effort SIGCONT helper: if `task_id` is currently `Frozen`,

@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
-use pitboss_cli::control::protocol::{ControlEvent, ControlOp, EventEnvelope};
+use pitboss_cli::control::protocol::{ClientMode, ControlEvent, ControlOp, EventEnvelope};
 
 pub struct FakeControlClient {
     writer: OwnedWriteHalf,
@@ -20,9 +20,25 @@ pub struct FakeControlClient {
 }
 
 impl FakeControlClient {
-    /// Connect to `socket`, send `hello`, read the server hello, return a ready
-    /// client.
+    /// Connect to `socket` as a writer client, send `hello`, read the
+    /// server hello, return a ready client.
     pub async fn connect(socket: &Path, client_version: &str) -> Result<Self> {
+        Self::connect_with_mode(socket, client_version, ClientMode::Writer).await
+    }
+
+    /// PR-P of #438: connect as a subscriber-mode client. The dispatcher
+    /// skips the writer-slot install + approval-drain / bridge-replay
+    /// and rejects writer ops with `OpFailed`. Tests use this to assert
+    /// the subscriber path without displacing a concurrent writer.
+    pub async fn connect_subscriber(socket: &Path, client_version: &str) -> Result<Self> {
+        Self::connect_with_mode(socket, client_version, ClientMode::Subscriber).await
+    }
+
+    async fn connect_with_mode(
+        socket: &Path,
+        client_version: &str,
+        mode: ClientMode,
+    ) -> Result<Self> {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("connect {}", socket.display()))?;
@@ -33,6 +49,7 @@ impl FakeControlClient {
         };
         c.send(&ControlOp::Hello {
             client_version: client_version.into(),
+            mode,
         })
         .await?;
         // Wait for the server hello so the connection is fully established.

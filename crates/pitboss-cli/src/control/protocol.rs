@@ -130,6 +130,29 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+/// Selects whether a control-socket client wants to write ops (default,
+/// pre-v0.14 behavior) or only read the broadcast envelope stream.
+///
+/// Added in PR-P of #438 to unblock multi-consumer access to a run's live
+/// envelope stream. The dispatcher's `control_writer` slot is single-tenant:
+/// every newly-accepted writer client supersedes the previous one with a
+/// `Superseded` event. A second control-plane consumer (the web SSE bridge,
+/// a TUI mirror, etc.) used to be impossible to attach without displacing
+/// the in-use writer. With `Subscriber` mode, the dispatcher skips the
+/// writer-slot install and fans out the broadcast bus to any number of
+/// concurrent subscribers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientMode {
+    #[default]
+    Writer,
+    Subscriber,
+}
+
+fn is_default_client_mode(m: &ClientMode) -> bool {
+    matches!(m, ClientMode::Writer)
+}
+
 /// An operation sent from the TUI (client) to the dispatcher (server).
 ///
 /// Note: `Eq` is NOT derived — `UpdatePolicy` carries `Vec<ApprovalRule>`,
@@ -140,6 +163,13 @@ fn is_zero_u64(v: &u64) -> bool {
 pub enum ControlOp {
     Hello {
         client_version: String,
+        /// Optional client-mode discriminator. Absent on the wire for
+        /// pre-v0.14 clients — `#[serde(default)]` yields `Writer`,
+        /// matching the historical single-client behavior. Subscriber
+        /// mode opts the client out of the dispatcher's writer slot;
+        /// see [`ClientMode`].
+        #[serde(default, skip_serializing_if = "is_default_client_mode")]
+        mode: ClientMode,
     },
     CancelWorker {
         task_id: String,
@@ -366,9 +396,35 @@ mod tests {
         assert_eq!(
             op,
             ControlOp::Hello {
-                client_version: "0.4.0".into()
+                client_version: "0.4.0".into(),
+                mode: ClientMode::Writer,
             }
         );
+    }
+
+    /// PR-P of #438: subscriber-mode hello deserializes and round-trips.
+    #[test]
+    fn hello_op_subscriber_mode_roundtrips() {
+        let op = ControlOp::Hello {
+            client_version: "pitboss-core/0.14.0".into(),
+            mode: ClientMode::Subscriber,
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert!(s.contains("\"mode\":\"subscriber\""), "{s}");
+        assert_eq!(roundtrip_op(&op), op);
+    }
+
+    /// PR-P back-compat: default `Writer` mode is elided on the wire, so
+    /// pre-PR-P fixtures (`{"op":"hello","client_version":"0.4.0"}`)
+    /// stay byte-identical.
+    #[test]
+    fn hello_op_writer_mode_elided_on_wire() {
+        let op = ControlOp::Hello {
+            client_version: "0.4.0".into(),
+            mode: ClientMode::Writer,
+        };
+        let s = serde_json::to_string(&op).unwrap();
+        assert_eq!(s, r#"{"op":"hello","client_version":"0.4.0"}"#);
     }
 
     #[test]

@@ -958,6 +958,48 @@ source or debugging connection issues should know the contract.
 
 ---
 
+## Control socket protocol (v0.14+)
+
+Each run also stands up a **control socket** distinct from the MCP
+socket. It's a per-run Unix socket carrying line-delimited JSON ops
+(`ControlOp`) and event envelopes (`EventEnvelope` wrapping
+`ControlEvent`). The TUI, the web SSE bridge, `pitboss-core::stream`'s
+live transport, and any future consumer that wants to read the live
+event stream all attach over this socket.
+
+### Socket
+
+- Path: `$XDG_RUNTIME_DIR/pitboss/<run_id>.control.sock` (preferred),
+  or fallback `<run_dir>/<run_id>/control.sock`. Resolved by
+  `pitboss_cli::control::control_socket_path` (re-exported as
+  `pitboss_core::control_protocol::resolve_control_socket`).
+- Bound by `start_control_server` at dispatch start, removed when the
+  `ControlServerHandle` drops.
+
+### Handshake: `Hello { client_version, mode }`
+
+Every client MUST send `ControlOp::Hello` as its first line. The
+`mode: ClientMode` field selects the connection role:
+
+| `mode` | Role | Behavior |
+|---|---|---|
+| `"writer"` (default, elided on the wire) | TUI / `pitboss-web::control_bridge::send_op` / any client that sends mutating ops | Takes the single `control_writer` slot, displacing any prior writer with a `Superseded` event. Receives the queued-approval drain + bridge replay. |
+| `"subscriber"` | `pitboss-core::stream::drive_live`; any read-only mirror | Does NOT take the writer slot — coexists with one writer + any number of other subscribers. Skips approval-drain / bridge-replay (subscribers can't respond). Writer ops are rejected up-front with `OpFailed { error: "subscriber mode forbids writer ops" }`. |
+
+Pre-v0.14 clients send `Hello` without `mode`; `#[serde(default)]`
+deserializes them as `Writer`, preserving byte-identical wire and
+historical semantics. Subscriber connections may send `Hello` (no-op
+ack) and `Subscribe { since_seq }` (advisory subscribe ack from
+PR-N); every other op returns `OpFailed`.
+
+The dispatcher fans out broadcast envelopes (`broadcast_control_event`)
+to every connected client — writer and all subscribers — via the
+per-run `events_tx: broadcast::Sender<EventEnvelope>`. Connection-scoped
+envelopes (op replies, `store_activity` ticks, queued-approval drain)
+go only to the originating connection.
+
+---
+
 ## The MCP tools the lead has
 
 When running hierarchical, the lead's `--allowedTools` is automatically

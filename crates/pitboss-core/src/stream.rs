@@ -201,9 +201,12 @@ async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq:
         }
     };
 
-    // Client hello.
+    // Client hello. PR-P of #438: send `"mode":"subscriber"` so the
+    // dispatcher skips the writer-slot install — any number of unified-API
+    // consumers can attach to a run without displacing each other or a
+    // concurrent writer (e.g. `control_bridge.rs::send_op` from pitboss-web).
     let hello = format!(
-        r#"{{"op":"hello","client_version":"pitboss-core/{}"}}{}"#,
+        r#"{{"op":"hello","client_version":"pitboss-core/{}","mode":"subscriber"}}{}"#,
         crate::VERSION,
         "\n"
     );
@@ -803,6 +806,57 @@ mod tests {
         // Per-stream seq is strictly monotonic across the three items.
         assert!(items[0].seq < items[1].seq);
         assert!(items[1].seq < items[2].seq);
+    }
+
+    /// PR-P of #438: the unified-API client identifies itself as
+    /// `"mode":"subscriber"` so the dispatcher skips the writer-slot
+    /// install — any number of `open_run_stream` consumers can attach
+    /// concurrently without displacing a writer like
+    /// `pitboss-web::control_bridge`. Pins the client-side handshake
+    /// shape so a regression in `drive_live`'s Hello formatting is
+    /// caught here rather than at the (one-way coupled) integration
+    /// boundary.
+    #[tokio::test]
+    async fn live_only_handshake_sends_subscriber_mode() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        use tokio::sync::oneshot;
+
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join("019d-fake-run-id");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let sock = run_dir.join("control.sock");
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path().join("xdg-empty"));
+
+        let (hello_tx, hello_rx) = oneshot::channel::<String>();
+        let listener = UnixListener::bind(&sock).expect("bind capture socket");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut lines = BufReader::new(read_half).lines();
+            let client_hello = lines.next_line().await.ok().flatten().unwrap_or_default();
+            let _ = hello_tx.send(client_hello);
+            let server_hello = "{\"event\":\"hello\",\"server_version\":\"mock\",\"run_id\":\"mock\",\"run_kind\":\"test\",\"workers\":[]}\n";
+            let _ = write_half.write_all(server_hello.as_bytes()).await;
+            let _ = write_half.flush().await;
+            // Eat the Subscribe and exit; closing the write half ends
+            // the consumer's stream so `collect` returns deterministically.
+            let _ = lines.next_line().await;
+        });
+        tokio::task::yield_now().await;
+
+        let _items = collect(&run_dir, StreamMode::LiveOnly).await;
+        std::env::remove_var("XDG_RUNTIME_DIR");
+
+        let captured = hello_rx.await.expect("hello captured");
+        assert!(
+            captured.contains("\"op\":\"hello\""),
+            "missing op tag in hello: {captured}"
+        );
+        assert!(
+            captured.contains("\"mode\":\"subscriber\""),
+            "drive_live must send subscriber mode: {captured}"
+        );
     }
 
     /// `ReplayThenLive` against a connected dispatcher emits the disk
