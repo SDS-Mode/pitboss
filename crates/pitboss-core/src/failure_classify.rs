@@ -415,10 +415,56 @@ pub fn excerpt(blob: &str) -> String {
         }
     }
 
+    // #475: the 8 KiB tail-read window in `detect_failure_reason` can land
+    // mid-line when the last stream-JSON event is itself larger than the
+    // window — e.g., a `tool_use` whose input contains a base64-encoded
+    // payload. `lines().rev().find(...)` then returns the back-half of
+    // the event as if it were a complete line, producing operator-
+    // illegible output like `kens":1325},"output_tokens":6,...` that
+    // looks like a usage envelope tail but isn't classified as one.
+    // Detect this case here at the consumer rather than growing the
+    // read window unboundedly: a clean stream-JSON event starts with
+    // `{`, so a non-JSON-prefixed tail that nevertheless carries the
+    // key-value separator `":` ahead of any opening brace is almost
+    // certainly mid-event. Surface that explicitly.
+    if looks_like_mid_json_event(last_line) {
+        let tail = last_chars(last_line, 80);
+        return format!("[truncated mid-event] …{tail}");
+    }
+
     // Fallback: the last full line, capped. Still strictly better than
     // the pre-fix mid-line slice — at least the operator sees one
     // complete event boundary.
     cap_chars(last_line)
+}
+
+/// Heuristic: does this string look like the back-half of a JSON event
+/// that was truncated by the 8 KiB tail read in `detect_failure_reason`?
+///
+/// A clean stream-JSON event starts with `{` (or `[`). A line that
+/// doesn't, but contains the JSON key-value separator `":` before any
+/// opening brace, is almost certainly a mid-event tail from a large
+/// single-line event that exceeded the tail-read window. (#475)
+fn looks_like_mid_json_event(line: &str) -> bool {
+    let l = line.trim_start();
+    if l.starts_with('{') || l.starts_with('[') {
+        return false;
+    }
+    let Some(kv_idx) = l.find("\":") else {
+        return false;
+    };
+    let first_brace_idx = l.find('{').unwrap_or(usize::MAX);
+    kv_idx < first_brace_idx
+}
+
+/// Take the last `n` codepoints of `s`. Codepoint-aware so it never
+/// produces a partial UTF-8 sequence.
+fn last_chars(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        return s.to_string();
+    }
+    s.chars().skip(count - n).collect()
 }
 
 /// Cap a string at `EXCERPT_MAX_CHARS` codepoints, taking the tail when
@@ -727,6 +773,66 @@ mod tests {
         let e = excerpt(blob);
         // Falls back to the malformed line itself (capped).
         assert_eq!(e, "{\"truncated\":");
+    }
+
+    /// #475 regression: when the last stream-JSON line is itself larger
+    /// than the 8 KiB tail-read window (e.g., a `tool_use` with a
+    /// base64-encoded payload), the dispatcher's 8 KiB tail starts
+    /// mid-line. Pre-fix `excerpt()` returned that mid-line slice
+    /// verbatim — operator-illegible output like
+    /// `kens":1325},"output_tokens":6,...` that resembles a usage
+    /// envelope tail but isn't classified as one. Post-fix the
+    /// truncation is surfaced explicitly with a `[truncated mid-event]`
+    /// marker so the failures dashboard says "we didn't capture enough
+    /// of the tail to classify" rather than rendering garbage.
+    #[test]
+    fn excerpt_marks_mid_event_truncation_when_tail_starts_mid_line() {
+        let payload = format!(
+            "earlier line 1\n\
+             earlier line 2\n\
+             {{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"input\":{{\"command\":\"{}\"}}}}]}},\"usage\":{{\"input_tokens\":1325,\"output_tokens\":6}},\"uuid\":\"abc\"}}",
+            "x".repeat(9000)
+        );
+        // Simulate the 8 KiB tail read in `detect_failure_reason`.
+        let mut tail_start = payload.len().saturating_sub(8 * 1024);
+        while !payload.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let tail = &payload[tail_start..];
+        let e = excerpt(tail);
+        assert!(
+            e.starts_with("[truncated mid-event]"),
+            "expected truncation marker, got: {e:?}"
+        );
+        // Anti-pattern from the bug report: the bare mid-line slice
+        // resembling a usage envelope tail must NOT be returned.
+        assert!(
+            !e.contains("input_tokens\":1325},\"output_tokens\":6,") || e.starts_with("[truncated"),
+            "mid-line slice must be marked, not returned bare: {e:?}"
+        );
+    }
+
+    /// Companion check: prose tails without JSON-syntax artifacts are
+    /// NOT misclassified as mid-event truncations.
+    #[test]
+    fn excerpt_does_not_flag_clean_prose_as_truncated() {
+        let blob = "ERROR: something broke and we couldn't recover";
+        let e = excerpt(blob);
+        assert!(!e.starts_with("[truncated"));
+        assert_eq!(e, "ERROR: something broke and we couldn't recover");
+    }
+
+    /// A mid-line tail starting with a JSON closing-brace and continuing
+    /// with key-value pairs is the canonical shape the bug produced.
+    #[test]
+    fn excerpt_flags_classic_mid_envelope_shape() {
+        // Reproduce the exact shape from the bug report.
+        let blob = r#"kens":1325},"output_tokens":6,"service_tier":"standard","inference_geo":"not_available"},"context_management":null},"parent_tool_use_id":null,"session_id":"e7b8712b-...","uuid":"4d8ce2f9-..."}"#;
+        let e = excerpt(blob);
+        assert!(
+            e.starts_with("[truncated mid-event]"),
+            "expected truncation marker, got: {e:?}"
+        );
     }
 
     /// Empty `result.result` strings are skipped — they're not useful
