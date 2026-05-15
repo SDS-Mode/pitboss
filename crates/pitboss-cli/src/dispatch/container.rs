@@ -264,6 +264,30 @@ fn build_run_args(
     args.push("-w".into());
     args.push(workdir.display().to_string());
 
+    // ── Control-bridge TCP forward (#474) ────────────────────────────────────
+    // `pitboss-web` running on the host can't reach the dispatcher's
+    // in-container AF_UNIX control socket on macOS+Podman (virtiofs's
+    // `bind()` returns EINVAL; the `XDG_RUNTIME_DIR=/tmp` workaround
+    // keeps the socket on container-overlay, which is unreachable from
+    // the host). Auto-publish a host-loopback TCP forward instead: pick
+    // a free 127.0.0.1 port, map it to the same port inside the
+    // container, and tell the dispatcher to bind there via
+    // PITBOSS_CONTROL_TCP_PORT. Harmless on Linux — the UNIX socket
+    // continues to work and pitboss-web only consults the TCP arm when
+    // meta.json's `control_tcp_addr` is populated.
+    if let Some(port) = pick_free_loopback_port() {
+        args.push("-p".into());
+        args.push(format!("127.0.0.1:{port}:{port}"));
+        args.push("-e".into());
+        args.push(format!("PITBOSS_CONTROL_TCP_PORT={port}"));
+    } else {
+        eprintln!(
+            "pitboss container-dispatch: warning: could not allocate a host \
+             loopback port for the control bridge TCP forward; pitboss-web \
+             Live/Graph/controls will be unavailable for this run."
+        );
+    }
+
     // ── Extra operator args ───────────────────────────────────────────────────
     // Defense in depth: `validate_extra_args` is also called from
     // `manifest::validate::validate_container`, but a test or
@@ -330,6 +354,24 @@ fn build_run_args(
     }
 
     Ok(args)
+}
+
+/// Pick an unused TCP port on 127.0.0.1 by asking the kernel for one.
+/// Returns `None` on bind failure (e.g., the loopback interface is
+/// somehow unavailable — should not happen in practice).
+///
+/// There is an inherent TOCTOU race between the listener drop and
+/// podman's `-p` bind on the host side, but the window is short and the
+/// alternative (parsing podman's verbose error output to retry) is much
+/// more complex. If a collision does happen, the run starts but the
+/// control-bridge TCP forward is broken — pitboss-web falls back to the
+/// AF_UNIX path (which on macOS will still be unreachable, but that's a
+/// pre-existing limitation we're trying to fix here, not regress). (#474)
+fn pick_free_loopback_port() -> Option<u16> {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
 }
 
 /// Reject `extra_args` entries that defeat the container sandbox or

@@ -32,6 +32,7 @@ mod integration_tests {
             claude_version: Some("1.0.0".into()),
             started_at: Utc::now(),
             env: HashMap::new(),
+            control_tcp_addr: None,
         }
     }
 

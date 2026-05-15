@@ -350,9 +350,15 @@ async fn setup_run_harness(
         notification_router,
         shared_store.clone(),
     ));
+    // PITBOSS_CONTROL_TCP_PORT — see hierarchical.rs for the rationale (#474).
+    let tcp_bind = std::env::var("PITBOSS_CONTROL_TCP_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p)));
     let control_sock = crate::control::control_socket_path(init.run_id, &resolved.run_dir);
-    let _control = crate::control::server::start_control_server(
+    let _control = crate::control::server::start_control_server_with_options(
         control_sock,
+        crate::control::server::ControlServerOptions { tcp_bind },
         env!("CARGO_PKG_VERSION").to_string(),
         init.run_id.to_string(),
         "flat".into(),

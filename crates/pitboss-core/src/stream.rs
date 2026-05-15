@@ -166,11 +166,18 @@ async fn drive_replay(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>) -> u64 {
 /// the inner `EventEnvelope.seq` and is preserved verbatim for
 /// consumers that care.
 ///
+/// Transport selection (#474):
+/// - If `meta.json` carries `control_tcp_addr`, dial that TCP address
+///   first. This is the path that container-dispatch runs on macOS use
+///   because the in-container `AF_UNIX` socket isn't reachable from the
+///   host through virtiofs.
+/// - Otherwise, fall back to the historical `AF_UNIX` path resolved via
+///   `resolve_control_socket`.
+///
 /// Returns silently when no socket exists or the socket EOFs — the
 /// caller's stream then ends.
 async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq: u64) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
+    use tokio::net::{TcpStream, UnixStream};
 
     // Run-id is the run-dir's basename (uuid). Used both for socket
     // resolution and for the `RunStreamItem.run_id` field on emitted
@@ -188,18 +195,47 @@ async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq:
     };
     let run_id = Uuid::parse_str(&run_id_str).unwrap_or_else(|_| Uuid::nil());
 
+    if let Some(tcp_addr) = read_control_tcp_addr(run_dir) {
+        match TcpStream::connect(&tcp_addr).await {
+            Ok(stream) => {
+                handshake_and_forward(stream, &run_id_str, run_id, tx, start_seq).await;
+            }
+            Err(e) => {
+                tracing::debug!(run_id = %run_id_str, addr = %tcp_addr, error = %e,
+                                "live transport: tcp connect failed");
+            }
+        }
+        return;
+    }
+
     let Some(sock_path) = resolve_control_socket(&run_id_str, run_dir) else {
         tracing::debug!(run_id = %run_id_str, "live transport: no control socket");
         return;
     };
 
-    let mut stream = match UnixStream::connect(&sock_path).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(run_id = %run_id_str, error = %e, "live transport: connect failed");
-            return;
+    match UnixStream::connect(&sock_path).await {
+        Ok(stream) => {
+            handshake_and_forward(stream, &run_id_str, run_id, tx, start_seq).await;
         }
-    };
+        Err(e) => {
+            tracing::debug!(run_id = %run_id_str, error = %e, "live transport: unix connect failed");
+        }
+    }
+}
+
+/// Perform the subscriber-mode Hello + Subscribe handshake, then loop
+/// forwarding envelopes from the stream until EOF or a send error.
+/// Generic over `S` so the same body serves `AF_UNIX` and TCP streams. (#474)
+async fn handshake_and_forward<S>(
+    mut stream: S,
+    run_id_str: &str,
+    run_id: Uuid,
+    tx: &mpsc::Sender<RunStreamItem>,
+    start_seq: u64,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     // Client hello. PR-P of #438: send `"mode":"subscriber"` so the
     // dispatcher skips the writer-slot install — any number of unified-API
@@ -221,10 +257,7 @@ async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq:
     // full-duplex and the dispatcher processes ops in order, so this
     // doesn't race the server-side Hello reply. `since_seq: 0`
     // requests everything; consumer-side reconciliation in
-    // `ReplayThenLive` dedupes against its disk replay. A future PR can
-    // plumb the actual last-seen dispatcher seq and have the server
-    // fast-forward — today the dispatcher just acks and emits new
-    // envelopes onward.
+    // `ReplayThenLive` dedupes against its disk replay.
     let subscribe = "{\"op\":\"subscribe\",\"since_seq\":0}\n";
     if stream.write_all(subscribe.as_bytes()).await.is_err() {
         return;
@@ -233,7 +266,7 @@ async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq:
         return;
     }
 
-    let (read_half, _write_half) = stream.into_split();
+    let (read_half, _write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
 
     // Forward envelopes.
@@ -249,11 +282,7 @@ async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq:
                     Err(e) => {
                         // Server may emit non-envelope replies (OpAcked
                         // for the subscribe op, op-replies for future
-                        // ops). Best-effort: keep parsing. A typed
-                        // EventEnvelope with Value-inner parses any
-                        // valid control event, so a parse failure here
-                        // is genuinely malformed JSON or a non-event
-                        // op-reply — log + continue.
+                        // ops). Best-effort: keep parsing.
                         tracing::debug!(
                             run_id = %run_id_str,
                             error = %e,
@@ -288,6 +317,22 @@ async fn drive_live(run_dir: &Path, tx: &mpsc::Sender<RunStreamItem>, start_seq:
             }
         }
     }
+}
+
+/// Read `meta.json` for the run at `run_dir` and return the optional
+/// `control_tcp_addr` field. Returns `None` when meta.json is missing,
+/// unparseable, or doesn't carry the field. Used by `drive_live` to
+/// decide whether to dial TCP or fall back to `AF_UNIX`. (#474)
+fn read_control_tcp_addr(run_dir: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct MetaTcpOnly {
+        #[serde(default)]
+        control_tcp_addr: Option<String>,
+    }
+    let bytes = std::fs::read(run_dir.join("meta.json")).ok()?;
+    serde_json::from_slice::<MetaTcpOnly>(&bytes)
+        .ok()
+        .and_then(|m| m.control_tcp_addr)
 }
 
 /// Polling interval for [`tail_run_stream`]. The current implementation

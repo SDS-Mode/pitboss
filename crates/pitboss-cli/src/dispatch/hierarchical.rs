@@ -12,7 +12,7 @@ use pitboss_core::session::CancelToken;
 use pitboss_core::store::{JsonFileStore, RunSummary, SessionStore};
 use uuid::Uuid;
 
-use crate::control::{control_socket_path, server::start_control_server};
+use crate::control::control_socket_path;
 use crate::dispatch::state::DispatchState;
 use crate::manifest::resolve::ResolvedManifest;
 use crate::mcp::{socket_path_for_run, McpServer};
@@ -227,9 +227,22 @@ pub async fn run_hierarchical(
     crate::dispatch::runner::install_approval_ttl_watcher(state.clone());
 
     // Bind the control socket for TUI ↔ dispatcher ops.
+    //
+    // PITBOSS_CONTROL_TCP_PORT is injected by `pitboss container-dispatch`
+    // when running on a platform where the in-container AF_UNIX socket
+    // isn't reachable from the host (macOS+Podman virtiofs). When set,
+    // the dispatcher binds an additional TCP listener at
+    // `0.0.0.0:<port>` so podman's `-p` port-forward gives the host
+    // `pitboss-web` a working dial path. The host-side dial address
+    // (`127.0.0.1:<port>`) lands in `meta.json` via the entrypoint. (#474)
+    let tcp_bind = std::env::var("PITBOSS_CONTROL_TCP_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p)));
     let control_sock = control_socket_path(run_id, &run_dir);
-    let _control = start_control_server(
+    let _control = crate::control::server::start_control_server_with_options(
         control_sock,
+        crate::control::server::ControlServerOptions { tcp_bind },
         env!("CARGO_PKG_VERSION").to_string(),
         run_id.to_string(),
         "hierarchical".into(),

@@ -643,6 +643,7 @@ mod tests {
             claude_version: None,
             started_at,
             env: HashMap::new(),
+            control_tcp_addr: None,
         };
         std::fs::write(
             dir.path().join("meta.json"),
