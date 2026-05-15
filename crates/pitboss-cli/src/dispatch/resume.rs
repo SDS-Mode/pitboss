@@ -677,6 +677,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(ResolvedLead {
                 id: "triage".into(),
@@ -802,6 +803,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(ResolvedLead {
                 id: "triage".into(),
@@ -930,6 +932,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(ResolvedLead {
                 id: "root-lead".into(),
@@ -1134,6 +1137,7 @@ mod tests {
             run_dir: std::path::PathBuf::from("/tmp"),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: None,
             max_workers: None,

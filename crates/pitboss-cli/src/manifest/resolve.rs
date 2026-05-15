@@ -140,6 +140,13 @@ pub struct ResolvedManifest {
     pub run_dir: PathBuf,
     pub worktree_cleanup: WorktreeCleanup,
     pub emit_event_stream: bool,
+    /// Optional `--setting-sources` override forwarded to every worker
+    /// `claude … -p` spawn. `None` means apply pitboss's default (filter
+    /// in container, no filter on host). Validated comma-separated
+    /// subset of `user`, `project`, `local` — see
+    /// `manifest::schema::Manifest::claude_setting_sources` doc-comment.
+    #[serde(default)]
+    pub claude_setting_sources: Option<String>,
     pub tasks: Vec<ResolvedTask>,
     pub lead: Option<ResolvedLead>,
     /// Surfaced from `[lead].max_workers` for consumer convenience.
@@ -386,6 +393,7 @@ pub fn resolve(
         run_dir,
         worktree_cleanup: manifest.run.worktree_cleanup,
         emit_event_stream: manifest.run.emit_event_stream,
+        claude_setting_sources: manifest.run.claude_setting_sources.clone(),
         tasks: resolved_tasks,
         lead: resolved_lead,
         max_workers,

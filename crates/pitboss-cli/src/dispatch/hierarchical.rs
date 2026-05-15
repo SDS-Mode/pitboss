@@ -97,6 +97,7 @@ pub async fn run_hierarchical(
             &placeholder_cfg,
             resolved.communication.mode,
             &resolved.mcp_servers,
+            resolved.claude_setting_sources.as_deref(),
         );
         println!("DRY-RUN lead: {}", lead.id);
         println!(
@@ -332,6 +333,7 @@ pub async fn run_hierarchical(
             &mcp_config_path,
             communication_mode,
             &resolved.mcp_servers,
+            resolved.claude_setting_sources.as_deref(),
         ),
         cwd: lead_cwd.clone(),
         env: lead_env,
@@ -386,6 +388,7 @@ pub async fn run_hierarchical(
                     new_prompt,
                     communication_mode,
                     &resolved.mcp_servers,
+                    resolved.claude_setting_sources.as_deref(),
                 ),
                 cwd: lead_cwd.clone(),
                 env: resume_env,
@@ -1190,6 +1193,7 @@ mod await_drained_tests {
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: None,
             max_workers: Some(4),

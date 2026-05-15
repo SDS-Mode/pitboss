@@ -564,6 +564,7 @@ mod tests {
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: None,
             max_workers: Some(4),

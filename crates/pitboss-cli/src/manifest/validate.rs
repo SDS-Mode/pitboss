@@ -33,6 +33,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_mcp_server_tools(resolved)?;
     validate_mcp_tool_consistency(resolved)?;
     validate_agent_profiles(resolved)?;
+    validate_claude_setting_sources(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -395,6 +396,52 @@ fn validate_communication(r: &ResolvedManifest) -> Result<()> {
     }
     if r.communication.max_artifacts_per_actor == 0 {
         bail!("[communication].max_artifacts_per_actor must be > 0");
+    }
+    Ok(())
+}
+
+/// Validate `[run].claude_setting_sources` (#555). The string must be a
+/// comma-separated subset of `user`, `project`, `local`. Empty string,
+/// unknown tokens, and duplicate tokens are rejected with a hint. An
+/// omitted (`None`) field passes through — that's the back-compat path
+/// where pitboss applies its built-in defaults (filter in container,
+/// no filter on host).
+fn validate_claude_setting_sources(r: &ResolvedManifest) -> Result<()> {
+    let Some(value) = r.claude_setting_sources.as_deref() else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        bail!(
+            "[run].claude_setting_sources: empty string is not a valid \
+             value; either omit the field (pitboss applies its default) \
+             or set a comma-separated subset of \"user\", \"project\", \
+             \"local\""
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for token in value.split(',') {
+        let t = token.trim();
+        if t.is_empty() {
+            bail!(
+                "[run].claude_setting_sources = {value:?}: contains an empty \
+                 token (e.g. trailing comma); use a comma-separated subset of \
+                 \"user\", \"project\", \"local\" with no empty entries"
+            );
+        }
+        match t {
+            "user" | "project" | "local" => {}
+            other => bail!(
+                "[run].claude_setting_sources = {value:?}: unknown token \
+                 {other:?}; valid tokens are \"user\", \"project\", \"local\" \
+                 (claude-code's --setting-sources flag)"
+            ),
+        }
+        if !seen.insert(t.to_string()) {
+            bail!(
+                "[run].claude_setting_sources = {value:?}: token {t:?} \
+                 appears more than once"
+            );
+        }
     }
     Ok(())
 }
@@ -1082,6 +1129,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks,
             lead: None,
             max_workers: None,
@@ -1119,6 +1167,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(rl("lead", d.path().to_path_buf())),
             max_workers: Some(4),
@@ -1212,6 +1261,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![rt("t1", d.path().to_path_buf(), false, None)],
             lead: Some(rl("lead", d.path().to_path_buf())),
             max_workers: Some(4),
@@ -1252,6 +1302,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(rl("l", d.path().to_path_buf())),
             max_workers: Some(17),
@@ -1288,6 +1339,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(rl("l", d.path().to_path_buf())),
             max_workers: Some(4),
@@ -1338,6 +1390,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -1440,6 +1493,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -1567,6 +1621,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: None,
             max_workers: None,
@@ -1628,6 +1683,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -1670,6 +1726,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -1883,6 +1940,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -2230,6 +2288,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -2269,6 +2328,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),
             max_workers: Some(4),
@@ -2390,6 +2450,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(rl("lead", d.path().to_path_buf())),
             max_workers: Some(4),
@@ -2435,6 +2496,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: Some(rl("lead", d.path().to_path_buf())),
             max_workers: Some(4),
@@ -2999,5 +3061,62 @@ mod tests {
             }];
         });
         validate_skip_dir_check(&r).expect("known built-in references must validate");
+    }
+
+    // ── #555: [run].claude_setting_sources validation ─────────────────────
+
+    #[test]
+    fn claude_setting_sources_accepts_valid_subset() {
+        for valid in [
+            "user",
+            "project",
+            "local",
+            "project,local",
+            "user,project,local",
+        ] {
+            let r = rm_with(|m| m.claude_setting_sources = Some(valid.into()));
+            validate_skip_dir_check(&r)
+                .unwrap_or_else(|e| panic!("valid value {valid:?} must accept: {e}"));
+        }
+    }
+
+    #[test]
+    fn claude_setting_sources_accepts_omitted() {
+        // Back-compat: pre-#555 manifests have no field. Must still pass.
+        let r = rm_with(|m| m.claude_setting_sources = None);
+        validate_skip_dir_check(&r).expect("omitted field is back-compat default");
+    }
+
+    #[test]
+    fn claude_setting_sources_rejects_empty_string() {
+        // Explicit empty string is ambiguous — operator should omit the
+        // field instead.
+        let r = rm_with(|m| m.claude_setting_sources = Some(String::new()));
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("empty string"), "got: {err}");
+        assert!(err.contains("claude_setting_sources"), "got: {err}");
+    }
+
+    #[test]
+    fn claude_setting_sources_rejects_unknown_token() {
+        let r = rm_with(|m| m.claude_setting_sources = Some("project,enterprise".into()));
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("enterprise"), "got: {err}");
+        assert!(err.contains("--setting-sources"), "got: {err}");
+    }
+
+    #[test]
+    fn claude_setting_sources_rejects_duplicate_token() {
+        let r = rm_with(|m| m.claude_setting_sources = Some("project,project".into()));
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn claude_setting_sources_rejects_trailing_comma() {
+        // `"project,"` parses as `["project", ""]` — an empty token.
+        let r = rm_with(|m| m.claude_setting_sources = Some("project,".into()));
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("empty token"), "got: {err}");
     }
 }
