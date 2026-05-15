@@ -39,7 +39,7 @@ pub(crate) fn detect_in_container() -> bool {
 ///    explicit value wins, regardless of container vs. host. This is
 ///    the headless-dispatch escape hatch — set `"project,local"` to
 ///    filter host user-scope hooks/output-style out of unattended
-///    workers on host dispatch. (#XXX)
+///    workers on host dispatch. (#555)
 /// 2. **Container default**: `project,local` is forced in
 ///    container-dispatch so host hooks (which often point at host
 ///    filesystem paths the container can't see) don't leak in. (#426)

@@ -418,17 +418,33 @@ fn validate_claude_setting_sources(r: &ResolvedManifest) -> Result<()> {
              \"local\""
         );
     }
+    // Reject whitespace inside the value. The string is forwarded
+    // verbatim to claude as `--setting-sources <value>`; a space-
+    // padded form like `"project, local"` would be passed through as
+    // a literal flag value and either rejected by claude or silently
+    // misparsed. Rejecting at validate time keeps the contract simple
+    // (the value the operator wrote is the value claude receives) and
+    // surfaces the typo immediately rather than at dispatch.
+    if value.chars().any(char::is_whitespace) {
+        bail!(
+            "[run].claude_setting_sources = {value:?}: contains whitespace; \
+             use the canonical comma-separated form with no spaces \
+             (e.g. \"project,local\"), not \"project, local\""
+        );
+    }
     let mut seen = std::collections::BTreeSet::new();
     for token in value.split(',') {
-        let t = token.trim();
-        if t.is_empty() {
+        // No `.trim()` — whitespace is already rejected above; if a
+        // token is empty here, it's because of a `,,` or trailing/
+        // leading comma, which is the empty-token case below.
+        if token.is_empty() {
             bail!(
                 "[run].claude_setting_sources = {value:?}: contains an empty \
                  token (e.g. trailing comma); use a comma-separated subset of \
                  \"user\", \"project\", \"local\" with no empty entries"
             );
         }
-        match t {
+        match token {
             "user" | "project" | "local" => {}
             other => bail!(
                 "[run].claude_setting_sources = {value:?}: unknown token \
@@ -436,9 +452,9 @@ fn validate_claude_setting_sources(r: &ResolvedManifest) -> Result<()> {
                  (claude-code's --setting-sources flag)"
             ),
         }
-        if !seen.insert(t.to_string()) {
+        if !seen.insert(token.to_string()) {
             bail!(
-                "[run].claude_setting_sources = {value:?}: token {t:?} \
+                "[run].claude_setting_sources = {value:?}: token {token:?} \
                  appears more than once"
             );
         }
@@ -3118,5 +3134,37 @@ mod tests {
         let r = rm_with(|m| m.claude_setting_sources = Some("project,".into()));
         let err = validate_skip_dir_check(&r).unwrap_err().to_string();
         assert!(err.contains("empty token"), "got: {err}");
+    }
+
+    /// The whitespace-around-comma trap is real: an operator types
+    /// `"project, local"` from muscle memory, the prior validator
+    /// trimmed each token and let it pass — but the un-trimmed value
+    /// flowed to `claude --setting-sources` verbatim, which doesn't
+    /// accept space-padded values. Pin the rejection so a future
+    /// validator refactor doesn't quietly restore the silent-pass
+    /// behavior. The error must name the canonical form so an operator
+    /// can fix in one read.
+    #[test]
+    fn claude_setting_sources_rejects_whitespace() {
+        for bad in [
+            "project, local", // space after comma — the classic typo
+            "project ,local", // space before comma
+            " project,local", // leading space
+            "project,local ", // trailing space
+            "user,\tlocal",   // tab counts as whitespace too
+        ] {
+            let r = rm_with(|m| m.claude_setting_sources = Some(bad.to_string()));
+            let result = validate_skip_dir_check(&r);
+            assert!(result.is_err(), "{bad:?} should reject but didn't");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("whitespace"),
+                "{bad:?} should error on whitespace; got: {err}"
+            );
+            assert!(
+                err.contains("project,local"),
+                "{bad:?} error should name the canonical form; got: {err}"
+            );
+        }
     }
 }

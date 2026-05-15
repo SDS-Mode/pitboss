@@ -2099,6 +2099,136 @@ mod tests {
         }
     }
 
+    /// #555: end-to-end wiring test for `claude_setting_sources`.
+    ///
+    /// The 4 unit tests in `dispatch::container::tests` exercise
+    /// `claude_setting_sources_args` in isolation. The 6 validator tests
+    /// exercise `validate_claude_setting_sources` in isolation. NEITHER
+    /// asserts the value actually reaches the assembled argv — so a
+    /// regression that stops threading the param through one of the 5
+    /// builders would slip past every existing test. Pin the wiring
+    /// here: when the operator sets `claude_setting_sources = Some("project,local")`
+    /// every spawn variant MUST emit `--setting-sources project,local`
+    /// in its argv. The companion negative case (`None` → no flag) is
+    /// also pinned so a future change can't start emitting the flag
+    /// when no override was requested.
+    #[test]
+    fn every_spawn_variant_threads_claude_setting_sources() {
+        use crate::manifest::resolve::{ResolvedLead, ResolvedTask};
+        use crate::manifest::schema::PermissionRouting;
+        use std::path::PathBuf;
+
+        let task = ResolvedTask {
+            id: "t".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            permission_routing: PermissionRouting::PathA,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_total_workers: None,
+            sublead_defaults: None,
+        };
+        let cfg = PathBuf::from("/tmp/cfg.json");
+        let cm = crate::manifest::schema::CommunicationMode::Disabled;
+        let css = Some("project,local");
+
+        // ---- positive: operator-set value reaches argv on every builder ----
+        let positive_cases: Vec<(&str, Vec<String>)> = vec![
+            ("flat task", spawn_args(&task, css)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[], css)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[], css),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    None,
+                    None,
+                    PermissionRouting::PathA,
+                    cm,
+                    &[],
+                    css,
+                ),
+            ),
+        ];
+        for (name, argv) in positive_cases {
+            // The flag must appear immediately followed by the value.
+            let flag_idx = argv
+                .iter()
+                .position(|a| a == "--setting-sources")
+                .unwrap_or_else(|| panic!("{name}: --setting-sources missing from argv: {argv:?}"));
+            assert_eq!(
+                argv.get(flag_idx + 1).map(String::as_str),
+                Some("project,local"),
+                "{name}: --setting-sources must be followed by the operator value; \
+                 got argv: {argv:?}"
+            );
+        }
+
+        // ---- negative: `None` produces NO flag on host (default behavior) ----
+        // `detect_in_container()` returns false in this test environment, so
+        // the host default applies: empty argv extension. Pin this so a
+        // future change can't silently start emitting `--setting-sources`
+        // when no override was requested.
+        let none_cases: Vec<(&str, Vec<String>)> = vec![
+            ("flat task", spawn_args(&task, None)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[], None)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[], None),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    None,
+                    None,
+                    PermissionRouting::PathA,
+                    cm,
+                    &[],
+                    None,
+                ),
+            ),
+        ];
+        for (name, argv) in none_cases {
+            assert!(
+                !argv.iter().any(|a| a == "--setting-sources"),
+                "{name}: host default with claude_setting_sources=None must NOT \
+                 emit --setting-sources; got argv: {argv:?}"
+            );
+        }
+    }
+
     #[test]
     fn lead_spawn_args_includes_mcp_config_and_verbose() {
         use crate::manifest::resolve::ResolvedLead;
