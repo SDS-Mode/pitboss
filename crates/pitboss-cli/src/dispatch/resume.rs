@@ -463,6 +463,7 @@ mod tests {
                 failure_reason: None,
                 cost_usd: None,
                 actor_type: None,
+                terminate_reason: None,
             })
             .collect();
 
@@ -747,6 +748,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
@@ -874,6 +876,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),
@@ -997,6 +1000,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let summary = RunSummary {
             run_id: Uuid::now_v7(),

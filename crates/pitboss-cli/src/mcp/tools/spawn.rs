@@ -516,6 +516,9 @@ async fn run_worker(
                     failure_reason: None,
                     cost_usd,
                     actor_type: actor_type.clone(),
+                    // Spawn-failed before the subprocess started; no
+                    // dispatcher kill fired. (#475)
+                    terminate_reason: None,
                 };
                 let _ = layer.store.append_record(layer.run_id, &rec).await;
                 layer
@@ -701,7 +704,7 @@ async fn run_worker(
             .with_stderr_log_path(stderr_path.clone())
             .with_session_id_tx(session_id_tx)
             .with_pid_slot(pid_slot)
-            .run_to_completion(cancel, Duration::from_secs(timeout_secs))
+            .run_to_completion(cancel.clone(), Duration::from_secs(timeout_secs))
             .await;
         promote_task.abort();
         // Clean up the pid slot — the worker is done, the pid is stale.
@@ -782,6 +785,10 @@ async fn run_worker(
         failure_reason,
         cost_usd,
         actor_type: actor_type.clone(),
+        // Whichever kill path fired (budget watcher, parent cascade,
+        // operator-issued terminate via MCP / control bridge) set the
+        // reason here. `None` for workers that exited on their own. (#475)
+        terminate_reason: cancel.terminate_reason(),
     };
 
     // Persist record.
@@ -801,6 +808,7 @@ async fn run_worker(
             Some(lead_id.clone()),
             reason,
             &["root", &lead_id, &task_id],
+            rec.terminate_reason.clone(),
         )
         .await;
     }
@@ -1217,7 +1225,10 @@ pub async fn spawn_resume_worker(
         .with_log_path(log_path.clone())
         .with_stderr_log_path(stderr_path.clone())
         .with_pid_slot(resume_pid_slot)
-        .run_to_completion(worker_cancel, std::time::Duration::from_secs(timeout_secs))
+        .run_to_completion(
+            worker_cancel.clone(),
+            std::time::Duration::from_secs(timeout_secs),
+        )
         .await;
         // Clean up the pid slot when the resumed subprocess exits.
         layer_bg.worker_pids.write().await.remove(&task_id_bg);
@@ -1281,6 +1292,10 @@ pub async fn spawn_resume_worker(
             // spawn — read from the in-memory `worker_actor_types` map at
             // resume entry. (#252 Phase 1.5)
             actor_type: resumed_actor_type_bg.clone(),
+            // Plumb kill reason from the resumed worker's cancel token.
+            // The clone made before `run_to_completion` is still live in
+            // this closure scope. (#475)
+            terminate_reason: worker_cancel.terminate_reason(),
         };
         let _ = layer_bg.store.append_record(layer_bg.run_id, &rec).await;
         if let Some(reason) = rec.failure_reason.clone() {
@@ -1291,6 +1306,7 @@ pub async fn spawn_resume_worker(
                 Some(lead_id_bg.clone()),
                 reason,
                 &["root", &lead_id_bg, &task_id_bg],
+                rec.terminate_reason.clone(),
             )
             .await;
         }

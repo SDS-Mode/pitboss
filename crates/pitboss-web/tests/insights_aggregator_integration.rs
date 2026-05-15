@@ -74,6 +74,7 @@ fn task(id: &str, status: TaskStatus, reason: Option<FailureReason>) -> TaskReco
         failure_reason: reason,
         cost_usd: None,
         actor_type: None,
+        terminate_reason: None,
     }
 }
 

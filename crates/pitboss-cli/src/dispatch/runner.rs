@@ -713,6 +713,9 @@ async fn execute_task(
                     // Flat-mode tasks don't carry profile attribution
                     // today (#252 covers hierarchical only).
                     actor_type: None,
+                    // Spawn-failed before any kill could fire; the
+                    // subprocess never started.
+                    terminate_reason: None,
                 };
             }
         }
@@ -734,7 +737,7 @@ async fn execute_task(
     let outcome = SessionHandle::new(task.id.clone(), spawner, cmd)
         .with_log_path(log_path.clone())
         .with_stderr_log_path(stderr_log_path.clone())
-        .run_to_completion(cancel, Duration::from_secs(task.timeout_secs))
+        .run_to_completion(cancel.clone(), Duration::from_secs(task.timeout_secs))
         .await;
 
     let status = match outcome.final_state {
@@ -794,6 +797,10 @@ async fn execute_task(
         // Flat-mode tasks don't carry profile attribution today
         // (#252 covers hierarchical only).
         actor_type: None,
+        // Read whatever kill reason any dispatcher path set on this
+        // task's cancel token (budget breach, parent cascade, etc.).
+        // `None` for natural completions / failures. (#475)
+        terminate_reason: cancel.terminate_reason(),
     }
 }
 
