@@ -322,10 +322,20 @@ impl SessionHandle {
 
         let final_message = accum.last_text.clone();
         let final_message_preview = final_message.as_deref().map(truncate_preview);
+        // Result-event-wins for clean exits; fall back to the latest
+        // per-assistant-turn cumulative when the subprocess was killed
+        // before its terminal Result landed. Without the fallback,
+        // every aborted worker/lead/sub-lead reported zero spend even
+        // when the run had burned a budget cap to get there. (#475)
+        let token_usage = if accum.saw_result {
+            accum.usage
+        } else {
+            accum.latest_assistant_usage.unwrap_or_default()
+        };
         SessionOutcome {
             final_state,
             exit_code,
-            token_usage: accum.usage,
+            token_usage,
             claude_session_id: accum.session_id.clone(),
             final_message_preview,
             final_message,
@@ -347,6 +357,17 @@ struct StreamAccum {
     session_id: Option<String>,
     last_text: Option<String>,
     saw_result: bool,
+    /// Latest per-assistant-turn cumulative usage snapshot. Tracked
+    /// separately from `usage` so the `Event::Result` path retains its
+    /// authoritative-cumulative semantics on clean exits while a
+    /// subprocess terminated *before* Result lands (operator Ctrl-C,
+    /// budget watchdog, sub-tree cascade, timeout) still surfaces a
+    /// non-zero `token_usage` in the outcome. Without this fallback,
+    /// killed workers' `TaskRecord` always reported zero tokens and
+    /// zero cost regardless of how much they actually spent — the run
+    /// summary was systematically blind to the cost of every aborted
+    /// actor. (#475)
+    latest_assistant_usage: Option<TokenUsage>,
 }
 
 async fn stream_loop(
@@ -432,11 +453,24 @@ async fn stream_loop(
                         }
                         Event::AssistantUsage { usage: u } => {
                             // Per-turn cumulative usage snapshot from
-                            // claude's wire format. We don't update `accum.usage`
-                            // here — `Event::Result` remains the authoritative
-                            // per-subprocess total. We only notify the
-                            // observer so the dispatcher's budget watcher
-                            // can react before subprocess exit. (#253)
+                            // claude's wire format. `Event::Result`
+                            // remains the authoritative per-subprocess
+                            // total for clean exits — we stash this
+                            // value separately so it acts as a fallback
+                            // only when Result never lands (operator
+                            // Ctrl-C, budget kill, cascade, timeout).
+                            // Killed actors used to surface a zero
+                            // `token_usage` and thus zero
+                            // `TaskRecord.cost_usd` regardless of how
+                            // many tokens they actually burned; the
+                            // summary's spend_breakdown was blind to
+                            // every aborted actor. (#475)
+                            {
+                                let mut a = accum
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                a.latest_assistant_usage = Some(u);
+                            }
                             if let Some(obs) = &usage_observer {
                                 obs(u);
                             }
@@ -678,5 +712,145 @@ mod pid_slot_tests {
             "pid slot should be cleared on return so signal sites cannot \
              target a recycled pid",
         );
+    }
+}
+
+#[cfg(test)]
+mod assistant_usage_fallback_tests {
+    //! #475 fix #3: a subprocess killed before `Event::Result` lands
+    //! (operator Ctrl-C, budget watchdog, sub-tree cascade, timeout)
+    //! still surfaces a non-zero `token_usage` derived from the most
+    //! recently observed `Event::AssistantUsage`. Without this the
+    //! aborted actor's `TaskRecord` reported zero tokens / zero cost
+    //! and the run summary was systematically blind to the cost of
+    //! every killed actor.
+    //!
+    //! These tests pin three invariants:
+    //!  1. Clean exit with a Result event: `outcome.token_usage` equals
+    //!     the Result's usage (authoritative — fallback never wins).
+    //!  2. Killed via cancel after one assistant turn: `outcome.token_usage`
+    //!     equals the assistant turn's reported usage.
+    //!  3. Exit without Result or any assistant turn: `outcome.token_usage`
+    //!     is default-zero (no synthetic value invented).
+    use super::*;
+    use crate::process::fake::{FakeScript, FakeSpawner};
+    use crate::process::ProcessSpawner;
+    use crate::session::CancelToken;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn fake_cmd() -> crate::process::SpawnCmd {
+        crate::process::SpawnCmd {
+            program: std::path::PathBuf::from("fake-claude"),
+            args: vec![],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Clean exit with Result: Result wins, the `AssistantUsage`
+    /// stash is irrelevant. Pin this so a future refactor that always
+    /// returns the assistant fallback can't silently regress clean
+    /// runs.
+    #[tokio::test]
+    async fn result_wins_when_present_even_after_assistant_usage() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"s"}"#)
+            // Assistant turn 1: cumulative {input:50, output:10}.
+            .stdout_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":50,"output_tokens":10}}}"#)
+            // Result carries the authoritative cumulative — purposely
+            // different so we can detect which one the outcome used.
+            .stdout_line(r#"{"type":"result","session_id":"s","usage":{"input_tokens":99,"output_tokens":77}}"#)
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let handle = SessionHandle::new("t", spawner, fake_cmd());
+        let outcome = handle
+            .run_to_completion(CancelToken::new(), Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            outcome.token_usage.input, 99,
+            "Result event must remain authoritative on clean exit; got {:?}",
+            outcome.token_usage
+        );
+        assert_eq!(outcome.token_usage.output, 77);
+    }
+
+    /// Killed before Result: the most recently observed
+    /// `AssistantUsage` cumulative is surfaced. This is the headline
+    /// fix — previously this case produced
+    /// `outcome.token_usage == default()` and the killed worker's
+    /// `TaskRecord.cost_usd` was zero regardless of how many tokens
+    /// the worker had actually burned. (#475)
+    #[tokio::test]
+    async fn assistant_usage_fallback_used_when_cancelled_before_result() {
+        // Two assistant turns observed, then the script holds open
+        // waiting for SIGTERM. We fire the cancel after a short delay
+        // so both assistant lines are guaranteed to have been parsed
+        // before the kill arrives.
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"s"}"#)
+            .stdout_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"a"}],"usage":{"input_tokens":50,"output_tokens":10}}}"#)
+            .stdout_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"b"}],"usage":{"input_tokens":200,"output_tokens":40,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}}}"#)
+            .hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cancel = CancelToken::new();
+        let cancel_for_task = cancel.clone();
+        // Race the cancel against the stream: fire after both
+        // assistant lines have had time to flow through the parser.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_for_task.terminate();
+        });
+        let handle = SessionHandle::new("t", spawner, fake_cmd())
+            .with_terminate_grace(Duration::from_millis(50));
+        let outcome = handle
+            .run_to_completion(cancel, Duration::from_secs(5))
+            .await;
+        // The LATEST assistant turn's cumulative is what surfaces —
+        // matching the budget watcher's same-event interpretation
+        // (#253). If a future regression reverted accum to zero on
+        // kill, both `input` and `output` would be 0 below.
+        assert_eq!(
+            outcome.token_usage.input, 200,
+            "killed-before-Result outcome must surface the latest \
+             AssistantUsage cumulative; got {:?}",
+            outcome.token_usage
+        );
+        assert_eq!(outcome.token_usage.output, 40);
+        assert_eq!(outcome.token_usage.cache_read, 7);
+        assert_eq!(outcome.token_usage.cache_creation, 3);
+        // saw_result == false is the discriminator that selected the
+        // fallback path; surface it through final_state for the
+        // dispatcher's audit trail.
+        assert!(matches!(
+            outcome.final_state,
+            super::SessionState::Cancelled
+        ));
+    }
+
+    /// Killed before any assistant turn even fired (subprocess was
+    /// terminated before producing useful output):
+    /// `outcome.token_usage` is default zero. No synthetic fallback to
+    /// invent. Pin this so a future regression that defaults the
+    /// fallback to a non-default value (e.g. last `accum.usage` from a
+    /// prior subprocess via shared state) is caught.
+    #[tokio::test]
+    async fn zero_usage_when_killed_before_any_assistant_turn() {
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"s"}"#)
+            .hold_until_signal();
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cancel = CancelToken::new();
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel_for_task.terminate();
+        });
+        let handle = SessionHandle::new("t", spawner, fake_cmd())
+            .with_terminate_grace(Duration::from_millis(50));
+        let outcome = handle
+            .run_to_completion(cancel, Duration::from_secs(5))
+            .await;
+        assert_eq!(outcome.token_usage, TokenUsage::default());
     }
 }
