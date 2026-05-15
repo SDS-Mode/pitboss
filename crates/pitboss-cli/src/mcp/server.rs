@@ -1,6 +1,6 @@
 //! Lifecycle of the pitboss MCP server (unix socket transport).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -1472,7 +1472,14 @@ impl McpServer {
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
-        let listener = tokio::net::UnixListener::bind(&socket_path)?;
+        let listener = tokio::net::UnixListener::bind(&socket_path).with_context(|| {
+            format!(
+                "bind MCP socket at {} (#550: on macOS+Podman the runs dir is virtiofs-backed, \
+                 which rejects AF_UNIX bind() with EINVAL — set [container].extra_args = [\"-e\", \
+                 \"XDG_RUNTIME_DIR=/tmp\"] or upgrade to a build where this is auto-injected)",
+                socket_path.display()
+            )
+        })?;
         // Explicit hardening — inherited umask (e.g. 0022) would leave the
         // socket world-readable, letting any local user connect and inject
         // `actor_role: root_lead` in _meta to call spawn_worker / kv_set.

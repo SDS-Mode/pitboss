@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{oneshot, Mutex};
@@ -132,10 +132,21 @@ pub async fn start_control_server_with_options(
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
     }
-    let unix_listener = UnixListener::bind(&socket_path)?;
+    let unix_listener = UnixListener::bind(&socket_path).with_context(|| {
+        format!(
+            "bind control socket at {} (#550: on macOS+Podman the runs dir is virtiofs-backed, \
+             which rejects AF_UNIX bind() with EINVAL — set [container].extra_args = [\"-e\", \
+             \"XDG_RUNTIME_DIR=/tmp\"] or upgrade to a build where this is auto-injected)",
+            socket_path.display()
+        )
+    })?;
 
     let tcp_listener = match options.tcp_bind {
-        Some(addr) => Some(TcpListener::bind(addr).await?),
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind control TCP listener on {addr}"))?,
+        ),
         None => None,
     };
     let tcp_addr = match tcp_listener.as_ref() {

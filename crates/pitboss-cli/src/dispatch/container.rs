@@ -288,6 +288,30 @@ fn build_run_args(
         );
     }
 
+    // ── macOS+Podman virtiofs AF_UNIX EINVAL workaround (#550) ───────────────
+    // On macOS+Podman the auto-mounted runs dir is virtiofs-backed.
+    // `control_socket_path` (and the per-run MCP socket path) fall back
+    // to `<run_dir>/<run-id>/{control,mcp}.sock` when `$XDG_RUNTIME_DIR`
+    // is unset inside the container — and the `pitboss-with-claude`
+    // image doesn't set it. The fallback path is on virtiofs, where
+    // `bind(AF_UNIX)` returns EINVAL. Redirect XDG_RUNTIME_DIR to
+    // container-overlay `/tmp` so the sockets land somewhere bindable.
+    // The TCP-forward auto-inject above (#474/#546) makes the control
+    // bridge reachable from the host despite the socket being on
+    // container-overlay; the MCP socket only needs to be in-container
+    // reachable so this just works.
+    //
+    // Operator can override by setting `-e XDG_RUNTIME_DIR=...` in
+    // `[container].extra_args` — we skip the auto-inject in that case.
+    // Linux dispatches are untouched (host-Linux operators get their
+    // systemd-provided XDG_RUNTIME_DIR forwarded through the runtime
+    // and don't hit the virtiofs trap).
+    #[cfg(target_os = "macos")]
+    if !extra_args_overrides_env(&container.extra_args, "XDG_RUNTIME_DIR") {
+        args.push("-e".into());
+        args.push("XDG_RUNTIME_DIR=/tmp".into());
+    }
+
     // ── Extra operator args ───────────────────────────────────────────────────
     // Defense in depth: `validate_extra_args` is also called from
     // `manifest::validate::validate_container`, but a test or
@@ -372,6 +396,50 @@ fn pick_free_loopback_port() -> Option<u16> {
         .ok()
         .and_then(|l| l.local_addr().ok())
         .map(|a| a.port())
+}
+
+/// Check whether `extra_args` already sets an env var via the common
+/// `-e KEY=VAL` / `-e KEY` / `--env KEY=VAL` / `--env=KEY=VAL` /
+/// `-e=KEY=VAL` shapes. Used by the macOS+Podman `XDG_RUNTIME_DIR=/tmp`
+/// auto-inject (#550) to honour explicit operator overrides without
+/// emitting a duplicate `-e` in the audit log. Exotic forms (`--env-file`,
+/// env vars set indirectly via wrapper shells) are not recognised — the
+/// auto-inject just lays its default before `extra_args`, and Podman's
+/// "last `-e` wins" semantics ensure a later operator-supplied
+/// `-e XDG_RUNTIME_DIR=...` still overrides at runtime.
+///
+/// The function body is platform-agnostic (pure string parsing) and the
+/// unit tests below run on every platform so the helper's behavior is
+/// validated everywhere. Its only **production** caller lives under
+/// `#[cfg(target_os = "macos")]` in `build_run_args`, so on non-macOS
+/// lib builds the function is dead code from clippy's perspective —
+/// silenced narrowly via `cfg_attr` rather than a blanket
+/// `#[allow(dead_code)]` so a future regression on macOS (no remaining
+/// caller) still fires the warning.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn extra_args_overrides_env(extra_args: &[String], key: &str) -> bool {
+    let prefix = format!("{key}=");
+    let mut iter = extra_args.iter();
+    while let Some(arg) = iter.next() {
+        // `-e KEY=VAL` / `-e KEY` / `--env KEY=VAL` / `--env KEY`
+        if arg == "-e" || arg == "--env" {
+            if let Some(next) = iter.next() {
+                if next == key || next.starts_with(&prefix) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        // `-e=KEY=VAL` / `--env=KEY=VAL`
+        for joined_prefix in ["-e=", "--env="] {
+            if let Some(rest) = arg.strip_prefix(joined_prefix) {
+                if rest == key || rest.starts_with(&prefix) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Reject `extra_args` entries that defeat the container sandbox or
@@ -1376,5 +1444,179 @@ prompt = "hi"
             cmd.contains("libssl3 g++-12 python3.11 pandoc"),
             "expected joined package list, got: {cmd}"
         );
+    }
+
+    // ── #550: XDG_RUNTIME_DIR=/tmp auto-inject on macOS ───────────────────
+
+    /// Helper: count occurrences of an env `KEY=VAL` (or any value for
+    /// the key) however it was passed — `-e KEY=VAL`, `--env KEY=VAL`,
+    /// `-e=KEY=VAL`, or `--env=KEY=VAL`. Mirrors the shapes recognised
+    /// by `extra_args_overrides_env` so suppression tests can assert
+    /// "exactly one occurrence reached the final argv" no matter which
+    /// form the operator used.
+    fn count_env_inject(args: &[String], key: &str) -> usize {
+        let prefix = format!("{key}=");
+        let mut count = 0usize;
+        let mut i = 0;
+        while i < args.len() {
+            let arg = &args[i];
+            if arg == "-e" || arg == "--env" {
+                if let Some(next) = args.get(i + 1) {
+                    if next == key || next.starts_with(&prefix) {
+                        count += 1;
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            for joined_prefix in ["-e=", "--env="] {
+                if let Some(rest) = arg.strip_prefix(joined_prefix) {
+                    if rest == key || rest.starts_with(&prefix) {
+                        count += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    /// On macOS hosts, `build_run_args` injects `-e XDG_RUNTIME_DIR=/tmp`
+    /// so the in-container AF_UNIX bind for control + MCP sockets lands
+    /// on container-overlay instead of the virtiofs-mounted runs dir.
+    /// Without this, every default macOS+Podman dispatch fails with bare
+    /// `Invalid argument (os error 22)`. (#550)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_auto_injects_xdg_runtime_dir() {
+        let cfg = ContainerConfig::default();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        assert_eq!(
+            count_env_inject(&args, "XDG_RUNTIME_DIR"),
+            1,
+            "macOS dispatch must inject exactly one XDG_RUNTIME_DIR=/tmp env to dodge \
+             virtiofs+AF_UNIX EINVAL; argv: {args:?}"
+        );
+        // Land in the right shape, not just the right count.
+        let pos = args
+            .iter()
+            .position(|a| a == "XDG_RUNTIME_DIR=/tmp")
+            .expect("XDG_RUNTIME_DIR=/tmp present");
+        assert_eq!(args[pos - 1], "-e", "must be preceded by `-e`");
+    }
+
+    /// On Linux hosts the same path must NOT inject — the operator
+    /// expects their systemd-provided `$XDG_RUNTIME_DIR` to flow
+    /// through, and Linux+Podman doesn't have the virtiofs trap. Forcing
+    /// `/tmp` would shift the socket location and silently break
+    /// host-side observability tools that look at the canonical path.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_does_not_auto_inject_xdg_runtime_dir() {
+        let cfg = ContainerConfig::default();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        assert_eq!(
+            count_env_inject(&args, "XDG_RUNTIME_DIR"),
+            0,
+            "Linux dispatch must NOT inject XDG_RUNTIME_DIR — operator's environment wins"
+        );
+    }
+
+    /// An operator-supplied `XDG_RUNTIME_DIR` in `extra_args` wins —
+    /// the auto-inject must not append a duplicate. Honours the
+    /// audit-log expectation (one `-e XDG_RUNTIME_DIR=...` in the
+    /// recorded argv) and prevents the audit reader from being
+    /// surprised by a self-inflicted duplicate.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_auto_inject_respects_extra_args_override() {
+        let cfg = ContainerConfig {
+            extra_args: vec!["-e".into(), "XDG_RUNTIME_DIR=/run/custom".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        assert_eq!(
+            count_env_inject(&args, "XDG_RUNTIME_DIR"),
+            1,
+            "operator override in extra_args must suppress the auto-inject; argv: {args:?}"
+        );
+        // And the surviving value is the operator's, not our default.
+        assert!(
+            args.iter().any(|a| a == "XDG_RUNTIME_DIR=/run/custom"),
+            "operator value must survive: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "XDG_RUNTIME_DIR=/tmp"),
+            "default value must not appear: {args:?}"
+        );
+    }
+
+    /// `--env KEY=VAL` (long form) is recognised by the override-detector.
+    /// Same as the `-e` case — must suppress the auto-inject. Pin all
+    /// the shapes the detector handles so a future shrinkage of the
+    /// detector doesn't silently regress override support.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_auto_inject_respects_long_form_env_override() {
+        let cfg = ContainerConfig {
+            extra_args: vec!["--env".into(), "XDG_RUNTIME_DIR=/x".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        assert_eq!(count_env_inject(&args, "XDG_RUNTIME_DIR"), 1);
+        assert!(args.iter().any(|a| a == "XDG_RUNTIME_DIR=/x"));
+    }
+
+    /// `-e=KEY=VAL` (joined form, less common but legal) — also
+    /// recognised. Some operators write env this way; the auto-inject
+    /// must not duplicate.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_auto_inject_respects_joined_form_env_override() {
+        let cfg = ContainerConfig {
+            extra_args: vec!["-e=XDG_RUNTIME_DIR=/joined".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        assert!(
+            !args.iter().any(|a| a == "XDG_RUNTIME_DIR=/tmp"),
+            "default must be suppressed by `-e=` joined override: {args:?}"
+        );
+    }
+
+    /// Unit-test the override detector directly so its specific shape
+    /// recognition is verifiable independent of `build_run_args`. The
+    /// caller's invariant: setting a different env var (not the
+    /// target key) does NOT suppress the auto-inject.
+    #[test]
+    fn extra_args_overrides_env_only_matches_the_target_key() {
+        assert!(extra_args_overrides_env(
+            &["-e".into(), "FOO=bar".into()],
+            "FOO"
+        ));
+        assert!(extra_args_overrides_env(
+            &["--env".into(), "FOO=bar".into()],
+            "FOO"
+        ));
+        assert!(extra_args_overrides_env(&["-e=FOO=bar".into()], "FOO"));
+        assert!(extra_args_overrides_env(&["--env=FOO=bar".into()], "FOO"));
+        // Passthrough form: `-e FOO` (value taken from host env)
+        // is also an override — operator clearly cares about this var.
+        assert!(extra_args_overrides_env(
+            &["-e".into(), "FOO".into()],
+            "FOO"
+        ));
+        // Negative: a different key must not match.
+        assert!(!extra_args_overrides_env(
+            &["-e".into(), "OTHER=v".into()],
+            "FOO"
+        ));
+        // Negative: empty extra_args.
+        assert!(!extra_args_overrides_env(&[], "FOO"));
+        // Negative: prefix collision (`FOOBAR` is not `FOO`).
+        assert!(!extra_args_overrides_env(
+            &["-e".into(), "FOOBAR=v".into()],
+            "FOO"
+        ));
     }
 }
