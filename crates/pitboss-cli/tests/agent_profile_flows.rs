@@ -291,6 +291,98 @@ prompt = "go"
 }
 
 #[test]
+fn resolved_prompt_round_trips_with_exactly_one_prelude() {
+    // Regression guard for the "no double-prepend on resume" invariant.
+    // The resume path reads ResolvedManifest from resolved.json; if a
+    // future refactor were to ALSO re-apply compose_prompt at resume
+    // time, we'd end up with two copies of the prelude and two
+    // `--- TASK ---` separators. Pin the contract: a resolve →
+    // serialize → deserialize round trip on a profile-using manifest
+    // must show exactly ONE prelude and ONE separator.
+    let toml_src = minimal_manifest_with_lead("task body", Some("pitboss/lead-opus"));
+    let m: Manifest = toml::from_str(&toml_src).expect("parse");
+    let r = resolve(m, None).expect("resolve");
+    let prompt_before = r.lead.as_ref().expect("lead").prompt.clone();
+    assert_eq!(prompt_before.matches("--- TASK ---").count(), 1);
+    assert_eq!(prompt_before.matches("Pitboss **lead**").count(), 1);
+
+    let json = serde_json::to_string(&r).expect("serialize");
+    let r2: pitboss_cli::manifest::resolve::ResolvedManifest =
+        serde_json::from_str(&json).expect("deserialize");
+    let prompt_after = r2.lead.expect("lead present after round-trip").prompt;
+    assert_eq!(prompt_before, prompt_after);
+    assert_eq!(
+        prompt_after.matches("--- TASK ---").count(),
+        1,
+        "resume-shaped round trip must not duplicate the TASK separator"
+    );
+    assert_eq!(
+        prompt_after.matches("Pitboss **lead**").count(),
+        1,
+        "resume-shaped round trip must not duplicate the prelude"
+    );
+}
+
+#[test]
+fn defaults_model_beats_profile_model_at_resolve() {
+    // Precedence pin: [defaults].model fills the model slot BEFORE the
+    // profile's default. An operator with a [defaults] block and a
+    // profile reference gets [defaults].model, not the profile's.
+    let toml_src = r#"
+[defaults]
+model = "claude-sonnet-4-6"
+
+[lead]
+id = "x"
+directory = "/tmp"
+prompt = "go"
+agent_profile = "pitboss/lead-opus"
+"#;
+    let m: Manifest = toml::from_str(toml_src).expect("parse");
+    let r = resolve(m, None).expect("resolve");
+    let lead = r.lead.expect("lead present");
+    assert_eq!(
+        lead.model, "claude-sonnet-4-6",
+        "[defaults].model must beat profile.model"
+    );
+}
+
+#[test]
+fn lead_tools_override_profile_tools_at_resolve() {
+    // [lead].tools (explicit) wins over profile.tools (default).
+    let toml_src = r#"
+[lead]
+id = "x"
+directory = "/tmp"
+prompt = "go"
+agent_profile = "pitboss/worker-haiku"
+tools = ["Bash"]
+"#;
+    let m: Manifest = toml::from_str(toml_src).expect("parse");
+    let r = resolve(m, None).expect("resolve");
+    let lead = r.lead.expect("lead present");
+    assert_eq!(lead.tools, vec!["Bash".to_string()]);
+}
+
+#[test]
+fn defaults_tools_beat_profile_tools_when_lead_omits() {
+    let toml_src = r#"
+[defaults]
+tools = ["Read", "Write"]
+
+[lead]
+id = "x"
+directory = "/tmp"
+prompt = "go"
+agent_profile = "pitboss/worker-haiku"
+"#;
+    let m: Manifest = toml::from_str(toml_src).expect("parse");
+    let r = resolve(m, None).expect("resolve");
+    let lead = r.lead.expect("lead present");
+    assert_eq!(lead.tools, vec!["Read".to_string(), "Write".to_string()]);
+}
+
+#[test]
 fn validate_rejects_unknown_worker_type_profile_ref() {
     use pitboss_cli::manifest::validate::validate_skip_dir_check;
     let toml_src = r#"

@@ -27,16 +27,16 @@ publish.
 
 When `[communication]` is disabled, fall back to writing structured
 output as your `final_message` (the parent reads it from your
-`TaskRecord`). The shared-store KV surface (`kv_set`, `kv_get`,
-`lease_acquire`, etc.) is always available when an mcp-config is
-attached.
+`TaskRecord`). The shared-store KV surface (`mcp__pitboss__kv_set`,
+`mcp__pitboss__kv_get`, `mcp__pitboss__lease_acquire`, etc.) is always
+available when an mcp-config is attached.
 
 # Guard-rails
 
-- **Do not print results to stdout instead of `artifact_put`.** Stdout
-  is logged but not surfaced to the parent.
-- **Do not call `spawn_worker` / `spawn_sublead`.** Those tools are
-  gated to leads/subleads; calls will be rejected.
+- **Do not print results to stdout instead of `mcp__pitboss__artifact_put`.**
+  Stdout is logged but not surfaced to the parent.
+- **Do not call `mcp__pitboss__spawn_worker` / `mcp__pitboss__spawn_sublead`.**
+  Those tools are gated to leads/subleads; calls will be rejected.
 - **Do not retry on the same root cause.** If a tool call fails,
   report it in your final message and exit; the parent decides whether
   to re-spawn.

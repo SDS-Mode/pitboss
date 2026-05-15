@@ -141,6 +141,15 @@ prompt = """
   Replace with the actual prompt body.
 """
 
+[[agent_profile]]
+id = "<value>"
+system_prompt = """
+  Replace with the actual prompt body.
+"""
+model = "<value>"
+env = { EXAMPLE_KEY = "value" }
+tools = []
+
 [lifecycle]
 survive_parent = false
 

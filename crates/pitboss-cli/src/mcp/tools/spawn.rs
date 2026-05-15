@@ -151,10 +151,27 @@ pub async fn handle_spawn_worker(
     };
 
     // Resolve the worker's model up-front so the budget guard can price it.
+    //
+    // Cascade: args.model > profile.model > lead.model > "claude-haiku-4-5".
+    // The profile's model sits ABOVE lead.model deliberately — when a worker
+    // type binds `agent_profile = "pitboss/worker-haiku"`, the lead's own
+    // model (often Opus for the orchestrator) is incidental inheritance,
+    // not a deliberate override; the profile's role-default should win.
+    // Operator can still force a specific model by passing `args.model`.
     let lead = target_layer.manifest.lead.as_ref();
+    let worker_type_for_profile: Option<&crate::manifest::schema::WorkerType> =
+        match &profile_resolution {
+            crate::manifest::actor_type::WorkerProfileResolution::Typed(p) => Some(*p),
+            crate::manifest::actor_type::WorkerProfileResolution::Untyped => None,
+        };
+    let worker_agent_profile_for_model = crate::manifest::actor_type::worker_agent_profile(
+        worker_type_for_profile,
+        &state.root.manifest.agent_profiles,
+    );
     let worker_model = args
         .model
         .clone()
+        .or_else(|| worker_agent_profile_for_model.and_then(|p| p.model.clone()))
         .or_else(|| lead.map(|l| l.model.clone()))
         .unwrap_or_else(|| "claude-haiku-4-5".to_string());
 
@@ -390,15 +407,9 @@ pub async fn handle_spawn_worker(
     // an `agent_profile`, prepend the profile's `system_prompt` to the
     // operator-supplied prompt with `\n\n--- TASK ---\n\n` separator.
     // Untyped spawns / typeless / dangling references → operator prompt
-    // verbatim.
-    let worker_type_for_profile = match &profile_resolution {
-        crate::manifest::actor_type::WorkerProfileResolution::Typed(p) => Some(*p),
-        crate::manifest::actor_type::WorkerProfileResolution::Untyped => None,
-    };
-    let agent_profile = crate::manifest::actor_type::worker_agent_profile(
-        worker_type_for_profile,
-        &state.root.manifest.agent_profiles,
-    );
+    // verbatim. Reuses `worker_agent_profile_for_model` resolved earlier
+    // for the model cascade — they look up the same profile.
+    let agent_profile = worker_agent_profile_for_model;
     let prompt_bg = crate::manifest::resolve::compose_prompt(agent_profile, &args.prompt);
 
     let worker_type_id_bg = resolved_worker_type_id.clone();
@@ -591,17 +602,19 @@ async fn run_worker(
     // though the operator set `[defaults.env]` at the manifest level.
     // Fall back through the root lead (always populated, carries the
     // merged [defaults.env] + [lead.env]) before defaulting to empty.
-    let mut lead_env_for_worker = layer
+    let inherited_lead_env = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
         .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
         .unwrap_or_default();
-    // Merge the agent_profile env (bound via `[[worker_type]].agent_profile`)
-    // on top of the inherited lead env. Profile env wins over inherited
-    // lead env on collision; pitboss defaults (CLAUDE_CODE_ENTRYPOINT,
-    // etc.) still fill any remaining slot inside `compose_sublead_env`.
+    // Env precedence (later wins, mirroring `resolve_lead`):
+    //   profile.env → inherited [defaults.env] + [lead.env]
+    // Start from the profile's env (the role default), then layer the
+    // inherited lead env on top so operator-set vars beat profile defaults.
+    // pitboss defaults (CLAUDE_CODE_ENTRYPOINT, etc.) fill any remaining
+    // slot inside `compose_sublead_env`.
     let agent_profile_env: std::collections::HashMap<String, String> = actor_type
         .as_deref()
         .and_then(|t| {
@@ -616,9 +629,8 @@ async fn run_worker(
         .and_then(|id| state.root.manifest.agent_profiles.get(id))
         .map(|p| p.env.clone())
         .unwrap_or_default();
-    for (k, v) in agent_profile_env {
-        lead_env_for_worker.insert(k, v);
-    }
+    let mut lead_env_for_worker = agent_profile_env;
+    lead_env_for_worker.extend(inherited_lead_env);
     let worker_routing = layer
         .manifest
         .lead
@@ -1139,14 +1151,35 @@ pub async fn spawn_resume_worker(
 
     // Resume path mirrors the initial spawn: inherit the parent lead's
     // resolved env so `[defaults.env]` and `[lead.env]` survive a
-    // pause/continue or reprompt cycle.
-    let lead_env_for_resume = layer
+    // pause/continue or reprompt cycle. ALSO re-merge the agent_profile
+    // env via the resumed worker's `worker_type` → `agent_profile` ref —
+    // without this, every reprompt/continue silently drops profile-bound
+    // env vars (e.g. `PITBOSS_ACTOR_ROLE` from `pitboss/worker-haiku`).
+    // Precedence matches the initial spawn site in `run_worker`:
+    // profile.env first, then inherited lead env on top (operator wins).
+    let inherited_lead_env_for_resume = layer
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
         .or_else(|| state.root.manifest.lead.as_ref().map(|l| l.env.clone()))
         .unwrap_or_default();
+    let resume_profile_env: std::collections::HashMap<String, String> = resumed_actor_type
+        .as_deref()
+        .and_then(|t| {
+            state
+                .root
+                .manifest
+                .worker_types
+                .iter()
+                .find(|wt| wt.id == t)
+        })
+        .and_then(|wt| wt.agent_profile.as_deref())
+        .and_then(|id| state.root.manifest.agent_profiles.get(id))
+        .map(|p| p.env.clone())
+        .unwrap_or_default();
+    let mut lead_env_for_resume = resume_profile_env;
+    lead_env_for_resume.extend(inherited_lead_env_for_resume);
     let resume_env = crate::dispatch::sublead::compose_sublead_env(
         &lead_env_for_resume,
         &std::collections::HashMap::new(),
@@ -1293,5 +1326,86 @@ pub(crate) fn initial_estimate_for(model: &str) -> f64 {
         "claude-opus-4-7" => 2.00,
         "claude-sonnet-4-6" => 0.50,
         _ => 0.10, // haiku or unknown
+    }
+}
+
+#[cfg(test)]
+mod worker_spawn_args_tests {
+    //! End-to-end coverage that the prompt composed via `compose_prompt`
+    //! survives intact through `worker_spawn_args` into the `-p` argv
+    //! position. Lives alongside the (`pub(super)`) builder rather than
+    //! in `tests/agent_profile_flows.rs` because the visibility scope
+    //! doesn't reach integration tests.
+
+    use super::worker_spawn_args;
+    use crate::manifest::schema::{AgentProfile, CommunicationMode, PermissionRouting};
+
+    #[test]
+    fn composed_prompt_appears_verbatim_in_p_argv() {
+        let profile = AgentProfile {
+            id: "pitboss/worker-haiku".into(),
+            system_prompt: "WORKER PRELUDE BODY".into(),
+            model: Some("claude-haiku-4-5".into()),
+            env: Default::default(),
+            tools: None,
+        };
+        let composed =
+            crate::manifest::resolve::compose_prompt(Some(&profile), "the operator's task body");
+
+        let argv = worker_spawn_args(
+            &composed,
+            "claude-haiku-4-5",
+            &["Read".to_string()],
+            None,
+            PermissionRouting::PathA, // mcp_config=None forces Path A degrade
+            CommunicationMode::Disabled,
+            &[],
+        );
+
+        // Find the `-p` and assert the next entry is the composed prompt
+        // verbatim (with the prelude + separator + operator body).
+        let p_idx = argv
+            .iter()
+            .position(|a| a == "-p")
+            .expect("argv must include `-p` flag");
+        let p_value = argv
+            .get(p_idx + 1)
+            .expect("argv must have a prompt arg after -p");
+        assert!(
+            p_value.contains("WORKER PRELUDE BODY"),
+            "-p value missing prelude: {p_value:?}"
+        );
+        assert!(
+            p_value.contains("--- TASK ---"),
+            "-p value missing separator: {p_value:?}"
+        );
+        assert!(
+            p_value.contains("the operator's task body"),
+            "-p value missing operator content: {p_value:?}"
+        );
+        assert_eq!(
+            p_value, &composed,
+            "worker_spawn_args must pass the composed prompt through unchanged"
+        );
+        // Only ONE prelude / separator copy makes it into argv.
+        assert_eq!(p_value.matches("--- TASK ---").count(), 1);
+        assert_eq!(p_value.matches("WORKER PRELUDE BODY").count(), 1);
+    }
+
+    #[test]
+    fn untyped_spawn_prompt_passes_through_unchanged() {
+        let composed = crate::manifest::resolve::compose_prompt(None, "raw operator prompt");
+        let argv = worker_spawn_args(
+            &composed,
+            "claude-haiku-4-5",
+            &[],
+            None,
+            PermissionRouting::PathA,
+            CommunicationMode::Disabled,
+            &[],
+        );
+        let p_idx = argv.iter().position(|a| a == "-p").unwrap();
+        assert_eq!(argv[p_idx + 1], "raw operator prompt");
+        assert!(!argv[p_idx + 1].contains("--- TASK ---"));
     }
 }

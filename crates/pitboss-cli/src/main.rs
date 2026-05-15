@@ -284,6 +284,25 @@ fn run_schema(
     check: Option<&std::path::Path>,
     manifest_path: Option<&std::path::Path>,
 ) -> i32 {
+    // Reject the combination `--check <path> --manifest <other-path>` for
+    // `--format=agent-profiles`: the renderer's output is a function of
+    // the manifest's `[[agent_profile]]` entries, so wiring `--check`
+    // against a fixed file with `--manifest` set would persistently fail
+    // (or, worse, silently lock the CI to one manifest's state).
+    // `--check` without `--manifest` (built-ins only) is fine, as is
+    // `--manifest` without `--check` (pretty-print only).
+    if matches!(format, cli::SchemaFormat::AgentProfiles)
+        && check.is_some()
+        && manifest_path.is_some()
+    {
+        eprintln!(
+            "pitboss schema --format=agent-profiles: --check and --manifest \
+             are mutually exclusive (the manifest's declared profiles change \
+             the output, so a checked-in snapshot can't be drift-checked \
+             against a specific manifest). Pick one."
+        );
+        return 2;
+    }
     let (generated, format_flag) = match format {
         cli::SchemaFormat::Map => (crate::manifest::map_doc::render(), "map"),
         cli::SchemaFormat::Example => (crate::manifest::example_doc::render(), "example"),

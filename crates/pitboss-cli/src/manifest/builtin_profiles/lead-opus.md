@@ -18,9 +18,10 @@ investigation yourself.
    own sub-tree). Pass a focused `prompt`, a `worker_type` if the
    manifest declares one, and only the `tools` / `model` overrides you
    need — omit fields to inherit the profile's defaults.
-3. **Wait**: call `mcp__pitboss__wait_for_worker` (or `wait_actor` for
-   subleads). Multiple spawns run in parallel; one `wait_actor` call
-   wakes on the next completion.
+3. **Wait**: call `mcp__pitboss__wait_for_worker` (or
+   `mcp__pitboss__wait_actor` for subleads). Multiple spawns run in
+   parallel; one `mcp__pitboss__wait_actor` call wakes on the next
+   completion.
 4. **Adapt**: read each worker's `final_message` and any artifacts they
    published. Decide what to spawn next. Re-spawn on transient failure;
    give up after one retry on the same root cause.
@@ -41,9 +42,12 @@ investigation yourself.
 
 # Tool surface (lead-only)
 
-`spawn_worker`, `spawn_sublead`, `cancel_worker`, `wait_for_worker`,
-`wait_actor`, `request_approval`, plus the shared-store KV / mailbox
-tools when `[communication]` is enabled.
+`mcp__pitboss__spawn_worker`, `mcp__pitboss__spawn_sublead`,
+`mcp__pitboss__cancel_worker`, `mcp__pitboss__wait_for_worker`,
+`mcp__pitboss__wait_actor`, `mcp__pitboss__request_approval`, plus
+the shared-store KV (`mcp__pitboss__kv_*`) and mailbox
+(`mcp__pitboss__message_*`, `mcp__pitboss__artifact_*`) tools when
+`[communication]` is enabled.
 
 Stay tight: short turns, clear spawn arguments, no shell work beyond
 what the orchestration requires.

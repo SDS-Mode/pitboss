@@ -224,6 +224,15 @@ pub struct ResolvedManifest {
     /// `agent_profile` references to compose worker/sublead prompts +
     /// env defaults. Serialised so `resolved.json` round-trips through
     /// resume.
+    ///
+    /// Note: this is the *merged* catalogue. To distinguish
+    /// manifest-declared from built-in entries (used by
+    /// `validate_agent_profiles` for namespace-squatting detection),
+    /// re-load the built-in id set via
+    /// `builtin_profiles::load_builtins()` and diff — the duplicate
+    /// load is cheap (3 `include_str!` parses) and avoids carrying a
+    /// second `agent_profiles_manifest: Vec<AgentProfile>` field whose
+    /// only consumer is validate.
     #[serde(default)]
     pub agent_profiles: HashMap<String, AgentProfile>,
 }

@@ -640,22 +640,24 @@ async fn spawn_sublead_session(
     //    blocks like `[defaults.env]` (WORK_DIR/ARTIFACTS_DIR/etc.)
     //    reach subleads automatically; the lead doesn't have to re-pass
     //    them in every spawn_sublead call.
-    let mut lead_env = state
+    let inherited_lead_env = state
         .root
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
         .unwrap_or_default();
-    // Merge the agent_profile env (bound via `[[sublead_type]].agent_profile`)
-    // on top of inherited lead env. Profile env wins over inherited lead env
-    // on collision; operator_env (from the spawn_sublead MCP call) wins
-    // over profile env inside `compose_sublead_env`.
-    if let Some(p) = sublead_agent_profile {
-        for (k, v) in &p.env {
-            lead_env.insert(k.clone(), v.clone());
-        }
-    }
+    // Env precedence (later wins, mirroring `resolve_lead`):
+    //   profile.env → inherited [lead.env] → operator_env → pitboss defaults
+    // Start from the profile's env (role default), then layer the
+    // inherited lead env on top so operator-set [lead.env] vars beat
+    // profile defaults on collision. operator_env (the per-spawn override
+    // from the spawn_sublead MCP call) is merged last inside
+    // `compose_sublead_env` and beats everything else.
+    let mut lead_env: HashMap<String, String> = sublead_agent_profile
+        .map(|p| p.env.clone())
+        .unwrap_or_default();
+    lead_env.extend(inherited_lead_env);
     let routing = state
         .root
         .manifest
@@ -793,17 +795,38 @@ async fn spawn_sublead_session(
                     resume_communication_mode,
                     &state_bg.root.manifest.mcp_servers,
                 );
-                // Env precedence: lead → operator → pitboss defaults
-                // (see compose_sublead_env). Same cwd rationale as the
-                // initial spawn: lead.directory (not lead_cwd) — see
-                // the long comment in finalize_sublead_spawn.
-                let lead_env_resume = state_bg
+                // Env precedence on resume mirrors the initial spawn:
+                // profile.env → inherited [lead.env] → operator_env →
+                // pitboss defaults (see compose_sublead_env). Re-applying
+                // the agent_profile env here is what prevents a
+                // sublead_type-bound profile's env vars (e.g.
+                // PITBOSS_ACTOR_ROLE from pitboss/sublead-sonnet) from
+                // vanishing on every reprompt/resume. Same cwd rationale
+                // as the initial spawn: lead.directory (not lead_cwd) —
+                // see the long comment in finalize_sublead_spawn.
+                let resume_profile_env: std::collections::HashMap<String, String> = sublead_type_bg
+                    .as_deref()
+                    .and_then(|t| {
+                        state_bg
+                            .root
+                            .manifest
+                            .sublead_types
+                            .iter()
+                            .find(|st| st.id == t)
+                    })
+                    .and_then(|st| st.agent_profile.as_deref())
+                    .and_then(|id| state_bg.root.manifest.agent_profiles.get(id))
+                    .map(|p| p.env.clone())
+                    .unwrap_or_default();
+                let inherited_lead_env_resume = state_bg
                     .root
                     .manifest
                     .lead
                     .as_ref()
                     .map(|l| l.env.clone())
                     .unwrap_or_default();
+                let mut lead_env_resume = resume_profile_env;
+                lead_env_resume.extend(inherited_lead_env_resume);
                 let resume_env = compose_sublead_env(
                     &lead_env_resume,
                     &operator_env_bg,

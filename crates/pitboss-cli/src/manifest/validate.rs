@@ -2872,4 +2872,132 @@ mod tests {
         // Default `untyped_actor_policy = Bridge`; no profiles declared.
         validate_skip_dir_check(&r).expect("bridge policy without profiles must pass validate");
     }
+
+    // ── #7: validate_agent_profiles direct coverage ─────────────────────
+
+    fn ap(id: &str, body: &str) -> crate::manifest::schema::AgentProfile {
+        crate::manifest::schema::AgentProfile {
+            id: id.to_string(),
+            system_prompt: body.to_string(),
+            model: None,
+            env: Default::default(),
+            tools: None,
+        }
+    }
+
+    /// Populate the resolved-manifest's agent_profiles catalogue with the
+    /// built-ins, mirroring what `resolve()` does for real manifests.
+    /// `rm_with` constructs `ResolvedManifest` directly and so bypasses
+    /// the resolve-time catalogue build.
+    fn install_builtins(m: &mut ResolvedManifest) {
+        m.agent_profiles = crate::manifest::builtin_profiles::load_builtins()
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
+    }
+
+    #[test]
+    fn agent_profile_validate_accepts_only_builtins() {
+        let r = rm_with(install_builtins);
+        validate_skip_dir_check(&r).expect("built-in-only catalogue must validate");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_pitboss_namespace_squatting() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.agent_profiles.insert(
+                "pitboss/not-a-builtin".to_string(),
+                ap("pitboss/not-a-builtin", "x"),
+            );
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("pitboss/") && err.contains("reserved"),
+            "expected namespace-reservation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_profile_validate_allows_manifest_shadow_of_builtin() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            // Overwrite the built-in entry with an operator-shadowed version.
+            m.agent_profiles.insert(
+                "pitboss/worker-haiku".to_string(),
+                ap("pitboss/worker-haiku", "OVERRIDDEN"),
+            );
+        });
+        validate_skip_dir_check(&r)
+            .expect("manifest shadowing a built-in by exact id must validate");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_invalid_charset_id() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.agent_profiles
+                .insert("has spaces".to_string(), ap("has spaces", "x"));
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("^[A-Za-z0-9_/-]+$"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_unknown_worker_type_reference() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.worker_types = vec![crate::manifest::schema::WorkerType {
+                id: "extractor".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                agent_profile: Some("does/not-exist".into()),
+            }];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("does/not-exist"), "got: {err}");
+        assert!(err.contains("worker_type"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_unknown_sublead_type_reference() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.sublead_types = vec![crate::manifest::schema::SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+                agent_profile: Some("nope".into()),
+            }];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("nope"), "got: {err}");
+        assert!(err.contains("sublead_type"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_profile_validate_accepts_known_references() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.worker_types = vec![crate::manifest::schema::WorkerType {
+                id: "extractor".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                agent_profile: Some("pitboss/worker-haiku".into()),
+            }];
+            m.sublead_types = vec![crate::manifest::schema::SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+                agent_profile: Some("pitboss/sublead-sonnet".into()),
+            }];
+        });
+        validate_skip_dir_check(&r).expect("known built-in references must validate");
+    }
 }

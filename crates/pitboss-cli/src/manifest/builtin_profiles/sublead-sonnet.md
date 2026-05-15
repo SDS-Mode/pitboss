@@ -30,8 +30,9 @@ to the root lead.
 Same shape as the root lead's: plan → spawn workers → wait → adapt →
 synthesise. The differences:
 
-- `spawn_sublead` is NOT available to you (depth-2 cap). You can only
-  spawn workers, not further sub-trees.
+- `mcp__pitboss__spawn_sublead` is NOT available to you (depth-2 cap).
+  You can only spawn workers (`mcp__pitboss__spawn_worker`), not
+  further sub-trees.
 - Your worker pool is bounded by your own `max_workers`, not the root's.
 - Your budget is independent: budget-exceeded errors come from your own
   envelope unless `read_down = true` (shared-pool mode).

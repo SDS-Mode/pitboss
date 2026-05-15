@@ -192,6 +192,18 @@ Defined at [`../crates/pitboss-cli/src/manifest/schema.rs:938`](../crates/pitbos
 | `id` | text | **yes** | Slug referenced from [[task]].template. | [`../crates/pitboss-cli/src/manifest/schema.rs#L943`](../crates/pitboss-cli/src/manifest/schema.rs#L943) |
 | `prompt` | text (multi-line) | **yes** | Prompt body. Supports {var} placeholders supplied by [[task]].vars. | [`../crates/pitboss-cli/src/manifest/schema.rs#L949`](../crates/pitboss-cli/src/manifest/schema.rs#L949) |
 
+## `[[agent_profile]]` — `AgentProfile`
+
+Defined at [`../crates/pitboss-cli/src/manifest/schema.rs:732`](../crates/pitboss-cli/src/manifest/schema.rs#L732).
+
+| Field | Type | Required | Help | Source |
+|---|---|---|---|---|
+| `id` | text | **yes** | Unique id referenced from [lead]/[[task]]/[[worker_type]]/[[sublead_type]] .agent_profile. Match: ^[A-Za-z0-9_/-]+$. The pitboss/ namespace is reserved for built-ins. | [`../crates/pitboss-cli/src/manifest/schema.rs#L741`](../crates/pitboss-cli/src/manifest/schema.rs#L741) |
+| `system_prompt` | text (multi-line) | no | Role-shared prelude prepended to the operator's prompt with `\n\n--- TASK ---\n\n` separator. | [`../crates/pitboss-cli/src/manifest/schema.rs#L751`](../crates/pitboss-cli/src/manifest/schema.rs#L751) |
+| `model` | text | no | Default Claude model id when the actor's `model =` is unset. Not a cap — operator config wins. | [`../crates/pitboss-cli/src/manifest/schema.rs#L760`](../crates/pitboss-cli/src/manifest/schema.rs#L760) |
+| `env` | key-value map | no | Env merged between [defaults].env and the per-actor env. Operator wins on collision. | [`../crates/pitboss-cli/src/manifest/schema.rs#L768`](../crates/pitboss-cli/src/manifest/schema.rs#L768) |
+| `tools` | string list | no | Default tool allowlist when the actor's `tools =` is unset. Not a cap — operator config wins. | [`../crates/pitboss-cli/src/manifest/schema.rs#L777`](../crates/pitboss-cli/src/manifest/schema.rs#L777) |
+
 ## `[lifecycle]` — `Lifecycle`
 
 Defined at [`../crates/pitboss-cli/src/manifest/schema.rs:460`](../crates/pitboss-cli/src/manifest/schema.rs#L460).
