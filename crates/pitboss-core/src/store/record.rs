@@ -7,6 +7,49 @@ use uuid::Uuid;
 
 use crate::parser::TokenUsage;
 
+/// Why the dispatcher force-terminated a subprocess. Populated by every
+/// kill site (budget watchdog, operator Ctrl-C, parent cancel cascade,
+/// MCP-driven terminate, runtime timeout) *before* the subprocess's
+/// `FailureReason` is classified post-mortem. Lets operators distinguish
+/// "the dispatcher killed me" from "the subprocess failed on its own"
+/// without having to cross-reference run logs.
+///
+/// `TaskRecord::terminate_reason` is `Some(…)` only when an explicit kill
+/// path fired; a subprocess that exited on its own (clean completion,
+/// natural failure, rate-limit, etc.) leaves it `None`. Pairs with
+/// `FailureReason` rather than replacing it — the operator wants both
+/// "who killed me" *and* the classifier's post-mortem read of the
+/// stdout/stderr tail. (#475)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminateReason {
+    /// The run / lead / sub-lead exceeded its declared `budget_usd` or
+    /// `lead_budget_usd` cap. Distinguished from natural `BudgetExceeded`
+    /// failures (which arrive via the subprocess's own classifier) because
+    /// the dispatcher itself made the kill decision based on cumulative
+    /// `AssistantUsage` accounting.
+    BudgetBreach { detail: Option<String> },
+    /// A parent layer was cancelled and the cancel cascaded down to this
+    /// actor. The most common path on a graceful shutdown — fans out from
+    /// `cancel.terminate()` at the root and propagates to every sub-tree.
+    ParentCancelled,
+    /// The actor exceeded `lead_timeout_secs` / `timeout_secs` and the
+    /// dispatcher killed it.
+    RuntimeTimeout,
+    /// Operator-initiated kill via Ctrl-C (SIGINT) on the dispatch process.
+    OperatorCtrlC,
+    /// Operator-initiated kill via an MCP `terminate_*` tool call or a
+    /// control-bridge kill request from the TUI / web console.
+    OperatorRequest { detail: Option<String> },
+    /// The subprocess's MCP protocol stream broke or the actor's control
+    /// channel disconnected unexpectedly while the dispatcher was still
+    /// expecting events.
+    McpProtocolError { detail: Option<String> },
+    /// The dispatcher's health check (e.g., ack-stall watchdog) failed
+    /// for this actor.
+    HealthCheckFailed { detail: Option<String> },
+}
+
 /// Structured classification of *why* a claude subprocess failed, derived by
 /// scanning its stdout/stderr after a non-zero exit. Populated on the
 /// `TaskRecord` so callers (TUI, parent lead, spawn gater) can react without
@@ -119,6 +162,14 @@ pub struct TaskRecord {
     /// without re-deriving from the manifest snapshot. Added with #252.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_type: Option<String>,
+    /// Set by every dispatcher-initiated kill path (budget breach, parent
+    /// cancel cascade, operator Ctrl-C, MCP `terminate_*`, runtime timeout,
+    /// health check). `None` for subprocesses that exited on their own.
+    /// Pairs with `failure_reason` — the operator wants both "who killed
+    /// me" *and* the post-mortem classifier read of the stdout/stderr
+    /// tail. (#475)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminate_reason: Option<TerminateReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +316,7 @@ mod tests {
             failure_reason: None,
             cost_usd: Some(0.0234),
             actor_type: None,
+            terminate_reason: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&json).unwrap();
@@ -298,6 +350,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("parent_task_id"));
@@ -362,6 +415,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("claude-opus-4-7"));
@@ -481,6 +535,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&s).unwrap();
@@ -565,6 +620,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         let back: TaskRecord = serde_json::from_str(&s).unwrap();

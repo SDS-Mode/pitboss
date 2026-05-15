@@ -180,6 +180,7 @@ pub async fn broadcast_worker_failed(
     parent_task_id: Option<String>,
     reason: FailureReason,
     actor_path_segments: &[&str],
+    terminate_reason: Option<pitboss_core::store::TerminateReason>,
 ) {
     // PR-G of #259: `broadcast_control_event` assigns the run-scoped
     // seq + persists; callers still pass an envelope but its seq=0 is
@@ -191,6 +192,7 @@ pub async fn broadcast_worker_failed(
             task_id,
             parent_task_id,
             reason,
+            terminate_reason,
         },
     };
     root_layer.broadcast_control_event(envelope).await;
@@ -417,6 +419,7 @@ mod tests {
             Some("lead".into()),
             FailureReason::RateLimit { resets_at: None },
             &["root", "lead", "w-1"],
+            None,
         )
         .await;
 
@@ -429,6 +432,7 @@ mod tests {
                 task_id,
                 parent_task_id,
                 reason,
+                terminate_reason: _,
             } => {
                 assert_eq!(task_id, "w-1");
                 assert_eq!(parent_task_id.as_deref(), Some("lead"));
@@ -509,6 +513,7 @@ mod tests {
             None,
             FailureReason::AuthFailure,
             &["root", "w-1"],
+            None,
         )
         .await;
     }

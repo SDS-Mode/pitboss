@@ -93,7 +93,11 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
             tracing::warn!("received Ctrl-C — draining; send another within 5s to terminate");
             match tokio::time::timeout(SECOND_SIGINT_WINDOW, tokio::signal::ctrl_c()).await {
                 Ok(Ok(_)) => {
-                    cancel.terminate();
+                    // #475: name the kill site so every actor surfaces
+                    // `terminate_reason: OperatorCtrlC` on its TaskRecord
+                    // rather than the bare "Cancelled" status.
+                    cancel
+                        .terminate_with_reason(pitboss_core::store::TerminateReason::OperatorCtrlC);
                     tracing::warn!("received second Ctrl-C — terminating subprocesses");
                     return;
                 }
@@ -172,11 +176,19 @@ async fn cancel_and_find_parent(
     state: &Arc<DispatchState>,
     target: &str,
 ) -> Result<Option<Arc<crate::dispatch::layer::LayerState>>> {
+    // #475: all three terminate paths below originate from an operator-
+    // issued `cancel_actor_with_reason` (kill request via MCP / TUI /
+    // control bridge). Name the kill site so each actor's TaskRecord
+    // surfaces "killed by operator request" rather than bare Cancelled.
+    let operator_reason = || pitboss_core::store::TerminateReason::OperatorRequest {
+        detail: Some(format!("cancel_actor_with_reason target={target}")),
+    };
+
     // Root-layer workers: parent = root lead.
     {
         let cancels = state.root.worker_cancels.read().await;
         if let Some(tok) = cancels.get(target) {
-            tok.terminate();
+            tok.terminate_with_reason(operator_reason());
             return Ok(Some(state.root.clone()));
         }
     }
@@ -186,7 +198,7 @@ async fn cancel_and_find_parent(
 
     // Sub-leads themselves: parent = root lead.
     if let Some(sub_layer) = subleads.get(target) {
-        sub_layer.cancel.terminate();
+        sub_layer.cancel.terminate_with_reason(operator_reason());
         return Ok(Some(state.root.clone()));
     }
 
@@ -203,7 +215,7 @@ async fn cancel_and_find_parent(
         if let Some(sub_layer) = subleads.get(&sublead_id) {
             let cancels = sub_layer.worker_cancels.read().await;
             if let Some(tok) = cancels.get(target) {
-                tok.terminate();
+                tok.terminate_with_reason(operator_reason());
                 return Ok(Some(sub_layer.clone()));
             }
         }

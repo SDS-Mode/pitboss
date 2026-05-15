@@ -717,6 +717,13 @@ impl TaskRow {
                 .and_then(|s| serde_json::from_str(s).ok()),
             cost_usd: self.cost_usd,
             actor_type: self.actor_type,
+            // terminate_reason is a runtime hint captured by the
+            // dispatcher's kill paths; not persisted into the sqlite
+            // schema in this v0 of the field. Live consumers
+            // (TUI / pitboss-web / summary.jsonl) get it from the
+            // JsonFileStore path; the sqlite reader returns None for
+            // the snapshot view. (#475)
+            terminate_reason: None,
         })
     }
 }
@@ -1134,6 +1141,7 @@ mod sqlite_tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         }
     }
 

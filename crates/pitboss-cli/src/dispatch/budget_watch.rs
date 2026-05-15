@@ -257,7 +257,14 @@ fn trip_budget_abort(layer: &LayerState, reason: String) {
         *g = Some(reason.clone());
     }
     tracing::warn!(reason = %reason, "budget_watch: tripping cancel on lead layer");
-    layer.cancel.terminate();
+    // #475: name the kill site on the cancel token so every actor below
+    // this layer surfaces `terminate_reason: BudgetBreach` on its
+    // TaskRecord rather than the bare "I got killed somehow" signal.
+    layer
+        .cancel
+        .terminate_with_reason(pitboss_core::store::TerminateReason::BudgetBreach {
+            detail: Some(reason),
+        });
 }
 
 /// After a kill+resume iteration ends, fold its committed cost into
@@ -437,6 +444,19 @@ mod tests {
             layer.cancel.is_terminated(),
             "layer cancel should be terminated after budget abort"
         );
+        // #475: the budget watcher names the kill site via
+        // `terminate_with_reason(BudgetBreach)` so any downstream
+        // TaskRecord built off this cancel token surfaces the audit
+        // trail instead of bare Cancelled.
+        match layer.cancel.terminate_reason() {
+            Some(pitboss_core::store::TerminateReason::BudgetBreach { detail }) => {
+                assert!(
+                    detail.as_deref().is_some_and(|d| d.contains("budget_usd")),
+                    "BudgetBreach detail should name the cap: {detail:?}"
+                );
+            }
+            other => panic!("expected TerminateReason::BudgetBreach, got {other:?}"),
+        }
     }
 
     /// `lead_budget_usd` (the orchestration-only cap) trips

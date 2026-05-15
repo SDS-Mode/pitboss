@@ -654,6 +654,7 @@ async fn headless_broadcast_persists_events_jsonl_without_client() {
                 reason: pitboss_core::store::FailureReason::Unknown {
                     message: "test failure".into(),
                 },
+                terminate_reason: None,
             },
         })
         .await;

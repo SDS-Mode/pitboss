@@ -994,7 +994,12 @@ async fn dispatch_op(
             thaw_if_frozen(&layer, &task_id).await;
             let cancels = layer.worker_cancels.read().await;
             if let Some(tok) = cancels.get(&task_id) {
-                tok.terminate();
+                // #475: name the kill site so the resulting TaskRecord
+                // surfaces "killed by operator request" rather than bare
+                // Cancelled.
+                tok.terminate_with_reason(pitboss_core::store::TerminateReason::OperatorRequest {
+                    detail: Some(format!("control.cancel_worker target={task_id}")),
+                });
                 ControlEvent::OpAcked {
                     op: "cancel_worker".into(),
                     task_id: Some(task_id),
@@ -1065,11 +1070,19 @@ async fn dispatch_op(
                 }
             }
 
+            // #475: cancel_run is the operator's "stop everything" big
+            // red button — name the kill site so every TaskRecord in
+            // every layer surfaces "killed by operator cancel_run"
+            // rather than the bare Cancelled status.
+            let cancel_run_reason = || pitboss_core::store::TerminateReason::OperatorRequest {
+                detail: Some("control.cancel_run".into()),
+            };
+
             // Root-layer worker tokens.
             {
                 let cancels = state.root.worker_cancels.read().await;
                 for tok in cancels.values() {
-                    tok.terminate();
+                    tok.terminate_with_reason(cancel_run_reason());
                 }
             }
 
@@ -1085,17 +1098,17 @@ async fn dispatch_op(
                 for sub_layer in subleads.values() {
                     let sub_cancels = sub_layer.worker_cancels.read().await;
                     for tok in sub_cancels.values() {
-                        tok.terminate();
+                        tok.terminate_with_reason(cancel_run_reason());
                     }
                     drop(sub_cancels);
-                    sub_layer.cancel.terminate();
+                    sub_layer.cancel.terminate_with_reason(cancel_run_reason());
                 }
             }
 
             // Root cancel, last — the lead's SessionHandle observes this
             // via `await_terminate()` and sends SIGTERM → SIGKILL to the
             // root claude subprocess.
-            state.root.cancel.terminate();
+            state.root.cancel.terminate_with_reason(cancel_run_reason());
             ControlEvent::OpAcked {
                 op: "cancel_run".into(),
                 task_id: None,
@@ -1129,7 +1142,14 @@ async fn dispatch_op(
                         crate::control::protocol::PauseMode::Cancel => {
                             let cancels = layer.worker_cancels.read().await;
                             if let Some(tok) = cancels.get(&task_id) {
-                                tok.terminate();
+                                // #475: operator pause-by-cancel.
+                                tok.terminate_with_reason(
+                                    pitboss_core::store::TerminateReason::OperatorRequest {
+                                        detail: Some(format!(
+                                            "control.pause_worker(cancel) target={task_id}"
+                                        )),
+                                    },
+                                );
                             }
                             workers.insert(
                                 task_id.clone(),
@@ -1384,7 +1404,14 @@ async fn dispatch_op(
                 }) => {
                     let cancels = layer.worker_cancels.read().await;
                     if let Some(tok) = cancels.get(&task_id) {
-                        tok.terminate();
+                        // #475: reprompt is operator-issued kill+respawn.
+                        tok.terminate_with_reason(
+                            pitboss_core::store::TerminateReason::OperatorRequest {
+                                detail: Some(format!(
+                                    "control.reprompt_worker (kill+respawn) target={task_id}"
+                                )),
+                            },
+                        );
                     }
                     // Brief grace so the prior subprocess exits.
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2998,6 +3025,7 @@ mod tests {
                 failure_reason: None,
                 cost_usd: None,
                 actor_type: None,
+                terminate_reason: None,
             }),
         );
         state
