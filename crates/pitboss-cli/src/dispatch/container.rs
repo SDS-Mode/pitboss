@@ -26,16 +26,40 @@ pub(crate) fn detect_in_container() -> bool {
 
 /// Additional CLI args to pass to every `claude … -p` spawn so the host
 /// operator's user-scope `~/.claude/settings.json` (hooks, etc.) doesn't
-/// leak into containerized runs.
+/// leak into worker subprocesses where it doesn't belong.
 ///
-/// `--setting-sources project,local` excludes the `user` scope where
-/// host hooks live, while keeping project- and local-scope settings
-/// active. OAuth/keychain credentials are not loaded via setting-sources
-/// so the bind-mounted `~/.claude/credentials.json` continues to work.
+/// `--setting-sources <list>` is comma-separated subset of `user`,
+/// `project`, `local`. The `user` scope is where host hooks live; the
+/// `project` scope is where a repo's own `.claude/settings.json` lives;
+/// `local` is the per-cwd override.
 ///
-/// Returns an empty vec on the host so flat-mode `pitboss dispatch` is
-/// unchanged. (#426)
-pub(crate) fn claude_setting_sources_args(in_container: bool) -> Vec<String> {
+/// Resolution precedence (operator > defaults):
+///
+/// 1. **Operator-set `[run].claude_setting_sources`**: the manifest's
+///    explicit value wins, regardless of container vs. host. This is
+///    the headless-dispatch escape hatch — set `"project,local"` to
+///    filter host user-scope hooks/output-style out of unattended
+///    workers on host dispatch. (#555)
+/// 2. **Container default**: `project,local` is forced in
+///    container-dispatch so host hooks (which often point at host
+///    filesystem paths the container can't see) don't leak in. (#426)
+/// 3. **Host default**: no filter — operator's full settings flow
+///    through. Backwards-compatible with pre-`claude_setting_sources`
+///    manifests.
+///
+/// OAuth/keychain credentials are not loaded via setting-sources, so
+/// the bind-mounted `~/.claude/credentials.json` continues to work
+/// independent of this filter.
+pub(crate) fn claude_setting_sources_args(
+    in_container: bool,
+    operator_override: Option<&str>,
+) -> Vec<String> {
+    if let Some(value) = operator_override {
+        // Operator-set value wins over the container default. An empty
+        // operator string is rejected at validate time, so anything
+        // reaching here is non-empty and validated.
+        return vec!["--setting-sources".into(), value.into()];
+    }
     if in_container {
         vec!["--setting-sources".into(), "project,local".into()]
     } else {
@@ -782,7 +806,8 @@ mod tests {
 
     #[test]
     fn claude_setting_sources_args_in_container_excludes_user_scope() {
-        let argv = claude_setting_sources_args(true);
+        // No operator override → container default applies (`project,local`).
+        let argv = claude_setting_sources_args(true, None);
         assert_eq!(
             argv,
             vec!["--setting-sources".to_string(), "project,local".to_string()],
@@ -793,8 +818,37 @@ mod tests {
     #[test]
     fn claude_setting_sources_args_on_host_is_empty() {
         // Flat-mode `pitboss dispatch` is unchanged — the operator's
-        // host-side ~/.claude/settings.json continues to apply.
-        assert!(claude_setting_sources_args(false).is_empty());
+        // host-side ~/.claude/settings.json continues to apply when no
+        // explicit `[run].claude_setting_sources` override is set.
+        assert!(claude_setting_sources_args(false, None).is_empty());
+    }
+
+    /// #555: an operator-set `[run].claude_setting_sources` value wins
+    /// over the container default. On HOST, this is the escape hatch
+    /// that filters user-scope `SessionStart` hooks (the explanatory
+    /// output-style hook) out of unattended worker subprocesses.
+    #[test]
+    fn claude_setting_sources_args_operator_override_wins_on_host() {
+        let argv = claude_setting_sources_args(false, Some("project,local"));
+        assert_eq!(
+            argv,
+            vec!["--setting-sources".to_string(), "project,local".to_string()],
+            "operator override on host must surface as --setting-sources argv"
+        );
+    }
+
+    /// Operator override also wins in container — they can pick a
+    /// stricter value (e.g. `"local"`) when the project-scope config
+    /// itself shouldn't flow in. The container's hardcoded default is
+    /// just that: a default.
+    #[test]
+    fn claude_setting_sources_args_operator_override_wins_in_container() {
+        let argv = claude_setting_sources_args(true, Some("local"));
+        assert_eq!(
+            argv,
+            vec!["--setting-sources".to_string(), "local".to_string()],
+            "operator override should take precedence over container default"
+        );
     }
 
     fn make_config(mounts: Vec<MountSpec>) -> ContainerConfig {

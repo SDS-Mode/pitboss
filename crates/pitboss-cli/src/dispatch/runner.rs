@@ -276,12 +276,13 @@ struct RunHarness {
 /// have written the manifest snapshot to the run subdir, so the dry-run
 /// check happens AFTER init. Pre-existing behavior.
 fn print_dry_run_plan(resolved: &ResolvedManifest, claude_binary: &Path) {
+    let css = resolved.claude_setting_sources.as_deref();
     for t in &resolved.tasks {
         println!(
             "DRY-RUN {}: {} {}",
             t.id,
             claude_binary.display(),
-            spawn_args(t).join(" ")
+            spawn_args(t, css).join(" ")
         );
     }
 }
@@ -437,6 +438,7 @@ async fn spawn_task_loop(
         let table = harness.table.clone();
         let halt_drained = halt_drained.clone();
         let run_id = init.run_id;
+        let claude_setting_sources = resolved.claude_setting_sources.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
@@ -450,6 +452,7 @@ async fn spawn_task_loop(
                 run_id,
                 run_dir,
                 table.clone(),
+                claude_setting_sources.as_deref(),
             )
             .await;
             let failed = !matches!(record.status, TaskStatus::Success);
@@ -666,6 +669,7 @@ async fn execute_task(
     run_id: Uuid,
     run_dir: PathBuf,
     table: Arc<Mutex<crate::tui_table::ProgressTable>>,
+    claude_setting_sources: Option<&str>,
 ) -> TaskRecord {
     let task_dir = run_dir
         .join(run_id.to_string())
@@ -727,7 +731,7 @@ async fn execute_task(
     apply_pitboss_env_defaults(&mut cmd_env, &run_id.to_string(), Default::default());
     let cmd = SpawnCmd {
         program: claude.to_path_buf(),
-        args: spawn_args(task),
+        args: spawn_args(task, claude_setting_sources),
         cwd: cwd.clone(),
         env: cmd_env,
     };
@@ -832,7 +836,7 @@ async fn execute_task(
 /// MUST include the same two flags; there is a regression test
 /// (`every_spawn_variant_has_plugin_isolation_flags`) that asserts
 /// this.
-fn spawn_args(task: &ResolvedTask) -> Vec<String> {
+fn spawn_args(task: &ResolvedTask, claude_setting_sources: Option<&str>) -> Vec<String> {
     // claude CLI requires --verbose when combining -p (print mode) with
     // --output-format stream-json. Without it, claude rejects the invocation
     // with "When using --print, --output-format=stream-json requires --verbose".
@@ -853,9 +857,12 @@ fn spawn_args(task: &ResolvedTask) -> Vec<String> {
         "--disable-slash-commands".into(),
     ];
     // Inside containers, exclude the host operator's user-scope settings
-    // (hooks, etc.) so they don't leak in. (#426)
+    // (hooks, etc.) so they don't leak in. Operator can override via
+    // `[run].claude_setting_sources` for host-headless dispatch — see
+    // `claude_setting_sources_args` for the precedence rules. (#426 / #555)
     args.extend(crate::dispatch::container::claude_setting_sources_args(
         crate::dispatch::container::detect_in_container(),
+        claude_setting_sources,
     ));
     if !task.tools.is_empty() {
         args.push("--allowedTools".into());
@@ -1026,6 +1033,7 @@ pub fn lead_spawn_args(
     mcp_config: &std::path::Path,
     communication_mode: crate::manifest::schema::CommunicationMode,
     mcp_servers: &[crate::manifest::schema::McpServerSpec],
+    claude_setting_sources: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -1038,9 +1046,11 @@ pub fn lead_spawn_args(
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
     // Inside containers, exclude user-scope settings (hooks, etc.) — the
-    // companion piece that actually delivers on the comment above. (#426)
+    // companion piece that actually delivers on the comment above. Operator
+    // can override via `[run].claude_setting_sources` (#426 / #555).
     args.extend(crate::dispatch::container::claude_setting_sources_args(
         crate::dispatch::container::detect_in_container(),
+        claude_setting_sources,
     ));
 
     // Build the allowed-tools set: user tools + pitboss MCP tools.
@@ -1093,6 +1103,7 @@ pub fn lead_resume_spawn_args(
     new_prompt: &str,
     communication_mode: crate::manifest::schema::CommunicationMode,
     mcp_servers: &[crate::manifest::schema::McpServerSpec],
+    claude_setting_sources: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -1103,9 +1114,11 @@ pub fn lead_resume_spawn_args(
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
-    // Inside containers, exclude user-scope settings (hooks, etc.). (#426)
+    // Inside containers, exclude user-scope settings (hooks, etc.).
+    // Operator can override via `[run].claude_setting_sources`. (#426 / #555)
     args.extend(crate::dispatch::container::claude_setting_sources_args(
         crate::dispatch::container::detect_in_container(),
+        claude_setting_sources,
     ));
     // Path-B: filter user-declared tools through per-server allowlists
     // before unioning with the pitboss MCP set. Path A: no-op. (#391/#399)
@@ -1169,6 +1182,7 @@ pub fn sublead_spawn_args(
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
     mcp_servers: &[crate::manifest::schema::McpServerSpec],
+    claude_setting_sources: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "--output-format".into(),
@@ -1179,9 +1193,11 @@ pub fn sublead_spawn_args(
     // Plugin/skill isolation (see lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
-    // Inside containers, exclude user-scope settings (hooks, etc.). (#426)
+    // Inside containers, exclude user-scope settings (hooks, etc.).
+    // Operator can override via `[run].claude_setting_sources`. (#426 / #555)
     args.extend(crate::dispatch::container::claude_setting_sources_args(
         crate::dispatch::container::detect_in_container(),
+        claude_setting_sources,
     ));
 
     // Build the allowed-tools set. Operator-supplied tools (if any) are
@@ -1495,6 +1511,7 @@ mod tests {
             run_dir: PathBuf::from("/tmp/pitboss-test"),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: None,
             max_workers: None,
@@ -1621,6 +1638,7 @@ mod tests {
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![
                 ResolvedTask {
                     id: "ok".into(),
@@ -1750,6 +1768,7 @@ mod tests {
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![make_task("a"), make_task("b"), make_task("c")],
             lead: None,
             max_workers: None,
@@ -1838,6 +1857,7 @@ mod tests {
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![
                 ResolvedTask {
                     id: "one".into(),
@@ -1948,7 +1968,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_args_includes_resume_when_session_id_set() {
         let task = make_test_task("t", Some("sess_abc".to_string()));
-        let args = spawn_args(&task);
+        let args = spawn_args(&task, None);
         assert!(
             args.iter().any(|a| a == "--resume"),
             "expected --resume in args: {args:?}"
@@ -1962,7 +1982,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_args_omits_resume_when_no_session_id() {
         let task = make_test_task("t", None);
-        let args = spawn_args(&task);
+        let args = spawn_args(&task, None);
         assert!(
             !args.iter().any(|a| a == "--resume"),
             "expected no --resume in args: {args:?}"
@@ -2026,11 +2046,11 @@ mod tests {
         let cfg = PathBuf::from("/tmp/cfg.json");
         let cm = crate::manifest::schema::CommunicationMode::Disabled;
         let cases: Vec<(&str, Vec<String>)> = vec![
-            ("flat task", spawn_args(&task)),
-            ("lead", lead_spawn_args(&lead, &cfg, cm, &[])),
+            ("flat task", spawn_args(&task, None)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[], None)),
             (
                 "lead_resume",
-                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[]),
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[], None),
             ),
             (
                 "sublead",
@@ -2044,6 +2064,7 @@ mod tests {
                     PermissionRouting::PathA,
                     cm,
                     &[],
+                    None,
                 ),
             ),
             (
@@ -2058,6 +2079,7 @@ mod tests {
                     PermissionRouting::PathA,
                     cm,
                     &[],
+                    None,
                 ),
             ),
         ];
@@ -2073,6 +2095,136 @@ mod tests {
             assert!(
                 argv.iter().any(|a| a == "--disable-slash-commands"),
                 "{name} spawn args missing --disable-slash-commands: {argv:?}"
+            );
+        }
+    }
+
+    /// #555: end-to-end wiring test for `claude_setting_sources`.
+    ///
+    /// The 4 unit tests in `dispatch::container::tests` exercise
+    /// `claude_setting_sources_args` in isolation. The 6 validator tests
+    /// exercise `validate_claude_setting_sources` in isolation. NEITHER
+    /// asserts the value actually reaches the assembled argv — so a
+    /// regression that stops threading the param through one of the 5
+    /// builders would slip past every existing test. Pin the wiring
+    /// here: when the operator sets `claude_setting_sources = Some("project,local")`
+    /// every spawn variant MUST emit `--setting-sources project,local`
+    /// in its argv. The companion negative case (`None` → no flag) is
+    /// also pinned so a future change can't start emitting the flag
+    /// when no override was requested.
+    #[test]
+    fn every_spawn_variant_threads_claude_setting_sources() {
+        use crate::manifest::resolve::{ResolvedLead, ResolvedTask};
+        use crate::manifest::schema::PermissionRouting;
+        use std::path::PathBuf;
+
+        let task = ResolvedTask {
+            id: "t".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+        };
+        let lead = ResolvedLead {
+            id: "l".into(),
+            directory: PathBuf::from("/tmp"),
+            prompt: "p".into(),
+            branch: None,
+            model: "m".into(),
+            effort: crate::manifest::schema::Effort::High,
+            tools: vec!["Read".into()],
+            timeout_secs: 60,
+            use_worktree: false,
+            env: Default::default(),
+            resume_session_id: None,
+            permission_routing: PermissionRouting::PathA,
+            allow_subleads: true,
+            max_subleads: None,
+            max_sublead_budget_usd: None,
+            max_total_workers: None,
+            sublead_defaults: None,
+        };
+        let cfg = PathBuf::from("/tmp/cfg.json");
+        let cm = crate::manifest::schema::CommunicationMode::Disabled;
+        let css = Some("project,local");
+
+        // ---- positive: operator-set value reaches argv on every builder ----
+        let positive_cases: Vec<(&str, Vec<String>)> = vec![
+            ("flat task", spawn_args(&task, css)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[], css)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[], css),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    None,
+                    None,
+                    PermissionRouting::PathA,
+                    cm,
+                    &[],
+                    css,
+                ),
+            ),
+        ];
+        for (name, argv) in positive_cases {
+            // The flag must appear immediately followed by the value.
+            let flag_idx = argv
+                .iter()
+                .position(|a| a == "--setting-sources")
+                .unwrap_or_else(|| panic!("{name}: --setting-sources missing from argv: {argv:?}"));
+            assert_eq!(
+                argv.get(flag_idx + 1).map(String::as_str),
+                Some("project,local"),
+                "{name}: --setting-sources must be followed by the operator value; \
+                 got argv: {argv:?}"
+            );
+        }
+
+        // ---- negative: `None` produces NO flag on host (default behavior) ----
+        // `detect_in_container()` returns false in this test environment, so
+        // the host default applies: empty argv extension. Pin this so a
+        // future change can't silently start emitting `--setting-sources`
+        // when no override was requested.
+        let none_cases: Vec<(&str, Vec<String>)> = vec![
+            ("flat task", spawn_args(&task, None)),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[], None)),
+            (
+                "lead_resume",
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[], None),
+            ),
+            (
+                "sublead",
+                sublead_spawn_args(
+                    "sl-id",
+                    "p",
+                    "m",
+                    &cfg,
+                    None,
+                    None,
+                    PermissionRouting::PathA,
+                    cm,
+                    &[],
+                    None,
+                ),
+            ),
+        ];
+        for (name, argv) in none_cases {
+            assert!(
+                !argv.iter().any(|a| a == "--setting-sources"),
+                "{name}: host default with claude_setting_sources=None must NOT \
+                 emit --setting-sources; got argv: {argv:?}"
             );
         }
     }
@@ -2105,6 +2257,7 @@ mod tests {
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         assert!(args.iter().any(|a| a == "--verbose"));
         assert!(args.iter().any(|a| a == "--mcp-config"));
@@ -2141,6 +2294,7 @@ mod tests {
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2191,6 +2345,7 @@ mod tests {
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::ParentChild,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2235,6 +2390,7 @@ mod tests {
             &PathBuf::from("/tmp/cfg.json"),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2276,6 +2432,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2304,6 +2461,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2331,6 +2489,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2355,6 +2514,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::ParentChild,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2379,6 +2539,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2401,6 +2562,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         // Verify the basic arg structure is correct
         assert!(args.contains(&"--output-format".to_string()));
@@ -2429,6 +2591,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2457,6 +2620,7 @@ mod tests {
             Default::default(),
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let list = &args[idx + 1];
@@ -2494,6 +2658,7 @@ mod tests {
             &cfg,
             crate::manifest::schema::CommunicationMode::Disabled,
             &[],
+            None,
         );
         assert!(
             !args.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -2555,10 +2720,10 @@ mod tests {
         // `pub(super)`. Its Path-B variant is asserted in
         // `mcp::tools::spawn::tests::path_b_worker_emits_permission_prompt_tool`.
         let cases: Vec<(&str, Vec<String>)> = vec![
-            ("lead", lead_spawn_args(&lead, &cfg, cm, &[])),
+            ("lead", lead_spawn_args(&lead, &cfg, cm, &[], None)),
             (
                 "lead_resume",
-                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[]),
+                lead_resume_spawn_args(&lead, &cfg, "sess", "new prompt", cm, &[], None),
             ),
             (
                 "sublead",
@@ -2572,6 +2737,7 @@ mod tests {
                     PermissionRouting::PathB,
                     cm,
                     &[],
+                    None,
                 ),
             ),
             (
@@ -2586,6 +2752,7 @@ mod tests {
                     PermissionRouting::PathB,
                     cm,
                     &[],
+                    None,
                 ),
             ),
         ];

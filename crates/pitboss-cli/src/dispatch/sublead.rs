@@ -601,6 +601,7 @@ async fn spawn_sublead_session(
         spawn_routing,
         communication_mode,
         &state.root.manifest.mcp_servers,
+        state.root.manifest.claude_setting_sources.as_deref(),
     );
 
     // 4. Task log directory (mirrors workers' layout for consistency).
@@ -794,6 +795,7 @@ async fn spawn_sublead_session(
                     resume_routing,
                     resume_communication_mode,
                     &state_bg.root.manifest.mcp_servers,
+                    state_bg.root.manifest.claude_setting_sources.as_deref(),
                 );
                 // Env precedence on resume mirrors the initial spawn:
                 // profile.env → inherited [lead.env] → operator_env →

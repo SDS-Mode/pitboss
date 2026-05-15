@@ -665,6 +665,7 @@ async fn run_worker(
             worker_routing,
             worker_communication_mode,
             &state.root.manifest.mcp_servers,
+            state.root.manifest.claude_setting_sources.as_deref(),
         ),
         cwd: cwd.clone(),
         env: worker_env,
@@ -934,6 +935,7 @@ pub(super) fn worker_spawn_args(
     permission_routing: crate::manifest::schema::PermissionRouting,
     communication_mode: crate::manifest::schema::CommunicationMode,
     mcp_servers: &[crate::manifest::schema::McpServerSpec],
+    claude_setting_sources: Option<&str>,
 ) -> Vec<String> {
     use crate::manifest::schema::PermissionRouting;
     // #369: Path B requires a reachable mcp-config so claude can route
@@ -969,9 +971,11 @@ pub(super) fn worker_spawn_args(
     // Plugin/skill isolation (see runner::lead_spawn_args doc).
     args.push("--strict-mcp-config".into());
     args.push("--disable-slash-commands".into());
-    // Inside containers, exclude user-scope settings (hooks, etc.). (#426)
+    // Inside containers, exclude user-scope settings (hooks, etc.).
+    // Operator can override via `[run].claude_setting_sources`. (#426 / #555)
     args.extend(crate::dispatch::container::claude_setting_sources_args(
         crate::dispatch::container::detect_in_container(),
+        claude_setting_sources,
     ));
     // Workers always get the shared-store MCP tools in their allowlist when
     // an mcp-config is supplied, alongside their user-declared tools. Without
@@ -1153,6 +1157,7 @@ pub async fn spawn_resume_worker(
         resume_routing,
         resume_communication_mode,
         &state.root.manifest.mcp_servers,
+        state.root.manifest.claude_setting_sources.as_deref(),
     );
     spawn_args_v.insert(0, "--resume".into());
     spawn_args_v.insert(1, session_id);
@@ -1376,8 +1381,8 @@ mod worker_spawn_args_tests {
             PermissionRouting::PathA, // mcp_config=None forces Path A degrade
             CommunicationMode::Disabled,
             &[],
+            None,
         );
-
         // Find the `-p` and assert the next entry is the composed prompt
         // verbatim (with the prelude + separator + operator body).
         let p_idx = argv
@@ -1419,6 +1424,7 @@ mod worker_spawn_args_tests {
             PermissionRouting::PathA,
             CommunicationMode::Disabled,
             &[],
+            None,
         );
         let p_idx = argv.iter().position(|a| a == "-p").unwrap();
         assert_eq!(argv[p_idx + 1], "raw operator prompt");

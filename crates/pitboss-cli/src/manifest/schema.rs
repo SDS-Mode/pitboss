@@ -579,6 +579,28 @@ pub struct RunConfig {
         help = "Write a JSONL event stream alongside summary.jsonl."
     )]
     pub emit_event_stream: bool,
+    /// `--setting-sources` override forwarded to every `claude … -p`
+    /// spawn under this manifest. When omitted, pitboss falls back to
+    /// its built-in default: `project,local` in container-dispatch
+    /// (keeps host-side hooks out of the container, #426) and no
+    /// filter on host-dispatch (operator's full settings flow through).
+    ///
+    /// Operators running unattended host dispatch can set this to
+    /// `"project,local"` to filter their user-scope `~/.claude/settings.json`
+    /// out of worker subprocesses — useful when user-scope `SessionStart`
+    /// hooks or output-style settings (e.g. the built-in "explanatory"
+    /// mode that injects `★ Insight ─` blocks) leak into worker stdout
+    /// and pollute the structured findings the dispatch prompts ask for.
+    ///
+    /// Valid values: comma-separated subset of `user`, `project`,
+    /// `local`. Validate-time enforced; an invalid token is rejected
+    /// with a hint. Operator-set value wins over the container default.
+    #[serde(default)]
+    #[field(
+        label = "Claude setting sources",
+        help = "--setting-sources override for every worker claude spawn. Comma-separated subset of {user, project, local}. Defaults to project,local in container-dispatch and unfiltered on host."
+    )]
+    pub claude_setting_sources: Option<String>,
     /// Default approval-policy action applied to every approval request
     /// that no `[[approval_policy]]` rule matches. Renamed from
     /// `approval_policy` in v0.9 to disambiguate from the rules array.
@@ -688,6 +710,7 @@ impl Default for RunConfig {
             run_dir: None,
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             default_approval_policy: None,
             denial_termination_policy: None,
             dump_shared_store: false,

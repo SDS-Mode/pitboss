@@ -260,6 +260,7 @@ mod tests {
             run_dir: PathBuf::from("."),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            claude_setting_sources: None,
             tasks: vec![],
             lead: None,
             max_workers: None,

@@ -27,6 +27,7 @@ fn worker_spawn_args_has_plugin_isolation_flags() {
         Default::default(),
         crate::manifest::schema::CommunicationMode::Disabled,
         &[],
+        None,
     );
     assert!(
         argv.iter().any(|a| a == "--strict-mcp-config"),
@@ -84,6 +85,7 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -157,6 +159,7 @@ fn worker_spawn_args_passes_dangerously_skip_permissions_under_path_a() {
         PermissionRouting::PathA,
         CommunicationMode::Disabled,
         &[],
+        None,
     );
     assert!(
         argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -182,6 +185,7 @@ fn path_b_worker_emits_permission_prompt_tool() {
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
         &[],
+        None,
     );
     assert!(
         !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -224,6 +228,7 @@ fn path_b_worker_with_no_mcp_config_falls_back_to_path_a() {
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
         &[],
+        None,
     );
     // Must have the Path A flag (the fallback) — the worker runs
     // without per-tool gate routing.
@@ -257,6 +262,7 @@ fn path_b_worker_with_mcp_config_keeps_path_b_args() {
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
         &[],
+        None,
     );
     assert!(
         !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -283,6 +289,7 @@ fn path_a_worker_with_no_mcp_config_unchanged() {
         PermissionRouting::PathA,
         CommunicationMode::Disabled,
         &[],
+        None,
     );
     assert!(
         argv.iter().any(|a| a == "--dangerously-skip-permissions"),
@@ -308,6 +315,7 @@ fn worker_spawn_args_excludes_comm_tools_when_mode_disabled() {
         Default::default(),
         CommunicationMode::Disabled,
         &[],
+        None,
     );
     let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
     let list = &argv[idx + 1];
@@ -333,6 +341,7 @@ fn worker_spawn_args_includes_comm_tools_when_mode_parent_child() {
         Default::default(),
         CommunicationMode::ParentChild,
         &[],
+        None,
     );
     let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
     let list = &argv[idx + 1];
@@ -382,6 +391,7 @@ fn path_b_worker_filters_non_allowlisted_mcp_tool_from_allowed_tools() {
         PermissionRouting::PathB,
         CommunicationMode::Disabled,
         &servers,
+        None,
     );
     let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
     let list = &argv[idx + 1];
@@ -423,6 +433,7 @@ fn path_a_worker_leaves_non_allowlisted_mcp_tool_in_allowed_tools() {
         PermissionRouting::PathA,
         CommunicationMode::Disabled,
         &servers,
+        None,
     );
     let idx = argv.iter().position(|a| a == "--allowedTools").unwrap();
     let list = &argv[idx + 1];
@@ -851,6 +862,7 @@ async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchS
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -1712,6 +1724,7 @@ async fn handle_request_approval_auto_approves() {
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -1814,6 +1827,7 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -1930,6 +1944,7 @@ async fn permission_prompt_denies_mcp_tool_outside_server_allowlist() {
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -2052,6 +2067,7 @@ async fn permission_prompt_admits_mcp_tool_inside_server_allowlist() {
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -2190,6 +2206,7 @@ async fn mk_plan_state_with_termination_policy(
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
@@ -3195,6 +3212,7 @@ async fn test_state_with_worker_types_full(
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+        claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),
         max_workers: Some(4),
