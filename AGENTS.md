@@ -278,6 +278,12 @@ To pre-flight a container-mode manifest without dispatching, use `pitboss valida
 
 Two mounts are always auto-injected: `~/.claude → /home/pitboss/.claude` (OAuth — **read-only by default**; set `[container].claude_mount_rw = true` to allow OAuth token refresh) and the run artifact directory; the manifest itself is injected at `/run/pitboss.toml` read-only.
 
+#### macOS+Podman: auto-injected `XDG_RUNTIME_DIR=/tmp` (#550)
+
+On macOS hosts using Podman, the auto-mounted runs directory is virtiofs-backed and rejects AF_UNIX `bind()` with `EINVAL`. To keep the in-container control + MCP sockets bindable, pitboss auto-injects `-e XDG_RUNTIME_DIR=/tmp` into the `podman run` argv, which redirects the per-run socket paths onto container-overlay `/tmp`. Pairs with the control-bridge TCP forward (#474/#546) so host-side `pitboss-web` still reaches the bridge despite the socket being on container-overlay.
+
+The auto-inject is **suppressed** when the operator already sets the variable via `[container].extra_args` (`-e XDG_RUNTIME_DIR=…`, `--env XDG_RUNTIME_DIR=…`, or the `=`-joined forms) — the operator's value wins and only one `-e` lands in the dispatch audit log. Linux dispatches are unaffected — the operator's systemd-provided `$XDG_RUNTIME_DIR` continues to flow through unchanged.
+
 #### `[[container.copy]]`
 
 Files baked into a derived image at `pitboss container-build` time. Unlike `[[container.mount]]`, these are layered into the image — they're available even when no host bind mount is in place, and they require a build step before `container-dispatch` will run.
