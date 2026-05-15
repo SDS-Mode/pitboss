@@ -415,19 +415,30 @@ pub fn excerpt(blob: &str) -> String {
         }
     }
 
-    // #475: the 8 KiB tail-read window in `detect_failure_reason` can land
-    // mid-line when the last stream-JSON event is itself larger than the
-    // window — e.g., a `tool_use` whose input contains a base64-encoded
-    // payload. `lines().rev().find(...)` then returns the back-half of
-    // the event as if it were a complete line, producing operator-
-    // illegible output like `kens":1325},"output_tokens":6,...` that
-    // looks like a usage envelope tail but isn't classified as one.
-    // Detect this case here at the consumer rather than growing the
-    // read window unboundedly: a clean stream-JSON event starts with
-    // `{`, so a non-JSON-prefixed tail that nevertheless carries the
-    // key-value separator `":` ahead of any opening brace is almost
-    // certainly mid-event. Surface that explicitly.
-    if looks_like_mid_json_event(last_line) {
+    // #475 / #552: detect a truncated mid-event tail and surface it
+    // explicitly. The 8 KiB tail-read window in `detect_failure_reason`
+    // can produce two distinct truncation shapes:
+    //
+    //   A. `last_line` doesn't start with `{` — the tail-read landed
+    //      mid-content of an event larger than 8 KiB (typical: a
+    //      `tool_use` whose input contains base64, or a `tool_result`
+    //      with multi-thousand-line cat output). The trailing envelope
+    //      keys (`parent_tool_use_id`, `session_id`, `uuid`, `timestamp`)
+    //      are visible but the leading `{` is offscreen.
+    //
+    //   B. `last_line` DOES start with `{` but `serde_json::from_str`
+    //      above failed — the event is also truncated, just at its own
+    //      EOF rather than at the head. The stdout was cut off before
+    //      the closing brace landed.
+    //
+    // Both shapes look identical to the operator (an unparseable JSON
+    // tail), so the same `[truncated mid-event]` marker is the right
+    // surface. The detector unifies both: a `last_line` that fails to
+    // parse end-to-end as JSON but carries the `":` key-value marker
+    // is a truncated event. The length floor avoids marking short
+    // non-JSON log lines that happen to contain `":` (rare but possible
+    // in panic messages).
+    if is_truncated_event_tail(last_line) {
         let tail = last_chars(last_line, 80);
         return format!("[truncated mid-event] …{tail}");
     }
@@ -438,23 +449,33 @@ pub fn excerpt(blob: &str) -> String {
     cap_chars(last_line)
 }
 
-/// Heuristic: does this string look like the back-half of a JSON event
-/// that was truncated by the 8 KiB tail read in `detect_failure_reason`?
-///
-/// A clean stream-JSON event starts with `{` (or `[`). A line that
-/// doesn't, but contains the JSON key-value separator `":` before any
-/// opening brace, is almost certainly a mid-event tail from a large
-/// single-line event that exceeded the tail-read window. (#475)
-fn looks_like_mid_json_event(line: &str) -> bool {
-    let l = line.trim_start();
-    if l.starts_with('{') || l.starts_with('[') {
+/// Detect a truncated stream-JSON event tail — either shape from
+/// `excerpt`'s call site (mid-content with nested `{` chars before the
+/// envelope, OR a starts-with-`{` event cut at its EOF). Both shapes
+/// fail to parse end-to-end as JSON. The length floor and `":` key
+/// marker together gate against false positives on short non-JSON
+/// content. (#552)
+fn is_truncated_event_tail(line: &str) -> bool {
+    // Floor: real stream-JSON event tails are always at least a few
+    // hundred bytes because they're returned from the 8 KiB tail-read
+    // window. Anything shorter than 100 chars couldn't meaningfully
+    // be a mid-event tail; the floor keeps short panic messages and
+    // plain-log lines that happen to embed `":` (e.g. `error: {"a":1}`)
+    // out of the marker path. The canonical bug-report shape from #475
+    // is ~190 chars, so the floor sits comfortably below that.
+    const MIN_TRUNCATED_LEN: usize = 100;
+    if line.len() < MIN_TRUNCATED_LEN {
         return false;
     }
-    let Some(kv_idx) = l.find("\":") else {
+    // Clean stream-JSON parses end-to-end; anything that doesn't is
+    // either truncated (the case we care about) or non-JSON entirely.
+    // The `contains("\":")` check filters out the non-JSON case —
+    // long log lines without JSON-key markers fall through to
+    // `cap_chars` unchanged.
+    if !line.contains("\":") {
         return false;
-    };
-    let first_brace_idx = l.find('{').unwrap_or(usize::MAX);
-    kv_idx < first_brace_idx
+    }
+    serde_json::from_str::<serde_json::Value>(line).is_err()
 }
 
 /// Take the last `n` codepoints of `s`. Codepoint-aware so it never
@@ -832,6 +853,112 @@ mod tests {
         assert!(
             e.starts_with("[truncated mid-event]"),
             "expected truncation marker, got: {e:?}"
+        );
+    }
+
+    /// #552 sub-case A: a mid-line tail that does NOT start with `{`
+    /// but contains a nested `{` somewhere in `tool_result` content
+    /// (e.g. line-numbered cat output with stringified struct dumps),
+    /// followed by the trailing envelope keys (`parent_tool_use_id`,
+    /// `session_id`, `uuid`, `timestamp`) at the end. The original
+    /// `looks_like_mid_json_event` heuristic missed this because it
+    /// only fired when `kv_idx < first_brace_idx` — when a nested `{`
+    /// appears in content BEFORE the trailing envelope keys, the
+    /// check returned false. With the parse-failure-based detector
+    /// the marker fires correctly.
+    #[test]
+    fn excerpt_marks_nested_brace_in_content_as_truncated() {
+        // Shape captured from the failing run 019e2ce1: the tail is
+        // mid-content (line numbers + closing braces from a Rust
+        // source file) plus the trailing envelope. Nested `{` from
+        // the previous event's `init` block is also in the tail at
+        // an earlier byte position.
+        let blob = format!(
+            "\\t            .await\\n1733\\t            .unwrap();\\n{}\
+             1742\\t\"}}]}},\"parent_tool_use_id\":\"toolu_01GQfqpf5cp6eNaCqJ1j6e1C\",\
+             \"session_id\":\"dab09735-b33c-40e5-83a1-16ea91f52c4a\",\
+             \"uuid\":\"94e5a300-e2eb-4957-87f8-7406dd6c284d\",\
+             \"timestamp\":\"2026-05-15T18:26:53.128Z\"}}",
+            // Inject a nested `{...}` mid-content to confirm the new
+            // detector doesn't misfire on it the way the old one did.
+            r#"{"command":"cat -n foo.rs","description":"read file"}"#
+        );
+        let e = excerpt(&blob);
+        assert!(
+            e.starts_with("[truncated mid-event]"),
+            "nested-{{ tail must be marked truncated; got: {e:?}"
+        );
+        // And the tail-portion of the marker contains the recognisable
+        // trailing envelope key — confirms `last_chars(line, 80)`
+        // surfaces the most useful 80 chars (the timestamp end, not
+        // some opaque middle).
+        assert!(
+            e.contains("timestamp"),
+            "tail should end with the envelope's timestamp field: {e:?}"
+        );
+    }
+
+    /// #552 sub-case B: a `last_line` that DOES start with `{` but is
+    /// truncated at its own EOF (subprocess was signal-killed
+    /// mid-stdout-write). `serde_json::from_str` fails on the
+    /// unbalanced braces. Pre-fix this fell through both detectors —
+    /// `starts_with('{')` early-returned in `looks_like_mid_json_event`
+    /// and the JSON parse failure was silent, landing in `cap_chars`
+    /// and producing the same operator-illegible tail. With the
+    /// parse-failure-based detector this case is caught.
+    #[test]
+    fn excerpt_marks_starts_with_brace_truncated_event_as_truncated() {
+        // Real shape from worker-019e2cfa-c707 in run 019e2cf9: the
+        // assistant event begins cleanly but the closing `}` never
+        // arrives because the OOM-killer signal-killed the worker
+        // mid-write. The line below is ~250 bytes — over the 200-byte
+        // floor — and starts with `{"type":"assistant"...`.
+        let blob = r#"{"type":"assistant","message":{"id":"msg_01ABC","model":"claude-sonnet-4-6","stop_reason":null,"content":[{"type":"text","text":"Let me read more of this file to understand the dispatcher layout before"#;
+        // Sanity check: this line starts with `{` and is over the
+        // length floor — the pre-fix path would have hit the cap_chars
+        // fallback.
+        assert!(blob.starts_with('{'));
+        assert!(blob.len() > 200);
+        let e = excerpt(blob);
+        assert!(
+            e.starts_with("[truncated mid-event]"),
+            "starts-with-{{ truncated event must be marked; got: {e:?}"
+        );
+    }
+
+    /// Negative companion: a starts-with-`{` line that IS a complete,
+    /// parseable event must NOT get the truncation marker — the
+    /// happy-path extraction (or `cap_chars` fallback) should run.
+    /// Pin the parser-success branch so a future refactor can't
+    /// regress to "always mark as truncated."
+    #[test]
+    fn excerpt_does_not_mark_clean_complete_event() {
+        let blob = r#"{"type":"result","subtype":"success","session_id":"s","result":"the answer is 42","usage":{"input_tokens":10,"output_tokens":3}}"#;
+        let e = excerpt(blob);
+        assert!(
+            !e.starts_with("[truncated mid-event]"),
+            "clean complete event must not be marked truncated; got: {e:?}"
+        );
+        // And the happy path extracted the `result` string.
+        assert_eq!(e, "the answer is 42");
+    }
+
+    /// Negative: a long non-JSON log line with no `":` key marker is
+    /// NOT marked truncated. The `contains("\":")` filter is the gate
+    /// that keeps plain log lines (Rust panic messages, banner
+    /// errors, etc.) out of the marker path. Pin it so a refactor
+    /// that loosens the filter to e.g. just `":"` would fail here.
+    #[test]
+    fn excerpt_does_not_mark_long_plain_log_line() {
+        // 400-char prose with no JSON-key markers anywhere.
+        let blob = "thread 'main' panicked at crates/foo/src/lib.rs:42:13: ".to_string()
+            + &"unexpected condition in the validation step ".repeat(8);
+        assert!(blob.len() > 200);
+        assert!(!blob.contains("\":"));
+        let e = excerpt(&blob);
+        assert!(
+            !e.starts_with("[truncated mid-event]"),
+            "plain log line without `\":` must fall through to cap_chars; got: {e:?}"
         );
     }
 
