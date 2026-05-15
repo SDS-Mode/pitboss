@@ -407,6 +407,16 @@ fn pick_free_loopback_port() -> Option<u16> {
 /// auto-inject just lays its default before `extra_args`, and Podman's
 /// "last `-e` wins" semantics ensure a later operator-supplied
 /// `-e XDG_RUNTIME_DIR=...` still overrides at runtime.
+///
+/// The function body is platform-agnostic (pure string parsing) and the
+/// unit tests below run on every platform so the helper's behavior is
+/// validated everywhere. Its only **production** caller lives under
+/// `#[cfg(target_os = "macos")]` in `build_run_args`, so on non-macOS
+/// lib builds the function is dead code from clippy's perspective —
+/// silenced narrowly via `cfg_attr` rather than a blanket
+/// `#[allow(dead_code)]` so a future regression on macOS (no remaining
+/// caller) still fires the warning.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn extra_args_overrides_env(extra_args: &[String], key: &str) -> bool {
     let prefix = format!("{key}=");
     let mut iter = extra_args.iter();
