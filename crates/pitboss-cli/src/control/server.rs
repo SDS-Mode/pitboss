@@ -1487,6 +1487,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
         let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1971,6 +1972,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2462,6 +2464,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2577,6 +2580,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2707,6 +2711,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,
@@ -2850,6 +2855,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let sub_layer = std::sync::Arc::new(LayerState::new(
             run_id,

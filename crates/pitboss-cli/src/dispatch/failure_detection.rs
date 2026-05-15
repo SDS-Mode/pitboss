@@ -382,6 +382,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
@@ -479,6 +480,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let store: Arc<dyn pitboss_core::store::SessionStore> =
             Arc::new(JsonFileStore::new(dir.path().to_path_buf()));

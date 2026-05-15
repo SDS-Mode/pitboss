@@ -32,6 +32,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_mcp_server_scopes(resolved)?;
     validate_mcp_server_tools(resolved)?;
     validate_mcp_tool_consistency(resolved)?;
+    validate_agent_profiles(resolved)?;
     if resolved.lead.is_some() {
         validate_lead(resolved, skip_dir_check)?;
         validate_hierarchical_ranges(resolved)?;
@@ -127,6 +128,89 @@ fn validate_actor_types(r: &ResolvedManifest) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Validate `[[agent_profile]]` invariants and references.
+///
+/// - Charset: every id must match `^[A-Za-z0-9_/-]+$`. The id appears
+///   in error messages and in `pitboss schema --format=agent-profiles`
+///   output; restricting the charset keeps quoting/escaping
+///   predictable across both surfaces.
+/// - Namespace: the `pitboss/` prefix is reserved for bundled
+///   built-ins. A manifest may *shadow* a built-in by matching its id
+///   exactly, but may not introduce novel `pitboss/<other>` ids.
+/// - References: every `agent_profile = "<id>"` mention on
+///   `[[worker_type]]` / `[[sublead_type]]` must resolve to a built-in
+///   or a manifest-declared id. Dangling refs on `[lead]` / `[[task]]`
+///   are caught earlier at resolve time (where the lookup happens
+///   inline); the worker_type / sublead_type refs survive in the
+///   resolved manifest and are checked here.
+///
+/// Duplicate manifest ids are caught at resolve time so the catalogue
+/// HashMap can't silently swallow them.
+fn validate_agent_profiles(r: &ResolvedManifest) -> Result<()> {
+    fn is_valid_id(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/')
+    }
+
+    let builtin_ids: HashSet<String> = crate::manifest::builtin_profiles::load_builtins()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+
+    for id in r.agent_profiles.keys() {
+        if !is_valid_id(id) {
+            bail!(
+                "[[agent_profile]].id {:?}: must match ^[A-Za-z0-9_/-]+$ \
+                 (allowed: ASCII alphanumeric, underscore, hyphen, forward slash)",
+                id
+            );
+        }
+        if id.starts_with("pitboss/") && !builtin_ids.contains(id) {
+            let mut ids: Vec<&str> = builtin_ids.iter().map(String::as_str).collect();
+            ids.sort();
+            bail!(
+                "[[agent_profile]].id {:?}: the `pitboss/` namespace is \
+                 reserved for built-in profiles. A manifest may shadow a \
+                 built-in by matching its id exactly, but may not introduce \
+                 novel `pitboss/<other>` ids. Known built-ins: {}",
+                id,
+                ids.join(", ")
+            );
+        }
+    }
+
+    let known: HashSet<&str> = r.agent_profiles.keys().map(String::as_str).collect();
+    let check_ref = |surface: &str, maybe_ref: Option<&str>| -> Result<()> {
+        let Some(id) = maybe_ref else {
+            return Ok(());
+        };
+        if !known.contains(id) {
+            let mut ids: Vec<&str> = known.iter().copied().collect();
+            ids.sort();
+            bail!(
+                "{surface}: agent_profile {id:?} not found. Declared profiles \
+                 (built-ins + manifest): {}. See `pitboss schema --format=agent-profiles`.",
+                ids.join(", ")
+            );
+        }
+        Ok(())
+    };
+    for wt in &r.worker_types {
+        check_ref(
+            &format!("[[worker_type]] id={:?}", wt.id),
+            wt.agent_profile.as_deref(),
+        )?;
+    }
+    for st in &r.sublead_types {
+        check_ref(
+            &format!("[[sublead_type]] id={:?}", st.id),
+            st.agent_profile.as_deref(),
+        )?;
+    }
     Ok(())
 }
 
@@ -1018,6 +1102,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         }
     }
 
@@ -1054,6 +1139,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         f(&mut m);
         m
@@ -1146,6 +1232,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -1185,6 +1272,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         assert!(validate(&r).is_err());
     }
@@ -1220,6 +1308,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         assert!(validate(&r).is_err());
     }
@@ -1269,6 +1358,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         }
     }
 
@@ -1370,6 +1460,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         (d, r)
     }
@@ -1496,6 +1587,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(err.contains("empty manifest"), "got: {err}");
@@ -1556,6 +1648,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let err = validate(&r).unwrap_err().to_string();
         assert!(
@@ -1597,6 +1690,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         assert!(validate(&r).is_err());
     }
@@ -1809,6 +1903,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         // Sanity: with skip_dir_check=false the validator rejects (the
         // host-side path is bogus).
@@ -2155,6 +2250,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         validate(&r).expect("path_b must validate (in soak); pre-#368 this bailed");
     }
@@ -2193,6 +2289,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         validate(&r).expect("path_a is the default and must validate");
     }
@@ -2206,6 +2303,7 @@ mod tests {
                 tools: vec!["Read".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         let err = validate(&r).unwrap_err().to_string();
@@ -2223,12 +2321,14 @@ mod tests {
                     tools: vec!["Read".into()],
                     allowed_models: vec![],
                     max_timeout_secs: None,
+                    agent_profile: None,
                 },
                 WorkerType {
                     id: "extraction".into(),
                     tools: vec!["Write".into()],
                     allowed_models: vec![],
                     max_timeout_secs: None,
+                    agent_profile: None,
                 },
             ];
         });
@@ -2248,6 +2348,7 @@ mod tests {
                     allowed_models: vec![],
                     max_timeout_secs: None,
                     max_budget_usd: None,
+                    agent_profile: None,
                 },
                 SubleadType {
                     id: "planner".into(),
@@ -2255,6 +2356,7 @@ mod tests {
                     allowed_models: vec![],
                     max_timeout_secs: None,
                     max_budget_usd: None,
+                    agent_profile: None,
                 },
             ];
         });
@@ -2308,6 +2410,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         m.require_actor_type = true;
         m.worker_types = vec![WorkerType {
@@ -2315,6 +2418,7 @@ mod tests {
             tools: vec!["Read".into()],
             allowed_models: vec![],
             max_timeout_secs: None,
+            agent_profile: None,
         }];
         validate(&m).expect("require_actor_type with profile must validate");
     }
@@ -2351,12 +2455,14 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         m.worker_types = vec![WorkerType {
             id: "extraction".into(),
             tools: vec!["Read".into(), "Glob".into()],
             allowed_models: vec!["claude-haiku-4-5".into()],
             max_timeout_secs: Some(900),
+            agent_profile: None,
         }];
         m.sublead_types = vec![SubleadType {
             id: "planner".into(),
@@ -2364,6 +2470,7 @@ mod tests {
             allowed_models: vec!["claude-opus-4-7".into()],
             max_timeout_secs: Some(1800),
             max_budget_usd: Some(2.0),
+            agent_profile: None,
         }];
         validate(&m).expect("declared profiles without require flag must validate");
     }
@@ -2407,6 +2514,7 @@ mod tests {
                 tools: vec!["Read".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
             m.mcp_servers = vec![mcp("ctx", Some("type:rdr"))];
         });
@@ -2424,6 +2532,7 @@ mod tests {
                 tools: vec!["Read".into(), "Write".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
             m.mcp_servers = vec![mcp("ctx", Some("type:writer"))];
         });
@@ -2441,6 +2550,7 @@ mod tests {
                 allowed_models: vec![],
                 max_timeout_secs: None,
                 max_budget_usd: None,
+                agent_profile: None,
             }];
             m.mcp_servers = vec![mcp("ctx", Some("type:planner"))];
         });
@@ -2535,6 +2645,7 @@ mod tests {
                 tools: vec!["mcp__fs__write_file".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         let err = validate_skip_dir_check(&r).unwrap_err().to_string();
@@ -2555,6 +2666,7 @@ mod tests {
                 tools: vec!["mcp__fs__write_file".into(), "Read".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         validate_skip_dir_check(&r)
@@ -2578,6 +2690,7 @@ mod tests {
                 tools: vec!["mcp__fs_writer__read_file".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         validate_skip_dir_check(&r).expect(
@@ -2599,6 +2712,7 @@ mod tests {
                 tools: vec!["mcp__fs__anything".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         validate_skip_dir_check(&r)
@@ -2662,6 +2776,7 @@ mod tests {
                 tools: vec!["Read".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         r.lead.as_mut().unwrap().permission_routing =
@@ -2679,6 +2794,7 @@ mod tests {
                 allowed_models: vec![],
                 max_timeout_secs: None,
                 max_budget_usd: None,
+                agent_profile: None,
             }];
         });
         r.lead.as_mut().unwrap().permission_routing =
@@ -2725,6 +2841,7 @@ mod tests {
                 tools: vec!["Read".into()],
                 allowed_models: vec![],
                 max_timeout_secs: None,
+                agent_profile: None,
             }];
         });
         r.untyped_actor_policy = crate::manifest::schema::UntypedActorPolicy::Block;
@@ -2739,6 +2856,7 @@ mod tests {
                 allowed_models: vec![],
                 max_timeout_secs: None,
                 max_budget_usd: None,
+                agent_profile: None,
             }];
         });
         r.untyped_actor_policy = crate::manifest::schema::UntypedActorPolicy::Block;
@@ -2753,5 +2871,133 @@ mod tests {
         let r = rm_with(|_| {});
         // Default `untyped_actor_policy = Bridge`; no profiles declared.
         validate_skip_dir_check(&r).expect("bridge policy without profiles must pass validate");
+    }
+
+    // ── #7: validate_agent_profiles direct coverage ─────────────────────
+
+    fn ap(id: &str, body: &str) -> crate::manifest::schema::AgentProfile {
+        crate::manifest::schema::AgentProfile {
+            id: id.to_string(),
+            system_prompt: body.to_string(),
+            model: None,
+            env: Default::default(),
+            tools: None,
+        }
+    }
+
+    /// Populate the resolved-manifest's agent_profiles catalogue with the
+    /// built-ins, mirroring what `resolve()` does for real manifests.
+    /// `rm_with` constructs `ResolvedManifest` directly and so bypasses
+    /// the resolve-time catalogue build.
+    fn install_builtins(m: &mut ResolvedManifest) {
+        m.agent_profiles = crate::manifest::builtin_profiles::load_builtins()
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
+    }
+
+    #[test]
+    fn agent_profile_validate_accepts_only_builtins() {
+        let r = rm_with(install_builtins);
+        validate_skip_dir_check(&r).expect("built-in-only catalogue must validate");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_pitboss_namespace_squatting() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.agent_profiles.insert(
+                "pitboss/not-a-builtin".to_string(),
+                ap("pitboss/not-a-builtin", "x"),
+            );
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("pitboss/") && err.contains("reserved"),
+            "expected namespace-reservation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_profile_validate_allows_manifest_shadow_of_builtin() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            // Overwrite the built-in entry with an operator-shadowed version.
+            m.agent_profiles.insert(
+                "pitboss/worker-haiku".to_string(),
+                ap("pitboss/worker-haiku", "OVERRIDDEN"),
+            );
+        });
+        validate_skip_dir_check(&r)
+            .expect("manifest shadowing a built-in by exact id must validate");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_invalid_charset_id() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.agent_profiles
+                .insert("has spaces".to_string(), ap("has spaces", "x"));
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("^[A-Za-z0-9_/-]+$"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_unknown_worker_type_reference() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.worker_types = vec![crate::manifest::schema::WorkerType {
+                id: "extractor".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                agent_profile: Some("does/not-exist".into()),
+            }];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("does/not-exist"), "got: {err}");
+        assert!(err.contains("worker_type"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_profile_validate_rejects_unknown_sublead_type_reference() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.sublead_types = vec![crate::manifest::schema::SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+                agent_profile: Some("nope".into()),
+            }];
+        });
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(err.contains("nope"), "got: {err}");
+        assert!(err.contains("sublead_type"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_profile_validate_accepts_known_references() {
+        let r = rm_with(|m| {
+            install_builtins(m);
+            m.worker_types = vec![crate::manifest::schema::WorkerType {
+                id: "extractor".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                agent_profile: Some("pitboss/worker-haiku".into()),
+            }];
+            m.sublead_types = vec![crate::manifest::schema::SubleadType {
+                id: "planner".into(),
+                tools: vec!["Read".into()],
+                allowed_models: vec![],
+                max_timeout_secs: None,
+                max_budget_usd: None,
+                agent_profile: Some("pitboss/sublead-sonnet".into()),
+            }];
+        });
+        validate_skip_dir_check(&r).expect("known built-in references must validate");
     }
 }

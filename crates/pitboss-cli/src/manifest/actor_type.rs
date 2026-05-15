@@ -23,9 +23,11 @@
 //! | false                | Some(unknown)  | —                               | reject ("unknown worker_type")              |
 //! | false                | Some(known)    | —                               | enforce caps                                |
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 
-use crate::manifest::schema::{SubleadType, WorkerType};
+use crate::manifest::schema::{AgentProfile, SubleadType, WorkerType};
 
 /// The outcome of resolving an actor type against the manifest's
 /// declared profiles.
@@ -188,6 +190,33 @@ pub fn check_model_allowed(
     Ok(())
 }
 
+/// Look up the [`AgentProfile`] (if any) bound to a `[[worker_type]]`
+/// via its `agent_profile` reference. Returns `None` when the worker
+/// is untyped, when the worker_type has no `agent_profile`, or when
+/// the reference fails to resolve in the catalogue (validate-time
+/// should have rejected dangling references, but the runtime treats a
+/// missing entry as "no profile" rather than panicking).
+pub fn worker_agent_profile<'m>(
+    worker_type: Option<&WorkerType>,
+    catalogue: &'m HashMap<String, AgentProfile>,
+) -> Option<&'m AgentProfile> {
+    worker_type
+        .and_then(|wt| wt.agent_profile.as_deref())
+        .and_then(|id| catalogue.get(id))
+}
+
+/// Look up the [`AgentProfile`] (if any) bound to a `[[sublead_type]]`
+/// via its `agent_profile` reference. See [`worker_agent_profile`] for
+/// the resolution rules.
+pub fn sublead_agent_profile<'m>(
+    sublead_type: Option<&SubleadType>,
+    catalogue: &'m HashMap<String, AgentProfile>,
+) -> Option<&'m AgentProfile> {
+    sublead_type
+        .and_then(|st| st.agent_profile.as_deref())
+        .and_then(|id| catalogue.get(id))
+}
+
 /// Clamp `requested` down to `cap` when both are present.
 /// Returns the smaller of the two; preserves `requested` when it's
 /// already within budget.
@@ -218,6 +247,7 @@ mod tests {
             tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
             allowed_models: vec!["claude-haiku-4-5".into()],
             max_timeout_secs: Some(900),
+            agent_profile: None,
         }
     }
 
@@ -228,6 +258,7 @@ mod tests {
             allowed_models: vec!["claude-opus-4-7".into()],
             max_timeout_secs: Some(1800),
             max_budget_usd: Some(2.0),
+            agent_profile: None,
         }
     }
 
@@ -346,5 +377,62 @@ mod tests {
         let profiles = vec![st("planner")];
         let err = resolve_sublead_profile(None, &profiles, true).unwrap_err();
         assert!(err.to_string().contains("require_actor_type"));
+    }
+
+    fn ap(id: &str, prompt: &str) -> AgentProfile {
+        AgentProfile {
+            id: id.to_string(),
+            system_prompt: prompt.to_string(),
+            model: None,
+            env: HashMap::new(),
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn worker_agent_profile_returns_none_when_untyped() {
+        let catalogue: HashMap<String, AgentProfile> = HashMap::new();
+        assert!(worker_agent_profile(None, &catalogue).is_none());
+    }
+
+    #[test]
+    fn worker_agent_profile_returns_none_when_no_reference() {
+        let catalogue: HashMap<String, AgentProfile> = [(String::from("p/x"), ap("p/x", "hi"))]
+            .into_iter()
+            .collect();
+        let wt_no_ref = wt("extraction"); // agent_profile: None
+        assert!(worker_agent_profile(Some(&wt_no_ref), &catalogue).is_none());
+    }
+
+    #[test]
+    fn worker_agent_profile_resolves_via_reference() {
+        let prof = ap("p/worker", "be excellent");
+        let catalogue: HashMap<String, AgentProfile> =
+            [(prof.id.clone(), prof)].into_iter().collect();
+        let mut wt_with_ref = wt("extraction");
+        wt_with_ref.agent_profile = Some("p/worker".to_string());
+        let resolved =
+            worker_agent_profile(Some(&wt_with_ref), &catalogue).expect("should resolve");
+        assert_eq!(resolved.system_prompt, "be excellent");
+    }
+
+    #[test]
+    fn worker_agent_profile_dangling_reference_returns_none() {
+        let catalogue: HashMap<String, AgentProfile> = HashMap::new();
+        let mut wt_with_ref = wt("extraction");
+        wt_with_ref.agent_profile = Some("p/missing".to_string());
+        assert!(worker_agent_profile(Some(&wt_with_ref), &catalogue).is_none());
+    }
+
+    #[test]
+    fn sublead_agent_profile_resolves_via_reference() {
+        let prof = ap("p/sub", "be terse");
+        let catalogue: HashMap<String, AgentProfile> =
+            [(prof.id.clone(), prof)].into_iter().collect();
+        let mut st_with_ref = st("planner");
+        st_with_ref.agent_profile = Some("p/sub".to_string());
+        let resolved =
+            sublead_agent_profile(Some(&st_with_ref), &catalogue).expect("should resolve");
+        assert_eq!(resolved.system_prompt, "be terse");
     }
 }

@@ -63,6 +63,7 @@ async fn pause_op_writes_events_jsonl() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -285,6 +286,7 @@ async fn server_emits_monotonic_seqs_on_wire() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -421,6 +423,7 @@ async fn emit_event_stream_writes_envelopes_to_events_jsonl() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -528,6 +531,7 @@ async fn emit_event_stream_off_does_not_create_events_jsonl() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -615,6 +619,7 @@ async fn headless_broadcast_persists_events_jsonl_without_client() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -731,6 +736,7 @@ async fn block_policy_queue_drains_on_tui_connect() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -854,6 +860,7 @@ async fn auto_approve_policy_responds_without_tui() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -924,6 +931,7 @@ async fn auto_reject_policy_responds_without_tui() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1005,6 +1013,7 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1194,6 +1203,7 @@ async fn subscribe_op_acks_and_keeps_dispatcher_responsive() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
@@ -1332,6 +1342,7 @@ async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid,
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());

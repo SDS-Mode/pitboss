@@ -104,6 +104,7 @@ async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -868,6 +869,7 @@ async fn completing_test_state_with_budget(budget: Option<f64>) -> Arc<DispatchS
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -1727,6 +1729,7 @@ async fn handle_request_approval_auto_approves() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1828,6 +1831,7 @@ async fn permission_prompt_auto_approves_and_returns_gate_response() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -1950,6 +1954,7 @@ async fn permission_prompt_denies_mcp_tool_outside_server_allowlist() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -2074,6 +2079,7 @@ async fn permission_prompt_admits_mcp_tool_inside_server_allowlist() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -2201,6 +2207,7 @@ async fn mk_plan_state_with_termination_policy(
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let script = FakeScript::new().hold_until_signal();
@@ -3205,6 +3212,7 @@ async fn test_state_with_worker_types_full(
         sublead_types: vec![],
         require_actor_type,
         untyped_actor_policy,
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -3238,6 +3246,7 @@ fn extraction_profile() -> crate::manifest::schema::WorkerType {
         tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
         allowed_models: vec!["claude-haiku-4-5".into()],
         max_timeout_secs: Some(900),
+        agent_profile: None,
     }
 }
 

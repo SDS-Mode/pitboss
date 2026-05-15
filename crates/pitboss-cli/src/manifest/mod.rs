@@ -1,4 +1,6 @@
 pub mod actor_type;
+pub mod agent_profile_doc;
+pub mod builtin_profiles;
 pub mod error;
 pub mod example_doc;
 pub mod init_template;

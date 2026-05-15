@@ -280,6 +280,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
             tools: vec![],
             allowed_models: vec![],
             max_timeout_secs: None,
+            agent_profile: None,
         }
     }
 
@@ -321,6 +323,7 @@ mod tests {
             allowed_models: vec![],
             max_timeout_secs: None,
             max_budget_usd: None,
+            agent_profile: None,
         }
     }
 

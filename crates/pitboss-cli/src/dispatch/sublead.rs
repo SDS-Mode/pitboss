@@ -574,9 +574,26 @@ async fn spawn_sublead_session(
         .as_ref()
         .map(|l| l.permission_routing)
         .unwrap_or_default();
+    // Compose the sub-lead prompt: if the matched `[[sublead_type]]`
+    // binds an `agent_profile`, prepend its `system_prompt` to the
+    // operator-supplied prompt with `\n\n--- TASK ---\n\n` separator.
+    // Untyped spawns / dangling references → operator prompt verbatim.
+    let sublead_type_resolved = sublead_type.as_deref().and_then(|id| {
+        state
+            .root
+            .manifest
+            .sublead_types
+            .iter()
+            .find(|st| st.id == id)
+    });
+    let sublead_agent_profile = crate::manifest::actor_type::sublead_agent_profile(
+        sublead_type_resolved,
+        &state.root.manifest.agent_profiles,
+    );
+    let composed_prompt = crate::manifest::resolve::compose_prompt(sublead_agent_profile, &prompt);
     let args = sublead_spawn_args(
         &sublead_id,
-        &prompt,
+        &composed_prompt,
         &model,
         &mcp_config_path,
         resume_session_id.as_deref(),
@@ -623,13 +640,24 @@ async fn spawn_sublead_session(
     //    blocks like `[defaults.env]` (WORK_DIR/ARTIFACTS_DIR/etc.)
     //    reach subleads automatically; the lead doesn't have to re-pass
     //    them in every spawn_sublead call.
-    let lead_env = state
+    let inherited_lead_env = state
         .root
         .manifest
         .lead
         .as_ref()
         .map(|l| l.env.clone())
         .unwrap_or_default();
+    // Env precedence (later wins, mirroring `resolve_lead`):
+    //   profile.env → inherited [lead.env] → operator_env → pitboss defaults
+    // Start from the profile's env (role default), then layer the
+    // inherited lead env on top so operator-set [lead.env] vars beat
+    // profile defaults on collision. operator_env (the per-spawn override
+    // from the spawn_sublead MCP call) is merged last inside
+    // `compose_sublead_env` and beats everything else.
+    let mut lead_env: HashMap<String, String> = sublead_agent_profile
+        .map(|p| p.env.clone())
+        .unwrap_or_default();
+    lead_env.extend(inherited_lead_env);
     let routing = state
         .root
         .manifest
@@ -767,17 +795,38 @@ async fn spawn_sublead_session(
                     resume_communication_mode,
                     &state_bg.root.manifest.mcp_servers,
                 );
-                // Env precedence: lead → operator → pitboss defaults
-                // (see compose_sublead_env). Same cwd rationale as the
-                // initial spawn: lead.directory (not lead_cwd) — see
-                // the long comment in finalize_sublead_spawn.
-                let lead_env_resume = state_bg
+                // Env precedence on resume mirrors the initial spawn:
+                // profile.env → inherited [lead.env] → operator_env →
+                // pitboss defaults (see compose_sublead_env). Re-applying
+                // the agent_profile env here is what prevents a
+                // sublead_type-bound profile's env vars (e.g.
+                // PITBOSS_ACTOR_ROLE from pitboss/sublead-sonnet) from
+                // vanishing on every reprompt/resume. Same cwd rationale
+                // as the initial spawn: lead.directory (not lead_cwd) —
+                // see the long comment in finalize_sublead_spawn.
+                let resume_profile_env: std::collections::HashMap<String, String> = sublead_type_bg
+                    .as_deref()
+                    .and_then(|t| {
+                        state_bg
+                            .root
+                            .manifest
+                            .sublead_types
+                            .iter()
+                            .find(|st| st.id == t)
+                    })
+                    .and_then(|st| st.agent_profile.as_deref())
+                    .and_then(|id| state_bg.root.manifest.agent_profiles.get(id))
+                    .map(|p| p.env.clone())
+                    .unwrap_or_default();
+                let inherited_lead_env_resume = state_bg
                     .root
                     .manifest
                     .lead
                     .as_ref()
                     .map(|l| l.env.clone())
                     .unwrap_or_default();
+                let mut lead_env_resume = resume_profile_env;
+                lead_env_resume.extend(inherited_lead_env_resume);
                 let resume_env = compose_sublead_env(
                     &lead_env_resume,
                     &operator_env_bg,

@@ -125,6 +125,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();

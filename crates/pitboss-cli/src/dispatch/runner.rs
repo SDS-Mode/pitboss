@@ -1502,6 +1502,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         }
     }
 
@@ -1654,6 +1655,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
 
         // Script: first call succeeds, second call fails. FakeSpawner is single-shot,
@@ -1755,6 +1757,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
 
         let spawner = Arc::new(CyclingFake(
@@ -1869,6 +1872,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
 
         let spawner = Arc::new(CyclingFake(

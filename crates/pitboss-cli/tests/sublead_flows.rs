@@ -86,6 +86,7 @@ fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -164,6 +165,7 @@ fn mk_state_without_subleads() -> (TempDir, Arc<DispatchState>) {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -240,6 +242,7 @@ fn mk_state_with_sublead_budget_cap(cap: f64) -> (TempDir, Arc<DispatchState>) {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
     let run_id = Uuid::now_v7();
@@ -2018,6 +2021,7 @@ async fn reconcile_terminated_sublead_marks_self_row_done() {
         sublead_types: vec![],
         require_actor_type: false,
         untyped_actor_policy: Default::default(),
+        agent_profiles: ::std::collections::HashMap::new(),
     };
     let sub_layer = Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
         state.root.run_id,
@@ -2132,6 +2136,7 @@ async fn reconcile_terminated_sublead_outcome_to_status_mapping() {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         Arc::new(pitboss_cli::dispatch::layer::LayerState::new(
             state.root.run_id,

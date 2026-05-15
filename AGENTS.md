@@ -402,6 +402,46 @@ The resolved profile id is persisted to each `TaskRecord.actor_type`, surfaced i
 - Synthesized cancellation records on lead-exit cleanup keep `actor_type` from the same map.
 - SQLite-backed runs round-trip `actor_type` (migration v10 adds the column; both backends are now at parity with `JsonFileStore`).
 
+### `[[agent_profile]]` (v0.14+, reusable role preludes)
+
+Reusable role profiles. Each profile carries a **prepended `system_prompt` prelude** plus optional **`model` / `tools` / `env` defaults**. Unlike `[[worker_type]]` (capability *caps*), agent profiles are default-providers — the operator's per-actor config (`[lead]`, `[[task]]`, spawn args) always wins.
+
+Three built-ins ship bundled, listable via `pitboss schema --format=agent-profiles`:
+
+- `pitboss/lead-opus` — root-lead orchestration body on Opus.
+- `pitboss/sublead-sonnet` — sub-tree-lead body on Sonnet.
+- `pitboss/worker-haiku` — leaf-worker publish-ceremony body on Haiku.
+
+A manifest may declare additional profiles and shadow a built-in by matching its id exactly. The `pitboss/` namespace is otherwise reserved (validate rejects novel `pitboss/<other>` ids).
+
+```toml
+[[agent_profile]]
+id            = "review/domain-worker"
+system_prompt = """
+You are a domain reviewer. Publish findings via artifact_put; do not Bash.
+"""
+model = "claude-haiku-4-5"
+tools = ["Read", "Glob", "Grep"]
+env   = { PITBOSS_ACTOR_ROLE = "review-worker" }
+
+[[worker_type]]
+id            = "domain-worker"
+tools         = ["Read", "Glob", "Grep"]
+agent_profile = "review/domain-worker"
+
+[lead]
+id            = "review-lead"
+directory     = "/path/to/repo"
+prompt        = "Review the codebase, then synthesize findings."
+agent_profile = "pitboss/lead-opus"     # built-in
+max_workers   = 4
+budget_usd    = 5.0
+```
+
+**Reference surfaces.** `agent_profile = "<id>"` is accepted on `[lead]`, `[[task]]`, `[[worker_type]]`, and `[[sublead_type]]`. References on `[lead]`/`[[task]]` apply at resolve time (prepended into the resolved prompt); references on `[[worker_type]]`/`[[sublead_type]]` apply at MCP-spawn time (composed before `worker_spawn_args`/`sublead_spawn_args`). Dangling references hard-fail at resolve (`[lead]`/`[[task]]`) or validate (`[[worker_type]]`/`[[sublead_type]]`).
+
+**Precedence (later wins).** `built-in default → profile → [defaults] → per-actor (lead/task/spawn args)`. The `system_prompt` is **prepended** to the operator's prompt with a fixed `\n\n--- TASK ---\n\n` separator (never replaced). The `env` map merges between `[defaults].env` and the per-actor env. The `model` / `tools` defaults fill any slot the operator left unset.
+
 ### `[communication]` (v0.10+, opt-in)
 
 Declares the policy for the Pitboss-owned mailbox + artifact MCP tools.

@@ -714,6 +714,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -837,6 +838,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -963,6 +965,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         std::fs::write(
             run_dir.join("resolved.json"),
@@ -1153,6 +1156,7 @@ mod tests {
             sublead_types: vec![],
             require_actor_type: false,
             untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(
