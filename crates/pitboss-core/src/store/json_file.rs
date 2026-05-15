@@ -170,6 +170,7 @@ mod iter_runs_tests {
             claude_version: None,
             started_at: started,
             env: HashMap::new(),
+            control_tcp_addr: None,
         }
     }
 

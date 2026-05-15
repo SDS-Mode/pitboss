@@ -49,13 +49,22 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use pitboss_cli::control::protocol::{ControlOp, EventEnvelope};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, info, warn};
 
 const CHANNEL_CAPACITY: usize = 256;
+
+/// Boxed-trait-object writer half. The bridge connects to either a
+/// `UnixStream` (host-mode runs) or a `TcpStream` (container-dispatch
+/// runs that publish a control_tcp_addr in meta.json — #474). The split
+/// write halves are different concrete types, so they're boxed at the
+/// boundary into a single `AsyncWrite + Unpin + Send` trait object.
+type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// Boxed-trait-object reader half. See `BoxedWriter`.
+type BoxedReader = Box<dyn AsyncRead + Unpin + Send>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
@@ -76,7 +85,7 @@ pub enum BridgeError {
 #[derive(Clone)]
 struct Entry {
     tx: broadcast::Sender<EventEnvelope>,
-    write: Arc<Mutex<OwnedWriteHalf>>,
+    write: Arc<Mutex<BoxedWriter>>,
 }
 
 #[derive(Clone)]
@@ -143,42 +152,74 @@ impl ControlBridge {
             return Ok(entry.clone());
         }
 
-        // Resolve the socket path. PR-Q preserves the pre-existing
-        // 404-on-cold-runs contract: if neither the XDG path nor the
-        // run-dir fallback exists, return `NotFound` rather than
-        // silently letting `open_run_stream(ReplayThenLive)` replay
-        // disk events.jsonl over the SSE feed — that's the dedicated
-        // Replay tab's job via `/api/runs/:id/events-jsonl`.
-        let socket_path = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(|x| {
-                std::path::PathBuf::from(x)
-                    .join("pitboss")
-                    .join(format!("{run_id}.control.sock"))
-            })
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| self.runs_dir.join(run_id).join("control.sock"));
-        if !socket_path.exists() {
-            return Err(BridgeError::NotFound);
-        }
-
-        // 1. Writer connection: writer-mode Hello, owns the write half.
-        let mut writer_stream = match UnixStream::connect(&socket_path).await {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                return Err(BridgeError::Dead);
+        // Transport selection (#474):
+        //
+        // 1. If meta.json carries `control_tcp_addr`, dial TCP. This is
+        //    populated by `pitboss container-dispatch` on platforms
+        //    where the in-container AF_UNIX socket isn't visible from
+        //    the host (macOS+Podman virtiofs).
+        // 2. Otherwise, resolve the AF_UNIX socket path (XDG runtime
+        //    dir first, then runs-dir fallback) and dial UnixStream.
+        //
+        // PR-Q preserves the pre-existing 404-on-cold-runs contract for
+        // the AF_UNIX path: if the socket doesn't exist, return
+        // `NotFound` rather than silently letting
+        // `open_run_stream(ReplayThenLive)` replay disk events.jsonl
+        // over the SSE feed — that's the dedicated Replay tab's job via
+        // `/api/runs/:id/events-jsonl`.
+        let tcp_addr = read_control_tcp_addr(&self.runs_dir, run_id);
+        let (writer_read_half, writer_write_half): (BoxedReader, BoxedWriter) = match &tcp_addr {
+            Some(addr) => {
+                let mut stream = match TcpStream::connect(addr).await {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                        return Err(BridgeError::Dead);
+                    }
+                    Err(e) => return Err(BridgeError::Io(e)),
+                };
+                let hello = ControlOp::Hello {
+                    client_version: format!("pitboss-web/{}", env!("CARGO_PKG_VERSION")),
+                    mode: pitboss_cli::control::protocol::ClientMode::default(),
+                };
+                let mut hello_line = serde_json::to_string(&hello)
+                    .map_err(|e| BridgeError::Handshake(e.to_string()))?;
+                hello_line.push('\n');
+                stream.write_all(hello_line.as_bytes()).await?;
+                let (rh, wh) = stream.into_split();
+                (Box::new(rh), Box::new(wh))
             }
-            Err(e) => return Err(BridgeError::Io(e)),
+            None => {
+                let socket_path = std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(|x| {
+                        std::path::PathBuf::from(x)
+                            .join("pitboss")
+                            .join(format!("{run_id}.control.sock"))
+                    })
+                    .filter(|p| p.exists())
+                    .unwrap_or_else(|| self.runs_dir.join(run_id).join("control.sock"));
+                if !socket_path.exists() {
+                    return Err(BridgeError::NotFound);
+                }
+                let mut stream = match UnixStream::connect(&socket_path).await {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                        return Err(BridgeError::Dead);
+                    }
+                    Err(e) => return Err(BridgeError::Io(e)),
+                };
+                let hello = ControlOp::Hello {
+                    client_version: format!("pitboss-web/{}", env!("CARGO_PKG_VERSION")),
+                    mode: pitboss_cli::control::protocol::ClientMode::default(),
+                };
+                let mut hello_line = serde_json::to_string(&hello)
+                    .map_err(|e| BridgeError::Handshake(e.to_string()))?;
+                hello_line.push('\n');
+                stream.write_all(hello_line.as_bytes()).await?;
+                let (rh, wh) = stream.into_split();
+                (Box::new(rh), Box::new(wh))
+            }
         };
-        let hello = ControlOp::Hello {
-            client_version: format!("pitboss-web/{}", env!("CARGO_PKG_VERSION")),
-            mode: pitboss_cli::control::protocol::ClientMode::default(),
-        };
-        let mut hello_line =
-            serde_json::to_string(&hello).map_err(|e| BridgeError::Handshake(e.to_string()))?;
-        hello_line.push('\n');
-        writer_stream.write_all(hello_line.as_bytes()).await?;
 
-        let (writer_read_half, writer_write_half) = writer_stream.into_split();
         let (tx, _initial_rx) = broadcast::channel::<EventEnvelope>(CHANNEL_CAPACITY);
         let entry = Entry {
             tx: tx.clone(),
@@ -271,8 +312,26 @@ impl ControlBridge {
         map.insert(run_id.to_string(), entry.clone());
         info!(
             run_id,
+            transport = if tcp_addr.is_some() { "tcp" } else { "unix" },
             "control bridge connection opened (writer + subscriber pump)"
         );
         Ok(entry)
     }
+}
+
+/// Read `meta.json` for a run and return the optional `control_tcp_addr`.
+/// Returns `None` when meta.json doesn't exist, can't be parsed, or
+/// doesn't carry the field (host-mode runs, or container-dispatch runs
+/// from before #474). The bridge falls back to AF_UNIX in those cases.
+fn read_control_tcp_addr(runs_dir: &std::path::Path, run_id: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct MetaTcpOnly {
+        #[serde(default)]
+        control_tcp_addr: Option<String>,
+    }
+    let meta_path = runs_dir.join(run_id).join("meta.json");
+    let bytes = std::fs::read(&meta_path).ok()?;
+    serde_json::from_slice::<MetaTcpOnly>(&bytes)
+        .ok()
+        .and_then(|m| m.control_tcp_addr)
 }

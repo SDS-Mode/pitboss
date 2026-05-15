@@ -848,6 +848,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
             claude_version: None,
             started_at: chrono::Utc::now(),
             env: Default::default(),
+            control_tcp_addr: None,
         })
         .await
         .expect("init run");

@@ -479,6 +479,7 @@ mod tests {
             claude_version: None,
             started_at: Utc::now(),
             env: HashMap::new(),
+            control_tcp_addr: None,
         };
         let bytes = serde_json::to_vec(&meta).unwrap();
         fs::write(run_dir.join("meta.json"), bytes).unwrap();

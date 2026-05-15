@@ -129,6 +129,16 @@ pub struct RunMeta {
     pub claude_version: Option<String>,
     pub started_at: DateTime<Utc>,
     pub env: HashMap<String, String>,
+    /// Host-side dial address of the dispatcher's control bridge when
+    /// it is bound on TCP in addition to the UNIX socket. Populated
+    /// only by `pitboss container-dispatch` on platforms where the
+    /// in-container `AF_UNIX` socket is unreachable from the host
+    /// (e.g., `macOS`+Podman virtiofs). Consumers (`pitboss-web`,
+    /// `pitboss-core::stream::drive_live`) prefer this when present and
+    /// fall back to the `AF_UNIX` path otherwise. Format:
+    /// `"127.0.0.1:<port>"`. (#474)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_tcp_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

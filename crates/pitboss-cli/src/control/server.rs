@@ -9,12 +9,13 @@
 
 #![allow(dead_code)] // Some fields are set by Phase 2 tasks.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -23,10 +24,35 @@ use tokio_util::task::TaskTracker;
 use crate::control::protocol::{ClientMode, ControlEvent, ControlOp, EventEnvelope};
 use crate::dispatch::actor::ActorPath;
 
+/// Boxed-trait-object read half of a control connection. Both
+/// `UnixStream::OwnedReadHalf` and `TcpStream::OwnedReadHalf` satisfy
+/// the bound, so `serve_connection` is transport-agnostic. (#474)
+type BoxedReader = Box<dyn AsyncRead + Unpin + Send>;
+
+/// Boxed-trait-object write half of a control connection. See
+/// `BoxedReader`. The wire protocol is line-delimited JSON over an
+/// `AsyncWrite` — neither AF_UNIX peer creds nor SCM_CREDS are used, so
+/// TCP is a drop-in transport. (#474)
+type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// Optional knobs for `start_control_server_with_options`. The default
+/// matches the historic signature: AF_UNIX only.
+#[derive(Default, Debug, Clone)]
+pub struct ControlServerOptions {
+    /// When `Some(addr)`, the server also binds a TCP listener at `addr`
+    /// alongside the AF_UNIX socket. Used by `pitboss container-dispatch`
+    /// on macOS+Podman where the in-container UNIX socket can't be
+    /// reached from the host through virtiofs. The host publishes the
+    /// port via `-p` and the dispatcher binds the same port on
+    /// `0.0.0.0:<port>` inside the container. (#474)
+    pub tcp_bind: Option<SocketAddr>,
+}
+
 /// Handle returned from `start_control_server`. Drop terminates the accept loop
 /// and removes the socket file.
 pub struct ControlServerHandle {
     socket_path: PathBuf,
+    tcp_addr: Option<SocketAddr>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
     tracker: TaskTracker,
@@ -36,6 +62,14 @@ pub struct ControlServerHandle {
 impl ControlServerHandle {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Bound TCP listener address when the server was started with
+    /// `ControlServerOptions::tcp_bind = Some(_)`. Useful for tests that
+    /// pass `127.0.0.1:0` and need the OS-assigned port. (#474)
+    #[must_use]
+    pub fn tcp_addr(&self) -> Option<SocketAddr> {
+        self.tcp_addr
     }
 }
 
@@ -58,8 +92,38 @@ impl Drop for ControlServerHandle {
 /// `server_version`, `run_id`, `run_kind` are embedded in the hello response.
 /// `state` is currently unused in Phase 1 — it threads the `DispatchState`
 /// reference forward so Phase 2 op handlers can operate on it.
+///
+/// This is a thin wrapper over `start_control_server_with_options` that
+/// preserves the historic AF_UNIX-only behavior. Call the
+/// `_with_options` variant directly when you need a TCP listener arm.
 pub async fn start_control_server(
     socket_path: PathBuf,
+    server_version: String,
+    run_id: String,
+    run_kind: String,
+    state: Arc<crate::dispatch::state::DispatchState>,
+) -> Result<ControlServerHandle> {
+    start_control_server_with_options(
+        socket_path,
+        ControlServerOptions::default(),
+        server_version,
+        run_id,
+        run_kind,
+        state,
+    )
+    .await
+}
+
+/// Start the control server with optional extras (TCP listener arm).
+///
+/// When `options.tcp_bind` is `Some(addr)`, a `TcpListener` is bound at
+/// `addr` and shares the same `serve_connection` handler as the
+/// AF_UNIX listener. Used by `pitboss container-dispatch` on macOS to
+/// expose the control bridge to host-side `pitboss-web` despite the
+/// virtiofs `bind()` constraint on AF_UNIX (#474).
+pub async fn start_control_server_with_options(
+    socket_path: PathBuf,
+    options: ControlServerOptions,
     server_version: String,
     run_id: String,
     run_kind: String,
@@ -68,7 +132,17 @@ pub async fn start_control_server(
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
     }
-    let listener = UnixListener::bind(&socket_path)?;
+    let unix_listener = UnixListener::bind(&socket_path)?;
+
+    let tcp_listener = match options.tcp_bind {
+        Some(addr) => Some(TcpListener::bind(addr).await?),
+        None => None,
+    };
+    let tcp_addr = match tcp_listener.as_ref() {
+        Some(l) => l.local_addr().ok(),
+        None => None,
+    };
+
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     let tracker = TaskTracker::new();
@@ -78,41 +152,61 @@ pub async fn start_control_server(
     let state_outer = state;
 
     let join_handle = tokio::spawn(async move {
+        // Both accept arms route into the same per-connection spawn.
+        // We share the spawn helper as a closure so the two arms can't
+        // drift on what context they propagate.
+        let spawn_conn = |read_half: BoxedReader, write_half: BoxedWriter| {
+            let cancel_inner = cancel_outer.clone();
+            let server_version = server_version.clone();
+            let run_id = run_id.clone();
+            let run_kind = run_kind.clone();
+            let state_inner = state_outer.clone();
+            // Workers snapshot is deferred to *after* the client Hello
+            // is received (inside `serve_connection`). Taking it here
+            // would miss any worker that spawned in the window between
+            // accept and Hello arrival, leaving the TUI with stale
+            // tiles until the next broadcast.
+            tracker_outer.spawn(async move {
+                tokio::select! {
+                    _ = cancel_inner.cancelled() => {},
+                    _ = serve_connection(
+                        read_half,
+                        write_half,
+                        server_version,
+                        run_id,
+                        run_kind,
+                        state_inner,
+                    ) => {},
+                }
+            });
+        };
+
         loop {
             tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
                 _ = cancel_outer.cancelled() => break,
-                accept = listener.accept() => {
+                accept = unix_listener.accept() => {
                     match accept {
                         Ok((stream, _addr)) => {
-                            let cancel_inner = cancel_outer.clone();
-                            let server_version = server_version.clone();
-                            let run_id = run_id.clone();
-                            let run_kind = run_kind.clone();
-                            let state_inner = state_outer.clone();
-                            // Workers snapshot is deferred to *after* the
-                            // client Hello is received (inside
-                            // `serve_connection`). Taking it here would
-                            // miss any worker that spawned in the window
-                            // between accept and Hello arrival, leaving
-                            // the TUI with stale tiles until the next
-                            // broadcast.
-                            tracker_outer.spawn(async move {
-                                tokio::select! {
-                                    _ = cancel_inner.cancelled() => {},
-                                    _ = serve_connection(
-                                        stream,
-                                        server_version,
-                                        run_id,
-                                        run_kind,
-                                        state_inner,
-                                    ) => {},
-                                }
-                            });
+                            let (rh, wh) = stream.into_split();
+                            spawn_conn(Box::new(rh), Box::new(wh));
                         }
                         Err(e) => {
-                            tracing::debug!("control accept error: {e}");
+                            tracing::debug!("control accept (unix) error: {e}");
+                        }
+                    }
+                }
+                // Pends forever when no TCP listener is bound, so this
+                // arm reduces to a no-op for AF_UNIX-only callers.
+                Some(accept) = maybe_accept_tcp(tcp_listener.as_ref()) => {
+                    match accept {
+                        Ok((stream, _addr)) => {
+                            let (rh, wh) = stream.into_split();
+                            spawn_conn(Box::new(rh), Box::new(wh));
+                        }
+                        Err(e) => {
+                            tracing::debug!("control accept (tcp) error: {e}");
                         }
                     }
                 }
@@ -122,6 +216,7 @@ pub async fn start_control_server(
 
     Ok(ControlServerHandle {
         socket_path,
+        tcp_addr,
         shutdown_tx: Some(shutdown_tx),
         join_handle: Some(join_handle),
         tracker,
@@ -129,18 +224,35 @@ pub async fn start_control_server(
     })
 }
 
+/// `tokio::select!` arm helper: yield the next TCP accept result when a
+/// listener is bound, or pend forever when it isn't. The `Some(_)`
+/// wrapper lets the select macro pattern-match a present accept while
+/// silently ignoring the absent-listener case.
+async fn maybe_accept_tcp(
+    listener: Option<&TcpListener>,
+) -> Option<std::io::Result<(tokio::net::TcpStream, SocketAddr)>> {
+    match listener {
+        Some(l) => Some(l.accept().await),
+        None => std::future::pending().await,
+    }
+}
+
 /// Serve one client: complete hello handshake, install the control_writer,
 /// drain any queued approvals, then concurrently pump outbound events and read
 /// ops from the client. On disconnect clear the control_writer and abort the
 /// pump task.
+///
+/// The reader and writer halves are passed in pre-split and boxed so this
+/// function is transport-agnostic — the same code serves AF_UNIX and TCP
+/// connections (#474).
 async fn serve_connection(
-    stream: UnixStream,
+    read_half: BoxedReader,
+    write_half: BoxedWriter,
     server_version: String,
     run_id: String,
     run_kind: String,
     state: Arc<crate::dispatch::state::DispatchState>,
 ) {
-    let (read_half, write_half) = stream.into_split();
     let writer = Arc::new(Mutex::new(write_half));
     let mut reader = BufReader::new(read_half).lines();
     // Run-scoped monotonic seq counter for the `EventEnvelope.seq`
@@ -759,7 +871,7 @@ fn wrap_with_seq(
 }
 
 async fn send_event(
-    writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<BoxedWriter>>,
     event_log: &crate::control::event_log::EventLog,
     ev: &ControlEvent,
 ) -> Result<()> {
@@ -807,7 +919,7 @@ async fn try_enqueue_envelope(
 /// `flush()`. PR-G: channel carries envelopes (wrap + persist done at
 /// the broadcast/enqueue site), so the pump just writes.
 async fn send_envelopes_batch(
-    writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<BoxedWriter>>,
     batch: &[EventEnvelope],
 ) -> Result<()> {
     if batch.is_empty() {
@@ -1548,6 +1660,126 @@ mod tests {
                 assert_eq!(run_kind, "flat");
             }
             other => panic!("expected Hello, got {other:?}"),
+        }
+        drop(handle);
+    }
+
+    /// #474: the optional TCP listener arm accepts the same Hello
+    /// handshake as the AF_UNIX path and returns the same `Hello`
+    /// reply. Asserts the bound port is exposed via
+    /// `ControlServerHandle::tcp_addr()` so callers that bind to
+    /// `127.0.0.1:0` can discover the OS-assigned port.
+    #[tokio::test]
+    async fn tcp_hello_handshake_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        let sock = dir.path().join("tcp_hello.sock");
+        let handle = start_control_server_with_options(
+            sock.clone(),
+            ControlServerOptions {
+                tcp_bind: Some("127.0.0.1:0".parse().unwrap()),
+            },
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state,
+        )
+        .await
+        .unwrap();
+        let tcp_addr = handle.tcp_addr().expect("tcp_addr surfaced");
+        assert!(sock.exists(), "unix arm still bound alongside tcp arm");
+
+        let mut stream = tokio::net::TcpStream::connect(tcp_addr).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        let hello_line = lines.next_line().await.unwrap().expect("hello line");
+        let ev: ControlEvent = serde_json::from_str(&hello_line).unwrap();
+        match ev {
+            ControlEvent::Hello {
+                server_version,
+                run_id: rid,
+                run_kind,
+                ..
+            } => {
+                assert_eq!(server_version, "0.4.0");
+                assert_eq!(rid, run_id.to_string());
+                assert_eq!(run_kind, "hierarchical");
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+        drop(handle);
+    }
+
+    /// #474: the AF_UNIX and TCP arms share the same `serve_connection`
+    /// handler. A client that connects over TCP, sends Hello + Pause,
+    /// gets the same OpAcked reply as a UNIX client. Pairs with
+    /// `tcp_hello_handshake_roundtrips` to assert the full op-dispatch
+    /// path works over TCP, not just the Hello reply.
+    #[tokio::test]
+    async fn tcp_pause_op_acks() {
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+        let sock = dir.path().join("tcp_pause.sock");
+        let handle = start_control_server_with_options(
+            sock.clone(),
+            ControlServerOptions {
+                tcp_bind: Some("127.0.0.1:0".parse().unwrap()),
+            },
+            "0.4.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state,
+        )
+        .await
+        .unwrap();
+        let tcp_addr = handle.tcp_addr().expect("tcp_addr surfaced");
+
+        let mut stream = tokio::net::TcpStream::connect(tcp_addr).await.unwrap();
+        stream
+            .write_all(b"{\"op\":\"hello\",\"client_version\":\"0.4.0\"}\n")
+            .await
+            .unwrap();
+        stream
+            .write_all(b"{\"op\":\"pause_worker\",\"task_id\":\"nope\"}\n")
+            .await
+            .unwrap();
+
+        let (r, _w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+        // First line: server Hello.
+        let _hello = lines.next_line().await.unwrap().expect("hello line");
+        // Subsequent lines: scan until we see the reply to `pause_worker`.
+        // The dispatcher may interleave StoreActivity ticks (1s cadence)
+        // before the op reply lands.
+        let reply = loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+                .await
+                .expect("reply arrives before timeout")
+                .unwrap()
+                .expect("not EOF");
+            let envelope: EventEnvelope = serde_json::from_str(&line).unwrap();
+            match envelope.event {
+                ControlEvent::StoreActivity { .. } | ControlEvent::WorkersSnapshot { .. } => {
+                    continue
+                }
+                other => break other,
+            }
+        };
+        match reply {
+            ControlEvent::OpFailed { op, .. } => {
+                assert_eq!(op, "pause_worker");
+            }
+            ControlEvent::OpAcked { op, .. } => {
+                assert_eq!(op, "pause_worker");
+            }
+            other => panic!("expected OpAcked/OpFailed for pause_worker, got {other:?}"),
         }
         drop(handle);
     }

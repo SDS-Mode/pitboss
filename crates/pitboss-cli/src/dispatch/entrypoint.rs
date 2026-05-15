@@ -96,6 +96,16 @@ pub async fn init_run_state(
     }
 
     let started_at = Utc::now();
+    // PITBOSS_CONTROL_TCP_PORT is injected by `pitboss container-dispatch`
+    // on the host (it allocates a free TCP port and publishes it via
+    // `-p 127.0.0.1:<port>:<port>` + `-e PITBOSS_CONTROL_TCP_PORT=<port>`).
+    // When present, record the host-side dial address in meta.json so
+    // pitboss-web can reach the control bridge on platforms where the
+    // in-container AF_UNIX socket isn't visible from the host (#474).
+    let control_tcp_addr = std::env::var("PITBOSS_CONTROL_TCP_PORT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|p| format!("127.0.0.1:{p}"));
     let meta = RunMeta {
         run_id,
         manifest_path: manifest_path.to_path_buf(),
@@ -103,6 +113,7 @@ pub async fn init_run_state(
         claude_version,
         started_at,
         env: Default::default(),
+        control_tcp_addr,
     };
     store.init_run(&meta).await.context("init run")?;
 

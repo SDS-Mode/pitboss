@@ -1075,6 +1075,10 @@ fn iter_runs_blocking(guard: &rusqlite::Connection) -> Result<Vec<RunMeta>, Stor
             claude_version,
             started_at,
             env,
+            // control_tcp_addr is a transient runtime hint published by
+            // pitboss container-dispatch to meta.json — not persisted
+            // here. Defaults to None for runs read out of sqlite.
+            control_tcp_addr: None,
         });
     }
     Ok(metas)
@@ -1101,6 +1105,7 @@ mod sqlite_tests {
             claude_version: Some("1.0.0".into()),
             started_at: Utc::now(),
             env: HashMap::new(),
+            control_tcp_addr: None,
         }
     }
 
@@ -1517,6 +1522,7 @@ mod sqlite_tests {
             claude_version: None,
             started_at: Utc::now(),
             env,
+            control_tcp_addr: None,
         };
         store.init_run(&m).await.unwrap();
 
