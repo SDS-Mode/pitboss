@@ -51,6 +51,7 @@ fn rec(task_id: &str) -> TaskRecord {
         failure_reason: None,
         cost_usd: None,
         actor_type: None,
+        terminate_reason: None,
     }
 }
 

@@ -185,7 +185,11 @@ pub async fn handle_cancel_worker(
     let Some(token) = cancels.get(task_id) else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
-    token.terminate();
+    // #475: MCP-issued kill (terminate_worker) — name the kill site so
+    // the resulting TaskRecord surfaces "killed by operator request".
+    token.terminate_with_reason(pitboss_core::store::TerminateReason::OperatorRequest {
+        detail: Some(format!("mcp.terminate_worker target={task_id}")),
+    });
     Ok(CancelResult { ok: true })
 }
 
@@ -212,7 +216,14 @@ pub async fn handle_pause_worker(
             PauseMode::Cancel => {
                 let cancels = layer.worker_cancels.read().await;
                 if let Some(tok) = cancels.get(task_id) {
-                    tok.terminate();
+                    // #475: pause-by-cancel — same kind of kill as
+                    // terminate_worker, but issued via the MCP pause
+                    // tool. Surface the distinction in the reason.
+                    tok.terminate_with_reason(
+                        pitboss_core::store::TerminateReason::OperatorRequest {
+                            detail: Some(format!("mcp.pause_worker(cancel) target={task_id}")),
+                        },
+                    );
                 }
                 workers.insert(
                     task_id.to_string(),
@@ -332,7 +343,16 @@ pub async fn handle_reprompt_worker(
         }) => {
             let cancels = layer.worker_cancels.read().await;
             if let Some(tok) = cancels.get(&args.task_id) {
-                tok.terminate();
+                // #475: reprompt issues an internal kill+spawn-resume; not
+                // operator-initiated in the kill-audit sense, but record
+                // it as such because the original subprocess IS being
+                // terminated and the audit trail should reflect why.
+                tok.terminate_with_reason(pitboss_core::store::TerminateReason::OperatorRequest {
+                    detail: Some(format!(
+                        "mcp.reprompt_worker (kill+respawn) target={}",
+                        args.task_id
+                    )),
+                });
             }
             // Brief grace so the prior subprocess exits before spawn_resume
             // starts the new one. Matches the control-socket op.

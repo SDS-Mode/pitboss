@@ -1624,6 +1624,7 @@ mod tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         serde_json::to_string(&rec).unwrap()
     }

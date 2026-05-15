@@ -190,13 +190,17 @@ fn describe_event(event: &ControlEvent) -> (&'static str, String) {
             task_id,
             parent_task_id,
             reason,
-        } => (
-            "worker_failed",
+            terminate_reason,
+        } => ("worker_failed", {
+            let tr = terminate_reason
+                .as_ref()
+                .map(|r| format!(" terminate_reason={r:?}"))
+                .unwrap_or_default();
             match parent_task_id {
-                Some(p) => format!("task_id={task_id} parent={p} reason={reason:?}"),
-                None => format!("task_id={task_id} reason={reason:?}"),
-            },
-        ),
+                Some(p) => format!("task_id={task_id} parent={p} reason={reason:?}{tr}"),
+                None => format!("task_id={task_id} reason={reason:?}{tr}"),
+            }
+        }),
         ControlEvent::SubleadTerminated {
             sublead_id,
             spent_usd,
@@ -298,6 +302,7 @@ mod tests {
                         task_id: "w-1".into(),
                         parent_task_id: Some("sub-1".into()),
                         reason: FailureReason::AuthFailure,
+                        terminate_reason: None,
                     },
                 },
             ],

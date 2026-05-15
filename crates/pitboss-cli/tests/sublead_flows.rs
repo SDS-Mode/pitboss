@@ -1394,6 +1394,7 @@ async fn wait_actor_still_handles_worker_back_compat() {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         let mut w = state_clone.root.workers.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
@@ -1735,6 +1736,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         };
         sub.workers.write().await.insert(
             s1.clone(),

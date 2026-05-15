@@ -499,6 +499,10 @@ pub async fn run_hierarchical(
         },
         cost_usd: lead_cost_usd,
         actor_type: None,
+        // Capture any kill reason the dispatcher recorded on the lead's
+        // cancel token (budget watcher, operator Ctrl-C, etc.). `None` for
+        // natural completion. (#475)
+        terminate_reason: state.root.cancel.terminate_reason(),
     };
 
     // Cleanup worktree per policy. Surface the result via tracing
@@ -532,6 +536,7 @@ pub async fn run_hierarchical(
             None,
             reason,
             &["root", lead.id.as_str()],
+            lead_record.terminate_reason.clone(),
         )
         .await;
     }
@@ -683,6 +688,10 @@ pub async fn run_hierarchical(
                 // still has the original spawn's id even though no
                 // TaskRecord was appended yet. (#252 Phase 1.5)
                 actor_type,
+                // Synthesized cancellation records mean "the lead exited
+                // while this worker was still running" — that's a parent
+                // cancel cascade by definition. (#475)
+                terminate_reason: Some(pitboss_core::store::TerminateReason::ParentCancelled),
             }
         };
     {
@@ -1354,6 +1363,7 @@ mod await_drained_tests {
                     failure_reason: None,
                     cost_usd: None,
                     actor_type: None,
+                    terminate_reason: None,
                 }),
             );
             workers.insert("running-root".into(), WorkerState::Pending);
@@ -1408,6 +1418,7 @@ mod summary_jsonl_aggregation_tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         }
     }
 

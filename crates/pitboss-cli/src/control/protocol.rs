@@ -328,6 +328,14 @@ pub enum ControlEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_task_id: Option<String>,
         reason: pitboss_core::store::FailureReason,
+        /// Kill-audit reason captured by the dispatcher *before* the
+        /// post-mortem `FailureReason` classification ran. Pairs with
+        /// `reason` so consumers see both "who killed me" (e.g.,
+        /// `BudgetBreach`) and the classifier's read of the stdout
+        /// tail. `None` when no explicit kill fired (subprocess exited
+        /// on its own). (#475)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminate_reason: Option<pitboss_core::store::TerminateReason>,
     },
     /// A sub-lead has terminated (success, cancel, timeout, or error).
     /// Emitted by `dispatch::sublead::reconcile_terminated_sublead` after
@@ -707,6 +715,7 @@ mod tests {
             task_id: "w-1".into(),
             parent_task_id: Some("lead".into()),
             reason: FailureReason::RateLimit { resets_at: None },
+            terminate_reason: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"event\":\"worker_failed\""));
@@ -723,9 +732,47 @@ mod tests {
             task_id: "lead".into(),
             parent_task_id: None,
             reason: FailureReason::AuthFailure,
+            terminate_reason: None,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(!s.contains("parent_task_id"));
+    }
+
+    /// #475: WorkerFailed envelope carries the kill-audit reason
+    /// alongside the post-mortem classifier read. None elides; Some
+    /// serializes the tag + detail.
+    #[test]
+    fn worker_failed_with_terminate_reason_serializes() {
+        use pitboss_core::store::{FailureReason, TerminateReason};
+        let ev = ControlEvent::WorkerFailed {
+            task_id: "w-1".into(),
+            parent_task_id: Some("lead".into()),
+            reason: FailureReason::Unknown {
+                message: "killed mid-tool".into(),
+            },
+            terminate_reason: Some(TerminateReason::BudgetBreach {
+                detail: Some("over by $0.50".into()),
+            }),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"terminate_reason\""));
+        assert!(s.contains("\"kind\":\"budget_breach\""));
+        assert!(s.contains("over by $0.50"));
+        // Round-trip via the envelope deserializer.
+        assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    #[test]
+    fn worker_failed_without_terminate_reason_elides_field() {
+        use pitboss_core::store::FailureReason;
+        let ev = ControlEvent::WorkerFailed {
+            task_id: "w-1".into(),
+            parent_task_id: None,
+            reason: FailureReason::AuthFailure,
+            terminate_reason: None,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(!s.contains("terminate_reason"));
     }
 
     /// PR-B of #438: envelopes carry a `seq` field. Default (zero) is

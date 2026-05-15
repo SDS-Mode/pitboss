@@ -939,6 +939,10 @@ async fn spawn_sublead_session(
             }),
             cost_usd,
             actor_type: sublead_type_bg.clone(),
+            // Plumb any kill reason recorded on the sub-lead's cancel
+            // token (budget breach, cascade from root, operator action).
+            // `None` for natural exits. (#475)
+            terminate_reason: sub_layer_bg.cancel.terminate_reason(),
         };
         if let Err(e) = sub_layer_bg
             .store
@@ -1002,6 +1006,7 @@ async fn spawn_sublead_session(
                 Some("root".into()),
                 reason,
                 &["root", sublead_id_bg.as_str()],
+                rec.terminate_reason.clone(),
             )
             .await;
         }
@@ -1137,6 +1142,10 @@ pub async fn reconcile_terminated_sublead(
                     None
                 },
                 actor_type,
+                // Synthetic close-out for an unreported sub-lead happens
+                // when the sub-tree was killed (cascade or budget). Read
+                // the sub-layer's cancel token for the reason. (#475)
+                terminate_reason: sub_layer.cancel.terminate_reason(),
             };
             workers.insert(sublead_id.to_string(), WorkerState::Done(synthetic));
         }

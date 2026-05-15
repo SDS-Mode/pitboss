@@ -3,7 +3,9 @@
 pub mod record;
 pub mod traits;
 
-pub use record::{FailureReason, RunMeta, RunSummary, SpendBreakdown, TaskRecord, TaskStatus};
+pub use record::{
+    FailureReason, RunMeta, RunSummary, SpendBreakdown, TaskRecord, TaskStatus, TerminateReason,
+};
 pub use traits::SessionStore;
 
 pub mod json_file;
@@ -61,6 +63,7 @@ mod integration_tests {
             failure_reason: None,
             cost_usd: None,
             actor_type: None,
+            terminate_reason: None,
         }
     }
 
