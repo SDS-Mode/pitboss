@@ -10,33 +10,65 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
-## [0.14.0] — 2026-05-14
+## [0.15.0] — 2026-05-15
 
-v0.14.0 closes out the **unified envelope API** (#438): a single
-`RunStreamItem` stream in `pitboss-core::stream` is now the canonical
-read path for live + historical run state across CLI, TUI, and web.
-The dispatcher accepts subscriber-mode client handshakes so multiple
-read-only viewers (web SPA in two tabs, TUI mirror, a future `pitboss
-tail`) coexist on one run without displacing each other or the writer.
-Op replies moved to the broadcast bus, which unblocks the web SSE
-cutover and lands op replies in `events.jsonl` for post-run audit.
-
-The `[communication]` plane now journals every mailbox / artifact
-mutation to `<run-dir>/communication/messages.jsonl`; `pitboss resume`
-rehydrates the pre-crash mailbox + artifact metadata + per-actor
-activity counters so the resumed lead doesn't come back blind (#282).
-A new run-wide audit log lands at `<run-dir>/audit.jsonl` (#414) —
-every per-actor `TaskEvent` row tee'd into one chronological file with
-`actor_id` attribution. Query via `pitboss audit <run-id>` (filters:
-`--actor`, `--kind`, `--since`, `--reason-kind`) or `GET
-/api/runs/:id/audit` with the same surface as query params.
+v0.15.0 ships **reusable agent profiles** for collapsing manifest
+prompt boilerplate and a **headless-dispatch hook filter** for the
+operator-environment leak that was polluting worker output. Alongside
+those features, the release closes out the worker-failure-diagnostic
+chain (#475): force-kill paths now leave a `terminate_reason`
+audit-trail, killed actors surface their real token cost, and the
+stream-JSON failure-excerpt path catches every mid-event truncation
+shape we've seen in the wild. macOS+Podman container dispatch picks
+up two more hardening fixes — TCP forward for the control bridge and
+auto-injected `XDG_RUNTIME_DIR=/tmp` to dodge the virtiofs+AF_UNIX
+bind() trap.
 
 Highlights:
 
-- **Unified envelope API (#438)** — `open_run_stream(StreamMode::ReplayThenLive)` collapses the per-surface readers in `pitboss-cli`, `pitboss-tui`, and `pitboss-web`. PR-A through PR-Q close the arc.
-- **Subscriber-mode handshakes (#438, PR-P)** — `ControlOp::Hello { mode: ClientMode }` lets multiple read-only consumers coexist with one writer on a run's control socket.
-- **Communication-plane resume (#282)** — `messages.jsonl` journal + replay in `CommunicationStore::new` so `pitboss resume` doesn't lose pre-crash mailbox state.
-- **Aggregated audit log (#414)** — `<run-dir>/audit.jsonl` + `pitboss audit` CLI + `GET /api/runs/:id/audit` web endpoint with `--actor` / `--kind` / `--since` / `--reason-kind` filters.
+- **`[[agent_profile]]`** — declare role-shared system-prompt preludes
+  + env/model/tools defaults at the manifest level. Three built-ins
+  ship bundled (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
+  `pitboss/worker-haiku`); manifest-declared profiles can shadow them
+  by id. Bound to `[[worker_type]]` / `[[sublead_type]]` via a new
+  `agent_profile = "<id>"` field. Operator config always wins over
+  profile defaults — profiles are default-providers, not overrides.
+  Inspect via `pitboss schema --format=agent-profiles [--manifest <path>]`.
+- **`[run].claude_setting_sources`** — operator-controlled
+  pass-through of claude-code's `--setting-sources` flag (subset of
+  `user`, `project`, `local`). Lets headless dispatch filter out
+  user-scope SessionStart hooks and project-checked-in defaults so
+  workers run on the manifest contract alone, not the operator's
+  interactive-session decoration.
+- **Killed-actor diagnostic chain** — `terminate_reason` now
+  attributed for every force-kill path (#548); killed actors surface
+  their real token cost via the `AssistantUsage` fallback when the
+  stream ended without a `Result` event (#549); failure-excerpt path
+  marks every mid-event truncation shape (#547, #554) so a killed
+  worker's `failure_reason` is never just "unknown" anymore.
+- **macOS+Podman hardening** — auto-inject `XDG_RUNTIME_DIR=/tmp` to
+  dodge the virtiofs+AF_UNIX bind() EINVAL trap (#551); control-bridge
+  TCP forward for macOS+Podman dispatch (#546); `[container].extra_args`
+  hardening + mount defaults + doc quickstart (#544).
+
+### Added
+
+- Reusable agent profiles for prompt prelude + defaults ([#545](https://github.com/SDS-Mode/pitboss/pull/545))
+- [run].claude_setting_sources opt-in for headless dispatch ([#556](https://github.com/SDS-Mode/pitboss/pull/556))
+
+
+### Fixed
+
+- Mark every truncated stream-JSON tail, not just the leading-key shape ([#554](https://github.com/SDS-Mode/pitboss/pull/554))
+- Auto-inject XDG_RUNTIME_DIR=/tmp on macOS, name virtiofs trap in bind errors ([#551](https://github.com/SDS-Mode/pitboss/pull/551))
+- Surface killed actors' real token cost via AssistantUsage fallback ([#549](https://github.com/SDS-Mode/pitboss/pull/549))
+- Audit-trail every force-kill path via terminate_reason ([#548](https://github.com/SDS-Mode/pitboss/pull/548))
+- Surface mid-event truncation marker in failure excerpt ([#547](https://github.com/SDS-Mode/pitboss/pull/547))
+- Control-bridge TCP forward for macOS+Podman dispatch ([#546](https://github.com/SDS-Mode/pitboss/pull/546))
+- Harden extra_args, mount defaults, doc quickstart ([#544](https://github.com/SDS-Mode/pitboss/pull/544))
+
+
+## [0.14.0] — 2026-05-14
 
 ### Added
 

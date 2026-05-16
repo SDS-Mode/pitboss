@@ -20,7 +20,7 @@ GitHub issue, not here.
 - **No version targeting.** Use GitHub Milestones for release-train
   scheduling. Strategic horizons can stay inline as `parked:` notes.
 
-Last refreshed: v0.14.0 (2026-05-14).
+Last refreshed: v0.15.0 (2026-05-15).
 
 ---
 

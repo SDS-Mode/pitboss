@@ -16,31 +16,35 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.14.0** closes out the **unified envelope API** (#438): a single
-`RunStreamItem` stream in `pitboss-core::stream` replaces the
-per-surface readers that pitboss-cli, pitboss-tui, and pitboss-web
-each used to roll independently. `status`, `diff`, and the web SSE
-bridge all read from `open_run_stream(StreamMode::ReplayThenLive)` now;
-the dispatcher accepts subscriber-mode client handshakes so multiple
-read-only consumers (web SPA in two tabs, TUI mirror, a future
-`pitboss tail`) coexist on one run without displacing each other or
-the writer. Op replies (`op_acked` / `op_failed` / `workers_snapshot`)
-moved from per-connection delivery to the broadcast bus, which both
-unblocks the SSE migration and starts persisting them in
-`events.jsonl` for post-run audit. The `[communication]` plane (v0.10+)
-now journals every mailbox / artifact mutation to
-`<run-dir>/communication/messages.jsonl`; `pitboss resume` rehydrates
-the pre-crash mailbox + artifact metadata + per-actor activity
-counters from disk (#282) so the resumed lead doesn't come back blind.
-A new run-wide audit log lands at `<run-dir>/audit.jsonl` (#414) —
-every per-actor `TaskEvent` row (pause, continue, reprompt, approval
-request/response, tool denial, profile auto-approve) tee'd into one
-chronological file with `actor_id` attribution. Query it via
-`pitboss audit <run-id>` (filters: `--actor`, `--kind`, `--since`,
-`--reason-kind`) or `GET /api/runs/:id/audit` with the same filter
-surface as query params. See `CHANGELOG.md` for the full per-version
-history and `AGENTS.md` for the MCP tool reference, keybindings, and
-manifest schema.
+**v0.15.0** ships **`[[agent_profile]]`** (#545) — reusable role
+preludes for collapsing manifest prompt boilerplate. Three built-ins
+ship bundled (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
+`pitboss/worker-haiku`) carrying role conventions plus default
+model/tools/env; manifest-declared profiles can shadow them by id and
+bind to `[[worker_type]]` / `[[sublead_type]]` via a new
+`agent_profile = "<id>"` field. Composition happens at resolve time
+for `[lead]` / `[[task]]` and at MCP-spawn time for
+`spawn_worker` / `spawn_sublead`, so resolved.json, `--dry-run`, and
+resume all observe the same composed prompt the actor will receive.
+Operator config always wins over profile defaults. Inspect via
+`pitboss schema --format=agent-profiles [--manifest <path>]`. The
+companion **`[run].claude_setting_sources`** field (#556) gives
+operators control over claude-code's `--setting-sources` flag so
+headless dispatch can filter user-scope SessionStart hooks and
+project-checked-in defaults out of every worker spawn — workers run
+on the manifest contract alone, not the operator's interactive-session
+decoration. The release also closes out the worker-failure-diagnostic
+chain (#475): `terminate_reason` now attributes every force-kill path
+(#548); killed actors surface their real token cost via the
+`AssistantUsage` fallback when the stream ended without a `Result`
+event (#549); the failure-excerpt path catches every mid-event
+truncation shape we've seen (#547, #554) — a killed worker's
+`failure_reason` is never just "unknown" anymore. macOS+Podman
+container dispatch picks up two more hardening fixes — auto-injected
+`XDG_RUNTIME_DIR=/tmp` to dodge the virtiofs+AF_UNIX bind() trap
+(#551) and a control-bridge TCP forward (#546). See `CHANGELOG.md` for
+the full per-version history and `AGENTS.md` for the MCP tool
+reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
