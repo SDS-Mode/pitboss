@@ -1056,12 +1056,7 @@ mod tests {
     use super::*;
     use crate::dispatch::layer::LayerState;
     use crate::dispatch::state::{ApprovalPolicy, WorkerState};
-    use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
-    use crate::manifest::schema::{Effort, WorktreeCleanup};
-    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
-    use pitboss_core::process::ProcessSpawner;
     use pitboss_core::session::CancelToken;
-    use pitboss_core::store::{JsonFileStore, SessionStore};
     use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
 
     fn meta(actor_id: &str, actor_role: ActorRole) -> MetaField {
@@ -1093,78 +1088,15 @@ mod tests {
     }
 
     async fn test_state(config: CommunicationConfig) -> Arc<DispatchState> {
-        let dir = tempfile::TempDir::new().unwrap();
-        let lead = ResolvedLead {
-            id: "lead".into(),
-            directory: PathBuf::from("/tmp"),
-            prompt: "lead prompt".into(),
-            branch: None,
-            model: "claude-haiku-4-5".into(),
-            effort: Effort::High,
-            tools: vec![],
-            timeout_secs: 3600,
-            use_worktree: false,
-            env: Default::default(),
-            resume_session_id: None,
-            permission_routing: Default::default(),
-            allow_subleads: true,
-            max_subleads: Some(2),
-            max_sublead_budget_usd: Some(1.0),
-            max_total_workers: None,
-            sublead_defaults: None,
-        };
-        let manifest = ResolvedManifest {
-            manifest_schema_version: 0,
-            name: None,
-            max_parallel_tasks: Some(4),
-            halt_on_failure: false,
-            run_dir: dir.path().to_path_buf(),
-            worktree_cleanup: WorktreeCleanup::OnSuccess,
-            emit_event_stream: false,
-            claude_setting_sources: None,
-            tasks: vec![],
-            lead: Some(lead),
-            max_workers: Some(4),
-            budget_usd: Some(5.0),
-            lead_budget_usd: None,
-            lead_timeout_secs: None,
-            default_approval_policy: None,
-            denial_termination_policy: None,
-            notifications: vec![],
-            dump_shared_store: false,
-            require_plan_approval: false,
-            approval_rules: vec![],
-            container: None,
-            mcp_servers: vec![],
-            communication: config,
-            lifecycle: None,
-            worker_types: vec![],
-            sublead_types: vec![],
-            require_actor_type: false,
-            untyped_actor_policy: Default::default(),
-            agent_profiles: ::std::collections::HashMap::new(),
-        };
-        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-        let run_id = Uuid::now_v7();
-        let spawner: Arc<dyn ProcessSpawner> =
-            Arc::new(FakeSpawner::new(FakeScript::new().hold_until_signal()));
-        let run_subdir = dir.path().join(run_id.to_string());
+        let (dir, state) = crate::test_support::state_builder::TestStateBuilder::new()
+            .with_lead()
+            .allow_subleads()
+            .max_subleads(2)
+            .max_sublead_budget(1.0)
+            .communication(config)
+            .build();
         std::mem::forget(dir);
-        Arc::new(DispatchState::new(
-            run_id,
-            manifest,
-            store,
-            CancelToken::new(),
-            "lead".into(),
-            spawner,
-            PathBuf::from("claude"),
-            Arc::new(WorktreeManager::new()),
-            CleanupPolicy::Never,
-            run_subdir,
-            ApprovalPolicy::Block,
-            None,
-            Arc::new(crate::shared_store::SharedStore::new()),
-        ))
+        state
     }
 
     async fn add_root_worker(state: &Arc<DispatchState>, id: &str) {

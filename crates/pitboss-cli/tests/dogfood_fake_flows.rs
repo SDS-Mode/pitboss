@@ -29,7 +29,6 @@
 
 mod support;
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use support::*;
@@ -39,13 +38,13 @@ use tempfile::TempDir;
 use fake_mcp_client::FakeMcpClient;
 use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState};
 use pitboss_cli::manifest::resolve::{ResolvedLead, ResolvedManifest};
-use pitboss_cli::manifest::schema::{Effort, WorktreeCleanup};
 use pitboss_cli::mcp::{socket_path_for_run, McpServer};
 use pitboss_core::process::fake::{FakeScript, FakeSpawner};
 use pitboss_core::process::ProcessSpawner;
 use pitboss_core::session::CancelToken;
 use pitboss_core::store::{JsonFileStore, SessionStore};
 use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+use support::state_builder::TestStateBuilder;
 use uuid::Uuid;
 
 /// Mint an actor token via `state.mint_token` and connect a `FakeMcpClient`
@@ -64,84 +63,15 @@ async fn connect_actor(
 }
 
 /// Build a DispatchState with allow_subleads=true for in-process spotlights.
-///
-/// Duplicated from `sublead_flows.rs::mk_state_with_subleads` to keep
-/// each test file self-contained. The two copies should stay in sync
-/// (both use FakeScript::hold_until_signal and a $20 root budget).
 fn mk_state_with_subleads() -> (TempDir, Arc<DispatchState>) {
-    let dir = TempDir::new().unwrap();
-    let lead = ResolvedLead {
-        id: "root".into(),
-        directory: PathBuf::from("/tmp"),
-        prompt: "root prompt".into(),
-        branch: None,
-        model: "claude-haiku-4-5".into(),
-        effort: Effort::High,
-        tools: vec![],
-        timeout_secs: 3600,
-        use_worktree: false,
-        env: Default::default(),
-        resume_session_id: None,
-        permission_routing: Default::default(),
-        allow_subleads: true,
-        max_subleads: None,
-        max_sublead_budget_usd: None,
-        max_total_workers: None,
-        sublead_defaults: None,
-    };
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(8),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: Some(lead),
-        max_workers: Some(20),
-        budget_usd: Some(20.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: None,
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let run_id = Uuid::now_v7();
-    let script = FakeScript::new().hold_until_signal();
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.path().join(run_id.to_string());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "root".into(),
-        spawner,
-        PathBuf::from("claude"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
-    (dir, state)
+    TestStateBuilder::new()
+        .with_lead()
+        .lead_id("root")
+        .allow_subleads()
+        .max_parallel_tasks(8)
+        .max_workers(20)
+        .budget(20.0)
+        .build()
 }
 
 /// Locate the dogfood directory relative to the workspace root.

@@ -1173,70 +1173,20 @@ pub async fn build_sublead_mcp_config(
 #[cfg(test)]
 mod await_drained_tests {
     use super::*;
-    use crate::dispatch::state::{ApprovalPolicy, WorkerState};
-    use crate::manifest::resolve::ResolvedManifest;
-    use crate::manifest::schema::WorktreeCleanup;
-    use pitboss_core::process::TokioSpawner;
-    use pitboss_core::store::JsonFileStore;
-    use pitboss_core::worktree::CleanupPolicy;
+    use crate::dispatch::state::WorkerState;
+    use crate::test_support::state_builder::TestStateBuilder;
     use std::collections::HashSet;
     use std::time::Duration;
     use tempfile::TempDir;
 
     fn mk_state() -> (TempDir, Arc<DispatchState>) {
-        let dir = TempDir::new().unwrap();
-        let manifest = ResolvedManifest {
-            manifest_schema_version: 0,
-            name: None,
-            max_parallel_tasks: Some(4),
-            halt_on_failure: false,
-            run_dir: dir.path().to_path_buf(),
-            worktree_cleanup: WorktreeCleanup::OnSuccess,
-            emit_event_stream: false,
-            claude_setting_sources: None,
-            tasks: vec![],
-            lead: None,
-            max_workers: Some(4),
-            budget_usd: None,
-            lead_budget_usd: None,
-            lead_timeout_secs: None,
-            default_approval_policy: None,
-            denial_termination_policy: None,
-            notifications: vec![],
-            dump_shared_store: false,
-            require_plan_approval: false,
-            approval_rules: vec![],
-            container: None,
-            mcp_servers: vec![],
-            communication: Default::default(),
-            lifecycle: None,
-            worker_types: vec![],
-            sublead_types: vec![],
-            require_actor_type: false,
-            untyped_actor_policy: Default::default(),
-            agent_profiles: ::std::collections::HashMap::new(),
-        };
-        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-        let run_id = Uuid::now_v7();
-        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-        let wt_mgr = Arc::new(pitboss_core::worktree::WorktreeManager::new());
-        let run_subdir = dir.path().join(run_id.to_string());
-        let state = Arc::new(DispatchState::new(
-            run_id,
-            manifest,
-            store,
-            CancelToken::new(),
-            "lead-1".into(),
-            spawner,
-            PathBuf::from("/bin/false"),
-            wt_mgr,
-            CleanupPolicy::Never,
-            run_subdir,
-            ApprovalPolicy::AutoApprove,
-            None,
-            Arc::new(crate::shared_store::SharedStore::new()),
-        ));
-        (dir, state)
+        TestStateBuilder::new()
+            .no_budget()
+            .lead_id("lead-1")
+            .tokio_spawner()
+            .claude_binary(PathBuf::from("/bin/false"))
+            .approval_policy(crate::dispatch::state::ApprovalPolicy::AutoApprove)
+            .build()
     }
 
     /// Empty `in_flight` set returns true immediately without waiting.

@@ -55,57 +55,6 @@ async fn connect_actor(
 /// Worker spawner uses FakeScript that completes cleanly.
 fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
     let run_id = Uuid::now_v7();
-    let lead = ResolvedLead {
-        id: "root".into(),
-        directory: PathBuf::from("/tmp"),
-        prompt: "execute phase 1".into(),
-        branch: None,
-        model: "claude-haiku-4-5".into(),
-        effort: Effort::High,
-        tools: vec![],
-        timeout_secs: 3600,
-        use_worktree: false,
-        env: Default::default(),
-        resume_session_id: None,
-        permission_routing: Default::default(),
-        allow_subleads: true,
-        max_subleads: Some(4),
-        max_sublead_budget_usd: Some(5.0),
-        max_total_workers: Some(8),
-        sublead_defaults: None,
-    };
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: Some(lead),
-        max_workers: Some(4),
-        budget_usd: Some(20.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
     let worker_script = FakeScript::new()
         .stdout_line(r#"{"type":"system","subtype":"init","session_id":"worker-sess"}"#)
         .stdout_line(
@@ -113,99 +62,35 @@ fn mk_state(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
         )
         .exit_code(0);
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(worker_script));
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.join(run_id.to_string());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "root".into(),
-        spawner,
-        PathBuf::from("claude"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::Block,
-        None,
-        Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let state = support::state_builder::TestStateBuilder::new()
+        .with_lead()
+        .lead_id("root")
+        .allow_subleads()
+        .max_subleads(4)
+        .max_sublead_budget(5.0)
+        .budget(20.0)
+        .default_approval_policy(ApprovalPolicy::Block)
+        .spawner(spawner)
+        .run_id(run_id)
+        .run_subdir(dir.join(run_id.to_string()))
+        .build_in(dir);
     (run_id, state)
 }
 
 /// Build a DispatchState where workers hold indefinitely (for cancel tests).
 fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
     let run_id = Uuid::now_v7();
-    let lead = ResolvedLead {
-        id: "root".into(),
-        directory: PathBuf::from("/tmp"),
-        prompt: "execute phase 1".into(),
-        branch: None,
-        model: "claude-haiku-4-5".into(),
-        effort: Effort::High,
-        tools: vec![],
-        timeout_secs: 3600,
-        use_worktree: false,
-        env: Default::default(),
-        resume_session_id: None,
-        permission_routing: Default::default(),
-        allow_subleads: true,
-        max_subleads: Some(4),
-        max_sublead_budget_usd: Some(5.0),
-        max_total_workers: Some(8),
-        sublead_defaults: None,
-    };
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: Some(lead),
-        max_workers: Some(4),
-        budget_usd: Some(20.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.to_path_buf()));
-    let hold_script = FakeScript::new().hold_until_signal();
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(hold_script));
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.join(run_id.to_string());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "root".into(),
-        spawner,
-        PathBuf::from("claude"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::Block,
-        None,
-        Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let state = support::state_builder::TestStateBuilder::new()
+        .with_lead()
+        .lead_id("root")
+        .allow_subleads()
+        .max_subleads(4)
+        .max_sublead_budget(5.0)
+        .budget(20.0)
+        .default_approval_policy(ApprovalPolicy::Block)
+        .run_id(run_id)
+        .run_subdir(dir.join(run_id.to_string()))
+        .build_in(dir);
     (run_id, state)
 }
 

@@ -44,100 +44,14 @@ async fn test_state() -> Arc<DispatchState> {
 }
 
 async fn test_state_with_budget(budget: f64) -> Arc<DispatchState> {
-    use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
-    use crate::manifest::schema::{Effort, WorktreeCleanup};
-    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
-    use pitboss_core::process::ProcessSpawner;
-    use pitboss_core::session::CancelToken;
-    use pitboss_core::store::{JsonFileStore, SessionStore};
-    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-    use uuid::Uuid;
-
-    let dir = TempDir::new().unwrap();
-    // Minimal lead that turns off worktree prep so the background worker
-    // spawn path doesn't require a real git repo to run against.
-    let lead = ResolvedLead {
-        id: "lead".into(),
-        directory: PathBuf::from("/tmp"),
-        prompt: "lead prompt".into(),
-        branch: None,
-        model: "claude-haiku-4-5".into(),
-        effort: Effort::High,
-        tools: vec![],
-        timeout_secs: 3600,
-        use_worktree: false,
-        env: Default::default(),
-        resume_session_id: None,
-        permission_routing: Default::default(),
-        allow_subleads: false,
-        max_subleads: None,
-        max_sublead_budget_usd: None,
-        max_total_workers: None,
-        sublead_defaults: None,
-    };
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: Some(lead),
-        max_workers: Some(4),
-        budget_usd: Some(budget),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: None,
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let run_id = Uuid::now_v7();
-    // Use a FakeSpawner that holds its children open until terminated.
-    // This keeps spawned workers in the Running state throughout the test
-    // (rather than transitioning to Done quickly as TokioSpawner + /bin/true
-    // would), which keeps the `active_worker_count()` guard deterministic.
-    let script = FakeScript::new().hold_until_signal();
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.path().join(run_id.to_string());
+    let (dir, state) = crate::test_support::state_builder::TestStateBuilder::new()
+        .with_lead()
+        .budget(budget)
+        .build();
     // Leak the TempDir — the state holds paths into it and the test
     // may spawn background workers that write logs inside it.
-    let dir_path = dir.path().to_path_buf();
     std::mem::forget(dir);
-    let _ = dir_path;
-    Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("claude"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
-    ))
+    state
 }
 
 #[test]
@@ -3173,92 +3087,15 @@ async fn test_state_with_worker_types_full(
     approval_policy: ApprovalPolicy,
     untyped_actor_policy: crate::manifest::schema::UntypedActorPolicy,
 ) -> Arc<DispatchState> {
-    use crate::manifest::resolve::{ResolvedLead, ResolvedManifest};
-    use crate::manifest::schema::{Effort, WorktreeCleanup};
-    use pitboss_core::process::fake::{FakeScript, FakeSpawner};
-    use pitboss_core::process::ProcessSpawner;
-    use pitboss_core::session::CancelToken;
-    use pitboss_core::store::{JsonFileStore, SessionStore};
-    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-    use uuid::Uuid;
-
-    let dir = TempDir::new().unwrap();
-    let lead = ResolvedLead {
-        id: "lead".into(),
-        directory: PathBuf::from("/tmp"),
-        prompt: "lead prompt".into(),
-        branch: None,
-        model: "claude-haiku-4-5".into(),
-        effort: Effort::High,
-        tools: vec![],
-        timeout_secs: 3600,
-        use_worktree: false,
-        env: Default::default(),
-        resume_session_id: None,
-        permission_routing: Default::default(),
-        allow_subleads: false,
-        max_subleads: None,
-        max_sublead_budget_usd: None,
-        max_total_workers: None,
-        sublead_defaults: None,
-    };
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: Some(lead),
-        max_workers: Some(4),
-        budget_usd: Some(5.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: None,
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types,
-        sublead_types: vec![],
-        require_actor_type,
-        untyped_actor_policy,
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let run_id = Uuid::now_v7();
-    let script = FakeScript::new().hold_until_signal();
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.path().join(run_id.to_string());
-    let dir_path = dir.path().to_path_buf();
+    let (dir, state) = crate::test_support::state_builder::TestStateBuilder::new()
+        .with_lead()
+        .worker_types(worker_types)
+        .require_actor_type(require_actor_type)
+        .untyped_actor_policy(untyped_actor_policy)
+        .approval_policy(approval_policy)
+        .build();
     std::mem::forget(dir);
-    let _ = dir_path;
-    Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("claude"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        approval_policy,
-        None,
-        std::sync::Arc::new(crate::shared_store::SharedStore::new()),
-    ))
+    state
 }
 
 fn extraction_profile() -> crate::manifest::schema::WorkerType {
