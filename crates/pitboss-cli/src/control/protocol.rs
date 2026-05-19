@@ -351,11 +351,25 @@ pub enum ControlEvent {
     /// the sub-tree LayerState is removed and budget is reconciled.
     SubleadTerminated {
         sublead_id: String,
-        /// USD actually spent by the sub-lead's workers.
+        /// USD actually spent by the sub-lead's workers. Carries
+        /// `#[serde(default)]` for forward-compat with future schemas
+        /// that may omit it on cancel/error paths (closes F-PROTO-2 /
+        /// #515). NOT skip-serialized: `0.0` is a meaningful
+        /// observation (cancelled sub-lead with no spend).
+        #[serde(default)]
         spent_usd: f64,
         /// USD returned to the root pool (original_reservation - spent).
+        /// Carries `#[serde(default)]` for forward-compat consistency
+        /// (closes F-PROTO-2 / #515). NOT skip-serialized: `0.0` is
+        /// meaningful (full reservation spent).
+        #[serde(default)]
         unspent_usd: f64,
         /// Terminal outcome: `"success"` | `"cancel"` | `"timeout"` | `"error"`.
+        /// Carries `#[serde(default)]` for forward-compat consistency
+        /// (closes F-PROTO-2 / #515). NOT skip-serialized: an empty
+        /// string is not a valid outcome value, so eliding it would
+        /// produce silently misclassified terminations on the wire.
+        #[serde(default)]
         outcome: String,
     },
 }
@@ -918,6 +932,71 @@ mod tests {
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"read_down\":true"), "{s}");
+        assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    /// F-PROTO-2 (#515): a future dispatcher that omits any of the three
+    /// payload fields on `SubleadTerminated` must still deserialize
+    /// successfully, with each missing field at its `Default` value. The
+    /// `sublead_id` field is identity-bearing and intentionally stays
+    /// required (matching the bare-`sublead_id` on `SubleadSpawned`); a
+    /// missing identity should fail loudly, not silently default to `""`.
+    #[test]
+    fn sublead_terminated_back_compat_missing_payload_fields() {
+        let raw = r#"{"event":"sublead_terminated","sublead_id":"sub-A"}"#;
+        let ev: ControlEvent = serde_json::from_str(raw).expect(
+            "sublead_terminated with all payload fields omitted must deserialize (forward-compat)",
+        );
+        match ev {
+            ControlEvent::SubleadTerminated {
+                sublead_id,
+                spent_usd,
+                unspent_usd,
+                outcome,
+            } => {
+                assert_eq!(sublead_id, "sub-A");
+                assert_eq!(spent_usd, 0.0, "missing spent_usd must default to 0.0");
+                assert_eq!(unspent_usd, 0.0, "missing unspent_usd must default to 0.0");
+                assert_eq!(outcome, "", "missing outcome must default to empty string");
+            }
+            other => panic!("expected SubleadTerminated, got {other:?}"),
+        }
+    }
+
+    /// F-PROTO-2 (#515): the three payload fields are NOT skip-serialized.
+    /// `0.0` is a meaningful spend observation and an empty `outcome`
+    /// would render as an unknown terminal state in the TUI — keeping
+    /// the fields on the wire avoids silent misclassification.
+    #[test]
+    fn sublead_terminated_zero_values_stay_on_wire() {
+        let ev = ControlEvent::SubleadTerminated {
+            sublead_id: "sub-A".into(),
+            spent_usd: 0.0,
+            unspent_usd: 0.0,
+            outcome: "cancel".into(),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(
+            s.contains("\"spent_usd\":0"),
+            "spent_usd=0.0 must stay on wire; got: {s}"
+        );
+        assert!(
+            s.contains("\"unspent_usd\":0"),
+            "unspent_usd=0.0 must stay on wire; got: {s}"
+        );
+        assert!(s.contains("\"outcome\":\"cancel\""), "{s}");
+        assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    /// F-PROTO-2 (#515): a typical non-default payload round-trips.
+    #[test]
+    fn sublead_terminated_typical_payload_round_trips() {
+        let ev = ControlEvent::SubleadTerminated {
+            sublead_id: "sub-B".into(),
+            spent_usd: 1.25,
+            unspent_usd: 0.75,
+            outcome: "success".into(),
+        };
         assert_eq!(roundtrip_event(&ev), ev);
     }
 }
