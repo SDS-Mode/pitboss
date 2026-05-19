@@ -387,10 +387,21 @@ pub struct ActorActivityEntry {
     pub artifact_ops: u64,
 }
 
+/// Payload embedded inside the `WorkersSnapshot` `ControlEvent` variant.
+///
+/// `WorkersSnapshot` is emitted on every TUI connect/reconnect, making this
+/// a high-traffic nested payload — the version-skew window for adding a
+/// new field is much wider than for a once-per-run event. Every field
+/// carries `#[serde(default)]` so older TUI clients tolerate fields they
+/// don't yet know about, following the same wire-compat contract as the
+/// surrounding `ControlEvent` variants (see the top-of-file convention).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerSnapshotEntry {
+    #[serde(default)]
     pub task_id: String,
+    #[serde(default)]
     pub state: String,
+    #[serde(default)]
     pub prompt_preview: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
@@ -721,6 +732,33 @@ mod tests {
             }],
         };
         assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    #[test]
+    fn worker_snapshot_entry_accepts_missing_fields() {
+        // Same back-compat rationale as `RunFinishedSummary` but for the
+        // higher-traffic `WorkersSnapshot` event (emitted on every TUI
+        // connect/reconnect). Required String fields must deserialize to
+        // empty defaults rather than failing the whole snapshot when an
+        // older dispatcher omits a field, or a newer dispatcher adds one
+        // that this client doesn't know about. F-PROTO-3 bundling.
+        let e: WorkerSnapshotEntry = serde_json::from_str("{}").unwrap();
+        assert_eq!(e.task_id, "");
+        assert_eq!(e.state, "");
+        assert_eq!(e.prompt_preview, "");
+        assert!(e.started_at.is_none());
+        assert!(e.parent_task_id.is_none());
+        assert!(e.session_id.is_none());
+
+        let ev: ControlEvent =
+            serde_json::from_str(r#"{"event":"workers_snapshot","workers":[{}]}"#).unwrap();
+        match ev {
+            ControlEvent::WorkersSnapshot { workers } => {
+                assert_eq!(workers.len(), 1);
+                assert_eq!(workers[0].task_id, "");
+            }
+            other => panic!("expected WorkersSnapshot, got {other:?}"),
+        }
     }
 
     #[test]
