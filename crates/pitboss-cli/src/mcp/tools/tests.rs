@@ -458,7 +458,7 @@ async fn spawn_worker_refuses_when_max_workers_reached() {
 #[tokio::test]
 async fn spawn_worker_refuses_when_budget_exceeded() {
     let state = test_state().await; // budget_usd = 5.0
-    *state.root.spent_usd.lock().await = 5.0; // at cap
+    *state.root.budget.spent_usd.lock().await = 5.0; // at cap
     let args = SpawnWorkerArgs {
         prompt: "p".into(),
         directory: None,
@@ -877,7 +877,7 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
 
     // Verify cost accumulation. claude-haiku-4-5: input $0.80/1M, output $4.00/1M.
     // 1000 input = $0.0008; 2000 output = $0.008; total = $0.0088.
-    let spent = *state.root.spent_usd.lock().await;
+    let spent = *state.root.budget.spent_usd.lock().await;
     assert!(
         (spent - 0.0088).abs() < 1e-6,
         "expected spent_usd ≈ 0.0088, got {spent}"
@@ -933,7 +933,7 @@ async fn burst_spawn_is_budget_capped_via_reservation() {
     );
 
     // Sanity: the reservation should now reflect the two passing spawns.
-    let reserved_now = *state.root.reserved_usd.lock().await;
+    let reserved_now = *state.root.budget.reserved_usd.lock().await;
     assert!(
         (reserved_now - 0.20).abs() < 1e-9,
         "expected reserved ≈ 0.20, got {reserved_now}"
@@ -980,7 +980,7 @@ async fn reservation_released_on_worker_completion() {
         .expect("broadcast channel open");
     assert_eq!(completed_id, spawn.task_id);
 
-    let reserved_after = *state.root.reserved_usd.lock().await;
+    let reserved_after = *state.root.budget.reserved_usd.lock().await;
     assert!(
         reserved_after.abs() < 1e-9,
         "reservation should be released after completion, got {reserved_after}"

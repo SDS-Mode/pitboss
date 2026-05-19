@@ -19,7 +19,7 @@ The spotlight proves:
 
 3. **Clean state after rejection**: After a rejected spawn attempt:
    - `state.subleads.read().await.is_empty()` (no partial registration)
-   - `*state.root.reserved_usd.lock().await == 0.0` (no phantom reservation)
+   - `*state.root.budget.reserved_usd.lock().await == 0.0` (no phantom reservation)
 
 4. **Successful retry with compliant budget**: When the same root lead retries with `budget_usd = 2.0` (within the 3.0 cap):
    - The spawn succeeds

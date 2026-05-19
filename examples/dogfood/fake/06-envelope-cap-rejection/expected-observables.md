@@ -23,13 +23,13 @@ varying budgets.
 ### Result: Clean rejection
 - **MCP error returned** with message containing "exceeds per-sublead cap"
 - **No LayerState registered** — `state.subleads` remains empty
-- **No budget reservation made** — `state.root.reserved_usd` stays at 0.0
+- **No budget reservation made** — `state.root.budget.reserved_usd` stays at 0.0
 - **No partial state left behind** — dispatch remains clean for retry
 
 ### Observable in state
 ```
 state.subleads.read().await.is_empty() == true   // no partial registration
-*state.root.reserved_usd.lock().await == 0.0      // no phantom reservation
+*state.root.budget.reserved_usd.lock().await == 0.0      // no phantom reservation
 ```
 
 ---
@@ -44,13 +44,13 @@ state.subleads.read().await.is_empty() == true   // no partial registration
 ### Result: Clean success
 - **MCP returns sublead_id** (e.g., `sublead-xxx`)
 - **LayerState IS registered** — sub-lead appears in `state.subleads`
-- **Budget IS reserved** — `state.root.reserved_usd` increases to 2.0
+- **Budget IS reserved** — `state.root.budget.reserved_usd` increases to 2.0
 - **Sub-lead is ready** — root can interact with it via MCP
 
 ### Observable in state
 ```
 state.subleads.read().await.contains_key(sublead_id) == true  // registered
-*state.root.reserved_usd.lock().await == 2.0                  // envelope reserved
+*state.root.budget.reserved_usd.lock().await == 2.0                  // envelope reserved
 ```
 
 ---

@@ -713,7 +713,7 @@ mod tests {
     async fn budget_remaining_reflects_spent() {
         let st = mk_state(Some(10.0), None);
         assert_eq!(st.root.budget_remaining().await, Some(10.0));
-        *st.root.spent_usd.lock().await = 3.5;
+        *st.root.budget.spent_usd.lock().await = 3.5;
         assert_eq!(st.root.budget_remaining().await, Some(6.5));
     }
 
