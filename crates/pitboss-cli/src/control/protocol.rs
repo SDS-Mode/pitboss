@@ -130,6 +130,10 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Selects whether a control-socket client wants to write ops (default,
 /// pre-v0.14 behavior) or only read the broadcast envelope stream.
 ///
@@ -312,7 +316,12 @@ pub enum ControlEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_workers: Option<u32>,
         /// Whether the sub-lead was spawned with read_down=true (can read
-        /// root-layer KV keys).
+        /// root-layer KV keys). Defaults to `false` for back-compat with
+        /// pre-v0.6 TUI clients that don't know about read-down mode
+        /// (closes F-PROTO-1 / #512). The field is omitted from the wire
+        /// when `false` so a pre-v0.6 dispatcher's JSON stays
+        /// byte-identical.
+        #[serde(default, skip_serializing_if = "is_false")]
         read_down: bool,
     },
     /// A worker, sub-lead, or lead claude subprocess exited non-zero and
@@ -848,6 +857,67 @@ mod tests {
             !s.contains("\"lease_ops\":0"),
             "zero kv/lease counters should be omitted"
         );
+        assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    /// F-PROTO-1 (#512): `SubleadSpawned` from a pre-v0.6 dispatcher
+    /// omits the `read_down` field. Verify a payload without it
+    /// deserializes successfully (default `false`).
+    #[test]
+    fn sublead_spawned_back_compat_no_read_down() {
+        let raw = r#"{"event":"sublead_spawned","sublead_id":"sub-A"}"#;
+        let ev: ControlEvent = serde_json::from_str(raw)
+            .expect("sublead_spawned without read_down must deserialize (back-compat)");
+        match ev {
+            ControlEvent::SubleadSpawned {
+                sublead_id,
+                budget_usd,
+                lead_budget_usd,
+                max_workers,
+                read_down,
+            } => {
+                assert_eq!(sublead_id, "sub-A");
+                assert_eq!(budget_usd, None);
+                assert_eq!(lead_budget_usd, None);
+                assert_eq!(max_workers, None);
+                assert!(!read_down, "missing read_down must default to false");
+            }
+            other => panic!("expected SubleadSpawned, got {other:?}"),
+        }
+    }
+
+    /// F-PROTO-1 (#512): a `SubleadSpawned` with `read_down: false` must
+    /// elide the field on the wire so a pre-v0.6 TUI parsing the JSON
+    /// sees byte-identical output.
+    #[test]
+    fn sublead_spawned_read_down_false_elided_on_wire() {
+        let ev = ControlEvent::SubleadSpawned {
+            sublead_id: "sub-A".into(),
+            budget_usd: None,
+            lead_budget_usd: None,
+            max_workers: None,
+            read_down: false,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(
+            !s.contains("read_down"),
+            "read_down=false should be elided; got: {s}"
+        );
+        assert_eq!(roundtrip_event(&ev), ev);
+    }
+
+    /// F-PROTO-1 (#512): `read_down: true` is serialized and round-trips.
+    #[test]
+    fn sublead_spawned_read_down_true_round_trips() {
+        let ev = ControlEvent::SubleadSpawned {
+            sublead_id: "sub-B".into(),
+            budget_usd: Some(2.0),
+            lead_budget_usd: None,
+            max_workers: Some(4),
+            read_down: true,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"read_down\":true"), "{s}");
         assert_eq!(roundtrip_event(&ev), ev);
     }
 }
