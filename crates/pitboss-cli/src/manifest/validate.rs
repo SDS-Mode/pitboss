@@ -731,7 +731,10 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        bail!("lead id '{}' contains invalid characters", lead.id);
+        bail!(
+            "lead id '{}' contains invalid characters (allowed: a-zA-Z0-9_-)",
+            lead.id
+        );
     }
     if !skip_dir_check && !lead.directory.is_dir() {
         bail!(
@@ -752,7 +755,7 @@ fn validate_lead(r: &ResolvedManifest, skip_dir_check: bool) -> Result<()> {
         );
     }
     if lead.timeout_secs == 0 {
-        bail!("lead timeout_secs must be > 0");
+        bail!("[lead].timeout_secs must be > 0 (per-actor wall-clock cap)");
     }
     Ok(())
 }
@@ -862,7 +865,10 @@ fn validate_ids(r: &ResolvedManifest) -> Result<()> {
     let mut seen = HashSet::new();
     for t in &r.tasks {
         if !seen.insert(&t.id) {
-            bail!("duplicate task id: {}", t.id);
+            bail!(
+                "duplicate task id: '{}'; each [[task]].id must be unique within the manifest",
+                t.id
+            );
         }
         if t.id.is_empty() {
             bail!("empty task id");
@@ -910,7 +916,12 @@ fn validate_branch_conflicts(r: &ResolvedManifest) -> Result<()> {
         if let Some(b) = &t.branch {
             let canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
             if !seen.insert((canon, b.clone())) {
-                bail!("two tasks target the same directory + branch '{}'", b);
+                bail!(
+                    "two [[task]] entries target the same git directory + branch '{}'; \
+                     give each task a unique branch (via `branch = \"...\"`) or point them \
+                     at separate directories",
+                    b
+                );
             }
         }
     }

@@ -522,7 +522,10 @@ fn resolve_task(
                 .with_context(|| format!("rendering template '{}' for task '{}'", tid, task.id))?
         }
         (Some(_), Some(_)) => bail!("task '{}' sets both prompt and template", task.id),
-        (None, None) => bail!("task '{}' has no prompt and no template", task.id),
+        (None, None) => bail!(
+            "task '{}': prompt is required (set `prompt = \"...\"` or reference a [[template]] via `template = \"id\"`)",
+            task.id
+        ),
     };
     let prompt = compose_prompt(profile, &raw_prompt);
 
