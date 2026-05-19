@@ -369,7 +369,7 @@ async fn list_workers_empty_when_no_spawns() {
 async fn list_workers_shows_pending_and_running() {
     let state = test_state().await;
     {
-        let mut w = state.root.workers.write().await;
+        let mut w = state.root.workers.states.write().await;
         w.insert("w-1".into(), WorkerState::Pending);
         w.insert(
             "w-2".into(),
@@ -407,7 +407,7 @@ async fn spawn_worker_adds_entry_to_state() {
     // The background task may have already transitioned the worker to
     // Running or Done by the time we read, so we just assert the key
     // exists and is in a valid state (Pending / Running / Done).
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert_eq!(workers.len(), 1);
     let entry = workers.get(&result.task_id).unwrap();
     assert!(matches!(
@@ -416,7 +416,7 @@ async fn spawn_worker_adds_entry_to_state() {
     ));
 
     // Verify prompt_preview was recorded.
-    let prompts = state.root.worker_prompts.read().await;
+    let prompts = state.root.workers.prompts.read().await;
     assert_eq!(
         prompts.get(&result.task_id).unwrap(),
         "investigate issue #1"
@@ -609,7 +609,7 @@ async fn wait_for_worker_returns_outcome_on_completion() {
     let state = test_state().await;
     let task_id = "worker-test-1".to_string();
     {
-        let mut w = state.root.workers.write().await;
+        let mut w = state.root.workers.states.write().await;
         w.insert(task_id.clone(), WorkerState::Pending);
     }
 
@@ -643,9 +643,9 @@ async fn wait_for_worker_returns_outcome_on_completion() {
             actor_type: None,
             terminate_reason: None,
         };
-        let mut w = state_clone.root.workers.write().await;
+        let mut w = state_clone.root.workers.states.write().await;
         w.insert(task_id_clone.clone(), WorkerState::Done(rec));
-        let _ = state_clone.root.done_tx.send(task_id_clone);
+        let _ = state_clone.root.workers.done_tx.send(task_id_clone);
     });
 
     let outcome = handle_wait_for_worker(&state, &task_id, Some(5))
@@ -659,7 +659,7 @@ async fn wait_for_worker_times_out() {
     let state = test_state().await;
     let task_id = "worker-stuck".to_string();
     {
-        let mut w = state.root.workers.write().await;
+        let mut w = state.root.workers.states.write().await;
         w.insert(task_id.clone(), WorkerState::Pending);
     }
     let err = handle_wait_for_worker(&state, &task_id, Some(0))
@@ -685,7 +685,7 @@ async fn wait_for_any_returns_first_completed() {
     let state = test_state().await;
     let ids = vec!["w-a".to_string(), "w-b".to_string(), "w-c".to_string()];
     {
-        let mut w = state.root.workers.write().await;
+        let mut w = state.root.workers.states.write().await;
         for id in &ids {
             w.insert(id.clone(), WorkerState::Pending);
         }
@@ -720,9 +720,9 @@ async fn wait_for_any_returns_first_completed() {
             actor_type: None,
             terminate_reason: None,
         };
-        let mut w = state_clone.root.workers.write().await;
+        let mut w = state_clone.root.workers.states.write().await;
         w.insert("w-b".into(), WorkerState::Done(rec));
-        let _ = state_clone.root.done_tx.send("w-b".into());
+        let _ = state_clone.root.workers.done_tx.send("w-b".into());
     });
 
     let (winner_id, _rec) = handle_wait_for_any(&state, &ids, Some(5)).await.unwrap();
@@ -847,7 +847,7 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
     };
 
     // Subscribe to done events BEFORE spawning.
-    let mut rx = state.root.done_tx.subscribe();
+    let mut rx = state.root.workers.done_tx.subscribe();
     let spawn = handle_spawn_worker(&state, args).await.unwrap();
 
     // Wait for the broadcast.
@@ -858,7 +858,7 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
     assert_eq!(id, spawn.task_id, "broadcast id matches spawn id");
 
     // Verify Done state + Success + parent_task_id.
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     let entry = workers.get(&spawn.task_id).expect("worker recorded");
     match entry {
         WorkerState::Done(rec) => {
@@ -886,7 +886,8 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
     // Verify prompt_preview is present.
     let preview = state
         .root
-        .worker_prompts
+        .workers
+        .prompts
         .read()
         .await
         .get(&spawn.task_id)
@@ -948,7 +949,7 @@ async fn reservation_released_on_worker_completion() {
 
     // Subscribe to done events BEFORE spawning — the completion path is
     // fast (FakeScript exits immediately after emitting the result line).
-    let mut rx = state.root.done_tx.subscribe();
+    let mut rx = state.root.workers.done_tx.subscribe();
 
     let spawn = handle_spawn_worker(
         &state,
@@ -969,7 +970,7 @@ async fn reservation_released_on_worker_completion() {
     // Reservation should be > 0 at some point between spawn and completion;
     // under a very fast FakeSpawner the worker can complete before this
     // read, so we only assert "reservation was initialized to >0". That's
-    // checked indirectly via the `worker_reservations` map having an entry
+    // checked indirectly via the `workers.reservations` map having an entry
     // (or having had one — it's removed on release).
     // The primary assertion is post-completion.
 
@@ -984,7 +985,7 @@ async fn reservation_released_on_worker_completion() {
         reserved_after.abs() < 1e-9,
         "reservation should be released after completion, got {reserved_after}"
     );
-    let reservations = state.root.worker_reservations.read().await;
+    let reservations = state.root.workers.reservations.read().await;
     assert!(
         !reservations.contains_key(&spawn.task_id),
         "reservation entry should be removed on completion"
@@ -1009,7 +1010,7 @@ async fn running_worker_state_gets_session_id_after_init() {
     use std::time::Duration;
 
     let state = completing_test_state().await;
-    let mut rx = state.root.done_tx.subscribe();
+    let mut rx = state.root.workers.done_tx.subscribe();
     let args = SpawnWorkerArgs {
         prompt: "analyze".into(),
         directory: None,
@@ -1028,7 +1029,7 @@ async fn running_worker_state_gets_session_id_after_init() {
 
     // Post-completion, the worker is in Done state. The session_id is
     // preserved on TaskRecord via SessionOutcome. Assert it.
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     match workers.get(&spawn.task_id).unwrap() {
         WorkerState::Done(rec) => {
             assert_eq!(rec.claude_session_id.as_deref(), Some("sess_ok"));
@@ -1102,11 +1103,12 @@ async fn handle_pause_worker_pauses_running_worker() {
     let worker_token = pitboss_core::session::CancelToken::new();
     state
         .root
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-1".into(), worker_token.clone());
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1118,7 +1120,7 @@ async fn handle_pause_worker_pauses_running_worker() {
         .unwrap();
     assert!(res.ok);
     assert!(worker_token.is_terminated());
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert!(matches!(
         workers.get("w-1").unwrap(),
         WorkerState::Paused { .. }
@@ -1150,17 +1152,19 @@ async fn freeze_and_thaw_transition_via_handler() {
     let slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(pid));
     state
         .root
-        .worker_pids
+        .workers
+        .pids
         .write()
         .await
         .insert("w-freeze".into(), slot);
     state
         .root
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-freeze".into(), pitboss_core::session::CancelToken::new());
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-freeze".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1174,7 +1178,14 @@ async fn freeze_and_thaw_transition_via_handler() {
         .unwrap();
     assert!(res.ok);
     assert!(matches!(
-        state.root.workers.read().await.get("w-freeze").unwrap(),
+        state
+            .root
+            .workers
+            .states
+            .read()
+            .await
+            .get("w-freeze")
+            .unwrap(),
         WorkerState::Frozen { .. }
     ));
 
@@ -1202,7 +1213,14 @@ async fn freeze_and_thaw_transition_via_handler() {
     .unwrap();
     assert!(cres.ok);
     assert!(matches!(
-        state.root.workers.read().await.get("w-freeze").unwrap(),
+        state
+            .root
+            .workers
+            .states
+            .read()
+            .await
+            .get("w-freeze")
+            .unwrap(),
         WorkerState::Running { .. }
     ));
 
@@ -1215,7 +1233,7 @@ async fn freeze_and_thaw_transition_via_handler() {
 #[tokio::test]
 async fn handle_continue_worker_resumes_paused() {
     let state = test_state().await;
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Paused {
             session_id: "sess".into(),
@@ -1225,13 +1243,15 @@ async fn handle_continue_worker_resumes_paused() {
     );
     state
         .root
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert("w-1".into(), "hi".into());
     state
         .root
-        .worker_models
+        .workers
+        .models
         .write()
         .await
         .insert("w-1".into(), "claude-haiku-4-5".into());
@@ -1245,7 +1265,7 @@ async fn handle_continue_worker_resumes_paused() {
     .await
     .unwrap();
     assert!(res.ok);
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert!(matches!(
         workers.get("w-1").unwrap(),
         WorkerState::Running { .. }
@@ -1258,11 +1278,12 @@ async fn handle_reprompt_worker_from_running() {
     let worker_token = pitboss_core::session::CancelToken::new();
     state
         .root
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-1".into(), worker_token.clone());
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1271,13 +1292,15 @@ async fn handle_reprompt_worker_from_running() {
     );
     state
         .root
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert("w-1".into(), "original".into());
     state
         .root
-        .worker_models
+        .workers
+        .models
         .write()
         .await
         .insert("w-1".into(), "claude-haiku-4-5".into());
@@ -1296,7 +1319,8 @@ async fn handle_reprompt_worker_from_running() {
     // Counter bumps on success.
     let counters = state
         .root
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get("w-1")
@@ -1316,7 +1340,7 @@ async fn handle_reprompt_worker_from_running() {
         "events.jsonl missing reprompt: {events}"
     );
     // Worker transitioned back to Running via spawn_resume_worker.
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert!(matches!(
         workers.get("w-1").unwrap(),
         WorkerState::Running { .. }
@@ -1355,6 +1379,7 @@ async fn handle_reprompt_worker_from_done_errors() {
     state
         .root
         .workers
+        .states
         .write()
         .await
         .insert("w-done".into(), WorkerState::Done(rec));
@@ -1432,11 +1457,12 @@ async fn handle_pause_worker_targets_sublead_layer() {
 
     let worker_token = pitboss_core::session::CancelToken::new();
     sub_layer
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-sub".into(), worker_token.clone());
-    sub_layer.workers.write().await.insert(
+    sub_layer.workers.states.write().await.insert(
         "w-sub".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1444,14 +1470,21 @@ async fn handle_pause_worker_targets_sublead_layer() {
         },
     );
     // Sanity: root has no entry — pre-fix code would bail here.
-    assert!(state.root.workers.read().await.get("w-sub").is_none());
+    assert!(state
+        .root
+        .workers
+        .states
+        .read()
+        .await
+        .get("w-sub")
+        .is_none());
 
     let res = handle_pause_worker(&state, "w-sub", PauseMode::Cancel)
         .await
         .unwrap();
     assert!(res.ok);
     assert!(worker_token.is_terminated());
-    let workers = sub_layer.workers.read().await;
+    let workers = sub_layer.workers.states.read().await;
     assert!(matches!(
         workers.get("w-sub").unwrap(),
         WorkerState::Paused { .. }
@@ -1466,7 +1499,7 @@ async fn handle_continue_worker_targets_sublead_layer() {
     let sub_layer = register_test_sublead(&state, "sublead-A").await;
     index_worker(&state, "w-sub", Some("sublead-A")).await;
 
-    sub_layer.workers.write().await.insert(
+    sub_layer.workers.states.write().await.insert(
         "w-sub".into(),
         WorkerState::Paused {
             session_id: "sess".into(),
@@ -1475,12 +1508,14 @@ async fn handle_continue_worker_targets_sublead_layer() {
         },
     );
     sub_layer
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert("w-sub".into(), "hi".into());
     sub_layer
-        .worker_models
+        .workers
+        .models
         .write()
         .await
         .insert("w-sub".into(), "claude-haiku-4-5".into());
@@ -1496,8 +1531,15 @@ async fn handle_continue_worker_targets_sublead_layer() {
     .unwrap();
     assert!(res.ok);
     // The sublead's layer has the resumed worker — root must remain empty.
-    assert!(state.root.workers.read().await.get("w-sub").is_none());
-    let workers = sub_layer.workers.read().await;
+    assert!(state
+        .root
+        .workers
+        .states
+        .read()
+        .await
+        .get("w-sub")
+        .is_none());
+    let workers = sub_layer.workers.states.read().await;
     assert!(matches!(
         workers.get("w-sub").unwrap(),
         WorkerState::Running { .. }
@@ -1515,11 +1557,12 @@ async fn handle_reprompt_worker_targets_sublead_layer() {
 
     let worker_token = pitboss_core::session::CancelToken::new();
     sub_layer
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-sub".into(), worker_token.clone());
-    sub_layer.workers.write().await.insert(
+    sub_layer.workers.states.write().await.insert(
         "w-sub".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1527,12 +1570,14 @@ async fn handle_reprompt_worker_targets_sublead_layer() {
         },
     );
     sub_layer
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert("w-sub".into(), "original".into());
     sub_layer
-        .worker_models
+        .workers
+        .models
         .write()
         .await
         .insert("w-sub".into(), "claude-haiku-4-5".into());
@@ -1549,7 +1594,8 @@ async fn handle_reprompt_worker_targets_sublead_layer() {
     assert!(res.ok);
     // Counter bumps on the sub-lead's layer (NOT root).
     let counters = sub_layer
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get("w-sub")
@@ -1559,7 +1605,8 @@ async fn handle_reprompt_worker_targets_sublead_layer() {
     // Root counters should be empty.
     assert!(state
         .root
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get("w-sub")
@@ -1576,11 +1623,12 @@ async fn handle_cancel_worker_targets_sublead_layer() {
 
     let worker_token = pitboss_core::session::CancelToken::new();
     sub_layer
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-sub".into(), worker_token.clone());
-    sub_layer.workers.write().await.insert(
+    sub_layer.workers.states.write().await.insert(
         "w-sub".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1589,7 +1637,7 @@ async fn handle_cancel_worker_targets_sublead_layer() {
     );
 
     // Pre-fix: this would bail "unknown task_id" because the read was
-    // pinned to state.root.worker_cancels.
+    // pinned to state.root.workers.cancels.
     let res = handle_cancel_worker(&state, "w-sub").await.unwrap();
     assert!(res.ok);
     assert!(worker_token.is_terminated());
@@ -2423,7 +2471,7 @@ async fn permission_prompt_cost_over_rule_denies_when_estimate_exceeds() {
 
     // #367: the rule short-circuit must also record approval state so
     // counters and `approval_driven_termination` work under Path B.
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("lead")
         .expect("rule-driven deny must bump approval counters for caller");
@@ -2483,7 +2531,7 @@ async fn permission_prompt_rule_auto_approve_records_state_and_counters() {
         "rule-driven approve must yield Allow: {resp:?}"
     );
 
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("lead")
         .expect("rule-driven approve must bump approval counters for caller");
@@ -2520,7 +2568,7 @@ async fn permission_prompt_default_policy_auto_approve_records_last_response() {
         "bridge AutoApprove must yield Allow: {resp:?}"
     );
 
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("lead")
         .expect("bridge AutoApprove must bump approval counters");
@@ -2583,7 +2631,7 @@ async fn permission_prompt_default_policy_auto_reject_records_denied_by_policy()
          did (#373): {reason}"
     );
 
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("lead")
         .expect("bridge AutoReject must bump approval counters");
@@ -2655,7 +2703,7 @@ async fn approval_driven_termination_adapt_policy_returns_none_after_denial() {
     // Sanity: the denial WAS recorded — counters and last_approval_response
     // both fired (the Adapt policy does not silence those signals,
     // only the reclassification).
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("lead")
         .expect("denial must still bump approvals_rejected");
@@ -3206,7 +3254,8 @@ async fn spawn_worker_typed_persists_actor_type_on_record() {
     for _ in 0..50 {
         if let Some(tok) = state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .read()
             .await
             .get(&res.task_id)
@@ -3224,7 +3273,9 @@ async fn spawn_worker_typed_persists_actor_type_on_record() {
     let mut found_actor_type: Option<String> = None;
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        if let Some(WorkerState::Done(rec)) = state.root.workers.read().await.get(&res.task_id) {
+        if let Some(WorkerState::Done(rec)) =
+            state.root.workers.states.read().await.get(&res.task_id)
+        {
             found_actor_type = rec.actor_type.clone();
             break;
         }
@@ -3249,13 +3300,14 @@ async fn spawn_worker_typed_persists_actor_type_on_record() {
 // fall through to the bridge unchanged.
 
 /// Helper for the profile tests below: inserts a typed worker entry
-/// into the root layer's `worker_actor_types` map. Mirrors what
+/// into the root layer's `workers.actor_types` map. Mirrors what
 /// `handle_spawn_worker` does on a real spawn, without driving the
 /// FakeSpawner — the approval path only reads the maps.
 async fn insert_typed_worker(state: &Arc<DispatchState>, worker_id: &str, worker_type_id: &str) {
     state
         .root
-        .worker_actor_types
+        .workers
+        .actor_types
         .write()
         .await
         .insert(worker_id.to_string(), worker_type_id.to_string());
@@ -3297,7 +3349,7 @@ async fn permission_prompt_profile_auto_approves_tool_in_allowlist() {
     );
 
     // Counters bumped — symmetric with rule-driven AutoApprove (#367).
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("worker-1")
         .expect("profile auto-approve must bump approval counters");
@@ -3331,7 +3383,7 @@ async fn permission_prompt_profile_auto_denies_tool_outside_allowlist() {
         "model-facing reason must name the profile so claude can adapt: {message}"
     );
 
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("worker-1")
         .expect("profile auto-deny must bump approval counters");
@@ -3340,7 +3392,7 @@ async fn permission_prompt_profile_auto_denies_tool_outside_allowlist() {
     assert_eq!(entry.approvals_rejected, 1);
 }
 
-/// Untyped workers (no entry in `worker_actor_types`) MUST fall through
+/// Untyped workers (no entry in `workers.actor_types`) MUST fall through
 /// to the bridge so back-compat with v0.9 manifests is preserved.
 /// Verified by setting the bridge's default policy to AutoApprove and
 /// confirming the call returns Allow — if the profile path had
@@ -3372,7 +3424,7 @@ async fn permission_prompt_untyped_worker_falls_through_to_bridge() {
 /// Lead callers MUST NOT short-circuit on profile, even when typed
 /// `[[worker_type]]` entries exist in the manifest. The root lead is
 /// never typed (#252 Phase 1.5: "Root lead is never typed") and an
-/// off-by-one that wired `worker_actor_types` lookups for `ActorRole::Lead`
+/// off-by-one that wired `workers.actor_types` lookups for `ActorRole::Lead`
 /// would silently apply a worker profile's caps to the lead — which
 /// would forbid orchestration tools the lead must always have.
 #[tokio::test]
@@ -3388,13 +3440,14 @@ async fn permission_prompt_lead_caller_never_uses_profile_path() {
     .await;
     // Typed worker entries exist but the caller's role is Lead — the
     // profile lookup must short-circuit at the `ActorRole::Lead` arm.
-    // If it didn't, looking up `"lead"` in `worker_actor_types` would
+    // If it didn't, looking up `"lead"` in `workers.actor_types` would
     // find the planted "extraction" entry and apply a worker profile
     // to the lead — forbidding orchestration tools the lead must
     // always have.
     state
         .root
-        .worker_actor_types
+        .workers
+        .actor_types
         .write()
         .await
         .insert("lead".into(), "extraction".into());
@@ -3573,7 +3626,7 @@ async fn permission_prompt_synthetic_default_blocks_untyped_worker() {
         "synthetic denial must name the sentinel profile id: {message}"
     );
 
-    let counters = state.root.worker_counters.read().await;
+    let counters = state.root.workers.counters.read().await;
     let entry = counters
         .get("worker-untyped")
         .expect("synthetic auto-deny must bump approval counters");

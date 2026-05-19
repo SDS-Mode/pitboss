@@ -163,12 +163,12 @@ pub async fn cancel_actor_with_reason(
 /// reason'd because there is no parent to receive the reason).
 ///
 /// Routing strategy is O(1) at every layer:
-/// 1. Root-layer worker → `state.root.worker_cancels` HashMap.
+/// 1. Root-layer worker → `state.root.workers.cancels` HashMap.
 /// 2. Sub-lead itself → `state.subleads` HashMap.
 /// 3. Sub-tree worker → `state.worker_layer_index` HashMap to resolve
-///    the owning sublead id, then the sub-tree's own `worker_cancels`.
+///    the owning sublead id, then the sub-tree's own `workers.cancels`.
 ///
-/// The previous implementation walked every sub-tree's `worker_cancels`
+/// The previous implementation walked every sub-tree's `workers.cancels`
 /// under a held `state.subleads` read lock — O(N) per cancel call,
 /// blocking new sublead registration. The `worker_layer_index` lookup
 /// mirrors `resolve_layer_for_caller`'s routing for KV ops (#150 audit).
@@ -186,7 +186,7 @@ async fn cancel_and_find_parent(
 
     // Root-layer workers: parent = root lead.
     {
-        let cancels = state.root.worker_cancels.read().await;
+        let cancels = state.root.workers.cancels.read().await;
         if let Some(tok) = cancels.get(target) {
             tok.terminate_with_reason(operator_reason());
             return Ok(Some(state.root.clone()));
@@ -203,17 +203,17 @@ async fn cancel_and_find_parent(
     }
 
     // Sub-tree workers: route via worker_layer_index for O(1) lookup
-    // instead of scanning every sub-tree's worker_cancels under the
+    // instead of scanning every sub-tree's workers.cancels under the
     // held subleads lock. `worker_layer_index` is populated by
     // `handle_spawn_worker` immediately before the worker_cancel is
     // registered, so a successful index hit guarantees the target is
     // in the named sub-tree (modulo a brief intra-spawn window where
-    // the index is set but worker_cancels insertion hasn't completed —
+    // the index is set but workers.cancels insertion hasn't completed —
     // same race as the prior linear-scan implementation).
     let layer_idx = state.worker_layer_index.read().await.get(target).cloned();
     if let Some(Some(sublead_id)) = layer_idx {
         if let Some(sub_layer) = subleads.get(&sublead_id) {
-            let cancels = sub_layer.worker_cancels.read().await;
+            let cancels = sub_layer.workers.cancels.read().await;
             if let Some(tok) = cancels.get(target) {
                 tok.terminate_with_reason(operator_reason());
                 return Ok(Some(sub_layer.clone()));
@@ -267,7 +267,7 @@ pub fn install_sublead_cancel_watcher(sub_layer: Arc<crate::dispatch::layer::Lay
 /// Each sub-tree's per-layer watcher (installed via
 /// `install_sublead_cancel_watcher` at spawn time) then cascades to the
 /// sub-tree's workers — `DispatchState` never reaches into
-/// `sub_layer.worker_cancels` directly.
+/// `sub_layer.workers.cancels` directly.
 ///
 /// Same shape as `install_sublead_cancel_watcher` (one task,
 /// drain-then-terminate-aware) — see that function's doc-comment for
@@ -425,7 +425,7 @@ mod tests {
         let w1 = CancelToken::new();
         let w2 = CancelToken::new();
         {
-            let mut cancels = sub_layer.worker_cancels.write().await;
+            let mut cancels = sub_layer.workers.cancels.write().await;
             cancels.insert("w1".into(), w1.clone());
             cancels.insert("w2".into(), w2.clone());
         }
@@ -520,7 +520,7 @@ mod tests {
 
         let w1 = CancelToken::new();
         {
-            let mut cancels = sub_layer.worker_cancels.write().await;
+            let mut cancels = sub_layer.workers.cancels.write().await;
             cancels.insert("w1".into(), w1.clone());
         }
 
@@ -617,7 +617,7 @@ mod tests {
 
         let w1 = CancelToken::new();
         {
-            let mut cancels = sub_layer.worker_cancels.write().await;
+            let mut cancels = sub_layer.workers.cancels.write().await;
             cancels.insert("w1".into(), w1.clone());
         }
 

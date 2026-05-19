@@ -376,12 +376,12 @@ pub(super) async fn find_worker_across_layers(
     state: &Arc<DispatchState>,
     task_id: &str,
 ) -> Option<WorkerState> {
-    if let Some(w) = state.root.workers.read().await.get(task_id).cloned() {
+    if let Some(w) = state.root.workers.states.read().await.get(task_id).cloned() {
         return Some(w);
     }
     let subleads = state.subleads.read().await;
     for layer in subleads.values() {
-        if let Some(w) = layer.workers.read().await.get(task_id).cloned() {
+        if let Some(w) = layer.workers.states.read().await.get(task_id).cloned() {
             return Some(w);
         }
     }
@@ -390,8 +390,8 @@ pub(super) async fn find_worker_across_layers(
 
 /// Resolve the `LayerState` that owns `task_id`. Used by mutating
 /// handlers (cancel/pause/continue/reprompt) so they target the correct
-/// layer's `workers` / `worker_cancels` / `worker_pids` /
-/// `worker_counters` maps. Sub-lead-owned workers live in their layer,
+/// layer's `workers` / `workers.cancels` / `workers.pids` /
+/// `workers.counters` maps. Sub-lead-owned workers live in their layer,
 /// NOT root — before this helper, every mutating handler hard-coded
 /// `state.root.*` and silently failed for sub-tree workers (issue #146).
 ///
@@ -407,11 +407,11 @@ pub(super) async fn layer_for_worker(
         Some(None) => Some(state.root.clone()),
         Some(Some(sublead_id)) => state.subleads.read().await.get(&sublead_id).cloned(),
         None => {
-            if state.root.workers.read().await.contains_key(task_id) {
+            if state.root.workers.states.read().await.contains_key(task_id) {
                 return Some(state.root.clone());
             }
             for layer in state.subleads.read().await.values() {
-                if layer.workers.read().await.contains_key(task_id) {
+                if layer.workers.states.read().await.contains_key(task_id) {
                     return Some(layer.clone());
                 }
             }

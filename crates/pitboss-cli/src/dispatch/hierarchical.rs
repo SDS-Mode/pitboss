@@ -408,7 +408,8 @@ pub async fn run_hierarchical(
     // Build lead TaskRecord using the accumulated data from all iterations.
     let lead_counters = state
         .root
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get(&state.root.lead_id)
@@ -543,11 +544,11 @@ pub async fn run_hierarchical(
         )
         .await;
     }
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         lead.id.clone(),
         crate::dispatch::state::WorkerState::Done(lead_record.clone()),
     );
-    let _ = state.root.done_tx.send(lead.id.clone());
+    let _ = state.root.workers.done_tx.send(lead.id.clone());
 
     // 4. Finalize.
     // Capture the ORIGINAL cancel state BEFORE we call terminate() below.
@@ -575,7 +576,7 @@ pub async fn run_hierarchical(
     // The new shape:
     //
     // - **Subscribe first.** `done_rx` is taken before we snapshot or
-    //   trip cancels. Workers send their task_id to `state.root.done_tx`
+    //   trip cancels. Workers send their task_id to `state.root.workers.done_tx`
     //   on every exit (root layer or sub-tree, see `mcp/tools.rs:704`).
     //   Subscribing first guarantees we don't miss a fast-completing
     //   worker that exits between the snapshot and the wait.
@@ -600,11 +601,11 @@ pub async fn run_hierarchical(
     //   signal within that window are still classified Cancelled below
     //   but those are now the cases where the underlying child was
     //   genuinely stuck (the audit's pre-fix concern was real).
-    let mut done_rx = state.root.done_tx.subscribe();
+    let mut done_rx = state.root.workers.done_tx.subscribe();
 
     let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
-        let workers = state.root.workers.read().await;
+        let workers = state.root.workers.states.read().await;
         for (id, w) in workers.iter() {
             if id != &lead.id && !matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
                 in_flight.insert(id.clone());
@@ -614,7 +615,7 @@ pub async fn run_hierarchical(
     {
         let subleads = state.subleads.read().await;
         for sub in subleads.values() {
-            let workers = sub.workers.read().await;
+            let workers = sub.workers.states.read().await;
             for (id, w) in workers.iter() {
                 if !matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
                     in_flight.insert(id.clone());
@@ -687,7 +688,7 @@ pub async fn run_hierarchical(
                 failure_reason: None,
                 cost_usd,
                 // Preserve the typed-profile attribution on synthesized
-                // cancellations: the in-memory `worker_actor_types` map
+                // cancellations: the in-memory `workers.actor_types` map
                 // still has the original spawn's id even though no
                 // TaskRecord was appended yet. (#252 Phase 1.5)
                 actor_type,
@@ -698,9 +699,9 @@ pub async fn run_hierarchical(
             }
         };
     {
-        let workers = state.root.workers.read().await;
-        let worker_models = state.root.worker_models.read().await;
-        let worker_actor_types = state.root.worker_actor_types.read().await;
+        let workers = state.root.workers.states.read().await;
+        let models = state.root.workers.models.read().await;
+        let actor_types = state.root.workers.actor_types.read().await;
         for (id, w) in workers.iter() {
             if id == &lead.id || existing_ids.contains(id) {
                 continue;
@@ -709,8 +710,8 @@ pub async fn run_hierarchical(
                 cancelled_records.push(make_cancelled(
                     id,
                     &lead.id,
-                    worker_models.get(id).cloned(),
-                    worker_actor_types.get(id).cloned(),
+                    models.get(id).cloned(),
+                    actor_types.get(id).cloned(),
                 ));
             }
         }
@@ -718,9 +719,9 @@ pub async fn run_hierarchical(
     {
         let subleads = state.subleads.read().await;
         for (sublead_id, sub) in subleads.iter() {
-            let workers = sub.workers.read().await;
-            let worker_models = sub.worker_models.read().await;
-            let worker_actor_types = sub.worker_actor_types.read().await;
+            let workers = sub.workers.states.read().await;
+            let models = sub.workers.models.read().await;
+            let actor_types = sub.workers.actor_types.read().await;
             for (id, w) in workers.iter() {
                 // Sub-lead layers register the sub-lead itself as a
                 // "worker" entry (the claude subprocess). Filter by the
@@ -734,8 +735,8 @@ pub async fn run_hierarchical(
                     cancelled_records.push(make_cancelled(
                         id,
                         sublead_id,
-                        worker_models.get(id).cloned(),
-                        worker_actor_types.get(id).cloned(),
+                        models.get(id).cloned(),
+                        actor_types.get(id).cloned(),
                     ));
                 }
             }
@@ -850,7 +851,7 @@ pub async fn run_hierarchical(
 ///
 /// This avoids relying on a non-standard `transport: { type: "unix", ... }`
 /// Wait for `in_flight` worker task-ids to all signal completion via
-/// `state.root.done_tx`, or until `timeout` elapses (#150 M6).
+/// `state.root.workers.done_tx`, or until `timeout` elapses (#150 M6).
 ///
 /// `done_rx` MUST be subscribed to BEFORE the caller takes the
 /// `in_flight` snapshot and trips any cancel signals — otherwise a
@@ -920,7 +921,7 @@ async fn refresh_in_flight_from_maps(
 ) {
     let mut done_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
-        let workers = state.root.workers.read().await;
+        let workers = state.root.workers.states.read().await;
         for (id, w) in workers.iter() {
             if matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
                 done_ids.insert(id.clone());
@@ -930,7 +931,7 @@ async fn refresh_in_flight_from_maps(
     {
         let subleads = state.subleads.read().await;
         for sub in subleads.values() {
-            let workers = sub.workers.read().await;
+            let workers = sub.workers.states.read().await;
             for (id, w) in workers.iter() {
                 if matches!(w, crate::dispatch::state::WorkerState::Done(_)) {
                     done_ids.insert(id.clone());
@@ -1193,7 +1194,7 @@ mod await_drained_tests {
     #[tokio::test]
     async fn drain_returns_true_immediately_for_empty_set() {
         let (_dir, state) = mk_state();
-        let mut rx = state.root.done_tx.subscribe();
+        let mut rx = state.root.workers.done_tx.subscribe();
         let in_flight: HashSet<String> = HashSet::new();
         let start = tokio::time::Instant::now();
         let drained =
@@ -1208,11 +1209,11 @@ mod await_drained_tests {
     #[tokio::test]
     async fn drain_returns_true_when_all_workers_signal_before_deadline() {
         let (_dir, state) = mk_state();
-        let mut rx = state.root.done_tx.subscribe();
+        let mut rx = state.root.workers.done_tx.subscribe();
         let in_flight: HashSet<String> = ["w1", "w2", "w3"].into_iter().map(String::from).collect();
 
         // Spawn a producer that emits done events for each worker.
-        let tx = state.root.done_tx.clone();
+        let tx = state.root.workers.done_tx.clone();
         tokio::spawn(async move {
             for id in ["w1", "w2", "w3"] {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1240,7 +1241,7 @@ mod await_drained_tests {
     #[tokio::test]
     async fn drain_returns_false_when_worker_never_signals() {
         let (_dir, state) = mk_state();
-        let mut rx = state.root.done_tx.subscribe();
+        let mut rx = state.root.workers.done_tx.subscribe();
         let in_flight: HashSet<String> = ["never-drains".to_string()].into_iter().collect();
         let start = tokio::time::Instant::now();
         let drained =
@@ -1262,12 +1263,12 @@ mod await_drained_tests {
     #[tokio::test]
     async fn drain_ignores_done_events_for_unknown_ids() {
         let (_dir, state) = mk_state();
-        let mut rx = state.root.done_tx.subscribe();
+        let mut rx = state.root.workers.done_tx.subscribe();
         let in_flight: HashSet<String> = ["target-1".to_string(), "target-2".to_string()]
             .into_iter()
             .collect();
 
-        let tx = state.root.done_tx.clone();
+        let tx = state.root.workers.done_tx.clone();
         tokio::spawn(async move {
             // Emit some unrelated events first.
             let _ = tx.send("noise-a".to_string());
@@ -1291,7 +1292,7 @@ mod await_drained_tests {
         let (_dir, state) = mk_state();
         // Insert a Done worker on root and a Running worker on root.
         {
-            let mut workers = state.root.workers.write().await;
+            let mut workers = state.root.workers.states.write().await;
             workers.insert(
                 "done-root".into(),
                 WorkerState::Done(pitboss_core::store::TaskRecord {

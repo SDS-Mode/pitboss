@@ -85,7 +85,8 @@ pub struct ApprovalBridge {
 pub(crate) async fn bump_approval_requested(state: &Arc<DispatchState>, caller_id: &str) {
     state
         .root
-        .worker_counters
+        .workers
+        .counters
         .write()
         .await
         .entry(caller_id.to_string())
@@ -103,7 +104,7 @@ pub(crate) async fn record_approval_outcome(
     caller_id: &str,
     approved: bool,
 ) {
-    let mut guard = state.root.worker_counters.write().await;
+    let mut guard = state.root.workers.counters.write().await;
     let entry = guard.entry(caller_id.to_string()).or_default();
     if approved {
         entry.approvals_approved += 1;
@@ -617,7 +618,7 @@ mod tests {
     /// response path bumped `approvals_approved`/`approvals_rejected`; every
     /// short-circuit path silently left them at zero.
     async fn counters_for(state: &Arc<DispatchState>, caller: &str) -> (u32, u32, u32) {
-        let guard = state.root.worker_counters.read().await;
+        let guard = state.root.workers.counters.read().await;
         let c = guard.get(caller).cloned().unwrap_or_default();
         (
             c.approvals_requested,

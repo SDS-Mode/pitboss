@@ -362,11 +362,12 @@ async fn root_cancel_cascades_to_sublead_workers() {
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(sublead_id.as_str()).unwrap();
-        sub.workers.write().await.insert(
+        sub.workers.states.write().await.insert(
             "worker-A".into(),
             pitboss_cli::dispatch::state::WorkerState::Pending,
         );
-        sub.worker_cancels
+        sub.workers
+            .cancels
             .write()
             .await
             .insert("worker-A".into(), CancelToken::new());
@@ -381,7 +382,7 @@ async fn root_cancel_cascades_to_sublead_workers() {
     // Sub-tree's worker cancel token should be tripped
     let subleads = state.subleads.read().await;
     let sub = subleads.get(sublead_id.as_str()).unwrap();
-    let toks = sub.worker_cancels.read().await;
+    let toks = sub.workers.cancels.read().await;
     let tok = toks.get("worker-A").unwrap();
     assert!(
         tok.is_draining(),
@@ -891,11 +892,12 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(s1.as_str()).unwrap();
-        sub.workers.write().await.insert(
+        sub.workers.states.write().await.insert(
             "worker-A".into(),
             pitboss_cli::dispatch::state::WorkerState::Pending,
         );
-        sub.worker_cancels
+        sub.workers
+            .cancels
             .write()
             .await
             .insert("worker-A".into(), CancelToken::new());
@@ -1169,7 +1171,7 @@ async fn wait_actor_still_handles_worker_back_compat() {
     // Register a worker in Pending state.
     let worker_id = "worker-bc-test".to_string();
     {
-        let mut w = state.root.workers.write().await;
+        let mut w = state.root.workers.states.write().await;
         w.insert(worker_id.clone(), WorkerState::Pending);
     }
 
@@ -1203,9 +1205,9 @@ async fn wait_actor_still_handles_worker_back_compat() {
             actor_type: None,
             terminate_reason: None,
         };
-        let mut w = state_clone.root.workers.write().await;
+        let mut w = state_clone.root.workers.states.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
-        let _ = state_clone.root.done_tx.send(worker_id_clone);
+        let _ = state_clone.root.workers.done_tx.send(worker_id_clone);
     });
 
     // wait_actor should return the Worker variant for a regular worker.
@@ -1265,7 +1267,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
 
     // Worker must be registered in the sub-lead's LayerState, NOT root.
     {
-        let root_workers = state.root.workers.read().await;
+        let root_workers = state.root.workers.states.read().await;
         assert!(
             !root_workers.contains_key(&task_id),
             "worker must NOT appear in root layer; got: {task_id}"
@@ -1276,7 +1278,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
         let sub_layer = subleads
             .get(sublead_id.as_str())
             .expect("sub-tree layer should exist");
-        let sub_workers = sub_layer.workers.read().await;
+        let sub_workers = sub_layer.workers.states.read().await;
         assert!(
             sub_workers.contains_key(&task_id),
             "worker must appear in sub-lead's layer workers map; task_id={task_id}"
@@ -1348,7 +1350,7 @@ async fn v0_5_back_compat_no_meta_routes_to_root() {
     let task_id = result.task_id;
 
     // Worker must be in root layer.
-    let root_workers = state.root.workers.read().await;
+    let root_workers = state.root.workers.states.read().await;
     assert!(
         root_workers.contains_key(&task_id),
         "no-meta spawn must register worker in root layer; task_id={task_id}"
@@ -1404,11 +1406,12 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(s1.as_str()).unwrap();
-        sub.workers.write().await.insert(
+        sub.workers.states.write().await.insert(
             "worker-B".into(),
             pitboss_cli::dispatch::state::WorkerState::Pending,
         );
-        sub.worker_cancels
+        sub.workers
+            .cancels
             .write()
             .await
             .insert("worker-B".into(), CancelToken::new());
@@ -1498,11 +1501,12 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(s1.as_str()).unwrap();
-        sub.workers.write().await.insert(
+        sub.workers.states.write().await.insert(
             "worker-C".into(),
             pitboss_cli::dispatch::state::WorkerState::Pending,
         );
-        sub.worker_cancels
+        sub.workers
+            .cancels
             .write()
             .await
             .insert("worker-C".into(), CancelToken::new());
@@ -1545,7 +1549,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
             actor_type: None,
             terminate_reason: None,
         };
-        sub.workers.write().await.insert(
+        sub.workers.states.write().await.insert(
             s1.clone(),
             pitboss_cli::dispatch::state::WorkerState::Done(done_rec),
         );
@@ -1567,7 +1571,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
         .await;
 
     // The cancel_worker call itself may fail (worker-C has no real cancel token
-    // running a subprocess, but it was inserted into worker_cancels above so
+    // running a subprocess, but it was inserted into workers.cancels above so
     // cancel_actor_in_tree should find it).
     // What matters is that there's no panic and the process doesn't hang.
     // Allow the async machinery to settle.
@@ -1679,13 +1683,14 @@ async fn kill_with_reason_delivers_to_root_lead() {
 
     // Inject a worker into the ROOT layer (not inside a sub-lead).
     {
-        state.root.workers.write().await.insert(
+        state.root.workers.states.write().await.insert(
             "worker-root-1".into(),
             pitboss_cli::dispatch::state::WorkerState::Pending,
         );
         state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("worker-root-1".into(), CancelToken::new());
@@ -1854,7 +1859,7 @@ async fn reconcile_terminated_sublead_marks_self_row_done() {
     // row — this is the state the bug observed (Running with a
     // session_id, never cleared).
     let started = chrono::Utc::now();
-    sub_layer.workers.write().await.insert(
+    sub_layer.workers.states.write().await.insert(
         sub_id.clone(),
         WorkerState::Running {
             started_at: started,
@@ -1881,7 +1886,7 @@ async fn reconcile_terminated_sublead_marks_self_row_done() {
         .iter()
         .find(|l| l.lead_id == sub_id)
         .expect("layer must be in terminated_sublead_layers after reconcile");
-    let workers = layer.workers.read().await;
+    let workers = layer.workers.states.read().await;
     let row = workers
         .get(&sub_id)
         .expect("sublead's own row must still be present after reconcile");
@@ -1998,7 +2003,7 @@ async fn reconcile_terminated_sublead_outcome_to_status_mapping() {
     for (id, outcome, expected) in cases {
         let (_dir, state) = mk_state_with_subleads();
         let sub_layer = build_sub_layer(&state, id);
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             id.into(),
             WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2017,7 +2022,7 @@ async fn reconcile_terminated_sublead_outcome_to_status_mapping() {
 
         let term = state.terminated_sublead_layers.read().await;
         let layer = term.iter().find(|l| l.lead_id == id).unwrap();
-        let workers = layer.workers.read().await;
+        let workers = layer.workers.states.read().await;
         let row = workers.get(id).expect("row present");
         match row {
             WorkerState::Done(rec) => assert_eq!(

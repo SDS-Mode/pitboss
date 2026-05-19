@@ -847,7 +847,8 @@ async fn caller_profile(
             let type_id_opt: Option<String> = match layer_opt {
                 None | Some(None) => state
                     .root
-                    .worker_actor_types
+                    .workers
+                    .actor_types
                     .read()
                     .await
                     .get(caller_id)
@@ -864,7 +865,7 @@ async fn caller_profile(
                     };
                     match sub {
                         Some(sub) => {
-                            let map = sub.worker_actor_types.read().await;
+                            let map = sub.workers.actor_types.read().await;
                             map.get(caller_id).cloned()
                         }
                         None => None,

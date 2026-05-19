@@ -314,7 +314,7 @@ async fn serve_connection(
     // the previously-observed race where the snapshot was empty but a
     // worker was already registered.
     let workers_names: Vec<String> = {
-        let guard = state.root.workers.read().await;
+        let guard = state.root.workers.states.read().await;
         guard.keys().cloned().collect()
     };
 
@@ -725,14 +725,15 @@ fn is_subscriber_safe_op(op: &ControlOp) -> bool {
 /// fail because of signal cleanup.
 async fn thaw_if_frozen(layer: &Arc<crate::dispatch::layer::LayerState>, task_id: &str) {
     let is_frozen = matches!(
-        layer.workers.read().await.get(task_id),
+        layer.workers.states.read().await.get(task_id),
         Some(crate::dispatch::state::WorkerState::Frozen { .. })
     );
     if !is_frozen {
         return;
     }
     let pid = layer
-        .worker_pids
+        .workers
+        .pids
         .read()
         .await
         .get(task_id)
@@ -767,8 +768,8 @@ async fn collect_layer_workers(
     lead_parent: Option<String>,
     out: &mut Vec<crate::control::protocol::WorkerSnapshotEntry>,
 ) {
-    let workers = layer.workers.read().await;
-    let prompts = layer.worker_prompts.read().await;
+    let workers = layer.workers.states.read().await;
+    let prompts = layer.workers.prompts.read().await;
     let layer_lead_id = layer.lead_id.as_str();
     for (id, w) in workers.iter() {
         let (state_str, started_at, session_id) = match w {
@@ -847,12 +848,12 @@ async fn find_worker_layer(
     state: &Arc<crate::dispatch::state::DispatchState>,
     task_id: &str,
 ) -> Option<Arc<crate::dispatch::layer::LayerState>> {
-    if state.root.workers.read().await.contains_key(task_id) {
+    if state.root.workers.states.read().await.contains_key(task_id) {
         return Some(state.root.clone());
     }
     let subleads = state.subleads.read().await;
     for layer in subleads.values() {
-        if layer.workers.read().await.contains_key(task_id) {
+        if layer.workers.states.read().await.contains_key(task_id) {
             return Some(layer.clone());
         }
     }
@@ -989,7 +990,7 @@ async fn dispatch_op(
         },
         ControlOp::CancelWorker { task_id } => {
             // Search root + all sub-leads for the owning layer (#152 M2).
-            // Pre-fix only consulted state.root.worker_cancels and so
+            // Pre-fix only consulted state.root.workers.cancels and so
             // returned "unknown task_id" for any sub-lead-owned worker.
             let Some(layer) = find_worker_layer(state, &task_id).await else {
                 return ControlEvent::OpFailed {
@@ -1003,7 +1004,7 @@ async fn dispatch_op(
             // deliverable — a stopped process can't drain signals until
             // it's running again. Harmless for non-frozen workers.
             thaw_if_frozen(&layer, &task_id).await;
-            let cancels = layer.worker_cancels.read().await;
+            let cancels = layer.workers.cancels.read().await;
             if let Some(tok) = cancels.get(&task_id) {
                 // #475: name the kill site so the resulting TaskRecord
                 // surfaces "killed by operator request" rather than bare
@@ -1016,7 +1017,7 @@ async fn dispatch_op(
                     task_id: Some(task_id),
                 }
             } else {
-                // Layer's workers map had the entry but worker_cancels
+                // Layer's workers map had the entry but workers.cancels
                 // didn't — a transient state during spawn or completion.
                 ControlEvent::OpFailed {
                     op: "cancel_worker".into(),
@@ -1028,12 +1029,12 @@ async fn dispatch_op(
         ControlOp::CancelRun => {
             // Cascade cancel across the whole dispatch tree:
             //   root lead   → state.root.cancel           (terminal)
-            //   root workers → state.root.worker_cancels  (per-worker tokens)
+            //   root workers → state.root.workers.cancels  (per-worker tokens)
             //   sub-leads   → sub_layer.cancel       (bridged to the
             //                                          sub-lead's claude
             //                                          proc_cancel at
             //                                          sublead.rs:566)
-            //   sub-lead-owned workers → sub_layer.worker_cancels
+            //   sub-lead-owned workers → sub_layer.workers.cancels
             //
             // First phase: DRAIN the root cancel. This flips
             // `state.root.cancel.is_draining()` to true, which
@@ -1050,8 +1051,8 @@ async fn dispatch_op(
             // can't act on a cancel token until SIGCONT'd. Mirrors the
             // CancelWorker handler's behavior; now cascades to all layers.
             {
-                let pids = state.root.worker_pids.read().await;
-                let workers = state.root.workers.read().await;
+                let pids = state.root.workers.pids.read().await;
+                let workers = state.root.workers.states.read().await;
                 for (id, w) in workers.iter() {
                     if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
                         let pid = pids
@@ -1066,7 +1067,7 @@ async fn dispatch_op(
                 drop(workers);
                 let subleads = state.subleads.read().await;
                 for sub_layer in subleads.values() {
-                    let sub_workers = sub_layer.workers.read().await;
+                    let sub_workers = sub_layer.workers.states.read().await;
                     for (id, w) in sub_workers.iter() {
                         if matches!(w, crate::dispatch::state::WorkerState::Frozen { .. }) {
                             let pid = pids
@@ -1091,7 +1092,7 @@ async fn dispatch_op(
 
             // Root-layer worker tokens.
             {
-                let cancels = state.root.worker_cancels.read().await;
+                let cancels = state.root.workers.cancels.read().await;
                 for tok in cancels.values() {
                     tok.terminate_with_reason(cancel_run_reason());
                 }
@@ -1101,13 +1102,13 @@ async fn dispatch_op(
             // Terminating sub_layer.cancel cascades to the sub-lead's
             // claude subprocess (via the tree_cancel → proc_cancel bridge
             // installed in sublead.rs:566). We also explicitly iterate
-            // the sub-lead's worker_cancels because those workers have
+            // the sub-lead's workers.cancels because those workers have
             // their own sibling tokens that aren't bridged to the
             // sub-lead's cancel.
             {
                 let subleads = state.subleads.read().await;
                 for sub_layer in subleads.values() {
-                    let sub_cancels = sub_layer.worker_cancels.read().await;
+                    let sub_cancels = sub_layer.workers.cancels.read().await;
                     for tok in sub_cancels.values() {
                         tok.terminate_with_reason(cancel_run_reason());
                     }
@@ -1134,7 +1135,7 @@ async fn dispatch_op(
                     error: "unknown task_id".into(),
                 };
             };
-            let mut workers = layer.workers.write().await;
+            let mut workers = layer.workers.states.write().await;
             let Some(entry) = workers.get(&task_id).cloned() else {
                 // Worker disappeared between layer discovery and lock —
                 // treat as unknown.
@@ -1151,7 +1152,7 @@ async fn dispatch_op(
                 } => {
                     match mode {
                         crate::control::protocol::PauseMode::Cancel => {
-                            let cancels = layer.worker_cancels.read().await;
+                            let cancels = layer.workers.cancels.read().await;
                             if let Some(tok) = cancels.get(&task_id) {
                                 // #475: operator pause-by-cancel.
                                 tok.terminate_with_reason(
@@ -1173,7 +1174,8 @@ async fn dispatch_op(
                         }
                         crate::control::protocol::PauseMode::Freeze => {
                             let pid = layer
-                                .worker_pids
+                                .workers
+                                .pids
                                 .read()
                                 .await
                                 .get(&task_id)
@@ -1216,7 +1218,8 @@ async fn dispatch_op(
                     )
                     .await;
                     layer
-                        .worker_counters
+                        .workers
+                        .counters
                         .write()
                         .await
                         .entry(task_id.clone())
@@ -1269,7 +1272,7 @@ async fn dispatch_op(
                     error: "unknown task_id".into(),
                 };
             };
-            let current = layer.workers.read().await.get(&task_id).cloned();
+            let current = layer.workers.states.read().await.get(&task_id).cloned();
             match current {
                 Some(crate::dispatch::state::WorkerState::Paused { session_id, .. }) => {
                     let prompt_text = prompt.unwrap_or_else(|| "continue".into());
@@ -1314,7 +1317,8 @@ async fn dispatch_op(
                     // SIGCONT the frozen process. `prompt` is ignored —
                     // freeze-mode preserves state and has no resume point.
                     let pid = layer
-                        .worker_pids
+                        .workers
+                        .pids
                         .read()
                         .await
                         .get(&task_id)
@@ -1334,7 +1338,7 @@ async fn dispatch_op(
                             error: format!("SIGCONT failed: {e}"),
                         };
                     }
-                    layer.workers.write().await.insert(
+                    layer.workers.states.write().await.insert(
                         task_id.clone(),
                         crate::dispatch::state::WorkerState::Running {
                             started_at,
@@ -1407,13 +1411,13 @@ async fn dispatch_op(
                     error: "unknown task_id".into(),
                 };
             };
-            let current = layer.workers.read().await.get(&task_id).cloned();
+            let current = layer.workers.states.read().await.get(&task_id).cloned();
             let session_id = match current {
                 Some(crate::dispatch::state::WorkerState::Running {
                     session_id: Some(sid),
                     ..
                 }) => {
-                    let cancels = layer.worker_cancels.read().await;
+                    let cancels = layer.workers.cancels.read().await;
                     if let Some(tok) = cancels.get(&task_id) {
                         // #475: reprompt is operator-issued kill+respawn.
                         tok.terminate_with_reason(
@@ -1459,7 +1463,8 @@ async fn dispatch_op(
             {
                 Ok(()) => {
                     layer
-                        .worker_counters
+                        .workers
+                        .counters
                         .write()
                         .await
                         .entry(task_id.clone())
@@ -2098,13 +2103,15 @@ mod tests {
         let worker_token = CancelToken::new();
         state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("w-1".into(), worker_token.clone());
         state
             .root
             .workers
+            .states
             .write()
             .await
             .insert("w-1".into(), crate::dispatch::state::WorkerState::Pending);
@@ -2147,7 +2154,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_run_op_cascades_to_sublead_layers() {
         // Regression coverage for task #60: CancelRun used to fire only
-        // root.cancel + state.root.worker_cancels. Sub-lead claude
+        // root.cancel + state.root.workers.cancels. Sub-lead claude
         // subprocesses, plus any workers the sub-lead had spawned,
         // stayed alive — their cancel tokens live on the sub-layer,
         // not on root. Observable pre-fix: operator hits cancel, root
@@ -2155,7 +2162,7 @@ mod tests {
         // lead_timeout_secs per sub-lead. Cascade must reach:
         //   - sub_layer.cancel (bridged to the sub-lead's claude proc
         //     via sublead.rs:566)
-        //   - every token in sub_layer.worker_cancels
+        //   - every token in sub_layer.workers.cancels
         //
         // Also: root.cancel.drain() must fire BEFORE the iteration so
         // any sub-lead being spawned synchronously (racing the cancel)
@@ -2220,12 +2227,14 @@ mod tests {
             None,
         ));
         sub_layer
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("sub-w-1".into(), sub_w1.clone());
         sub_layer
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("sub-w-2".into(), sub_w2.clone());
@@ -2291,7 +2300,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_run_op_cascades_to_every_worker_token() {
         // Regression: `CancelRun` used to only fire state.root.cancel (lead-only
-        // token). Workers have per-task tokens in state.root.worker_cancels;
+        // token). Workers have per-task tokens in state.root.workers.cancels;
         // without cascading, workers stayed alive after a kill-run and the
         // TUI showed the run as dead while `ps` showed live claude procs.
         let dir = TempDir::new().unwrap();
@@ -2302,13 +2311,15 @@ mod tests {
         let w2 = pitboss_core::session::CancelToken::new();
         state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("w-1".into(), w1.clone());
         state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("w-2".into(), w2.clone());
@@ -2404,11 +2415,12 @@ mod tests {
         let worker_token = CancelToken::new();
         state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("w-1".into(), worker_token.clone());
-        state.root.workers.write().await.insert(
+        state.root.workers.states.write().await.insert(
             "w-1".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2447,7 +2459,7 @@ mod tests {
             ControlEvent::OpAcked { ref op, .. } if op == "pause_worker"
         ));
         assert!(worker_token.is_terminated());
-        let workers = state.root.workers.read().await;
+        let workers = state.root.workers.states.read().await;
         match workers.get("w-1").unwrap() {
             crate::dispatch::state::WorkerState::Paused { session_id, .. } => {
                 assert_eq!(session_id, "sess-xyz");
@@ -2462,7 +2474,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let run_id = Uuid::now_v7();
         let state = mk_state(dir.path(), run_id);
-        state.root.workers.write().await.insert(
+        state.root.workers.states.write().await.insert(
             "w-1".into(),
             crate::dispatch::state::WorkerState::Paused {
                 session_id: "sess-xyz".into(),
@@ -2472,13 +2484,15 @@ mod tests {
         );
         state
             .root
-            .worker_prompts
+            .workers
+            .prompts
             .write()
             .await
             .insert("w-1".into(), "hi".into());
         state
             .root
-            .worker_models
+            .workers
+            .models
             .write()
             .await
             .insert("w-1".into(), "claude-haiku-4-5".into());
@@ -2513,7 +2527,7 @@ mod tests {
             reply,
             ControlEvent::OpAcked { ref op, .. } if op == "continue_worker"
         ));
-        let workers = state.root.workers.read().await;
+        let workers = state.root.workers.states.read().await;
         assert!(matches!(
             workers.get("w-1").unwrap(),
             crate::dispatch::state::WorkerState::Running { .. }
@@ -2529,11 +2543,12 @@ mod tests {
         let worker_token = CancelToken::new();
         state
             .root
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("w-1".into(), worker_token.clone());
-        state.root.workers.write().await.insert(
+        state.root.workers.states.write().await.insert(
             "w-1".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2542,13 +2557,15 @@ mod tests {
         );
         state
             .root
-            .worker_prompts
+            .workers
+            .prompts
             .write()
             .await
             .insert("w-1".into(), "hi".into());
         state
             .root
-            .worker_models
+            .workers
+            .models
             .write()
             .await
             .insert("w-1".into(), "claude-haiku-4-5".into());
@@ -2594,7 +2611,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let run_id = Uuid::now_v7();
         let state = mk_state(dir.path(), run_id);
-        state.root.workers.write().await.insert(
+        state.root.workers.states.write().await.insert(
             "w-1".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2603,7 +2620,8 @@ mod tests {
         );
         state
             .root
-            .worker_prompts
+            .workers
+            .prompts
             .write()
             .await
             .insert("w-1".into(), "investigate bug".into());
@@ -2657,7 +2675,7 @@ mod tests {
         let state = mk_state(dir.path(), run_id);
 
         // One root-layer worker, one sub-lead with one worker.
-        state.root.workers.write().await.insert(
+        state.root.workers.states.write().await.insert(
             "root-w".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2712,7 +2730,7 @@ mod tests {
             std::sync::Arc::new(crate::shared_store::SharedStore::new()),
             None,
         ));
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             "sub-w".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2831,14 +2849,14 @@ mod tests {
         ));
         // The sub-lead inserts itself into its own layer.workers via
         // run_kill_resume_loop in production. Mirror that here.
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             "sublead-S".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
                 session_id: Some("sub-sess".into()),
             },
         );
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             "sub-tree-w".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -2966,14 +2984,14 @@ mod tests {
         // directly into `terminated_sublead_layers` (skipping the live
         // `subleads` map) to model post-`reconcile_terminated_sublead`
         // state.
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             "sublead-T".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
                 session_id: Some("sub-sess".into()),
             },
         );
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             "sub-w".into(),
             crate::dispatch::state::WorkerState::Done(pitboss_core::store::TaskRecord {
                 task_id: "sub-w".into(),
@@ -3052,7 +3070,7 @@ mod tests {
     }
 
     /// #152 M2 regression: cancel_worker on a sub-lead-owned worker
-    /// must terminate the sub-lead's worker_cancels token, not return
+    /// must terminate the sub-lead's workers.cancels token, not return
     /// "unknown task_id" because the handler only consulted root.
     #[tokio::test]
     async fn cancel_worker_routes_to_sublead_layer() {
@@ -3108,7 +3126,7 @@ mod tests {
             None,
         ));
         let sub_w = pitboss_core::session::CancelToken::new();
-        sub_layer.workers.write().await.insert(
+        sub_layer.workers.states.write().await.insert(
             "sub-w".into(),
             crate::dispatch::state::WorkerState::Running {
                 started_at: chrono::Utc::now(),
@@ -3116,7 +3134,8 @@ mod tests {
             },
         );
         sub_layer
-            .worker_cancels
+            .workers
+            .cancels
             .write()
             .await
             .insert("sub-w".into(), sub_w.clone());

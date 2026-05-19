@@ -209,7 +209,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
     ));
 
     // Worker state should be Done with a captured session_id.
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert_eq!(
         workers.len(),
         1,
@@ -268,7 +268,7 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
 
     // All 3 workers should be registered (at least 1 Done; the rest can be
     // Done or Running depending on timing).
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert_eq!(
         workers.len(),
         3,
@@ -406,7 +406,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Worker should now be Cancelled.
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     let (_, w) = workers.iter().next().expect("at least one worker");
     match w {
         pitboss_cli::dispatch::state::WorkerState::Done(rec) => {
@@ -548,7 +548,8 @@ async fn e2e_lead_request_approval_round_trip() {
     // Counters should record one request + one approval.
     let counters = state
         .root
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get("lead")
@@ -683,7 +684,7 @@ async fn e2e_lead_reprompts_running_worker() {
 
     // Extract the worker's task_id for subsequent assertions.
     let task_id = {
-        let workers = state.root.workers.read().await;
+        let workers = state.root.workers.states.read().await;
         workers.keys().next().cloned().expect("at least one worker")
     };
 
@@ -698,7 +699,8 @@ async fn e2e_lead_reprompts_running_worker() {
     // Counter bumped.
     let counters = state
         .root
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get(&task_id)
@@ -950,7 +952,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
         .root
         .plan_approved
         .load(std::sync::atomic::Ordering::Acquire));
-    let workers = state.root.workers.read().await;
+    let workers = state.root.workers.states.read().await;
     assert_eq!(
         workers.len(),
         1,
@@ -1065,7 +1067,7 @@ impl ProcessSpawner for FakeClaudeWorkerSpawner {
 }
 
 /// Real-subprocess freeze-pause e2e. Workers are spawned as actual
-/// fake-claude processes (via FakeClaudeWorkerSpawner) so `worker_pids`
+/// fake-claude processes (via FakeClaudeWorkerSpawner) so `workers.pids`
 /// gets populated and `pause_worker(Freeze)` can send SIGSTOP.
 #[tokio::test]
 async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
@@ -1218,7 +1220,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
     // as exit code 5. The pause_worker call in particular requires a
     // live worker pid, which requires a real TokioSpawner subprocess
     // — so this test also proves the FakeClaudeWorkerSpawner wiring
-    // populates `worker_pids` correctly. No further assertions needed.
+    // populates `workers.pids` correctly. No further assertions needed.
     //
     // We do wait a tick for the worker background task to settle so
     // the test's Drop teardown doesn't race a live subprocess.

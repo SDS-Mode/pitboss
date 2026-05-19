@@ -287,7 +287,7 @@ async fn bridge_send_op_round_trips_through_dispatcher() {
 
     // Install a worker so ListWorkers returns a non-empty snapshot —
     // makes the assertion specific.
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -296,7 +296,8 @@ async fn bridge_send_op_round_trips_through_dispatcher() {
     );
     state
         .root
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert("w-1".into(), "look into the bug".into());
