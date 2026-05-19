@@ -916,7 +916,12 @@ fn validate_branch_conflicts(r: &ResolvedManifest) -> Result<()> {
         if let Some(b) = &t.branch {
             let canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
             if !seen.insert((canon, b.clone())) {
-                bail!("two tasks target the same directory + branch '{}'", b);
+                bail!(
+                    "two [[task]] entries target the same git directory + branch '{}'; \
+                     give each task a unique branch (via `branch = \"...\"`) or point them \
+                     at separate directories",
+                    b
+                );
             }
         }
     }
