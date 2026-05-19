@@ -320,7 +320,7 @@ async fn serve_connection(
 
     // Snapshot current policy rules (if any) to send in Hello.
     let policy_rules = {
-        let guard = state.root.policy_matcher.lock().await;
+        let guard = state.root.approvals.matcher.lock().await;
         guard
             .as_ref()
             .map(|m| m.rules().to_vec())
@@ -401,13 +401,13 @@ async fn serve_connection(
 
         // Drain any queued approvals now that a TUI is connected.
         {
-            let mut queue = state.root.approval_queue.lock().await;
+            let mut queue = state.root.approvals.queue.lock().await;
             while let Some(q) = queue.pop_front() {
                 // Transfer responder into the bridge map, preserving TTL metadata
                 // and display fields so expire_layer_approvals can still expire
                 // the entry and — per #102 — a subsequent TUI reconnect can
                 // replay pending approvals held by the bridge.
-                state.root.approval_bridge.lock().await.insert(
+                state.root.approvals.bridge.lock().await.insert(
                     q.request_id.clone(),
                     crate::dispatch::state::BridgeEntry {
                         responder: q.responder,
@@ -450,7 +450,7 @@ async fn serve_connection(
         // lock waiter (expire_layer_approvals, the Approve op handler, concurrent
         // Hello drain) for the full duration of the backpressure stall (#105).
         let pending: Vec<ControlEvent> = {
-            let bridge = state.root.approval_bridge.lock().await;
+            let bridge = state.root.approvals.bridge.lock().await;
             bridge
                 .iter()
                 .filter(|(_, entry)| !entry.responder.is_closed())
@@ -1528,7 +1528,7 @@ async fn dispatch_op(
             edited_summary,
             reason,
         } => {
-            let bridge_entry = state.root.approval_bridge.lock().await.remove(&request_id);
+            let bridge_entry = state.root.approvals.bridge.lock().await.remove(&request_id);
             if let Some(bridge_entry) = bridge_entry {
                 let caller_id = bridge_entry.task_id.clone();
                 let edited = edited_summary.is_some();
@@ -1923,7 +1923,7 @@ mod tests {
 
         // Pre-seed the bridge map with a request_id + BridgeEntry.
         let (tx, rx) = tokio::sync::oneshot::channel();
-        state.root.approval_bridge.lock().await.insert(
+        state.root.approvals.bridge.lock().await.insert(
             "req-1".into(),
             crate::dispatch::state::BridgeEntry {
                 responder: tx,
@@ -2013,7 +2013,7 @@ mod tests {
         // Simulate the "first TUI got the event then died" state: entry
         // lives in the bridge with a still-live responder oneshot.
         let (tx, rx) = tokio::sync::oneshot::channel();
-        state.root.approval_bridge.lock().await.insert(
+        state.root.approvals.bridge.lock().await.insert(
             "req-ghost".into(),
             crate::dispatch::state::BridgeEntry {
                 responder: tx,

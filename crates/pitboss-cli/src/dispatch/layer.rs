@@ -179,6 +179,59 @@ impl Default for BudgetState {
     }
 }
 
+/// Approval bookkeeping: live-TUI bridge, queued requests, the legacy
+/// fall-through policy, the declarative `PolicyMatcher`, and the
+/// plan-approval gate.
+///
+/// Split out of `LayerState` (#487 step 3) so handlers that only need
+/// approval state can take `&ApprovalState` instead of `&LayerState`
+/// and physically can't touch worker or budget bookkeeping.
+///
+/// The `plan_approved` gate stays as `AtomicBool` so reads on the
+/// hot-path (`spawn_worker`) are lock-free; the bridge and queue
+/// retain `Mutex` because the operations that mutate them
+/// (insert/remove/take) span more than a single atomic op.
+pub struct ApprovalState {
+    /// Live-TUI approval requests keyed by request_id.
+    ///
+    /// Values are `BridgeEntry` (not bare senders) so the TTL watcher can
+    /// expire bridge entries that the operator never acted on. Without TTL
+    /// metadata here, an approval that moves from `queue` to the bridge
+    /// on TUI connect loses its auto-resolve guarantee.
+    pub bridge: Mutex<HashMap<String, BridgeEntry>>,
+    /// Queued approval requests waiting for a TUI to attach.
+    pub queue: Mutex<VecDeque<QueuedApproval>>,
+    /// Legacy fall-through approval policy from `[run].default_approval_policy`.
+    /// Applies when no `[[approval_policy]]` rule matches.
+    pub policy: ApprovalPolicy,
+    /// Plan-approval gate. Atomic so the hot-path `spawn_worker` check
+    /// is lock-free.
+    pub plan_approved: std::sync::atomic::AtomicBool,
+    /// Operator-declared approval policy matcher. Loaded from manifest
+    /// `[[approval_policy]]` blocks at run startup. `None` means no
+    /// declarative rules; every approval falls through to the legacy
+    /// `policy` / operator queue path.
+    ///
+    /// NOTE: This is a run-level (root-layer) policy for v0.6. Per-sub-lead
+    /// policy is deferred to Phase 4.x.
+    pub matcher: Mutex<Option<PolicyMatcher>>,
+}
+
+impl ApprovalState {
+    /// Construct an approval state with the legacy fall-through policy
+    /// taken from the manifest. Bridge/queue start empty, plan gate
+    /// closed, no declarative matcher installed yet.
+    pub fn new(policy: ApprovalPolicy) -> Self {
+        Self {
+            bridge: Mutex::new(HashMap::new()),
+            queue: Mutex::new(VecDeque::new()),
+            policy,
+            plan_approved: std::sync::atomic::AtomicBool::new(false),
+            matcher: Mutex::new(None),
+        }
+    }
+}
+
 /// All state owned by a single coordination layer (root layer or a
 /// sub-tree layer).
 pub struct LayerState {
@@ -200,19 +253,10 @@ pub struct LayerState {
     pub cleanup_policy: CleanupPolicy,
     /// The per-run subdirectory where worker logs/artifacts land.
     pub run_subdir: PathBuf,
-    /// Approval bridge: maps request_id → sender that completes when the
-    /// TUI responds to an approval request.
-    /// Live-TUI approval requests keyed by request_id.
-    ///
-    /// Values are `BridgeEntry` (not bare senders) so the TTL watcher can
-    /// expire bridge entries that the operator never acted on. Without TTL
-    /// metadata here, an approval that moves from `approval_queue` to the
-    /// bridge on TUI connect loses its auto-resolve guarantee.
-    pub approval_bridge: Mutex<HashMap<String, BridgeEntry>>,
-    /// Queued approval requests waiting for a TUI to attach.
-    pub approval_queue: Mutex<VecDeque<QueuedApproval>>,
-    /// Approval policy from the manifest.
-    pub approval_policy: ApprovalPolicy,
+    /// Approval bookkeeping: live-TUI bridge, queue, legacy fall-through
+    /// policy, declarative matcher, and the plan-approval gate.
+    /// Split out of this struct in #487 step 3.
+    pub approvals: ApprovalState,
     /// Outbound control-socket event channel.
     ///
     /// `ControlWriterSlot` carries a per-connection `id` so disconnect
@@ -258,19 +302,9 @@ pub struct LayerState {
     pub notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
     /// In-memory shared store for hub-mediated lead ↔ worker coordination.
     pub shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
-    /// Plan-approval gate.
-    pub plan_approved: std::sync::atomic::AtomicBool,
     /// Original reservation amount (USD) at sub-lead spawn time.
     /// Only set for sub-leads; None for root layer.
     pub original_reservation_usd: Option<f64>,
-    /// Operator-declared approval policy matcher. Loaded from manifest
-    /// `[[approval_policy]]` blocks at run startup. `None` means no
-    /// declarative rules; every approval falls through to the legacy
-    /// ApprovalPolicy / operator queue path.
-    ///
-    /// NOTE: This is a run-level (root-layer) policy for v0.6. Per-sub-lead
-    /// policy is deferred to Phase 4.x.
-    pub policy_matcher: Mutex<Option<PolicyMatcher>>,
     /// Test-only hook: intercepts synthetic reprompts that would otherwise be
     /// delivered to this layer's Claude session. `None` in production (reprompt
     /// goes through the real MCP/subprocess path). Set via
@@ -363,17 +397,13 @@ impl LayerState {
             wt_mgr,
             cleanup_policy,
             run_subdir,
-            approval_bridge: Mutex::new(HashMap::new()),
-            approval_queue: Mutex::new(VecDeque::new()),
-            approval_policy,
+            approvals: ApprovalState::new(approval_policy),
             control_writer: Mutex::new(None),
             event_log,
             events_tx,
             notification_router,
             shared_store,
-            plan_approved: std::sync::atomic::AtomicBool::new(false),
             original_reservation_usd,
-            policy_matcher: Mutex::new(None),
             reprompt_hook: Mutex::new(None),
             reprompt_tx: Mutex::new(None),
         }
@@ -411,7 +441,7 @@ impl LayerState {
     /// resolving `[[approval_policy]]` blocks from the manifest. Can also be
     /// called in tests to inject policy without manifests.
     pub async fn set_policy_matcher(&self, matcher: PolicyMatcher) {
-        *self.policy_matcher.lock().await = Some(matcher);
+        *self.approvals.matcher.lock().await = Some(matcher);
     }
 
     /// Populate the reprompt delivery channel for this layer's lead subprocess.

@@ -824,7 +824,7 @@ async fn dogfood_policy_auto_filter() {
 
     // Verify no approval was queued for S1's tool-use.
     {
-        let q = state.root.approval_queue.lock().await;
+        let q = state.root.approvals.queue.lock().await;
         assert_eq!(
             q.len(),
             0,
@@ -858,7 +858,7 @@ async fn dogfood_policy_auto_filter() {
 
     // Verify S2's approval was queued (didn't match any auto-action rule).
     {
-        let q = state.root.approval_queue.lock().await;
+        let q = state.root.approvals.queue.lock().await;
         assert_eq!(
             q.len(),
             1,
@@ -899,7 +899,7 @@ async fn dogfood_policy_auto_filter() {
 
     // Verify S1's plan approval was queued (Rule 2 forces operator review).
     {
-        let q = state.root.approval_queue.lock().await;
+        let q = state.root.approvals.queue.lock().await;
         assert_eq!(
             q.len(),
             2,

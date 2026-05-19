@@ -98,6 +98,7 @@ pub async fn handle_spawn_worker(
     // layer worker spawns succeed.
     if state.root.manifest.require_plan_approval
         && !target_layer
+            .approvals
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire)
     {

@@ -460,10 +460,10 @@ async fn e2e_lead_request_approval_round_trip() {
     let ctrl_sock_bg = ctrl_sock.clone();
     let state_for_fcc = state.clone();
     let fcc_task = tokio::spawn(async move {
-        // Poll up to 2s for the approval_queue to fill.
+        // Poll up to 2s for the approvals.queue to fill.
         let poll_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if !state_for_fcc.root.approval_queue.lock().await.is_empty() {
+            if !state_for_fcc.root.approvals.queue.lock().await.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= poll_deadline {
@@ -881,7 +881,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
     let fcc_task = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
-            if !state_for_fcc.root.approval_queue.lock().await.is_empty() {
+            if !state_for_fcc.root.approvals.queue.lock().await.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -950,6 +950,7 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
     // plan_approved latched true, one worker spawned successfully.
     assert!(state
         .root
+        .approvals
         .plan_approved
         .load(std::sync::atomic::Ordering::Acquire));
     let workers = state.root.workers.states.read().await;

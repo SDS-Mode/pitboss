@@ -653,7 +653,7 @@ async fn policy_auto_approves_matching_actor() {
     );
 
     // Verify no approval was queued (the legacy block-mode path was bypassed).
-    let queue = state.root.approval_queue.lock().await;
+    let queue = state.root.approvals.queue.lock().await;
     assert!(
         queue.is_empty(),
         "policy short-circuit should not enqueue approval; queue has {} items",
@@ -738,7 +738,7 @@ async fn policy_auto_approves_sublead_actor() {
     );
 
     // Verify nothing was queued in the operator approval queue.
-    let queue = state.root.approval_queue.lock().await;
+    let queue = state.root.approvals.queue.lock().await;
     assert!(
         queue.is_empty(),
         "policy short-circuit must not enqueue approval; queue has {} items",
@@ -823,14 +823,14 @@ async fn approval_ttl_triggers_auto_reject_fallback() {
         created_at: chrono::Utc::now(),
     };
 
-    state.root.approval_queue.lock().await.push_back(approval);
+    state.root.approvals.queue.lock().await.push_back(approval);
 
     // Spawn the TTL watcher
     pitboss_cli::dispatch::runner::install_approval_ttl_watcher(state.clone());
 
     // Verify it's in the queue before TTL expires
     {
-        let queue = state.root.approval_queue.lock().await;
+        let queue = state.root.approvals.queue.lock().await;
         assert!(
             queue.iter().any(|a| a.request_id == request_id),
             "approval should be in queue initially"
@@ -842,7 +842,7 @@ async fn approval_ttl_triggers_auto_reject_fallback() {
     let mut found_removed = false;
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let queue = state.root.approval_queue.lock().await;
+        let queue = state.root.approvals.queue.lock().await;
         if queue.iter().all(|a| a.request_id != request_id) {
             found_removed = true;
             break;

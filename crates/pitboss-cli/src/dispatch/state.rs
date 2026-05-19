@@ -285,7 +285,7 @@ pub struct QueuedApproval {
 ///
 /// Carries TTL metadata so `expire_layer_approvals` can expire bridge entries
 /// that the operator never acted on — the same guarantee it provides for
-/// `approval_queue` entries. Without this, an approval that moves from queue
+/// `approvals.queue` entries. Without this, an approval that moves from queue
 /// to bridge (when a TUI connects) loses TTL coverage: the queue is empty so
 /// the watcher does nothing, while the bridge has no metadata to check against.
 ///
@@ -745,10 +745,10 @@ mod tests {
     #[tokio::test]
     async fn state_initializes_new_v04_fields() {
         let st = mk_state(None, None);
-        assert!(st.root.approval_bridge.lock().await.is_empty());
-        assert!(st.root.approval_queue.lock().await.is_empty());
+        assert!(st.root.approvals.bridge.lock().await.is_empty());
+        assert!(st.root.approvals.queue.lock().await.is_empty());
         assert!(matches!(
-            st.root.approval_policy,
+            st.root.approvals.policy,
             crate::dispatch::state::ApprovalPolicy::Block
         ));
         assert!(st.root.control_writer.lock().await.is_none());
