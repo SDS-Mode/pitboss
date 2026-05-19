@@ -242,11 +242,22 @@ The lead's prompt instructs it to pass a TTL on sensitive requests:
 To set a run-level fallback on all approval requests, combine the TTL with `[[approval_policy]]`:
 
 ```toml
-# Block all approvals; set a cost-over firewall for large events
+# Escalate large cost-category events to the operator
+# (NOT a hard firewall — cost_estimate is caller-supplied and can be underreported.
+#  For an actually-enforced cost ceiling use [run].budget_usd; see below.)
 [[approval_policy]]
 match  = { category = "cost", cost_over = 1.00 }
 action = "block"
 ```
+
+⚠️ **`cost_over` is advisory, not a hard gate.** The value it compares against is the caller's self-reported `cost_estimate` argument — an actor that passes `cost_estimate = 0.0` slips past any `cost_over` threshold. For hard cost enforcement that doesn't trust the caller, use one of:
+
+- `[run].budget_usd` — run-wide USD cap, enforced server-side from observed token usage in `dispatch::budget_watch`
+- `[lead].lead_budget_usd` — same enforcement, orchestration-cost sub-cap
+- `auto_reject` on `tool_name` — deny the specific tools that can incur high cost
+- `auto_reject` on `actor` — deny entire actor paths (e.g. a sub-tree) from making expensive calls
+
+See [Approval policy reference → Cost gates: advisory vs hard](../operator-guide/approval-policy-reference.md#cost-gates-advisory-vs-hard) for the full explainer.
 
 Operator-side: if you expect off-hours runs where the TUI may be unattended, set `approval_policy = "auto_reject"` in `[run]` as the baseline. Approvals that aren't explicitly auto-approved by a policy rule will reject rather than queue indefinitely.
 

@@ -136,7 +136,7 @@ action = "block"
 | `actor` | string | Actor path, e.g., `"root→S1"` or `"root→S1→W3"`. |
 | `category` | string | `"tool_use"`, `"plan"`, `"cost"`, etc. |
 | `tool_name` | string | Specific MCP tool name. |
-| `cost_over` | float | Fires when the request's `cost_estimate` exceeds this value (USD). |
+| `cost_over` | float | Fires when the request's `cost_estimate` exceeds this value (USD). **Advisory only** — `cost_estimate` is caller-supplied; see [Approval policy reference → Cost gates: advisory vs hard](./approval-policy-reference.md#cost-gates-advisory-vs-hard). |
 
 **Actions:** `"auto_approve"`, `"auto_reject"`, `"block"` (forces operator review).
 

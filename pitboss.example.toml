@@ -241,7 +241,11 @@ lead_timeout_secs = 900             # wall-clock cap on the lead session
 # match = { actor = "root→S1", category = "tool_use", tool_name = "Read" }
 # action = "auto_approve"
 #
-# # Force explicit approval for any cost-category event over $0.50
+# # Escalate any cost-category event over $0.50 to the operator.
+# # ADVISORY ONLY: cost_estimate is caller-supplied; an actor can pass
+# # cost_estimate=0.0 to bypass this threshold. For hard cost gates use
+# # [run].budget_usd or auto_reject on tool_name/actor.
+# # See book/src/operator-guide/approval-policy-reference.md ("Cost gates: advisory vs hard").
 # [[approval_policy]]
 # match = { category = "cost", cost_over = 0.50 }
 # action = "block"

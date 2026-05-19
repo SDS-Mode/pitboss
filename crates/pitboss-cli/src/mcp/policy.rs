@@ -29,7 +29,16 @@ pub struct ApprovalMatch {
     /// Match exact tool name (relevant for ToolUse category)
     #[serde(default)]
     pub tool_name: Option<String>,
-    /// Match if approval's cost > this value (relevant for Cost category)
+    /// Match if approval's cost > this value (relevant for Cost category).
+    ///
+    /// **Advisory only**: the `cost` value compared here is the
+    /// caller-supplied `cost_estimate` hint, which a buggy or
+    /// malicious actor can underreport (e.g. set to `0.0`) to bypass
+    /// the threshold. For hard cost gates, prefer `auto_reject` rules
+    /// matched on `tool_name` (deny the tools that can incur high
+    /// cost) or `actor` (deny entire actor paths). The run-wide
+    /// `[run].budget_usd` cap (enforced server-side from observed
+    /// usage) is the only authoritative cost guard. (F-SEC-8 / #531)
     #[serde(default)]
     pub cost_over: Option<f64>,
 }
@@ -95,13 +104,17 @@ fn rule_matches(
         }
     }
     // `cost_over` rules fire whenever the caller provides an explicit
-    // `cost_estimate` hint — which is now plumbed through all three
+    // `cost_estimate` hint — which is plumbed through all three
     // approval entry points: `RequestApprovalArgs`, `ProposePlanArgs`,
-    // and `PermissionPromptArgs`. Callers that omit it continue to fall
-    // through to `None` matching (rule does not match). Future work:
-    // automatic cost estimation that emits `ApprovalCategory::Cost`
-    // approvals server-side so rules can fire without caller hints.
-    // (#151 M5)
+    // and `PermissionPromptArgs`. Callers that omit it (or pass
+    // `0.0`) fall through to `None`/below-threshold matching, so this
+    // rule cannot serve as a hard cost gate against an actor that
+    // underreports — operators who need one should use `auto_reject`
+    // rules on `tool_name`/`actor`, or rely on the server-side
+    // `[run].budget_usd` cap. Future work: automatic cost estimation
+    // that emits `ApprovalCategory::Cost` approvals server-side so
+    // rules can fire on observed-cost rather than caller hints.
+    // (#151 M5 / F-SEC-8 / #531)
     if let Some(threshold) = m.cost_over {
         match cost {
             Some(actual) if actual > threshold => {}
