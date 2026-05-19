@@ -111,7 +111,7 @@ pub async fn handle_request_approval(
 
     // Evaluate operator-declared policy before falling through to the legacy queue.
     {
-        let matcher_guard = state.root.policy_matcher.lock().await;
+        let matcher_guard = state.root.approvals.matcher.lock().await;
         if let Some(matcher) = matcher_guard.as_ref() {
             match matcher.evaluate(&pending, args.tool_name.as_deref(), args.cost_estimate) {
                 Some(ApprovalAction::AutoApprove) => {
@@ -216,7 +216,7 @@ pub async fn handle_request_approval(
 /// Plan approval is per-layer: the root lead's approval gates root-layer
 /// worker spawns; each sub-lead's approval gates its own sub-tree's
 /// worker spawns. Previously, every `propose_plan` acceptance flipped
-/// `state.root.plan_approved`, so a sub-lead's approval silently
+/// `state.root.approvals.plan_approved`, so a sub-lead's approval silently
 /// unblocked worker spawns for the root lead and every sibling sub-lead
 /// — bypassing the root's own plan gate. `spawn_worker` now reads from
 /// the target layer, and this handler writes to the caller's layer.
@@ -281,7 +281,7 @@ pub async fn handle_propose_plan(
 
     // Evaluate operator-declared policy before falling through to the legacy queue.
     {
-        let matcher_guard = state.root.policy_matcher.lock().await;
+        let matcher_guard = state.root.approvals.matcher.lock().await;
         if let Some(matcher) = matcher_guard.as_ref() {
             // #151 M5: forward the caller-supplied cost estimate (if any)
             // so cost_over rules can fire on plan-level approvals. Pre-fix
@@ -294,6 +294,7 @@ pub async fn handle_propose_plan(
                         "plan auto-approved by policy"
                     );
                     caller_layer
+                        .approvals
                         .plan_approved
                         .store(true, std::sync::atomic::Ordering::Release);
                     state
@@ -376,6 +377,7 @@ pub async fn handle_propose_plan(
         Ok(resp) => {
             if resp.approved {
                 caller_layer
+                    .approvals
                     .plan_approved
                     .store(true, std::sync::atomic::Ordering::Release);
             }
@@ -547,7 +549,7 @@ pub async fn handle_permission_prompt(
 
     // Evaluate operator-declared policy first.
     {
-        let matcher_guard = state.root.policy_matcher.lock().await;
+        let matcher_guard = state.root.approvals.matcher.lock().await;
         if let Some(matcher) = matcher_guard.as_ref() {
             // #151 M5: forward the caller-supplied cost estimate (if any)
             // so cost_over rules can fire on permission_prompt. Pre-fix

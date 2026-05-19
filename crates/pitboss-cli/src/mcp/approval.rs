@@ -202,7 +202,7 @@ impl ApprovalBridge {
         // path. Operators who want manual review with a fallback should use
         // `[[approval_policy]]` rules (which already short-circuit) and
         // leave `default_approval_policy` at its default of `block`.
-        match self.state.root.approval_policy {
+        match self.state.root.approvals.policy {
             ApprovalPolicy::AutoApprove => {
                 let _ = tx.send(ApprovalResponse {
                     approved: true,
@@ -240,11 +240,11 @@ impl ApprovalBridge {
         // `w.send(ev)`. A previous version released the writer lock between
         // the "is it present?" check and the insert, so a TUI that
         // disconnected in that window would leave the responder orphaned
-        // in `approval_bridge` — stuck until the bridge timeout.
+        // in `approvals.bridge` — stuck until the bridge timeout.
         let writer_guard = self.state.root.control_writer.lock().await;
 
         if let Some(w) = writer_guard.as_ref() {
-            self.state.root.approval_bridge.lock().await.insert(
+            self.state.root.approvals.bridge.lock().await.insert(
                 request_id.clone(),
                 crate::dispatch::state::BridgeEntry {
                     responder: tx,
@@ -295,7 +295,8 @@ impl ApprovalBridge {
                 // responder isn't orphaned.
                 self.state
                     .root
-                    .approval_bridge
+                    .approvals
+                    .bridge
                     .lock()
                     .await
                     .remove(&request_id);
@@ -349,7 +350,8 @@ impl ApprovalBridge {
             self.state.root.event_log.persist(&queue_envelope).await;
             self.state
                 .root
-                .approval_queue
+                .approvals
+                .queue
                 .lock()
                 .await
                 .push_back(QueuedApproval {
@@ -402,7 +404,8 @@ impl ApprovalBridge {
                 // Timeout: remove the pending entry so a late respond doesn't panic.
                 self.state
                     .root
-                    .approval_bridge
+                    .approvals
+                    .bridge
                     .lock()
                     .await
                     .remove(&request_id); // removes BridgeEntry; responder dropped
@@ -411,7 +414,8 @@ impl ApprovalBridge {
                                           // approval modal for a request that has already resolved.
                 self.state
                     .root
-                    .approval_queue
+                    .approvals
+                    .queue
                     .lock()
                     .await
                     .retain(|q| q.request_id != request_id);
@@ -429,7 +433,8 @@ impl ApprovalBridge {
         let bridge_entry = self
             .state
             .root
-            .approval_bridge
+            .approvals
+            .bridge
             .lock()
             .await
             .remove(request_id)

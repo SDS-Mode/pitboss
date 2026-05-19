@@ -465,10 +465,10 @@ async fn reject_with_reason_reaches_sublead_session() {
     let reason_text = "output format must be JSON, not CSV".to_string();
     let reason_clone = reason_text.clone();
     let fcc_task = tokio::spawn(async move {
-        // Poll until the approval_queue is non-empty (sub-lead's request landed).
+        // Poll until the approvals.queue is non-empty (sub-lead's request landed).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if !state_for_bg.root.approval_queue.lock().await.is_empty() {
+            if !state_for_bg.root.approvals.queue.lock().await.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {

@@ -1423,7 +1423,7 @@ async fn register_test_sublead(
         state.root.wt_mgr.clone(),
         CleanupPolicy::Never,
         state.root.run_subdir.clone(),
-        state.root.approval_policy,
+        state.root.approvals.policy,
         None,
         std::sync::Arc::new(crate::shared_store::SharedStore::new()),
         None,
@@ -2278,6 +2278,7 @@ async fn propose_plan_auto_approve_flips_flag() {
     let state = mk_plan_state(crate::dispatch::state::ApprovalPolicy::AutoApprove, true).await;
     assert!(!state
         .root
+        .approvals
         .plan_approved
         .load(std::sync::atomic::Ordering::Acquire));
 
@@ -2300,6 +2301,7 @@ async fn propose_plan_auto_approve_flips_flag() {
     assert!(resp.approved);
     assert!(state
         .root
+        .approvals
         .plan_approved
         .load(std::sync::atomic::Ordering::Acquire));
 }
@@ -2348,6 +2350,7 @@ async fn propose_plan_cost_over_rule_auto_rejects_when_estimate_exceeds() {
     assert!(
         !state
             .root
+            .approvals
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire),
         "rejected plan must not flip plan_approved"
@@ -3089,6 +3092,7 @@ async fn propose_plan_auto_reject_leaves_flag_false() {
     assert!(
         !state
             .root
+            .approvals
             .plan_approved
             .load(std::sync::atomic::Ordering::Acquire),
         "rejected plan must not flip plan_approved — lead should be able to retry"

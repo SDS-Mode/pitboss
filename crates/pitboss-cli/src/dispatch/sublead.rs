@@ -368,7 +368,7 @@ pub async fn spawn_sublead(
                 CleanupPolicy::Never, // sub-tree shares run cleanup behaviour; finalized by root
                 state.root.run_subdir.clone(),
                 // Inherit root approval policy; sub-leads can escalate via request_approval.
-                state.root.approval_policy,
+                state.root.approvals.policy,
                 // No notification router for sub-trees — root router handles run events.
                 None,
                 sub_store,

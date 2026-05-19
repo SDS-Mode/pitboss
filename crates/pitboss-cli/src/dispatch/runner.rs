@@ -1263,7 +1263,7 @@ async fn expire_approvals(state: &Arc<crate::dispatch::state::DispatchState>) {
     expire_layer_approvals(state, &state.root).await;
 
     // Then every sub-lead layer. Acquiring the outer `subleads` read lock
-    // first and each inner `approval_queue` lock in a fresh per-iteration
+    // first and each inner `approvals.queue` lock in a fresh per-iteration
     // scope matches the project-wide lock ordering rule (see DispatchState
     // docs) and avoids holding both kinds of locks across await points.
     let subleads = state.subleads.read().await;
@@ -1297,9 +1297,9 @@ async fn expire_layer_approvals(
 
     let now = chrono::Utc::now();
 
-    // ── Scan approval_queue ───────────────────────────────────────────────────
+    // ── Scan approvals.queue ───────────────────────────────────────────────────
     // Entries here have not yet been seen by any TUI.
-    let mut queue = layer.approval_queue.lock().await;
+    let mut queue = layer.approvals.queue.lock().await;
     let mut i = 0;
     let mut expired_queue = Vec::new();
     while i < queue.len() {
@@ -1343,11 +1343,11 @@ async fn expire_layer_approvals(
         let _ = entry.responder.send(response);
     }
 
-    // ── Scan approval_bridge ──────────────────────────────────────────────────
+    // ── Scan approvals.bridge ──────────────────────────────────────────────────
     // Entries here were drained to a TUI that may have disconnected before
     // responding. Without this scan they would silently miss their TTL.
     let expired_bridge_ids: Vec<String> = {
-        let bridge = layer.approval_bridge.lock().await;
+        let bridge = layer.approvals.bridge.lock().await;
         bridge
             .iter()
             .filter_map(|(id, entry)| {
@@ -1367,7 +1367,7 @@ async fn expire_layer_approvals(
     };
 
     for request_id in expired_bridge_ids {
-        let entry = layer.approval_bridge.lock().await.remove(&request_id);
+        let entry = layer.approvals.bridge.lock().await.remove(&request_id);
         if let Some(entry) = entry {
             let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
             let approved = matches!(fallback, ApprovalFallback::AutoApprove);
