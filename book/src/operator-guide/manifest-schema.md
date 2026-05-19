@@ -20,6 +20,7 @@ pitboss validate pitboss.toml
 
 | Key | Type | Required? | Default | Notes |
 |-----|------|-----------|---------|-------|
+| `name` | string | no | unset | Human-readable label used to group related runs in the operational console (e.g. `"build-db"`, `"nightly-sync"`). When unset, the console falls back to the manifest filename. The canonical run identifier remains the UUIDv7 `run_id`. |
 | `max_parallel_tasks` | int | no | 4 | Flat mode: concurrency cap for `[[task]]` runs. Overridden by `ANTHROPIC_MAX_CONCURRENT` env. Renamed from `max_parallel` in v0.9. |
 | `halt_on_failure` | bool | no | false | Flat mode: stop remaining tasks on first failure. |
 | `run_dir` | string path | no | `~/.local/share/pitboss/runs` | Where per-run artifacts land. |
@@ -28,6 +29,8 @@ pitboss validate pitboss.toml
 | `default_approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: default action for `request_approval` / `propose_plan` when no TUI is attached and no `[[approval_policy]]` rule matches. Renamed from `approval_policy` in v0.9. |
 | `require_plan_approval` | bool | no | false | Hierarchical: when true, `spawn_worker` refuses until a `propose_plan` call has been approved. |
 | `dump_shared_store` | bool | no | false | Hierarchical: write `shared-store.json` into the run directory on finalize. |
+| `require_actor_type` | bool | no | false | Hierarchical: when true, every `spawn_worker` and `spawn_sublead` call MUST name a declared `[[worker_type]]` / `[[sublead_type]]`; type-less spawns are rejected at the dispatcher. Default `false` for back-compat with pre-typed-profile manifests (#252). |
+| `untyped_actor_policy` | `"bridge"` \| `"block"` | no | `"bridge"` | Hierarchical, Path-B only: behavior for un-typed callers reaching `permission_prompt`. `"bridge"` routes to the operator queue (pre-#252 default). `"block"` synthesizes an empty profile so anything outside `--allowedTools` auto-denies — strict counterpart for headless production once every actor has a profile. |
 
 ---
 
@@ -79,7 +82,8 @@ Lead-level caps (moved from `[run]` in v0.9):
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `max_workers` | int | unset | Hard cap on the lead's concurrent + queued worker pool (1–16). Required when the lead spawns workers. |
-| `budget_usd` | float | unset | Soft cap with reservation accounting. `spawn_worker` fails with `budget exceeded` once `spent + reserved + next_estimate > budget`. |
+| `budget_usd` | float | unset | Soft cap with reservation accounting on the **run-wide total** (workers + lead + sub-leads). `spawn_worker` fails with `budget exceeded` once `spent + reserved + next_estimate > budget`; the lead is aborted if a reconciled turn drives total spend past the cap. |
+| `lead_budget_usd` | float | unset | Optional separate cap on **lead + sub-lead orchestration cost** (the lead session's own token spend plus every sub-lead session's own token spend — **worker spend does NOT count against this cap**). Independent of `budget_usd`. Lead is aborted once accumulated lead/sub-lead spend exceeds this cap, even if `budget_usd` still has headroom. (#253) |
 | `lead_timeout_secs` | int | 3600 | Wall-clock cap on the lead session. No upper bound — set generously for multi-hour plans. |
 
 Depth-2 controls (sub-leads):
@@ -90,7 +94,7 @@ Depth-2 controls (sub-leads):
 | `max_subleads` | int | unset | Cap on total sub-leads spawned. |
 | `max_sublead_budget_usd` | float | unset | Cap on the per-sub-lead `budget_usd` envelope. |
 | `max_total_workers` | int | unset | Cap on total live workers across the entire tree (root + sub-trees). Renamed from `max_workers_across_tree` in v0.9. |
-| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_a"` | `"path_a"` (default) sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` — pitboss is the sole permission authority. `"path_b"` routes claude's permission gate through the `permission_prompt` MCP tool — rejected at validation time until stabilization (issues #92–#94). |
+| `permission_routing` | `"path_a"` \| `"path_b"` | `"path_b"` (since v0.12) | `"path_b"` (default) leaves claude's per-tool gate active and wires `--permission-prompt-tool mcp__pitboss__permission_prompt`; per-tool checks the model wants outside its `--allowedTools` route through pitboss with layered enforcement (per-server allowlist → operator `[[approval_policy]]` → typed profile cap → bridge fallback). Denials are non-terminating — claude receives a structured response and adapts. `"path_a"` is the opt-out: sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts` plus `--dangerously-skip-permissions`, bypassing claude's gate entirely so pitboss's `[[approval_policy]]` rules + bridge are the sole authority. See [AGENTS.md](https://github.com/SDS-Mode/pitboss/blob/main/AGENTS.md) `[lead]` table for full enforcement-order details. |
 
 ---
 
@@ -109,6 +113,7 @@ read_down = false
 | Key | Type | Notes |
 |-----|------|-------|
 | `budget_usd` | float | Per-sub-lead envelope when `read_down = false`. |
+| `lead_budget_usd` | float | Per-sub-lead cap on the sub-lead's own token spend (orchestration cost only — **does not count its workers' spend**). Analogous to `[lead].lead_budget_usd` but scoped to one sub-lead. Independent of `budget_usd`. Honored when `read_down = false`. |
 | `max_workers` | int | Per-sub-lead worker pool when `read_down = false`. |
 | `lead_timeout_secs` | int | Wall-clock cap for the sub-lead session. |
 | `read_down` | bool | When true, the sub-lead shares the root's budget and worker pool instead of carving its own envelope. |

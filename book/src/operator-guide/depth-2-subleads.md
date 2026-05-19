@@ -15,20 +15,11 @@ Do not use sub-leads for every multi-worker job. Plain workers are cheaper and s
 
 ## Manifest
 
-Enable sub-leads by setting `allow_subleads = true` on the `[[lead]]` block:
+Enable sub-leads by setting `allow_subleads = true` on the `[lead]` block:
 
 ```toml
-[run]
-max_workers = 20
-budget_usd = 20.00
-lead_timeout_secs = 7200
-
-[[lead]]
+[lead]
 id = "root"
-allow_subleads = true
-max_subleads = 4
-max_sublead_budget_usd = 5.00
-max_workers_across_tree = 16
 directory = "/path/to/repo"
 prompt = """
 Decompose this project into phases. For each phase, spawn a sub-lead with
@@ -36,25 +27,37 @@ its own budget and a focused prompt via spawn_sublead. Wait for all sub-leads
 via wait_actor. Synthesize the results.
 """
 
-[lead.sublead_defaults]
+# Lead-level caps (moved from [run] in v0.9).
+max_workers = 20
+budget_usd = 20.00
+lead_timeout_secs = 7200
+
+# Depth-2 controls.
+allow_subleads = true
+max_subleads = 4
+max_sublead_budget_usd = 5.00
+max_total_workers = 16
+
+[sublead_defaults]
 budget_usd = 2.00
 max_workers = 4
 lead_timeout_secs = 1800
 read_down = false
 ```
 
-### `[[lead]]` fields for sub-leads
+### `[lead]` fields for sub-leads
 
 | Field | Default | Notes |
 |-------|---------|-------|
 | `allow_subleads` | false | Required to expose `spawn_sublead` to the root lead. |
 | `max_subleads` | none | Optional cap on total sub-leads spawned across the run. |
 | `max_sublead_budget_usd` | none | Cap on the per-sub-lead `budget_usd` envelope. Spawn attempts exceeding this fail fast before any state is mutated. |
-| `max_workers_across_tree` | none | Cap on total live workers (root + all sub-trees). |
+| `lead_budget_usd` | none | Cap on **lead + sub-lead orchestration cost** only — independent of `budget_usd` and does not count worker spend. See [Manifest schema](./manifest-schema.md#lead--hierarchical-mode-single-table-exactly-one). |
+| `max_total_workers` | none | Cap on total live workers (root + all sub-trees). Renamed from `max_workers_across_tree` in v0.9. |
 
-### `[lead.sublead_defaults]`
+### `[sublead_defaults]`
 
-Optional defaults inherited by `spawn_sublead` calls that omit those parameters.
+Optional defaults inherited by `spawn_sublead` calls that omit those parameters. Top-level in v0.9 (promoted from the v0.8 nested `[lead.sublead_defaults]` form).
 
 ## `spawn_sublead` MCP tool
 

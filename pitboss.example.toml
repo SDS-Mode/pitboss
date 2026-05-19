@@ -24,6 +24,13 @@
 
 [run]
 
+# Human-readable label used to group related runs in the operational
+# console (e.g. "build-db", "nightly-sync"). When unset, the console
+# falls back to the manifest filename. The canonical run identifier
+# remains the UUIDv7 run_id; this name is purely for cross-run
+# grouping.
+# name = "example-shared-store"
+
 # Flat-mode concurrency cap. Only meaningful when [[task]] is used (not
 # when [lead] is set). Default 4. Overridden by ANTHROPIC_MAX_CONCURRENT.
 # Renamed from `max_parallel` in v0.9.
@@ -194,7 +201,8 @@ Then exit.
 
 # Lead-level caps (moved from [run] in v0.9).
 max_workers = 3                     # 1–16; required when the lead spawns workers
-budget_usd = 1.50                   # soft cap; reservation accounting at spawn time
+budget_usd = 1.50                   # soft cap on run-wide total (workers + lead + sub-leads); reservation accounting at spawn time
+# lead_budget_usd = 0.50            # optional separate cap on lead + sub-lead orchestration cost only (worker spend NOT counted); independent of budget_usd (#253)
 lead_timeout_secs = 900             # wall-clock cap on the lead session
 
 # Permission routing (v0.8+, default flipped to path_b in v0.12).
@@ -227,6 +235,7 @@ lead_timeout_secs = 900             # wall-clock cap on the lead session
 #
 # [sublead_defaults]
 # budget_usd = 2.00         # per-sub-lead envelope when read_down = false
+# lead_budget_usd = 0.50    # per-sub-lead cap on the sub-lead's own token spend (orchestration cost only — its workers' spend NOT counted); analogous to [lead].lead_budget_usd
 # max_workers = 4           # per-sub-lead worker pool when read_down = false
 # lead_timeout_secs = 1800  # wall-clock cap for the sub-lead session
 # read_down = false         # when true, sub-lead shares root's budget + pool
@@ -317,3 +326,12 @@ lead_timeout_secs = 900             # wall-clock cap on the lead session
 # spawn_sublead call to name a declared profile. Type-less spawns are
 # rejected. Default false for back-compat with pre-#252 manifests.
 # require_actor_type = true
+
+# Path-B-only behavior for un-typed callers reaching permission_prompt
+# (only meaningful when require_actor_type = false, i.e. some actors
+# are still type-less). "bridge" (default) routes those callers to the
+# operator approval queue, preserving pre-#252 semantics. "block"
+# synthesizes an empty profile so anything outside --allowedTools
+# auto-denies via denied_by_profile — the strict counterpart for
+# headless production runs once every actor's profile is declared.
+# untyped_actor_policy = "bridge"
