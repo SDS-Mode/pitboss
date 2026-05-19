@@ -35,7 +35,7 @@ action = "block"
 | `actor` | string (optional) | The approval's `actor_path` rendered as a string (e.g., `"root"` or `"root→S1"`) equals the value | Use `"root"` for root-level requests. Use `"root→<sublead_id>"` for a specific sub-lead; sub-lead IDs are UUIDv7 and runtime-generated, so this field is most useful when you know the sub-lead's identity in advance — e.g., from a prior `spawn_sublead` response. Exact string match only; no wildcard patterns. |
 | `category` | enum (optional) | The approval's category field equals the value exactly | Allowed values: `"tool_use"`, `"plan"`, `"cost"`, `"other"`. Most `request_approval` calls land in `tool_use`; `propose_plan` lands in `plan`. Cost-category approvals are not emitted by default (see deferment notes). |
 | `tool_name` | string (optional) | The lead's optional `tool_name` hint on `request_approval` equals the value | Only fires if the lead populates the optional `tool_name` arg. Without it, this field never matches. Exact string match only. |
-| `cost_over` | float (optional) | The lead's optional `cost_estimate` hint exceeds this threshold (strict `>` comparison) | Only fires if the lead passes a `cost_estimate` arg to `request_approval`. Without it, this field never matches. Numeric greater-than comparison. |
+| `cost_over` | float (optional) | The lead's optional `cost_estimate` hint exceeds this threshold (strict `>` comparison) | Only fires if the lead passes a `cost_estimate` arg to `request_approval`. Without it, this field never matches. Numeric greater-than comparison. **Advisory only** — see [Cost gates: advisory vs hard](#cost-gates-advisory-vs-hard) below. |
 
 ---
 
@@ -115,9 +115,26 @@ match = { category = "cost" }
 action = "auto_approve"
 ```
 
-**How it works:** Cost-category approvals over $1.00 always reach the operator. Smaller ones auto-approve. This is a firewall against unexpectedly expensive operations.
+**How it works:** Cost-category approvals over $1.00 always reach the operator. Smaller ones auto-approve. This is a firewall against unexpectedly expensive operations — but read the advisory-only caveat below before relying on it as a security control.
 
 **Note:** This pattern is forward-looking. As of v0.6, leads do not emit cost-category approvals by default. The lead must explicitly call `request_approval` with `category = "cost"` for these rules to fire. See deferment notes below.
+
+---
+
+## Cost gates: advisory vs hard
+
+The `cost_over` match field compares against the caller's optional `cost_estimate` argument on `request_approval` / `propose_plan` / `permission_prompt`. The caller — the lead, sub-lead, or claude's own permission gate — *supplies* the value pitboss compares against.
+
+**This means `cost_over` is advisory only, not a security control.** A buggy or adversarial caller can pass `cost_estimate = 0.0` and slip past any `cost_over = N` rule, no matter how high `N` is. Use `cost_over` for routine "escalate big plans to the operator" hygiene against well-behaved callers — not for blocking expensive operations that an untrusted actor might want to run.
+
+For **hard cost gates** that don't rely on caller honesty:
+
+- **`auto_reject` on `tool_name`** — deny the tools that can incur high cost outright. The match is on the tool the caller is *about* to invoke, not on a self-reported estimate.
+- **`auto_reject` on `actor`** — deny entire actor paths (e.g. a specific sub-lead's tree) from making expensive approvals at all.
+- **`[run].budget_usd`** — the run-wide USD cap. Enforced server-side from observed token usage via `dispatch::budget_watch`, not from caller hints. This is the only authoritative cost ceiling.
+- **`[lead].lead_budget_usd`** — orchestration-only sub-cap. Same enforcement mechanism, narrower scope.
+
+Tracked at [F-SEC-8 / #531](https://github.com/SDS-Mode/pitboss/issues/531). A future server-side cost estimator (cost-of-tool-call before it runs) would make `cost_over` authoritative; that work has not been scheduled.
 
 ---
 

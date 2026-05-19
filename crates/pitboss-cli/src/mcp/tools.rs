@@ -310,6 +310,12 @@ pub struct RequestApprovalArgs {
     /// Optional cost estimate (USD) hint for policy matching. When
     /// provided, the policy matcher can evaluate `match.cost_over` rules
     /// against this value. Falls through to `None` matching when omitted.
+    ///
+    /// **Advisory only — caller-supplied, not trustworthy.** A buggy
+    /// or malicious caller can pass `0.0` to bypass any `cost_over`
+    /// threshold. Operators who need hard cost gates should use
+    /// `auto_reject` rules on `tool_name`/`actor` or rely on the
+    /// server-side `[run].budget_usd` cap. (F-SEC-8 / #531)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_estimate: Option<f64>,
     /// Caller identity injected by mcp-bridge. Used to build the correct
@@ -352,6 +358,12 @@ pub struct ProposePlanArgs {
     /// `cost_over = 5.0 → block` to escalate any plan whose total
     /// estimated cost exceeds $5. Falls through to `None` matching
     /// when omitted, matching the pre-#151-M5 behavior. (#151 M5)
+    ///
+    /// **Advisory only — caller-supplied, not trustworthy.** A buggy
+    /// or malicious lead can pass `0.0` to bypass any `cost_over`
+    /// threshold. Operators who need hard cost gates should use
+    /// `auto_reject` rules on `tool_name`/`actor` or rely on the
+    /// server-side `[run].budget_usd` cap. (F-SEC-8 / #531)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_estimate: Option<f64>,
     /// Caller identity injected by mcp-bridge. Used to build the correct

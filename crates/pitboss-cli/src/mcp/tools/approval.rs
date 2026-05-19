@@ -412,6 +412,13 @@ pub struct PermissionPromptArgs {
     /// operator-declared `cost_over` rule fires for expensive
     /// permission requests. Falls through to `None` matching when
     /// omitted, matching the pre-#151-M5 behavior. (#151 M5)
+    ///
+    /// **Advisory only — caller-supplied, not trustworthy.** A buggy
+    /// or malicious caller (Claude's gate code is also a caller here)
+    /// can pass `0.0` to bypass any `cost_over` threshold. Operators
+    /// who need hard cost gates should use `auto_reject` rules on
+    /// `tool_name`/`actor` or rely on the server-side
+    /// `[run].budget_usd` cap. (F-SEC-8 / #531)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_estimate: Option<f64>,
     /// Caller identity injected by mcp-bridge.

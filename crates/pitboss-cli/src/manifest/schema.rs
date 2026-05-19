@@ -512,7 +512,7 @@ pub struct ApprovalMatchSpec {
     pub tool_name: Option<String>,
     #[field(
         label = "Cost over (USD)",
-        help = "Fires when the request's cost_estimate exceeds this value."
+        help = "Fires when the request's caller-supplied cost_estimate exceeds this value. Advisory only — a buggy or malicious caller can pass cost_estimate=0.0 to bypass the threshold. For hard cost gates use auto_reject rules on tool_name/actor, or the server-side [run].budget_usd cap. See AGENTS.md and the approval policy reference."
     )]
     pub cost_over: Option<f64>,
 }
