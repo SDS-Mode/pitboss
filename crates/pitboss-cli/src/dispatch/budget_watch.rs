@@ -15,13 +15,13 @@
 //!
 //! 1. Converts cumulative `TokenUsage` for the current subprocess to
 //!    USD via [`pitboss_core::prices::cost_usd`].
-//! 2. Atomically writes `layer.lead_spent_usd = baseline + cost`, where
+//! 2. Atomically writes `layer.budget.lead_spent_usd = baseline + cost`, where
 //!    `baseline` is the running total committed across prior kill+resume
 //!    iterations.
 //! 3. Computes the run-wide total (workers + lead + sub-leads across
 //!    every layer) and checks both `budget_usd` and the optional
 //!    `lead_budget_usd` cap. On breach, it stamps
-//!    `layer.budget_abort_reason` so `failure_detection` can name the
+//!    `layer.budget.abort_reason` so `failure_detection` can name the
 //!    overspend and then fires `layer.cancel.terminate()` to kill the
 //!    in-flight subprocess.
 //!
@@ -44,7 +44,7 @@ use crate::dispatch::state::DispatchState;
 #[derive(Default)]
 pub struct LeadSpendBaseline {
     /// Accumulated cost across prior kill+resume iterations. The
-    /// observer writes `layer.lead_spent_usd = baseline + this_iter_cost`
+    /// observer writes `layer.budget.lead_spent_usd = baseline + this_iter_cost`
     /// on every assistant-turn usage update.
     pub baseline_usd: Mutex<f64>,
 }
@@ -59,7 +59,7 @@ impl LeadSpendBaseline {
     // from the prior run's `summary.jsonl` so a resumed lead doesn't
     // restart with a $0 budget envelope against the original cap. The
     // current implementation mirrors the existing gap for
-    // `layer.spent_usd` (workers) — neither is restored on resume — so
+    // `layer.budget.spent_usd` (workers) — neither is restored on resume — so
     // this parallel gap is "fix both together" rather than "regressed
     // by this PR." Tracked as part of #259 (persistent control event
     // stream replay).
@@ -92,9 +92,10 @@ impl SpendBreakdown {
 /// Walk every layer in the run (root + live sub-leads + terminated
 /// sub-leads) and assemble the current spend totals.
 pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
-    let workers_root = *state.root.spent_usd.lock().await;
+    let workers_root = *state.root.budget.spent_usd.lock().await;
     let lead_usd = *state
         .root
+        .budget
         .lead_spent_usd
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -104,8 +105,9 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
     {
         let live = state.subleads.read().await;
         for layer in live.values() {
-            workers_subs += *layer.spent_usd.lock().await;
+            workers_subs += *layer.budget.spent_usd.lock().await;
             subleads_usd += *layer
+                .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -114,8 +116,9 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
     {
         let terminated = state.terminated_sublead_layers.read().await;
         for layer in terminated.iter() {
-            workers_subs += *layer.spent_usd.lock().await;
+            workers_subs += *layer.budget.spent_usd.lock().await;
             subleads_usd += *layer
+                .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -136,9 +139,16 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
 /// same instant the contention is benign and the next observer fire
 /// gets a fresh reading.
 fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
-    let workers_root = state.root.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
+    let workers_root = state
+        .root
+        .budget
+        .spent_usd
+        .try_lock()
+        .map(|g| *g)
+        .unwrap_or(0.0);
     let lead_usd = *state
         .root
+        .budget
         .lead_spent_usd
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -147,8 +157,9 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
     let mut subleads_usd = 0.0_f64;
     if let Ok(live) = state.subleads.try_read() {
         for layer in live.values() {
-            workers_subs += layer.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
+            workers_subs += layer.budget.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
             subleads_usd += *layer
+                .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -156,8 +167,9 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
     }
     if let Ok(terminated) = state.terminated_sublead_layers.try_read() {
         for layer in terminated.iter() {
-            workers_subs += layer.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
+            workers_subs += layer.budget.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
             subleads_usd += *layer
+                .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -197,6 +209,7 @@ pub fn build_lead_usage_observer(
 
         {
             let mut g = layer
+                .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -207,7 +220,8 @@ pub fn build_lead_usage_observer(
         // many times in quick succession; cancel() is idempotent but the
         // reason stamp would race).
         if layer
-            .budget_abort_reason
+            .budget
+            .abort_reason
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
@@ -251,7 +265,8 @@ pub fn build_lead_usage_observer(
 fn trip_budget_abort(layer: &LayerState, reason: String) {
     {
         let mut g = layer
-            .budget_abort_reason
+            .budget
+            .abort_reason
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *g = Some(reason.clone());
@@ -338,7 +353,7 @@ mod tests {
         let (_dir, state) = mk_state_with_caps(Some(1.00), None);
         let layer = state.root.clone();
         assert!(!layer.cancel.is_terminated());
-        assert!(layer.budget_abort_reason.lock().unwrap().is_none());
+        assert!(layer.budget.abort_reason.lock().unwrap().is_none());
 
         let baseline = LeadSpendBaseline::new();
         let obs = build_lead_usage_observer(
@@ -354,7 +369,7 @@ mod tests {
         // Fire the observer with usage that exceeds the cap.
         obs(usage(100_000, 100_000));
 
-        let reason = layer.budget_abort_reason.lock().unwrap().clone();
+        let reason = layer.budget.abort_reason.lock().unwrap().clone();
         assert!(
             reason.is_some(),
             "expected budget_abort_reason set after overspend"
@@ -406,7 +421,7 @@ mod tests {
             state.root.manifest.lead_budget_usd,
         );
         obs(usage(100_000, 100_000));
-        let reason = layer.budget_abort_reason.lock().unwrap().clone();
+        let reason = layer.budget.abort_reason.lock().unwrap().clone();
         let msg = reason.expect("expected reason set");
         assert!(
             msg.contains("lead_budget_usd"),
@@ -433,10 +448,10 @@ mod tests {
         // 1k+1k tokens at Opus = 1k * $15/M + 1k * $75/M ≈ $0.09 — far
         // below either cap.
         obs(usage(1_000, 1_000));
-        assert!(layer.budget_abort_reason.lock().unwrap().is_none());
+        assert!(layer.budget.abort_reason.lock().unwrap().is_none());
         assert!(!layer.cancel.is_terminated());
         // lead_spent_usd should reflect the priced cost.
-        let live = *layer.lead_spent_usd.lock().unwrap();
+        let live = *layer.budget.lead_spent_usd.lock().unwrap();
         assert!(live > 0.0 && live < 1.0, "live spend out of range: {live}");
     }
 

@@ -100,8 +100,8 @@ fn mk_state_hold_workers(dir: &std::path::Path) -> (Uuid, Arc<DispatchState>) {
 /// completion (simulated by directly setting up and reconciling the sub-tree).
 /// Asserts:
 /// - `subleads` map has 1 entry after spawn
-/// - root.reserved_usd == sub-lead budget after spawn
-/// - after reconcile: root.spent_usd == sub-lead actual spend
+/// - root.budget.reserved_usd == sub-lead budget after spawn
+/// - after reconcile: root.budget.spent_usd == sub-lead actual spend
 /// - unspent portion ($budget - $actual) is freed from reserved pool
 /// - sub-lead entry removed from `subleads` map after reconcile
 #[tokio::test]
@@ -149,7 +149,7 @@ async fn root_spawns_sublead_which_completes() {
         );
     }
     assert_eq!(
-        *state.root.reserved_usd.lock().await,
+        *state.root.budget.reserved_usd.lock().await,
         envelope_budget,
         "root should have reserved the full envelope"
     );
@@ -158,7 +158,7 @@ async fn root_spawns_sublead_which_completes() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
-        *sub_layer.spent_usd.lock().await = actual_spend;
+        *sub_layer.budget.spent_usd.lock().await = actual_spend;
     }
 
     // Trigger reconciliation (mimics Event::Result terminal event).
@@ -172,14 +172,14 @@ async fn root_spawns_sublead_which_completes() {
 
     // After reconcile: reservation released, actual spend recorded, sub-lead removed.
     assert_eq!(
-        *state.root.reserved_usd.lock().await,
+        *state.root.budget.reserved_usd.lock().await,
         0.0,
-        "root.reserved_usd should be 0 after reconcile"
+        "root.budget.reserved_usd should be 0 after reconcile"
     );
     assert_eq!(
-        *state.root.spent_usd.lock().await,
+        *state.root.budget.spent_usd.lock().await,
         actual_spend,
-        "root.spent_usd should equal sub-lead actual spend"
+        "root.budget.spent_usd should equal sub-lead actual spend"
     );
     assert!(
         expected_unspent > 0.0,
@@ -554,8 +554,8 @@ async fn reject_with_reason_reaches_sublead_session() {
 
 /// Sub-lead spawns with $5 envelope, spends $2, then terminates.
 /// Asserts:
-/// - root.spent_usd increases by $2 (actual sub-lead spend)
-/// - root.reserved_usd returns to pre-spawn value (full $5 reservation released)
+/// - root.budget.spent_usd increases by $2 (actual sub-lead spend)
+/// - root.budget.reserved_usd returns to pre-spawn value (full $5 reservation released)
 /// - net effect: $3 unspent returned to reservable pool
 #[tokio::test]
 async fn budget_envelope_returns_to_root_pool() {
@@ -568,8 +568,8 @@ async fn budget_envelope_returns_to_root_pool() {
     let actual_spend = 2.0_f64;
 
     // Record root's pre-spawn baseline.
-    let pre_spawn_reserved = *state.root.reserved_usd.lock().await;
-    let pre_spawn_spent = *state.root.spent_usd.lock().await;
+    let pre_spawn_reserved = *state.root.budget.reserved_usd.lock().await;
+    let pre_spawn_spent = *state.root.budget.spent_usd.lock().await;
 
     // Root lead spawns sub-lead with $5 envelope.
     let req = SubleadSpawnRequest {
@@ -592,7 +592,7 @@ async fn budget_envelope_returns_to_root_pool() {
 
     // Verify reservation was made.
     assert_eq!(
-        *state.root.reserved_usd.lock().await,
+        *state.root.budget.reserved_usd.lock().await,
         pre_spawn_reserved + envelope_budget,
         "root should have reserved the sub-lead's full envelope"
     );
@@ -601,7 +601,7 @@ async fn budget_envelope_returns_to_root_pool() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer must exist");
-        *sub_layer.spent_usd.lock().await = actual_spend;
+        *sub_layer.budget.spent_usd.lock().await = actual_spend;
     }
 
     // Reconcile (terminate the sub-lead).
@@ -618,14 +618,14 @@ async fn budget_envelope_returns_to_root_pool() {
     // - spent_usd rose by $2 (the actual spend)
     // - the $3 unspent is now available in the reservable pool (not reserved)
     assert_eq!(
-        *state.root.reserved_usd.lock().await,
+        *state.root.budget.reserved_usd.lock().await,
         pre_spawn_reserved,
-        "root.reserved_usd should return to pre-spawn value after reconcile"
+        "root.budget.reserved_usd should return to pre-spawn value after reconcile"
     );
     assert_eq!(
-        *state.root.spent_usd.lock().await,
+        *state.root.budget.spent_usd.lock().await,
         pre_spawn_spent + actual_spend,
-        "root.spent_usd should increase by the sub-lead's actual spend"
+        "root.budget.spent_usd should increase by the sub-lead's actual spend"
     );
     // Verify the sub-lead entry is cleaned up.
     assert!(
@@ -808,7 +808,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         "sub-lead should be registered after spawn"
     );
     assert!(
-        (*state.root.reserved_usd.lock().await - 2.0).abs() < 1e-9,
+        (*state.root.budget.reserved_usd.lock().await - 2.0).abs() < 1e-9,
         "root should reserve $2.0 for the sub-lead"
     );
 
@@ -861,9 +861,9 @@ async fn sublead_session_spawns_runs_and_reconciles() {
 
     // 7. Root's reservation is released and spend is recorded.
     assert_eq!(
-        *state.root.reserved_usd.lock().await,
+        *state.root.budget.reserved_usd.lock().await,
         0.0,
-        "root.reserved_usd should be 0 after reconcile"
+        "root.budget.reserved_usd should be 0 after reconcile"
     );
 
     state.root.cancel.terminate();

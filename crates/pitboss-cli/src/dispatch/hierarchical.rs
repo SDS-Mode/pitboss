@@ -340,7 +340,7 @@ pub async fn run_hierarchical(
     };
 
     // 3d. Budget watcher — installs a per-message usage observer that
-    //     updates `state.root.lead_spent_usd` live and aborts the lead
+    //     updates `state.root.budget.lead_spent_usd` live and aborts the lead
     //     when `budget_usd` (run-wide total) or `lead_budget_usd`
     //     (orchestration-only) caps are exceeded. (#253)
     let baseline = crate::dispatch::budget_watch::LeadSpendBaseline::new();
@@ -476,7 +476,8 @@ pub async fn run_hierarchical(
             // budget_usd" not "Cancelled".
             let budget_reason = state
                 .root
-                .budget_abort_reason
+                .budget
+                .abort_reason
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();

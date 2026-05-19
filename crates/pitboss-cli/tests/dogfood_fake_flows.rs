@@ -1055,7 +1055,7 @@ async fn dogfood_envelope_cap_rejection() {
 
     // Verify no budget reservation was made
     {
-        let reserved = *state.root.reserved_usd.lock().await;
+        let reserved = *state.root.budget.reserved_usd.lock().await;
         assert_eq!(
             reserved, 0.0,
             "after rejected spawn, reserved_usd should be 0.0; got: {reserved}"
@@ -1099,7 +1099,7 @@ async fn dogfood_envelope_cap_rejection() {
 
     // Verify budget IS reserved
     {
-        let reserved = *state.root.reserved_usd.lock().await;
+        let reserved = *state.root.budget.reserved_usd.lock().await;
         assert!(
             (reserved - 2.0).abs() < 1e-9,
             "after successful spawn with budget_usd=2.0, reserved_usd should be 2.0; got: {reserved}"

@@ -326,7 +326,7 @@ async fn spawn_sublead_creates_isolated_layer() {
     assert_eq!(plan_value, json!("do thing"));
 
     // Root's reservation should reflect the sub-lead's envelope.
-    assert_eq!(*state.root.reserved_usd.lock().await, 5.0);
+    assert_eq!(*state.root.budget.reserved_usd.lock().await, 5.0);
 }
 
 #[tokio::test]
@@ -447,17 +447,17 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
         .expect("spawn_sublead should succeed");
 
     // Verify the reservation was made
-    assert_eq!(*state.root.reserved_usd.lock().await, 5.0);
+    assert_eq!(*state.root.budget.reserved_usd.lock().await, 5.0);
 
     // Simulate sub-lead spending only $2 then terminating.
     // (In production this happens automatically as the sub-lead's
     // workers complete and accumulate spend in the sub-tree's
-    // LayerState.spent_usd; the reconciliation is triggered by the
+    // LayerState.budget.spent_usd; the reconciliation is triggered by the
     // sub-lead's terminal Event::Result.)
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
-        *sub_layer.spent_usd.lock().await = 2.0;
+        *sub_layer.budget.spent_usd.lock().await = 2.0;
     }
 
     // Trigger reconciliation
@@ -471,8 +471,8 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
 
     // After: root's reserved_usd dropped by $5, spent_usd rose by $2,
     // releasing $3 to reservable pool.
-    assert_eq!(*state.root.reserved_usd.lock().await, 0.0);
-    assert_eq!(*state.root.spent_usd.lock().await, 2.0);
+    assert_eq!(*state.root.budget.reserved_usd.lock().await, 0.0);
+    assert_eq!(*state.root.budget.spent_usd.lock().await, 2.0);
     // Verify sub-layer was removed during reconciliation
     assert!(
         state.subleads.read().await.get(&sublead_id).is_none(),
@@ -1066,7 +1066,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
-        *sub_layer.spent_usd.lock().await = 1.0;
+        *sub_layer.budget.spent_usd.lock().await = 1.0;
     }
 
     // Reconcile (terminate the sub-lead).
@@ -1613,7 +1613,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
 
     // Snapshot root's reservation before the sub-lead spawns a worker.
     // (Root has $5 reserved for the sub-lead envelope at this point.)
-    let root_reserved_before = *state.root.reserved_usd.lock().await;
+    let root_reserved_before = *state.root.budget.reserved_usd.lock().await;
 
     // Sub-lead calls spawn_worker with its identity in _meta.
     let args = SpawnWorkerArgs {
@@ -1635,7 +1635,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
 
     // Root's reserved_usd must NOT have changed (the new reservation went to
     // the sub-lead's layer, not root's).
-    let root_reserved_after = *state.root.reserved_usd.lock().await;
+    let root_reserved_after = *state.root.budget.reserved_usd.lock().await;
     assert!(
         (root_reserved_after - root_reserved_before).abs() < 1e-9,
         "root reserved_usd should be unchanged after sub-lead spawn_worker; \
@@ -1647,7 +1647,7 @@ async fn sublead_worker_budget_reserved_against_sublead_envelope() {
     let sub_layer = subleads
         .get(sublead_id.as_str())
         .expect("sub-tree layer must exist");
-    let sub_reserved = *sub_layer.reserved_usd.lock().await;
+    let sub_reserved = *sub_layer.budget.reserved_usd.lock().await;
     assert!(
         sub_reserved > 0.0,
         "sub-lead's reserved_usd must be > 0 after spawning a worker; got={sub_reserved}"

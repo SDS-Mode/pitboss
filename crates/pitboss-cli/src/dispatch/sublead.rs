@@ -308,8 +308,8 @@ pub async fn spawn_sublead(
             // Fixes the TOCTOU described in #106: two independent lock
             // snapshots + an unlocked check allowed both callers to pass
             // the guard before either wrote, enabling budget over-commit.
-            let spent = *state.root.spent_usd.lock().await;
-            let mut reserved = state.root.reserved_usd.lock().await;
+            let spent = *state.root.budget.spent_usd.lock().await;
+            let mut reserved = state.root.budget.reserved_usd.lock().await;
             if spent + *reserved + amount > cap {
                 bail!(
                     "spawn_sublead: budget exceeded: ${:.2} spent + ${:.2} reserved + ${:.2} estimated > ${:.2} budget",
@@ -321,7 +321,7 @@ pub async fn spawn_sublead(
             }
             *reserved += amount;
         } else {
-            *state.root.reserved_usd.lock().await += amount;
+            *state.root.budget.reserved_usd.lock().await += amount;
         }
         Some(amount)
     } else {
@@ -449,7 +449,7 @@ pub async fn spawn_sublead(
     // I-2: On failure, release the reservation to avoid leaking reserved budget.
     if result.is_err() {
         if let Some(amount) = reserved_amount {
-            let mut reserved = state.root.reserved_usd.lock().await;
+            let mut reserved = state.root.budget.reserved_usd.lock().await;
             *reserved = (*reserved - amount).max(0.0);
         }
     }
@@ -721,7 +721,7 @@ async fn spawn_sublead_session(
     let sublead_type_bg = sublead_type.clone();
 
     // Sub-lead budget watcher — mirrors the root lead's observer:
-    // updates `sub_layer.lead_spent_usd` live per assistant turn and
+    // updates `sub_layer.budget.lead_spent_usd` live per assistant turn and
     // aborts the sub-lead when its own `lead_budget_usd` cap (if any)
     // or the run-wide `budget_usd` cap is exceeded. (#253)
     let sublead_lead_budget_usd = match &envelope {
@@ -863,7 +863,7 @@ async fn spawn_sublead_session(
         // sub-tree can occur between iterations because the sub-lead's
         // MCP session is closed while its subprocess is dead).
         if let Some(cost) = pitboss_core::prices::cost_usd(&model_bg, &total_token_usage) {
-            *sub_layer_bg.spent_usd.lock().await += cost;
+            *sub_layer_bg.budget.spent_usd.lock().await += cost;
         }
 
         // Close the reprompt channel so further sends return errors.
@@ -1066,7 +1066,7 @@ pub async fn reconcile_terminated_sublead(
         .await
         .push(sub_layer.clone());
 
-    let actual_spend = *sub_layer.spent_usd.lock().await;
+    let actual_spend = *sub_layer.budget.spent_usd.lock().await;
     let original_reservation_usd = sub_layer.original_reservation_usd.unwrap_or(0.0);
     let unspent = (original_reservation_usd - actual_spend).max(0.0);
 
@@ -1155,12 +1155,12 @@ pub async fn reconcile_terminated_sublead(
 
     // Release the original reservation in full
     {
-        let mut reserved = state.root.reserved_usd.lock().await;
+        let mut reserved = state.root.budget.reserved_usd.lock().await;
         *reserved = (*reserved - original_reservation_usd).max(0.0);
     }
     // Then record the actual spend
     {
-        let mut spent = state.root.spent_usd.lock().await;
+        let mut spent = state.root.budget.spent_usd.lock().await;
         *spent += actual_spend;
     }
 

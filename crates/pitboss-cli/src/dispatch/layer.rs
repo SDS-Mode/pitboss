@@ -126,21 +126,20 @@ impl Default for WorkerRegistry {
     }
 }
 
-/// All state owned by a single coordination layer (root layer or a
-/// sub-tree layer).
-pub struct LayerState {
-    pub run_id: Uuid,
-    pub manifest: ResolvedManifest,
-    pub store: Arc<dyn SessionStore>,
-    pub cancel: CancelToken,
-    pub lead_id: String,
-    /// Worker bookkeeping: per-task_id maps + the `Done` broadcast.
-    /// Split out of this struct in #487.
-    pub workers: WorkerRegistry,
-    /// Total USD cost spent so far on completed workers in this layer.
-    /// Lead and sub-lead token spend live in their own counters
-    /// (`lead_spent_usd`); helpers that compute the total run spend sum
-    /// across layers.
+/// Layer-aggregate USD spend counters + the budget-abort reason.
+///
+/// Split out of `LayerState` (#487 step 2) so handlers that only need
+/// budget bookkeeping can take `&BudgetState` instead of `&LayerState`
+/// and physically can't touch worker or approval state.
+///
+/// Per-worker USD reservations are NOT here — they're keyed by
+/// `task_id` and live on `WorkerRegistry.reservations` alongside the
+/// rest of the per-task_id maps. This struct only owns the
+/// layer-aggregate counters and the abort signal.
+pub struct BudgetState {
+    /// Total USD spent so far on completed workers in this layer.
+    /// Lead and sub-lead token spend are accounted in `lead_spent_usd`;
+    /// helpers that compute the total run spend sum across layers.
     pub spent_usd: Mutex<f64>,
     /// USD reserved for in-flight workers at spawn time.
     pub reserved_usd: Mutex<f64>,
@@ -158,7 +157,42 @@ pub struct LayerState {
     /// startup and read by `failure_detection` so the lead's
     /// `TaskRecord.failure_reason` names the overspend rather than
     /// looking like a generic cancellation. (#253)
-    pub budget_abort_reason: std::sync::Mutex<Option<String>>,
+    pub abort_reason: std::sync::Mutex<Option<String>>,
+}
+
+impl BudgetState {
+    /// Construct a zeroed budget state. All counters start at 0.0
+    /// and `abort_reason` is `None`.
+    pub fn new() -> Self {
+        Self {
+            spent_usd: Mutex::new(0.0),
+            reserved_usd: Mutex::new(0.0),
+            lead_spent_usd: std::sync::Mutex::new(0.0),
+            abort_reason: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Default for BudgetState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// All state owned by a single coordination layer (root layer or a
+/// sub-tree layer).
+pub struct LayerState {
+    pub run_id: Uuid,
+    pub manifest: ResolvedManifest,
+    pub store: Arc<dyn SessionStore>,
+    pub cancel: CancelToken,
+    pub lead_id: String,
+    /// Worker bookkeeping: per-task_id maps + the `Done` broadcast.
+    /// Split out of this struct in #487 step 1.
+    pub workers: WorkerRegistry,
+    /// Layer-aggregate USD counters + budget-abort signal.
+    /// Split out of this struct in #487 step 2.
+    pub budget: BudgetState,
     /// Dependencies needed to actually launch worker subprocesses.
     pub spawner: Arc<dyn ProcessSpawner>,
     pub claude_binary: PathBuf,
@@ -323,10 +357,7 @@ impl LayerState {
             cancel,
             lead_id,
             workers: WorkerRegistry::new(),
-            spent_usd: Mutex::new(0.0),
-            reserved_usd: Mutex::new(0.0),
-            lead_spent_usd: std::sync::Mutex::new(0.0),
-            budget_abort_reason: std::sync::Mutex::new(None),
+            budget: BudgetState::new(),
             spawner,
             claude_binary,
             wt_mgr,
@@ -536,7 +567,7 @@ impl LayerState {
 
     pub async fn budget_remaining(&self) -> Option<f64> {
         let budget = self.manifest.budget_usd?;
-        let spent = *self.spent_usd.lock().await;
+        let spent = *self.budget.spent_usd.lock().await;
         Some((budget - spent).max(0.0))
     }
 
@@ -590,8 +621,8 @@ mod tests {
         let (_dir, layer) = mk_layer();
         assert!(layer.workers.states.read().await.is_empty());
         assert!(layer.workers.cancels.read().await.is_empty());
-        assert_eq!(*layer.spent_usd.lock().await, 0.0);
-        assert_eq!(*layer.reserved_usd.lock().await, 0.0);
+        assert_eq!(*layer.budget.spent_usd.lock().await, 0.0);
+        assert_eq!(*layer.budget.reserved_usd.lock().await, 0.0);
     }
 
     #[tokio::test]

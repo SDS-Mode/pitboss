@@ -212,13 +212,14 @@ pub async fn handle_spawn_worker(
         // before either increments the reservation. Spent_usd is captured
         // inside the same critical section to keep the arithmetic on a
         // single consistent snapshot.
-        let mut reserved_guard = target_layer.reserved_usd.lock().await;
-        let spent = *target_layer.spent_usd.lock().await;
+        let mut reserved_guard = target_layer.budget.reserved_usd.lock().await;
+        let spent = *target_layer.budget.spent_usd.lock().await;
         let reserved = *reserved_guard;
         // (#253) Include the lead/sub-lead's own token spend in the
         // budget check — `budget_usd` is now the run-wide cap across
         // workers + lead orchestration cost for this layer.
         let lead_spent = *target_layer
+            .budget
             .lead_spent_usd
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -827,7 +828,7 @@ async fn run_worker(
 
     // Accumulate cost into the layer's spent_usd.
     if let Some(cost) = pitboss_core::prices::cost_usd(&model, &rec.token_usage) {
-        *layer.spent_usd.lock().await += cost;
+        *layer.budget.spent_usd.lock().await += cost;
     }
 
     // Transition to Done + broadcast on the layer's done channel.
@@ -870,7 +871,7 @@ async fn release_reservation_for_layer(layer: &Arc<LayerState>, task_id: &str) {
         .remove(task_id)
         .unwrap_or(0.0);
     if reserved_amount > 0.0 {
-        let mut r = layer.reserved_usd.lock().await;
+        let mut r = layer.budget.reserved_usd.lock().await;
         *r = (*r - reserved_amount).max(0.0);
     }
 }

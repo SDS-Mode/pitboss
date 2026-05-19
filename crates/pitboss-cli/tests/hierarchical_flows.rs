@@ -108,7 +108,7 @@ async fn mcp_spawn_over_max_workers_returns_error() {
 #[tokio::test]
 async fn mcp_spawn_over_budget_returns_error() {
     let (_dir, state) = mk_state(); // budget_usd = 5.0
-    *state.root.spent_usd.lock().await = 5.0;
+    *state.root.budget.spent_usd.lock().await = 5.0;
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
     let _server = McpServer::start(socket.clone(), state.clone())
         .await
