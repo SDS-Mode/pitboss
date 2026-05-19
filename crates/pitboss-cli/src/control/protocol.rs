@@ -400,9 +400,19 @@ pub struct WorkerSnapshotEntry {
     pub session_id: Option<String>,
 }
 
+/// Payload embedded inside the `RunFinished` `ControlEvent` variant.
+///
+/// Every field carries `#[serde(default)]` so this nested struct follows
+/// the same wire-compat contract as the surrounding `ControlEvent` variants
+/// (see the top-of-file convention). Without per-field defaults, adding a
+/// new field like `total_spend_usd` would silently break every older TUI
+/// client that parses `RunFinished` — a regression class that the variant-
+/// level contract alone does not cover for nested payload structs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunFinishedSummary {
+    #[serde(default)]
     pub tasks_total: usize,
+    #[serde(default)]
     pub tasks_failed: usize,
 }
 
@@ -729,6 +739,28 @@ mod tests {
             },
         };
         assert_eq!(roundtrip_event(&rf), rf);
+    }
+
+    #[test]
+    fn run_finished_summary_accepts_missing_fields() {
+        // Simulates an older dispatcher emitting `RunFinished` before
+        // either field existed (or, equivalently, a newer dispatcher
+        // emitting fields the local serde shape doesn't know about): the
+        // struct must deserialize with field-level defaults rather than
+        // failing the whole event. F-PROTO-3 / #516.
+        let s: RunFinishedSummary = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.tasks_total, 0);
+        assert_eq!(s.tasks_failed, 0);
+
+        let ev: ControlEvent =
+            serde_json::from_str(r#"{"event":"run_finished","summary":{}}"#).unwrap();
+        match ev {
+            ControlEvent::RunFinished { summary } => {
+                assert_eq!(summary.tasks_total, 0);
+                assert_eq!(summary.tasks_failed, 0);
+            }
+            other => panic!("expected RunFinished, got {other:?}"),
+        }
     }
 
     #[test]
