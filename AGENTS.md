@@ -130,6 +130,7 @@ caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 
 | Key | Type | Required? | Default | Notes |
 |---|---|---|---|---|
+| `name` | string | no | unset | Human-readable label used to group related runs in the operational console (e.g. `"build-db"`, `"nightly-sync"`). When unset, the console falls back to the manifest filename. The canonical reference to a run remains its UUIDv7 `run_id`; this name is purely for cross-run grouping. |
 | `max_parallel_tasks` | int | no | 4 | Concurrency cap for flat-mode `[[task]]` runs. Overridden by `ANTHROPIC_MAX_CONCURRENT` env. Renamed from `max_parallel` in v0.9. |
 | `halt_on_failure` | bool | no | false | Flat mode. If a task fails, skip remaining tasks. |
 | `run_dir` | string path | no | `~/.local/share/pitboss/runs` | Where per-run artifacts land. |
@@ -140,6 +141,8 @@ caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 | `denial_termination_policy` | `"adapt"` \| `"reclassify"` | no | `"adapt"` | Path B only: how a denied `permission_prompt` affects the actor's terminal status. `"adapt"` (default, post-#377) trusts the actor's exit code; per-actor `events.jsonl::tool_denied` rows and the `approvals_rejected` counter remain authoritative for what was blocked. `"reclassify"` re-labels clean exits within 30s of a denial as `ApprovalRejected` (legacy heuristic, kept for operators who want fast-give-up distinguished in the status table — accepts that successful adaptation within the window will misclassify as failure). |
 | `require_plan_approval` | bool | no | false | Hierarchical: when true, `spawn_worker` refuses until a plan submitted via `propose_plan` has been operator-approved. |
 | `dump_shared_store` | bool | no | false | Hierarchical: at run finalize, write `shared-store.json` into the run dir for post-mortem inspection. |
+| `require_actor_type` | bool | no | false | When true, every `spawn_worker` and `spawn_sublead` call MUST name a declared `[[worker_type]]` / `[[sublead_type]]`; type-less spawns are rejected at the dispatcher. Default `false` for back-compat with manifests that pre-date typed profiles (#252). |
+| `untyped_actor_policy` | `"bridge"` \| `"block"` | no | `"bridge"` | Path-B-only behavior for un-typed callers reaching `permission_prompt`. `"bridge"` (default) routes to the operator approval queue, preserving pre-#252 semantics. `"block"` synthesizes an empty profile so anything outside `--allowedTools` auto-denies via `denied_by_profile` — the strict counterpart for headless production runs once every actor's profile has been declared. |
 
 ### `[[notification]]` sinks (v0.4.1+)
 
@@ -220,7 +223,8 @@ lead, not the run):
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `max_workers` | int | unset | Hard cap on the lead's concurrent + queued worker pool (1–16). Required when the lead spawns workers. |
-| `budget_usd` | float | unset | Soft cap with reservation accounting. `spawn_worker` fails with `budget exceeded` once `spent + reserved + next_estimate > budget`. |
+| `budget_usd` | float | unset | Soft cap with reservation accounting on the **run-wide total** (workers + lead + sub-leads). `spawn_worker` fails with `budget exceeded` once `spent + reserved + next_estimate > budget`; the lead is aborted if a reconciled turn drives total spend past the cap. |
+| `lead_budget_usd` | float | unset | Optional separate cap on **lead + sub-lead orchestration cost**, independent of `budget_usd`. When set, the lead is aborted once accumulated lead/sub-lead spend exceeds this cap, even if `budget_usd` still has headroom. Use this to bound orchestration spend without constraining worker spend. (#253) |
 | `lead_timeout_secs` | int | 3600 fallback | Wall-clock cap on the lead session. No upper bound — set generously for multi-hour orchestration plans. |
 
 Depth-2 controls (sub-leads):
@@ -250,6 +254,7 @@ read_down = false
 | Key | Type | Notes |
 |---|---|---|
 | `budget_usd` | float | Per-sub-lead envelope when `read_down = false`. |
+| `lead_budget_usd` | float | Per-sub-lead cap on the sub-lead's own + its workers' orchestration cost (analogous to `[lead].lead_budget_usd`). Independent of `budget_usd`. Honored when `read_down = false`. |
 | `max_workers` | int | Per-sub-lead worker pool when `read_down = false`. |
 | `lead_timeout_secs` | int | Wall-clock cap for the sub-lead session. |
 | `read_down` | bool | When true, the sub-lead shares the root's budget and worker pool instead of carving its own envelope. |
