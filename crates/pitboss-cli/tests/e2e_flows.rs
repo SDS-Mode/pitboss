@@ -40,57 +40,6 @@ fn mk_state(
     approval_policy: ApprovalPolicy,
 ) -> (Uuid, Arc<DispatchState>) {
     let run_id = Uuid::now_v7();
-    let lead = ResolvedLead {
-        id: "lead".into(),
-        directory: PathBuf::from("/tmp"),
-        prompt: "lead prompt".into(),
-        branch: None,
-        model: "claude-haiku-4-5".into(),
-        effort: Effort::High,
-        tools: vec![],
-        timeout_secs: 3600,
-        use_worktree: false,
-        env: Default::default(),
-        resume_session_id: None,
-        permission_routing: Default::default(),
-        allow_subleads: false,
-        max_subleads: None,
-        max_sublead_budget_usd: None,
-        max_total_workers: None,
-        sublead_defaults: None,
-    };
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: run_dir.to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: Some(lead),
-        max_workers: Some(4),
-        budget_usd: Some(5.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(approval_policy),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(run_dir.to_path_buf()));
     // Worker-side spawner: emits a complete stream-json run then exits 0.
     let worker_script = FakeScript::new()
         .stdout_line(r#"{"type":"system","subtype":"init","session_id":"worker-sess"}"#)
@@ -99,23 +48,14 @@ fn mk_state(
         )
         .exit_code(0);
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(worker_script));
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = run_dir.join(run_id.to_string());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("claude"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        approval_policy,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let state = support::state_builder::TestStateBuilder::new()
+        .with_lead()
+        .approval_policy(approval_policy)
+        .default_approval_policy(approval_policy)
+        .spawner(spawner)
+        .run_id(run_id)
+        .run_subdir(run_dir.join(run_id.to_string()))
+        .build_in(run_dir);
     (run_id, state)
 }
 

@@ -462,15 +462,9 @@ impl ApprovalBridge {
 mod tests {
     use super::*;
     use crate::dispatch::state::DispatchState;
-    use crate::manifest::resolve::ResolvedManifest;
-    use crate::manifest::schema::WorktreeCleanup;
-    use pitboss_core::process::{ProcessSpawner, TokioSpawner};
-    use pitboss_core::session::CancelToken;
-    use pitboss_core::store::{JsonFileStore, SessionStore};
-    use pitboss_core::worktree::{CleanupPolicy, WorktreeManager};
+    use crate::test_support::state_builder::TestStateBuilder;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use uuid::Uuid;
 
     async fn mk_state(policy: ApprovalPolicy) -> Arc<DispatchState> {
         mk_state_with_run_subdir(policy, PathBuf::from("/tmp")).await
@@ -484,58 +478,16 @@ mod tests {
         policy: ApprovalPolicy,
         run_subdir: PathBuf,
     ) -> Arc<DispatchState> {
-        let dir = TempDir::new().unwrap();
-        let manifest = ResolvedManifest {
-            manifest_schema_version: 0,
-            name: None,
-            max_parallel_tasks: Some(4),
-            halt_on_failure: false,
-            run_dir: dir.path().to_path_buf(),
-            worktree_cleanup: WorktreeCleanup::OnSuccess,
-            emit_event_stream: false,
-            claude_setting_sources: None,
-            tasks: vec![],
-            lead: None,
-            max_workers: Some(4),
-            budget_usd: Some(1.0),
-            lead_budget_usd: None,
-            lead_timeout_secs: None,
-            default_approval_policy: Some(policy),
-            denial_termination_policy: None,
-            notifications: vec![],
-            dump_shared_store: false,
-            require_plan_approval: false,
-            approval_rules: vec![],
-            container: None,
-            mcp_servers: vec![],
-            communication: Default::default(),
-            lifecycle: None,
-            worker_types: vec![],
-            sublead_types: vec![],
-            require_actor_type: false,
-            untyped_actor_policy: Default::default(),
-            agent_profiles: ::std::collections::HashMap::new(),
-        };
-        let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-        let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-        let wt_mgr = Arc::new(WorktreeManager::new());
-        let run_id = Uuid::now_v7();
+        let (dir, state) = TestStateBuilder::new()
+            .budget(1.0)
+            .tokio_spawner()
+            .claude_binary(PathBuf::from("/bin/true"))
+            .default_approval_policy(policy)
+            .approval_policy(policy)
+            .run_subdir(run_subdir)
+            .build();
         std::mem::forget(dir);
-        Arc::new(DispatchState::new(
-            run_id,
-            manifest,
-            store,
-            CancelToken::new(),
-            "lead".into(),
-            spawner,
-            PathBuf::from("/bin/true"),
-            wt_mgr,
-            CleanupPolicy::Never,
-            run_subdir,
-            policy,
-            None,
-            std::sync::Arc::new(crate::shared_store::SharedStore::new()),
-        ))
+        state
     }
 
     #[tokio::test]

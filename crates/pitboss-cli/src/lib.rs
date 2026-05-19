@@ -26,3 +26,6 @@ pub mod status;
 pub mod stream;
 pub mod tree;
 pub mod tui_table;
+
+#[cfg(test)]
+mod test_support;
