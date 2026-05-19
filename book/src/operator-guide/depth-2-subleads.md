@@ -50,6 +50,7 @@ read_down = false
 | `allow_subleads` | false | Required to expose `spawn_sublead` to the root lead. |
 | `max_subleads` | none | Optional cap on total sub-leads spawned across the run. |
 | `max_sublead_budget_usd` | none | Cap on the per-sub-lead `budget_usd` envelope. Spawn attempts exceeding this fail fast before any state is mutated. |
+| `lead_budget_usd` | none | Cap on **lead + sub-lead orchestration cost** only — independent of `budget_usd` and does not count worker spend. See [Manifest schema](./manifest-schema.md#lead--hierarchical-mode-single-table-exactly-one). |
 | `max_workers_across_tree` | none | Cap on total live workers (root + all sub-trees). |
 
 ### `[lead.sublead_defaults]`
