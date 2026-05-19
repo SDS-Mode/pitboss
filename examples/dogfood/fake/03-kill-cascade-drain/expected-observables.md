@@ -10,7 +10,7 @@ A root lead spawns two sub-leads in parallel:
 - **S2** — "phase 2"
 
 Each sub-lead has two active workers simulated by injecting cancel tokens
-directly into the sub-tree's `worker_cancels` map:
+directly into the sub-tree's `workers.cancels` map:
 - **S1-w0**, **S1-w1** — workers under S1's sub-tree
 - **S2-w0**, **S2-w1** — workers under S2's sub-tree
 
@@ -44,7 +44,7 @@ waiting on `root_cancel.await_drain()`. It wakes immediately and:
 
 1. Iterates every sub-lead registered in `state.subleads`.
 2. Calls `sub_layer.cancel.drain()` on each sub-lead's own cancel token.
-3. Iterates every worker cancel token in `sub_layer.worker_cancels` and calls
+3. Iterates every worker cancel token in `sub_layer.workers.cancels` and calls
    `tok.drain()` on each.
 
 This happens entirely inside the tokio runtime, so in an in-process test a

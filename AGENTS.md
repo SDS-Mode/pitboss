@@ -405,7 +405,7 @@ The resolved profile id is persisted to each `TaskRecord.actor_type`, surfaced i
 
 **Phase 1.5 (v0.12, landed):**
 - Per-actor MCP server scoping via `[[mcp_server]].scope = "type:<id>"` — see the `[[mcp_server]]` section above.
-- Resumed workers (`continue_worker` / `reprompt_worker`) preserve `actor_type` on the appended record via the in-memory `worker_actor_types` map populated at spawn.
+- Resumed workers (`continue_worker` / `reprompt_worker`) preserve `actor_type` on the appended record via the in-memory `workers.actor_types` map populated at spawn.
 - Synthesized cancellation records on lead-exit cleanup keep `actor_type` from the same map.
 - SQLite-backed runs round-trip `actor_type` (migration v10 adds the column; both backends are now at parity with `JsonFileStore`).
 

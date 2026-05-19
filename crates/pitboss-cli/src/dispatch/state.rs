@@ -405,7 +405,7 @@ pub struct DispatchState {
     /// by `handle_spawn_sublead` after the sub-lead's `LayerState` is
     /// registered (#252). Run-global (only the root layer hosts
     /// sub-leads — depth-2 cap), so it lives on `DispatchState` rather
-    /// than mirroring the per-layer `worker_actor_types` map.
+    /// than mirroring the per-layer `workers.actor_types` map.
     ///
     /// Read by `handle_permission_prompt` to look up a sub-lead
     /// caller's profile when applying the typed-profile auto-approve /
@@ -759,7 +759,8 @@ mod tests {
         let st = mk_state(None, None);
         let c = st
             .root
-            .worker_counters
+            .workers
+            .counters
             .read()
             .await
             .get("absent")

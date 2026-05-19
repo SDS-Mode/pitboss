@@ -65,20 +65,78 @@ pub struct ControlWriterSlot {
     pub sender: mpsc::Sender<crate::control::protocol::EventEnvelope>,
 }
 
+/// Per-task_id maps + the worker-done broadcast bus.
+///
+/// Split out of `LayerState` (#487) to narrow the access surface: every
+/// piece of state keyed by `task_id` lives here, plus the broadcast
+/// channel that fires when a worker transitions to `Done`. Handlers that
+/// only need worker bookkeeping can take `&WorkerRegistry` instead of
+/// `&LayerState` and physically can't touch budget or approval state.
+pub struct WorkerRegistry {
+    /// Map of task_id → worker state. Lead is also tracked here for convenience.
+    pub states: RwLock<HashMap<String, WorkerState>>,
+    /// Per-worker CancelToken, keyed by task_id.
+    pub cancels: RwLock<HashMap<String, CancelToken>>,
+    /// Per-worker prompt preview (first 80 chars of the worker's prompt).
+    pub prompts: RwLock<HashMap<String, String>>,
+    /// Per-worker resolved model, keyed by task_id.
+    pub models: RwLock<HashMap<String, String>>,
+    /// Per-worker resolved `actor_type` (matches a `[[worker_type]].id` from
+    /// the manifest), keyed by task_id. Populated at spawn time when the
+    /// caller resolves to `WorkerProfileResolution::Typed`. Read on resume
+    /// (continue/reprompt) so the rebuilt `mcp-config.json` can scope MCP
+    /// servers and the appended `TaskRecord` keeps its profile attribution.
+    /// (#252 Phase 1.5)
+    pub actor_types: RwLock<HashMap<String, String>>,
+    /// Per-task event counters.
+    pub counters: RwLock<HashMap<String, WorkerCounters>>,
+    /// Per-worker OS pid.
+    pub pids: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
+    /// Per-worker reserved cost (USD) at spawn time.
+    pub reservations: RwLock<HashMap<String, f64>>,
+    /// Broadcast channel that emits a `task_id` whenever a worker transitions
+    /// to `Done`. Subscribed to by `wait_for_worker` handlers.
+    pub done_tx: broadcast::Sender<String>,
+}
+
+impl WorkerRegistry {
+    /// Construct an empty registry with a fresh 64-slot `done_tx` channel.
+    /// The capacity matches the pre-split `LayerState::new` default; the
+    /// channel is mostly there for `wait_for_worker` consumers and a
+    /// `Lagged` receiver re-syncs from the `states` map.
+    pub fn new() -> Self {
+        let (done_tx, _) = broadcast::channel(64);
+        Self {
+            states: RwLock::new(HashMap::new()),
+            cancels: RwLock::new(HashMap::new()),
+            prompts: RwLock::new(HashMap::new()),
+            models: RwLock::new(HashMap::new()),
+            actor_types: RwLock::new(HashMap::new()),
+            counters: RwLock::new(HashMap::new()),
+            pids: RwLock::new(HashMap::new()),
+            reservations: RwLock::new(HashMap::new()),
+            done_tx,
+        }
+    }
+}
+
+impl Default for WorkerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// All state owned by a single coordination layer (root layer or a
 /// sub-tree layer).
-///
-/// Field names and types mirror the v0.5 `DispatchState` fields exactly so
-/// that all existing callsites continue to work via `Deref<Target = LayerState>`
-/// on `DispatchState`.
 pub struct LayerState {
     pub run_id: Uuid,
     pub manifest: ResolvedManifest,
     pub store: Arc<dyn SessionStore>,
     pub cancel: CancelToken,
     pub lead_id: String,
-    /// Map of task_id → worker state. Lead is also tracked here for convenience.
-    pub workers: RwLock<HashMap<String, WorkerState>>,
+    /// Worker bookkeeping: per-task_id maps + the `Done` broadcast.
+    /// Split out of this struct in #487.
+    pub workers: WorkerRegistry,
     /// Total USD cost spent so far on completed workers in this layer.
     /// Lead and sub-lead token spend live in their own counters
     /// (`lead_spent_usd`); helpers that compute the total run spend sum
@@ -101,24 +159,6 @@ pub struct LayerState {
     /// `TaskRecord.failure_reason` names the overspend rather than
     /// looking like a generic cancellation. (#253)
     pub budget_abort_reason: std::sync::Mutex<Option<String>>,
-    /// Broadcast channel that emits a `task_id` whenever a worker transitions
-    /// to `Done`. Subscribed to by `wait_for_worker` handlers.
-    pub done_tx: broadcast::Sender<String>,
-    /// Per-worker CancelToken, keyed by task_id.
-    pub worker_cancels: RwLock<HashMap<String, CancelToken>>,
-    /// Per-worker prompt preview (first 80 chars of the worker's prompt).
-    pub worker_prompts: RwLock<HashMap<String, String>>,
-    /// Per-worker resolved model, keyed by task_id.
-    pub worker_models: RwLock<HashMap<String, String>>,
-    /// Per-worker resolved `actor_type` (matches a `[[worker_type]].id` from
-    /// the manifest), keyed by task_id. Populated at spawn time when the
-    /// caller resolves to `WorkerProfileResolution::Typed`. Read on resume
-    /// (continue/reprompt) so the rebuilt `mcp-config.json` can scope MCP
-    /// servers and the appended `TaskRecord` keeps its profile attribution.
-    /// (#252 Phase 1.5)
-    pub worker_actor_types: RwLock<HashMap<String, String>>,
-    /// Per-worker reserved cost (USD) at spawn time.
-    pub worker_reservations: RwLock<HashMap<String, f64>>,
     /// Dependencies needed to actually launch worker subprocesses.
     pub spawner: Arc<dyn ProcessSpawner>,
     pub claude_binary: PathBuf,
@@ -180,14 +220,10 @@ pub struct LayerState {
     /// Shared by clone across the root layer and every sub-tree
     /// layer so the entire run funnels into a single bus.
     pub events_tx: broadcast::Sender<crate::control::protocol::EventEnvelope>,
-    /// Per-task event counters.
-    pub worker_counters: RwLock<HashMap<String, WorkerCounters>>,
     /// v0.4.1: notification router.
     pub notification_router: Option<std::sync::Arc<crate::notify::NotificationRouter>>,
     /// In-memory shared store for hub-mediated lead ↔ worker coordination.
     pub shared_store: std::sync::Arc<crate::shared_store::SharedStore>,
-    /// Per-worker OS pid.
-    pub worker_pids: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU32>>>,
     /// Plan-approval gate.
     pub plan_approved: std::sync::atomic::AtomicBool,
     /// Original reservation amount (USD) at sub-lead spawn time.
@@ -231,10 +267,13 @@ impl std::fmt::Debug for LayerState {
         f.debug_struct("LayerState")
             .field("run_id", &self.run_id)
             .field("lead_id", &self.lead_id)
-            .field("workers", &self.workers.try_read().map(|g| g.len()).ok())
             .field(
-                "worker_cancels",
-                &self.worker_cancels.try_read().map(|g| g.len()).ok(),
+                "workers",
+                &self.workers.states.try_read().map(|g| g.len()).ok(),
+            )
+            .field(
+                "workers.cancels",
+                &self.workers.cancels.try_read().map(|g| g.len()).ok(),
             )
             .finish_non_exhaustive()
     }
@@ -272,7 +311,6 @@ impl LayerState {
             std::path::Path::new("/"),
             false,
         ));
-        let (done_tx, _) = broadcast::channel(64);
         // PR-H of #259: each `LayerState::new` mints its own broadcast
         // bus by default. Prod callers (`DispatchState::new`, sub-lead
         // spawn) override via [`Self::with_events_tx`] to share the
@@ -284,17 +322,11 @@ impl LayerState {
             store,
             cancel,
             lead_id,
-            workers: RwLock::new(HashMap::new()),
+            workers: WorkerRegistry::new(),
             spent_usd: Mutex::new(0.0),
             reserved_usd: Mutex::new(0.0),
             lead_spent_usd: std::sync::Mutex::new(0.0),
             budget_abort_reason: std::sync::Mutex::new(None),
-            done_tx,
-            worker_cancels: RwLock::new(HashMap::new()),
-            worker_prompts: RwLock::new(HashMap::new()),
-            worker_models: RwLock::new(HashMap::new()),
-            worker_actor_types: RwLock::new(HashMap::new()),
-            worker_reservations: RwLock::new(HashMap::new()),
             spawner,
             claude_binary,
             wt_mgr,
@@ -306,10 +338,8 @@ impl LayerState {
             control_writer: Mutex::new(None),
             event_log,
             events_tx,
-            worker_counters: RwLock::new(HashMap::new()),
             notification_router,
             shared_store,
-            worker_pids: RwLock::new(HashMap::new()),
             plan_approved: std::sync::atomic::AtomicBool::new(false),
             original_reservation_usd,
             policy_matcher: Mutex::new(None),
@@ -487,6 +517,7 @@ impl LayerState {
 
     pub async fn active_worker_count(&self) -> usize {
         self.workers
+            .states
             .read()
             .await
             .iter()
@@ -512,7 +543,7 @@ impl LayerState {
     /// Register a worker's `CancelToken` under `task_id` and immediately
     /// propagate any in-flight drain/terminate state from this layer's
     /// `cancel` to the worker's token. Centralizes the previously-inlined
-    /// pattern at `mcp/tools.rs` (insert into `worker_cancels`, then
+    /// pattern at `mcp/tools.rs` (insert into `workers.cancels`, then
     /// check `target_layer.cancel.is_terminated()` / `is_draining()`).
     ///
     /// The eager propagation is what closes the post-register cascade
@@ -521,21 +552,22 @@ impl LayerState {
     /// would otherwise miss the cancel signal. Pinned by the integration
     /// tests in `tests/cancel_cascade_flows.rs`.
     pub async fn register_worker_cancel(&self, task_id: String, token: CancelToken) {
-        self.worker_cancels
+        self.workers
+            .cancels
             .write()
             .await
             .insert(task_id, token.clone());
         self.cancel.cascade_to(&token);
     }
 
-    /// Walk every registered `worker_cancels` entry and cascade this
+    /// Walk every registered `workers.cancels` entry and cascade this
     /// layer's current cancel state to it via `CancelToken::cascade_to`.
     /// Used by the per-sublead watcher tasks installed by
     /// `install_sublead_cancel_watcher` — both the drain and terminate
     /// watchers funnel through this method so the cascade rule
     /// (terminate dominates drain) is encoded in exactly one place.
     pub async fn cascade_to_workers(&self) {
-        let workers = self.worker_cancels.read().await;
+        let workers = self.workers.cancels.read().await;
         for (worker_id, tok) in workers.iter() {
             tracing::debug!(worker_id = %worker_id, "cascading cancel state to sub-tree worker");
             self.cancel.cascade_to(tok);
@@ -556,8 +588,8 @@ mod tests {
     #[tokio::test]
     async fn new_layer_starts_empty() {
         let (_dir, layer) = mk_layer();
-        assert!(layer.workers.read().await.is_empty());
-        assert!(layer.worker_cancels.read().await.is_empty());
+        assert!(layer.workers.states.read().await.is_empty());
+        assert!(layer.workers.cancels.read().await.is_empty());
         assert_eq!(*layer.spent_usd.lock().await, 0.0);
         assert_eq!(*layer.reserved_usd.lock().await, 0.0);
     }

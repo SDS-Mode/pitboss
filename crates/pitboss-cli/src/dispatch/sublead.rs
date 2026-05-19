@@ -224,12 +224,12 @@ pub async fn resolve_envelope(
 
     // ── Cap: max_total_workers ─────────────────────────────────────────
     if let Some(cap) = lead.and_then(|l| l.max_total_workers) {
-        let root_workers = state.root.workers.read().await.len() as u32;
+        let root_workers = state.root.workers.states.read().await.len() as u32;
         let subleads_guard = state.subleads.read().await;
         let sub_workers: u32 = {
             let mut total = 0u32;
             for sub in subleads_guard.values() {
-                total += sub.workers.read().await.len() as u32;
+                total += sub.workers.states.read().await.len() as u32;
             }
             total
         };
@@ -1086,7 +1086,7 @@ pub async fn reconcile_terminated_sublead(
     // leave it alone rather than clobbering richer data.
     {
         use crate::dispatch::state::WorkerState;
-        let mut workers = sub_layer.workers.write().await;
+        let mut workers = sub_layer.workers.states.write().await;
         let already_done = matches!(workers.get(sublead_id), Some(WorkerState::Done(_)));
         if !already_done {
             let (started_at, claude_session_id) = match workers.get(sublead_id) {
@@ -1209,7 +1209,7 @@ pub async fn reconcile_terminated_sublead(
         .insert(sublead_id.to_string(), record);
 
     // Wake any wait_actor subscribers blocked on this sublead_id.
-    let _ = state.root.done_tx.send(sublead_id.to_string());
+    let _ = state.root.workers.done_tx.send(sublead_id.to_string());
 
     Ok(())
 }

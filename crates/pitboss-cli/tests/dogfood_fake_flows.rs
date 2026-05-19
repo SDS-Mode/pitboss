@@ -448,7 +448,7 @@ async fn dogfood_isolation_strict_tree() {
 ///
 /// Same as spotlight #02: DispatchState + McpServer constructed in-process,
 /// driven via FakeMcpClient. Worker cancel tokens are injected directly into
-/// each sub-tree's `worker_cancels` map to simulate the state the cascade must
+/// each sub-tree's `workers.cancels` map to simulate the state the cascade must
 /// handle (Phase 4+ will wire real sub-tree workers).
 #[tokio::test]
 async fn dogfood_kill_cascade_drain() {
@@ -511,8 +511,8 @@ async fn dogfood_kill_cascade_drain() {
     for sublead_id in [&s1_id, &s2_id] {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(sublead_id.as_str()).unwrap();
-        let mut workers = sub.workers.write().await;
-        let mut cancels = sub.worker_cancels.write().await;
+        let mut workers = sub.workers.states.write().await;
+        let mut cancels = sub.workers.cancels.write().await;
         for worker_n in 0..2 {
             let worker_id = format!("{sublead_id}-w{worker_n}");
             workers.insert(
@@ -528,13 +528,13 @@ async fn dogfood_kill_cascade_drain() {
         let subleads = state.subleads.read().await;
         assert_eq!(subleads.len(), 2, "both sub-leads should be registered");
         for (sublead_id, sub) in subleads.iter() {
-            let worker_cancels = sub.worker_cancels.read().await;
+            let cancels = sub.workers.cancels.read().await;
             assert_eq!(
-                worker_cancels.len(),
+                cancels.len(),
                 2,
                 "sub-lead {sublead_id} should have 2 worker cancel tokens pre-cancel"
             );
-            for (wid, tok) in worker_cancels.iter() {
+            for (wid, tok) in cancels.iter() {
                 assert!(
                     !tok.is_draining(),
                     "pre-cancel: worker token {wid} under {sublead_id} should not be draining"
@@ -573,7 +573,7 @@ async fn dogfood_kill_cascade_drain() {
                 sub.cancel.is_draining(),
                 "cascade should have drained sub-tree {sublead_id}"
             );
-            for (wid, tok) in sub.worker_cancels.read().await.iter() {
+            for (wid, tok) in sub.workers.cancels.read().await.iter() {
                 assert!(
                     tok.is_draining(),
                     "cascade should have drained sub-tree worker {wid} under {sublead_id}"

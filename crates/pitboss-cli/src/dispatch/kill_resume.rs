@@ -126,7 +126,7 @@ pub async fn run_kill_resume_loop(
     let mut current_cmd = args.initial_cmd;
 
     let overall_started_at = Utc::now();
-    layer.workers.write().await.insert(
+    layer.workers.states.write().await.insert(
         actor_id.clone(),
         WorkerState::Running {
             started_at: overall_started_at,
@@ -181,7 +181,7 @@ pub async fn run_kill_resume_loop(
         // fires on the `system{subtype:"init"}` event so it's available
         // mid-run) or from the final result event.
         if let Ok(sid) = session_id_rx.try_recv() {
-            layer.workers.write().await.insert(
+            layer.workers.states.write().await.insert(
                 actor_id.clone(),
                 WorkerState::Running {
                     started_at: overall_started_at,
@@ -208,7 +208,7 @@ pub async fn run_kill_resume_loop(
                 );
                 reprompt_count += 1;
                 current_cmd = build_resume_cmd(sid, &new_prompt);
-                layer.workers.write().await.insert(
+                layer.workers.states.write().await.insert(
                     actor_id.clone(),
                     WorkerState::Running {
                         started_at: overall_started_at,

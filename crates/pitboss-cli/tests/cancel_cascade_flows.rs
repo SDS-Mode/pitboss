@@ -27,7 +27,7 @@
 //! the eager-cascade block. The `is_terminated()` branch at
 //! `tools.rs:514-516` is genuine defensive coverage for an intra-handler
 //! race (terminate fires after target-layer resolution succeeds but
-//! before worker_cancels is read), which is not observable through the
+//! before workers.cancels is read), which is not observable through the
 //! external MCP API. Pinning that race would require an in-process hook
 //! that 100.2's refactor will provide naturally; revisit then.
 //!
@@ -164,7 +164,7 @@ async fn sublead_spawned_after_root_terminate_inherits_terminate() {
 /// Worker registered in a **drained sub-tree** (root still healthy) must
 /// inherit drain via the eager cascade at `tools.rs:506-521`. The
 /// per-sublead fire-once watcher already woke when the sub-tree's
-/// `cancel` was tripped and snapshotted an empty `worker_cancels` —
+/// `cancel` was tripped and snapshotted an empty `workers.cancels` —
 /// only the eager check can reach this late-registered worker.
 #[tokio::test]
 async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
@@ -204,8 +204,8 @@ async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
 
     let subleads = state.subleads.read().await;
     let sub_layer = subleads.get(&sublead_id).unwrap();
-    let worker_cancels = sub_layer.worker_cancels.read().await;
-    let tok = worker_cancels
+    let cancels = sub_layer.workers.cancels.read().await;
+    let tok = cancels
         .get(&task_id)
         .expect("worker cancel token must be registered on the sub-tree layer");
     assert!(

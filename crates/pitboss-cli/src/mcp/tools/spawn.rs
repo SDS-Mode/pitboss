@@ -251,14 +251,15 @@ pub async fn handle_spawn_worker(
         *reserved_guard += estimate;
         drop(reserved_guard);
         target_layer
-            .worker_reservations
+            .workers
+            .reservations
             .write()
             .await
             .insert(task_id.clone(), estimate);
     }
 
     {
-        let mut workers = target_layer.workers.write().await;
+        let mut workers = target_layer.workers.states.write().await;
         workers.insert(task_id.clone(), WorkerState::Pending);
     }
 
@@ -278,7 +279,7 @@ pub async fn handle_spawn_worker(
         .insert(task_id.clone(), layer_index_value);
 
     // Register the worker's CancelToken on the target layer. This both
-    // inserts into `worker_cancels` and eagerly propagates any in-flight
+    // inserts into `workers.cancels` and eagerly propagates any in-flight
     // drain/terminate state from `target_layer.cancel` to the new token —
     // the post-#99 cascade gap fix lives inside `register_worker_cancel`
     // so the watcher / registration paths share one cascade rule
@@ -291,7 +292,8 @@ pub async fn handle_spawn_worker(
     // Record the prompt preview before spawning the background task.
     let prompt_preview: String = args.prompt.chars().take(80).collect();
     target_layer
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert(task_id.clone(), prompt_preview);
@@ -299,7 +301,8 @@ pub async fn handle_spawn_worker(
     // Track the worker's resolved model so cost estimation can price
     // completed workers at the correct rate.
     target_layer
-        .worker_models
+        .workers
+        .models
         .write()
         .await
         .insert(task_id.clone(), worker_model.clone());
@@ -309,7 +312,8 @@ pub async fn handle_spawn_worker(
     // reattach the type to appended TaskRecords. (#252 Phase 1.5)
     if let Some(t) = resolved_worker_type_id.as_deref() {
         target_layer
-            .worker_actor_types
+            .workers
+            .actor_types
             .write()
             .await
             .insert(task_id.clone(), t.to_string());
@@ -392,7 +396,8 @@ pub async fn handle_spawn_worker(
 
     // Retrieve the per-worker cancel token we inserted above.
     let worker_cancel_bg = target_layer
-        .worker_cancels
+        .workers
+        .cancels
         .read()
         .await
         .get(&task_id)
@@ -523,6 +528,7 @@ async fn run_worker(
                 let _ = layer.store.append_record(layer.run_id, &rec).await;
                 layer
                     .workers
+                    .states
                     .write()
                     .await
                     .insert(task_id.clone(), WorkerState::Done(rec));
@@ -533,9 +539,9 @@ async fn run_worker(
                 // Fan out to root so cross-layer wait_actor subscribers wake
                 // even on early-exit paths like SpawnFailed. Same rationale
                 // as the normal-exit fan-out below.
-                let _ = layer.done_tx.send(task_id.clone());
+                let _ = layer.workers.done_tx.send(task_id.clone());
                 if !std::sync::Arc::ptr_eq(&layer, &state.root) {
-                    let _ = state.root.done_tx.send(task_id);
+                    let _ = state.root.workers.done_tx.send(task_id);
                 }
                 return;
             }
@@ -545,7 +551,7 @@ async fn run_worker(
     };
 
     // Transition Pending → Running.
-    layer.workers.write().await.insert(
+    layer.workers.states.write().await.insert(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
@@ -677,7 +683,7 @@ async fn run_worker(
         let task_id_for_rx = task_id.clone();
         let promote_task = tokio::spawn(async move {
             if let Some(sid) = session_id_rx.recv().await {
-                let mut workers = session_layer.workers.write().await;
+                let mut workers = session_layer.workers.states.write().await;
                 if let Some(WorkerState::Running { started_at, .. }) =
                     workers.get(&task_id_for_rx).cloned()
                 {
@@ -696,7 +702,8 @@ async fn run_worker(
         // `run_to_completion` right after the spawn succeeds.
         let pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         layer
-            .worker_pids
+            .workers
+            .pids
             .write()
             .await
             .insert(task_id.clone(), pid_slot.clone());
@@ -709,7 +716,7 @@ async fn run_worker(
             .await;
         promote_task.abort();
         // Clean up the pid slot — the worker is done, the pid is stale.
-        layer.worker_pids.write().await.remove(&task_id);
+        layer.workers.pids.write().await.remove(&task_id);
         outcome
     };
 
@@ -749,7 +756,8 @@ async fn run_worker(
 
     let worktree_path = if use_worktree { Some(cwd) } else { None };
     let counters = layer
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get(&task_id)
@@ -825,6 +833,7 @@ async fn run_worker(
     // Transition to Done + broadcast on the layer's done channel.
     layer
         .workers
+        .states
         .write()
         .await
         .insert(task_id.clone(), WorkerState::Done(rec));
@@ -837,15 +846,15 @@ async fn run_worker(
     }
     // Broadcast termination on the worker's own layer AND on root.
     // wait_for_actor_internal (the engine for wait_actor / wait_for_worker)
-    // always subscribes via state.root.done_tx — regardless of which layer
+    // always subscribes via state.root.workers.done_tx — regardless of which layer
     // the caller is in — so a sublead-spawned worker that only fired its
     // own layer's done_tx would be invisible to its parent sub-lead's
     // wait_actor (which subscribes to root). Fan out to root so every
     // wait_actor caller, anywhere in the tree, wakes on every worker
     // completion. Cheap; broadcast.send is O(subscribers).
-    let _ = layer.done_tx.send(task_id.clone());
+    let _ = layer.workers.done_tx.send(task_id.clone());
     if !std::sync::Arc::ptr_eq(&layer, &state.root) {
-        let _ = state.root.done_tx.send(task_id);
+        let _ = state.root.workers.done_tx.send(task_id);
     }
 }
 
@@ -854,7 +863,8 @@ async fn run_worker(
 /// (returns 0 from the map). Clamped at 0.0 to avoid f64 drift going negative.
 async fn release_reservation_for_layer(layer: &Arc<LayerState>, task_id: &str) {
     let reserved_amount = layer
-        .worker_reservations
+        .workers
+        .reservations
         .write()
         .await
         .remove(task_id)
@@ -870,8 +880,8 @@ async fn release_reservation_for_layer(layer: &Arc<LayerState>, task_id: &str) {
 /// both root and sub-tree layers.
 async fn estimate_new_worker_cost_for_layer(layer: &Arc<LayerState>, intended_model: &str) -> f64 {
     use pitboss_core::prices::cost_usd;
-    let workers = layer.workers.read().await;
-    let models = layer.worker_models.read().await;
+    let workers = layer.workers.states.read().await;
+    let models = layer.workers.models.read().await;
     let mut costs: Vec<f64> = Vec::new();
     for (id, w) in workers.iter() {
         if let WorkerState::Done(rec) = w {
@@ -1035,7 +1045,8 @@ pub async fn spawn_resume_worker(
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
     let model = layer
-        .worker_models
+        .workers
+        .models
         .read()
         .await
         .get(&task_id)
@@ -1044,8 +1055,13 @@ pub async fn spawn_resume_worker(
     // Resolve the worker's typed-profile id (if any) so the rebuilt
     // mcp-config.json scopes correctly and the appended TaskRecord
     // keeps its profile attribution. (#252 Phase 1.5)
-    let resumed_actor_type: Option<String> =
-        layer.worker_actor_types.read().await.get(&task_id).cloned();
+    let resumed_actor_type: Option<String> = layer
+        .workers
+        .actor_types
+        .read()
+        .await
+        .get(&task_id)
+        .cloned();
     let tools: Vec<String> = layer
         .manifest
         .lead
@@ -1085,11 +1101,12 @@ pub async fn spawn_resume_worker(
         worker_cancel.drain();
     }
     layer
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert(task_id.clone(), worker_cancel.clone());
-    layer.workers.write().await.insert(
+    layer.workers.states.write().await.insert(
         task_id.clone(),
         WorkerState::Running {
             started_at: Utc::now(),
@@ -1215,7 +1232,8 @@ pub async fn spawn_resume_worker(
     // freeze-pause works across continue_worker boundaries.
     let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     layer
-        .worker_pids
+        .workers
+        .pids
         .write()
         .await
         .insert(task_id.clone(), resume_pid_slot.clone());
@@ -1236,7 +1254,7 @@ pub async fn spawn_resume_worker(
         )
         .await;
         // Clean up the pid slot when the resumed subprocess exits.
-        layer_bg.worker_pids.write().await.remove(&task_id_bg);
+        layer_bg.workers.pids.write().await.remove(&task_id_bg);
         let mut status = match outcome.final_state {
             pitboss_core::session::SessionState::Completed => TaskStatus::Success,
             pitboss_core::session::SessionState::Failed { .. } => TaskStatus::Failed,
@@ -1259,7 +1277,8 @@ pub async fn spawn_resume_worker(
             }
         }
         let counters = layer_bg
-            .worker_counters
+            .workers
+            .counters
             .read()
             .await
             .get(&task_id_bg)
@@ -1294,7 +1313,7 @@ pub async fn spawn_resume_worker(
             cost_usd,
             // Preserve the typed-profile attribution across resume so the
             // appended record carries the same `actor_type` as the original
-            // spawn — read from the in-memory `worker_actor_types` map at
+            // spawn — read from the in-memory `workers.actor_types` map at
             // resume entry. (#252 Phase 1.5)
             actor_type: resumed_actor_type_bg.clone(),
             // Plumb kill reason from the resumed worker's cancel token.
@@ -1317,6 +1336,7 @@ pub async fn spawn_resume_worker(
         }
         layer_bg
             .workers
+            .states
             .write()
             .await
             .insert(task_id_bg.clone(), WorkerState::Done(rec));
@@ -1328,7 +1348,7 @@ pub async fn spawn_resume_worker(
             .write()
             .await
             .remove(&task_id_bg);
-        let _ = layer_bg.done_tx.send(task_id_bg);
+        let _ = layer_bg.workers.done_tx.send(task_id_bg);
     });
 
     Ok(())

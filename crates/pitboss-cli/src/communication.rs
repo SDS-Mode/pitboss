@@ -1008,18 +1008,25 @@ async fn worker_parent(
     if let Some(owner) = state.worker_layer_index.read().await.get(actor_id).cloned() {
         return Ok(Some(owner.unwrap_or_else(|| state.root.lead_id.clone())));
     }
-    if state.root.workers.read().await.contains_key(actor_id) {
+    if state
+        .root
+        .workers
+        .states
+        .read()
+        .await
+        .contains_key(actor_id)
+    {
         return Ok(Some(state.root.lead_id.clone()));
     }
     let subleads = state.subleads.read().await;
     for (sublead_id, layer) in subleads.iter() {
-        if layer.workers.read().await.contains_key(actor_id) {
+        if layer.workers.states.read().await.contains_key(actor_id) {
             return Ok(Some(sublead_id.clone()));
         }
     }
     let terminated = state.terminated_sublead_layers.read().await;
     for layer in terminated.iter() {
-        if layer.workers.read().await.contains_key(actor_id) {
+        if layer.workers.states.read().await.contains_key(actor_id) {
             return Ok(Some(layer.lead_id.clone()));
         }
     }
@@ -1030,7 +1037,14 @@ async fn actor_exists(state: &Arc<DispatchState>, actor_id: &str) -> bool {
     if actor_id == state.root.lead_id {
         return true;
     }
-    if state.root.workers.read().await.contains_key(actor_id) {
+    if state
+        .root
+        .workers
+        .states
+        .read()
+        .await
+        .contains_key(actor_id)
+    {
         return true;
     }
     let subleads = state.subleads.read().await;
@@ -1038,13 +1052,13 @@ async fn actor_exists(state: &Arc<DispatchState>, actor_id: &str) -> bool {
         return true;
     }
     for layer in subleads.values() {
-        if layer.workers.read().await.contains_key(actor_id) {
+        if layer.workers.states.read().await.contains_key(actor_id) {
             return true;
         }
     }
     let terminated = state.terminated_sublead_layers.read().await;
     for layer in terminated.iter() {
-        if layer.lead_id == actor_id || layer.workers.read().await.contains_key(actor_id) {
+        if layer.lead_id == actor_id || layer.workers.states.read().await.contains_key(actor_id) {
             return true;
         }
     }
@@ -1103,6 +1117,7 @@ mod tests {
         state
             .root
             .workers
+            .states
             .write()
             .await
             .insert(id.to_string(), WorkerState::Pending);
@@ -1132,6 +1147,7 @@ mod tests {
         ));
         layer
             .workers
+            .states
             .write()
             .await
             .insert(worker.to_string(), WorkerState::Pending);

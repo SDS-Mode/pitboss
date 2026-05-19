@@ -240,9 +240,9 @@ async fn wait_actor_alias_resolves_worker_id() {
             actor_type: None,
             terminate_reason: None,
         };
-        let mut w = state_clone.root.workers.write().await;
+        let mut w = state_clone.root.workers.states.write().await;
         w.insert(worker_id_clone.clone(), WorkerState::Done(rec));
-        let _ = state_clone.root.done_tx.send(worker_id_clone);
+        let _ = state_clone.root.workers.done_tx.send(worker_id_clone);
     });
 
     // wait_actor should accept a worker id (back-compat path) and

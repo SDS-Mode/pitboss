@@ -1,6 +1,6 @@
 //! Wait-side MCP handlers: `wait_for_worker`, `wait_for_actor`,
 //! `wait_for_any`. All three share a single internal engine
-//! `wait_for_actor_internal` that subscribes to `state.root.done_tx`
+//! `wait_for_actor_internal` that subscribes to `state.root.workers.done_tx`
 //! before any fast-path check (preventing the cross-layer
 //! subscribe-after-completion race).
 
@@ -32,7 +32,7 @@ async fn wait_for_actor_internal(
     //    broadcast is missed and the wait blocks until either the
     //    timeout fires or the sublead itself is killed by lead_timeout.
     //    Subscribing first guarantees no completion is lost.
-    let mut rx = state.root.done_tx.subscribe();
+    let mut rx = state.root.workers.done_tx.subscribe();
 
     // ── Fast path: already Done ────────────────────────────────────────────────
     // 1. Worker already Done? (scan all layers — the worker may be in a
@@ -141,12 +141,12 @@ pub async fn handle_wait_for_any(
     // wait_for_actor_internal (commit 70e2bd8). Without this, a worker
     // that terminated between our existence check and our subscribe is
     // lost and we block until timeout.
-    let mut rx = state.root.done_tx.subscribe();
+    let mut rx = state.root.workers.done_tx.subscribe();
     let wait_duration = Duration::from_secs(timeout_secs.unwrap_or(3600));
 
     // Fast path: any already Done? Scan ALL layers — sub-lead-spawned
     // workers are registered in the sub-lead layer's workers map, not
-    // root's. Pre-fix, this only checked `state.root.workers.read()` (= root
+    // root's. Pre-fix, this only checked `state.root.workers.states.read()` (= root
     // via Deref) and so stayed blocked indefinitely on sub-lead-owned
     // workers. Same bug class as commit d134289 (which fixed wait_actor
     // + list_workers + worker_status) but this handler had its own

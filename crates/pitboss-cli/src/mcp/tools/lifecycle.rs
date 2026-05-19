@@ -22,12 +22,12 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
     // calling `list_workers` got an empty list even when they had their
     // own workers active — the workers were registered in the sub-lead
     // layer's own `workers` map by `handle_spawn_worker`'s
-    // `target_layer.workers.write()`.
+    // `target_layer.workers.states.write()`.
     //
     // Lead id filtering: excludes the root lead id. Sub-lead ids aren't
     // registered as workers so they don't need filtering here.
     let mut summaries: Vec<WorkerSummary> = Vec::new();
-    let prompts = state.root.worker_prompts.read().await;
+    let prompts = state.root.workers.prompts.read().await;
     let render = |id: &String, w: &WorkerState| -> WorkerSummary {
         let (state_str, started_at) = match w {
             WorkerState::Pending => ("Pending".to_string(), None),
@@ -61,14 +61,14 @@ pub async fn handle_list_workers(state: &Arc<DispatchState>) -> Vec<WorkerSummar
             started_at,
         }
     };
-    for (id, w) in state.root.workers.read().await.iter() {
+    for (id, w) in state.root.workers.states.read().await.iter() {
         if id != &state.root.lead_id {
             summaries.push(render(id, w));
         }
     }
     let subleads = state.subleads.read().await;
     for layer in subleads.values() {
-        for (id, w) in layer.workers.read().await.iter() {
+        for (id, w) in layer.workers.states.read().await.iter() {
             // Sub-lead layers hold the sub-lead itself as a "worker" entry
             // (the claude subprocess registered via workers.write() in
             // finalize_sublead_spawn). Filter by layer.lead_id so the
@@ -140,13 +140,14 @@ pub async fn handle_worker_status(
     };
     // #151 L2: read prompt_preview from the *owning* layer, not just
     // root. Sub-tree workers' prompts live in their layer's
-    // `worker_prompts`; pre-fix, `handle_worker_status` only checked
+    // `workers.prompts`; pre-fix, `handle_worker_status` only checked
     // root and so returned an empty prompt_preview for every
     // sub-lead-spawned worker. Falls back to root for compat in case
     // an older record landed there.
     let prompt_preview = if let Some(layer) = layer_for_worker(state, task_id).await {
         layer
-            .worker_prompts
+            .workers
+            .prompts
             .read()
             .await
             .get(task_id)
@@ -155,7 +156,8 @@ pub async fn handle_worker_status(
     } else {
         state
             .root
-            .worker_prompts
+            .workers
+            .prompts
             .read()
             .await
             .get(task_id)
@@ -181,7 +183,7 @@ pub async fn handle_cancel_worker(
     let layer = layer_for_worker(state, task_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
-    let cancels = layer.worker_cancels.read().await;
+    let cancels = layer.workers.cancels.read().await;
     let Some(token) = cancels.get(task_id) else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
@@ -204,7 +206,7 @@ pub async fn handle_pause_worker(
     let layer = layer_for_worker(state, task_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {task_id}"))?;
-    let mut workers = layer.workers.write().await;
+    let mut workers = layer.workers.states.write().await;
     let Some(entry) = workers.get(task_id).cloned() else {
         anyhow::bail!("unknown task_id: {task_id}");
     };
@@ -214,7 +216,7 @@ pub async fn handle_pause_worker(
             session_id: Some(sid),
         } => match mode {
             PauseMode::Cancel => {
-                let cancels = layer.worker_cancels.read().await;
+                let cancels = layer.workers.cancels.read().await;
                 if let Some(tok) = cancels.get(task_id) {
                     // #475: pause-by-cancel — same kind of kill as
                     // terminate_worker, but issued via the MCP pause
@@ -239,7 +241,8 @@ pub async fn handle_pause_worker(
                 // Read the pid slot. If 0 (subprocess hasn't spawned
                 // yet), fail — freeze is meaningless without a pid.
                 let pid = layer
-                    .worker_pids
+                    .workers
+                    .pids
                     .read()
                     .await
                     .get(task_id)
@@ -278,7 +281,13 @@ pub async fn handle_continue_worker(
     let layer = layer_for_worker(state, &args.task_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {}", args.task_id))?;
-    let current = layer.workers.read().await.get(&args.task_id).cloned();
+    let current = layer
+        .workers
+        .states
+        .read()
+        .await
+        .get(&args.task_id)
+        .cloned();
     match current {
         Some(WorkerState::Paused { session_id, .. }) => {
             let prompt = args.prompt.unwrap_or_else(|| "continue".into());
@@ -296,7 +305,8 @@ pub async fn handle_continue_worker(
             // a resume-only concept); clients that want to inject a
             // new prompt should thaw + reprompt as two steps.
             let pid = layer
-                .worker_pids
+                .workers
+                .pids
                 .read()
                 .await
                 .get(&args.task_id)
@@ -311,7 +321,7 @@ pub async fn handle_continue_worker(
             crate::dispatch::signals::resume_stopped(pid)?;
             // Transition back to Running, preserving the ORIGINAL
             // started_at so wall-clock duration stays accurate.
-            layer.workers.write().await.insert(
+            layer.workers.states.write().await.insert(
                 args.task_id.clone(),
                 WorkerState::Running {
                     started_at,
@@ -335,13 +345,19 @@ pub async fn handle_reprompt_worker(
     let layer = layer_for_worker(state, &args.task_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown task_id: {}", args.task_id))?;
-    let current = layer.workers.read().await.get(&args.task_id).cloned();
+    let current = layer
+        .workers
+        .states
+        .read()
+        .await
+        .get(&args.task_id)
+        .cloned();
     let session_id = match current {
         Some(WorkerState::Running {
             session_id: Some(sid),
             ..
         }) => {
-            let cancels = layer.worker_cancels.read().await;
+            let cancels = layer.workers.cancels.read().await;
             if let Some(tok) = cancels.get(&args.task_id) {
                 // #475: reprompt issues an internal kill+spawn-resume; not
                 // operator-initiated in the kill-audit sense, but record
@@ -392,7 +408,8 @@ pub async fn handle_reprompt_worker(
     // doesn't falsely inflate the reprompt count. Bump the counter on
     // the OWNING layer, not root.
     layer
-        .worker_counters
+        .workers
+        .counters
         .write()
         .await
         .entry(args.task_id)

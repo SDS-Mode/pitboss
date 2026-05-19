@@ -87,11 +87,12 @@ async fn pause_op_writes_events_jsonl() {
     let worker_token = CancelToken::new();
     state
         .root
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-1".into(), worker_token);
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -308,7 +309,7 @@ async fn server_emits_monotonic_seqs_on_wire() {
         None,
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-seq".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -446,7 +447,7 @@ async fn emit_event_stream_writes_envelopes_to_events_jsonl() {
         None,
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1459,17 +1460,18 @@ async fn subscriber_writer_op_returns_op_failed() {
     let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
 
     // Install a worker so a misrouted CancelWorker has something to find.
-    // The cancel must NOT fire — we rely on the worker_cancels token
+    // The cancel must NOT fire — we rely on the workers.cancels token
     // staying un-cancelled to prove the op was rejected before
     // dispatch_op ran.
     let worker_token = CancelToken::new();
     state
         .root
-        .worker_cancels
+        .workers
+        .cancels
         .write()
         .await
         .insert("w-1".into(), worker_token.clone());
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1675,7 +1677,7 @@ async fn op_replies_broadcast_to_subscribers() {
     let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
 
     // Install a worker so ListWorkers has a non-empty snapshot to return.
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
@@ -1684,7 +1686,8 @@ async fn op_replies_broadcast_to_subscribers() {
     );
     state
         .root
-        .worker_prompts
+        .workers
+        .prompts
         .write()
         .await
         .insert("w-1".into(), "investigate failure".into());

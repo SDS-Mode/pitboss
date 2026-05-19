@@ -236,11 +236,12 @@ async fn root_kill_cascades_to_sublead_workers() {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(&sublead_id).unwrap();
         for worker_id in ["worker-X", "worker-Y"] {
-            sub.workers.write().await.insert(
+            sub.workers.states.write().await.insert(
                 worker_id.into(),
                 pitboss_cli::dispatch::state::WorkerState::Pending,
             );
-            sub.worker_cancels
+            sub.workers
+                .cancels
                 .write()
                 .await
                 .insert(worker_id.into(), CancelToken::new());
@@ -251,7 +252,7 @@ async fn root_kill_cascades_to_sublead_workers() {
     {
         let subleads = state.subleads.read().await;
         let sub = subleads.get(&sublead_id).unwrap();
-        let cancels = sub.worker_cancels.read().await;
+        let cancels = sub.workers.cancels.read().await;
         for worker_id in ["worker-X", "worker-Y"] {
             let tok = cancels.get(worker_id).unwrap();
             assert!(
@@ -277,7 +278,7 @@ async fn root_kill_cascades_to_sublead_workers() {
         );
 
         // Sub-lead workers' cancel tokens should also be draining.
-        let cancels = sub.worker_cancels.read().await;
+        let cancels = sub.workers.cancels.read().await;
         for worker_id in ["worker-X", "worker-Y"] {
             let tok = cancels.get(worker_id).unwrap();
             assert!(
@@ -515,7 +516,7 @@ async fn reject_with_reason_reaches_sublead_session() {
     fcc_task.await.expect("FCC task panicked");
 
     // Give the control server's read loop time to process the Approve op and
-    // update the worker_counters map before we assert on it.
+    // update the workers.counters map before we assert on it.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // The sub-lead's MCP response should carry approved=false and the reason.
@@ -534,7 +535,8 @@ async fn reject_with_reason_reaches_sublead_session() {
     // ApprovalBridge credits the counter to the actor that submitted the request.
     let counters = state
         .root
-        .worker_counters
+        .workers
+        .counters
         .read()
         .await
         .get(&s1_id)

@@ -202,7 +202,7 @@ async fn live_only_receives_server_hello_envelope() {
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     // Seed a worker so the server's WorkersSnapshot has content.
-    state.root.workers.write().await.insert(
+    state.root.workers.states.write().await.insert(
         "w-live".into(),
         WorkerState::Running {
             started_at: chrono::Utc::now(),
