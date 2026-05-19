@@ -1018,13 +1018,29 @@ source or debugging connection issues should know the contract.
   result (NOT the wire `_meta.actor_id`, which is forge-able) and
   strips the token before downstream handlers see it. Unknown or
   forged tokens → `invalid_request("invalid actor token …")`.
-- Tokens are not revoked at actor termination — `actor_tokens` grows
-  monotonically until the dispatcher process exits. This is bounded by
-  process lifetime; a token for a terminated actor cannot be used
-  because that actor's bridge subprocess has also exited. A same-UID
-  process that previously read an actor's `mcp-config.json` could
-  replay the token until the run ends; this is consistent with the
-  same-UID local threat model.
+- Tokens are revoked at actor termination (closes F-SEC-1 / #523):
+  - **Worker exits** — `run_worker` and `spawn_resume_worker` revoke
+    their own iteration's token in the finalize tail via
+    `DispatchState::revoke_token(&str)`. Per-token (not actor-id-wide)
+    so a slow finalize can't race-drop a fresh token that a
+    concurrent `spawn_resume_worker` call just minted for a
+    reprompted subprocess.
+  - **Sub-lead exits** — `reconcile_terminated_sublead` calls
+    `revoke_tokens_for_actor(&sublead_id)` (actor-id-wide; sub-leads
+    have one token for their lifetime, no kill+resume re-mint).
+  - **Lead exits** — `run_hierarchical` calls
+    `revoke_tokens_for_actor(&state.root.lead_id)` before
+    `mcp.shutdown()`.
+- **Known limitation (per-connection identity cache):**
+  `authenticate_and_rebind` short-circuits on `connection_identity`
+  before consulting `lookup_token`. Once a bridge connection has
+  bound its identity (on its first `tools/call`), subsequent calls on
+  the SAME connection inherit the cached identity without
+  re-validating the token. A connection bound BEFORE revoke fires
+  retains its access until the connection drops. In normal operation
+  the bridge subprocess exits with its parent claude, closing the
+  connection; the surviving threat is a malicious same-UID process
+  that holds the socket fd open past actor exit.
 
 ### Invariants
 
