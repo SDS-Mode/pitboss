@@ -602,17 +602,32 @@ impl DispatchState {
         self.actor_tokens.read().await.get(token).cloned()
     }
 
+    /// Revoke a single token by its string value. Returns `true` if
+    /// the token was present and removed, `false` if it was already
+    /// absent (or never minted). Closes F-SEC-1 (#523) on actor-exit
+    /// paths where each iteration of a subprocess owns exactly one
+    /// token and the caller can identify which one to drop.
+    ///
+    /// Preferred over [`revoke_tokens_for_actor`] for workers because
+    /// the worker has a kill+resume re-mint pattern: a stale
+    /// `run_worker` tail revoking ALL tokens for the actor_id could
+    /// race-drop a fresh token that `spawn_resume_worker` just minted
+    /// for the resumed subprocess. Each iteration revoking only its
+    /// own token-string is race-free.
+    pub async fn revoke_token(&self, token: &str) -> bool {
+        self.actor_tokens.write().await.remove(token).is_some()
+    }
+
     /// Revoke every token bound to `actor_id`. Returns the count of
-    /// tokens removed. Closes F-SEC-1 (#523): without this, a token
-    /// minted at spawn time stays valid for the lifetime of the run
-    /// even after the actor has exited — a process that obtained the
-    /// token (by reading the actor's `mcp-config.json` before cleanup,
-    /// or from a log artifact) could replay it as the dead actor.
+    /// tokens removed. Closes F-SEC-1 (#523) for actor-exit paths
+    /// without a kill+resume re-mint pattern (sub-lead finalize, lead
+    /// finalize). For worker exits, prefer [`revoke_token`] with the
+    /// per-iteration token-string — see that method's docs.
     ///
     /// `actor_tokens` is keyed by token-string (UUIDv7), so revocation
     /// by `actor_id` is a scan over the table. The table is bounded by
-    /// the run's concurrent-actor count (a few dozen in practice plus
-    /// any kill+resume re-mints), so the scan is negligible.
+    /// the run's concurrent-actor count (a few dozen), so the scan is
+    /// negligible.
     ///
     /// Idempotent: calling twice for the same `actor_id` is safe; the
     /// second call returns 0.
@@ -841,5 +856,41 @@ mod tests {
         let _ = st.mint_token("w-1", "worker").await;
         assert_eq!(st.revoke_tokens_for_actor("w-1").await, 1);
         assert_eq!(st.revoke_tokens_for_actor("w-1").await, 0);
+    }
+
+    /// F-SEC-1 (#523): singular `revoke_token` drops exactly the named
+    /// token-string and leaves siblings alone. Used by the worker
+    /// per-iteration finalize path to avoid the kill+resume race.
+    #[tokio::test]
+    async fn revoke_token_drops_only_named_token() {
+        let st = mk_state(None, None);
+        let t1 = st.mint_token("w-1", "worker").await;
+        let t2 = st.mint_token("w-1", "worker").await;
+
+        assert!(st.revoke_token(&t1).await);
+        assert!(st.lookup_token(&t1).await.is_none());
+        assert!(
+            st.lookup_token(&t2).await.is_some(),
+            "sibling token for the same actor_id must survive a per-token revoke"
+        );
+    }
+
+    /// F-SEC-1 (#523): per-token revoke is also idempotent — second
+    /// call on an already-revoked token returns false.
+    #[tokio::test]
+    async fn revoke_token_is_idempotent() {
+        let st = mk_state(None, None);
+        let t = st.mint_token("w-1", "worker").await;
+        assert!(st.revoke_token(&t).await);
+        assert!(!st.revoke_token(&t).await);
+    }
+
+    /// F-SEC-1 (#523): revoking an unknown token-string is a no-op
+    /// returning false (defensive: a buggy caller can't poison the
+    /// table by passing garbage).
+    #[tokio::test]
+    async fn revoke_token_unknown_is_noop() {
+        let st = mk_state(None, None);
+        assert!(!st.revoke_token("not-a-real-token").await);
     }
 }

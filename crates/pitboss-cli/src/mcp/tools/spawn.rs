@@ -846,12 +846,13 @@ async fn run_worker(
     if released_count > 0 {
         tracing::info!(worker_id = %task_id, count = released_count, "auto-released run-global leases on worker termination");
     }
-    // Revoke every auth token issued to this worker (including any
-    // re-mints from kill+resume iterations) so a leaked token can't be
-    // replayed as the dead worker. F-SEC-1 / #523.
-    let revoked = state.revoke_tokens_for_actor(&task_id).await;
-    if revoked > 0 {
-        tracing::debug!(worker_id = %task_id, count = revoked, "revoked auth tokens on worker termination");
+    // Revoke ONLY this iteration's auth token. Using a per-token revoke
+    // (not `revoke_tokens_for_actor`) avoids the kill+resume race where
+    // a slow finalize tail could drop a fresh token that
+    // `spawn_resume_worker` just minted for the resumed subprocess.
+    // F-SEC-1 (#523).
+    if state.revoke_token(&worker_token).await {
+        tracing::debug!(worker_id = %task_id, "revoked auth token on worker termination");
     }
     // Broadcast termination on the worker's own layer AND on root.
     // wait_for_actor_internal (the engine for wait_actor / wait_for_worker)
@@ -1131,14 +1132,12 @@ pub async fn spawn_resume_worker(
     // subprocess. write_worker_mcp_config is idempotent so calling it
     // again on an existing file is safe.
     //
-    // Revoke the prior iteration's token before minting a fresh one —
-    // closes the inter-iteration replay window for F-SEC-1 (#523). The
-    // dead subprocess can't legitimately use the old token (it already
-    // exited), but a leaked copy could otherwise be replayed until run
-    // finalize. The final finalize hook (`revoke_tokens_for_actor` in
-    // the `run_worker` tail) catches any tokens that race past this
-    // point. Issue #145 (initial mint), #523 (revocation).
-    state.revoke_tokens_for_actor(&task_id).await;
+    // Mint a fresh auth token for the resumed bridge. The prior
+    // iteration's token is revoked by the previous `run_worker` /
+    // `spawn_resume_worker` task's own finalize tail (per-token
+    // revoke, see #523 — using actor-id-wide revoke here would race
+    // with this iteration's mint when the prior task's tail runs
+    // late). Issue #145 (initial mint), #523 (per-token revocation).
     let worker_token = state.mint_token(&task_id, "worker").await;
     let worker_task_dir = layer.run_subdir.join("tasks").join(&task_id);
     tokio::fs::create_dir_all(&worker_task_dir).await.ok();
@@ -1242,6 +1241,7 @@ pub async fn spawn_resume_worker(
     let stderr_path = task_dir.join("stderr.log");
     let resume_model = model.clone();
     let resumed_actor_type_bg = resumed_actor_type.clone();
+    let worker_token_bg = worker_token.clone();
     // Register a pid slot for the resumed subprocess too, so
     // freeze-pause works across continue_worker boundaries.
     let resume_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -1362,6 +1362,13 @@ pub async fn spawn_resume_worker(
             .write()
             .await
             .remove(&task_id_bg);
+        // Revoke this iteration's token only. Per-token revoke (not
+        // actor-id-wide) so a slow finalize here can't drop a fresh
+        // token minted by a subsequent `spawn_resume_worker` call.
+        // F-SEC-1 (#523).
+        if state_bg.revoke_token(&worker_token_bg).await {
+            tracing::debug!(worker_id = %task_id_bg, "revoked auth token on resumed-worker termination");
+        }
         let _ = layer_bg.workers.done_tx.send(task_id_bg);
     });
 
