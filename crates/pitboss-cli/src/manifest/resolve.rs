@@ -134,7 +134,11 @@ pub struct ResolvedManifest {
     /// #320: pre-fix this was always `Some(DEFAULT_MAX_PARALLEL_TASKS)`
     /// even for hierarchical manifests, which made `resolved.json` lie
     /// about the run's actual concurrency model.
-    #[serde(alias = "max_parallel", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "max_parallel",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_parallel_tasks: Option<u32>,
     pub halt_on_failure: bool,
     pub run_dir: PathBuf,
@@ -164,7 +168,7 @@ pub struct ResolvedManifest {
     /// Renamed from `approval_policy` in v0.9 to match the TOML field name
     /// and disambiguate from `approval_rules`.
     /// `alias` keeps pre-v0.9 `resolved.json` snapshots resumable.
-    #[serde(alias = "approval_policy")]
+    #[serde(default, alias = "approval_policy")]
     pub default_approval_policy: Option<crate::dispatch::state::ApprovalPolicy>,
     /// What happens to an actor's terminal status after a denied
     /// `permission_prompt`. `None` resolves to `Adapt` at read time.
@@ -1196,6 +1200,46 @@ category = "tool_use"
             lead.max_total_workers,
             Some(12),
             "alias `max_workers_across_tree` must populate max_total_workers"
+        );
+    }
+
+    /// Regression test for `#[serde(default)]` coverage on the two
+    /// `Option<T>` fields flagged by F-PROTO-8 (#521). Today serde
+    /// already deserializes a missing `Option<T>` as `None` regardless
+    /// of `#[serde(default)]`, so this test passes on the pre-fix code
+    /// too. The attribute matters as defense-in-depth against a future
+    /// `Option<T>` → `T` type change: without `default`, the same
+    /// missing-field snapshot would start failing with a typed serde
+    /// error rather than silently resuming. If you change either field
+    /// off `Option`, this test must keep passing — restore the default
+    /// (`#[serde(default = "fn")]` with an explicit fallback) or bump
+    /// `CURRENT_MANIFEST_SCHEMA_VERSION` so resume rejects the snapshot
+    /// rather than mis-defaulting.
+    #[test]
+    fn resolved_manifest_accepts_missing_optional_top_level_fields() {
+        // Snapshot omits BOTH `max_parallel_tasks` (and its legacy
+        // alias `max_parallel`) AND `default_approval_policy` (and its
+        // legacy alias `approval_policy`). Every other required field
+        // is present.
+        let sparse = serde_json::json!({
+            "manifest_schema_version": CURRENT_MANIFEST_SCHEMA_VERSION,
+            "halt_on_failure": false,
+            "run_dir": "/tmp/runs",
+            "worktree_cleanup": "on_success",
+            "emit_event_stream": false,
+            "tasks": [],
+        });
+
+        let r: ResolvedManifest = serde_json::from_value(sparse)
+            .expect("snapshot missing optional fields must deserialize");
+
+        assert!(
+            r.max_parallel_tasks.is_none(),
+            "missing `max_parallel_tasks` must default to None"
+        );
+        assert!(
+            r.default_approval_policy.is_none(),
+            "missing `default_approval_policy` must default to None"
         );
     }
 }
