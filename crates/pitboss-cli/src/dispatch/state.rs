@@ -602,6 +602,27 @@ impl DispatchState {
         self.actor_tokens.read().await.get(token).cloned()
     }
 
+    /// Revoke every token bound to `actor_id`. Returns the count of
+    /// tokens removed. Closes F-SEC-1 (#523): without this, a token
+    /// minted at spawn time stays valid for the lifetime of the run
+    /// even after the actor has exited — a process that obtained the
+    /// token (by reading the actor's `mcp-config.json` before cleanup,
+    /// or from a log artifact) could replay it as the dead actor.
+    ///
+    /// `actor_tokens` is keyed by token-string (UUIDv7), so revocation
+    /// by `actor_id` is a scan over the table. The table is bounded by
+    /// the run's concurrent-actor count (a few dozen in practice plus
+    /// any kill+resume re-mints), so the scan is negligible.
+    ///
+    /// Idempotent: calling twice for the same `actor_id` is safe; the
+    /// second call returns 0.
+    pub async fn revoke_tokens_for_actor(&self, actor_id: &str) -> usize {
+        let mut tokens = self.actor_tokens.write().await;
+        let before = tokens.len();
+        tokens.retain(|_token, identity| identity.actor_id != actor_id);
+        before - tokens.len()
+    }
+
     /// Record the most recent approval response delivered to `actor_id`.
     /// Called by approval MCP handlers immediately before they return to
     /// the caller. Used downstream by `approval_driven_termination` to
@@ -767,5 +788,58 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(c.pause_count, 0);
+    }
+
+    /// F-SEC-1 (#523): revoke removes the token from the lookup table.
+    #[tokio::test]
+    async fn revoke_invalidates_token() {
+        let st = mk_state(None, None);
+        let tok = st.mint_token("w-1", "worker").await;
+        assert!(st.lookup_token(&tok).await.is_some());
+
+        let count = st.revoke_tokens_for_actor("w-1").await;
+        assert_eq!(count, 1);
+        assert!(st.lookup_token(&tok).await.is_none());
+    }
+
+    /// F-SEC-1 (#523): kill+resume mints multiple tokens for the same
+    /// actor_id; revoke must drop all of them in one call.
+    #[tokio::test]
+    async fn revoke_clears_all_tokens_for_actor() {
+        let st = mk_state(None, None);
+        let t1 = st.mint_token("w-1", "worker").await;
+        let t2 = st.mint_token("w-1", "worker").await;
+        let t3 = st.mint_token("w-1", "worker").await;
+
+        let count = st.revoke_tokens_for_actor("w-1").await;
+        assert_eq!(count, 3);
+        assert!(st.lookup_token(&t1).await.is_none());
+        assert!(st.lookup_token(&t2).await.is_none());
+        assert!(st.lookup_token(&t3).await.is_none());
+    }
+
+    /// F-SEC-1 (#523): revoking one actor must not affect peers.
+    #[tokio::test]
+    async fn revoke_scopes_to_named_actor_only() {
+        let st = mk_state(None, None);
+        let worker_tok = st.mint_token("w-1", "worker").await;
+        let sublead_tok = st.mint_token("sub-A", "sublead").await;
+
+        let count = st.revoke_tokens_for_actor("w-1").await;
+        assert_eq!(count, 1);
+        assert!(st.lookup_token(&worker_tok).await.is_none());
+        assert!(
+            st.lookup_token(&sublead_tok).await.is_some(),
+            "sibling actor's token must survive a peer's revocation"
+        );
+    }
+
+    /// F-SEC-1 (#523): revoke is idempotent — second call returns 0.
+    #[tokio::test]
+    async fn revoke_is_idempotent() {
+        let st = mk_state(None, None);
+        let _ = st.mint_token("w-1", "worker").await;
+        assert_eq!(st.revoke_tokens_for_actor("w-1").await, 1);
+        assert_eq!(st.revoke_tokens_for_actor("w-1").await, 0);
     }
 }

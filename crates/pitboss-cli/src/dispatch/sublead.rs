@@ -1193,6 +1193,13 @@ pub async fn reconcile_terminated_sublead(
     if released_count > 0 {
         tracing::info!(sublead_id = %sublead_id, count = released_count, "auto-released run-global leases on sublead termination");
     }
+    // Revoke every auth token issued to this sub-lead (including any
+    // re-mints from its own kill+resume iterations). Idempotent —
+    // the outer `subleads.remove` above guards re-entry. F-SEC-1 (#523).
+    let revoked = state.revoke_tokens_for_actor(sublead_id).await;
+    if revoked > 0 {
+        tracing::debug!(sublead_id = %sublead_id, count = revoked, "revoked auth tokens on sublead termination");
+    }
 
     // Persist terminal record so wait_actor(sublead_id) can return it.
     let record = SubleadTerminalRecord {

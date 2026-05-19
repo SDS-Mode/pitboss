@@ -833,6 +833,12 @@ pub async fn run_hierarchical(
         0
     };
 
+    // Revoke the root lead's auth tokens before MCP teardown. Lead
+    // subprocess has already exited (kill+resume loop returned above);
+    // any token still in `actor_tokens` for the lead id is now a
+    // replay liability. F-SEC-1 (#523).
+    state.revoke_tokens_for_actor(&state.root.lead_id).await;
+
     // #151 M2: deterministic MCP teardown. Awaits per-connection
     // cleanup (lease release, identity slot drain) before the
     // dispatcher returns, so callers observe a fully-quiesced run.

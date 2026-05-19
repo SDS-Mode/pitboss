@@ -2035,3 +2035,65 @@ async fn reconcile_terminated_sublead_outcome_to_status_mapping() {
         }
     }
 }
+
+/// F-SEC-1 (#523): when a sub-lead is reconciled (terminates), every
+/// token bound to its `actor_id` must be revoked. Without this, a
+/// process that obtained the token (from `mcp-config.json` or a log
+/// artifact) could replay it as the dead sub-lead for the rest of the
+/// run.
+#[tokio::test]
+async fn reconcile_terminated_sublead_revokes_auth_tokens() {
+    use pitboss_cli::dispatch::sublead::{
+        reconcile_terminated_sublead, spawn_sublead, SubleadOutcome, SubleadSpawnRequest,
+    };
+
+    let (_dir, state) = mk_state_with_subleads();
+
+    let req = SubleadSpawnRequest {
+        prompt: "test".into(),
+        model: "claude-haiku-4-5".into(),
+        budget_usd: Some(2.0),
+        lead_budget_usd: None,
+        max_workers: Some(1),
+        lead_timeout_secs: Some(1800),
+        initial_ref: Default::default(),
+        read_down: false,
+        env: Default::default(),
+        tools: Default::default(),
+        resume_session_id: None,
+        sublead_type: None,
+    };
+    let sublead_id = spawn_sublead(&state, req)
+        .await
+        .expect("spawn_sublead should succeed");
+
+    // Pre-reconcile: the sublead's token is live.
+    let live_before = state
+        .actor_tokens
+        .read()
+        .await
+        .values()
+        .filter(|id| id.actor_id == sublead_id)
+        .count();
+    assert_eq!(
+        live_before, 1,
+        "spawn_sublead should mint exactly one token for the sublead"
+    );
+
+    reconcile_terminated_sublead(&state, &sublead_id, SubleadOutcome::Success)
+        .await
+        .expect("reconcile should succeed");
+
+    // Post-reconcile: no tokens for that sublead remain.
+    let live_after = state
+        .actor_tokens
+        .read()
+        .await
+        .values()
+        .filter(|id| id.actor_id == sublead_id)
+        .count();
+    assert_eq!(
+        live_after, 0,
+        "reconcile_terminated_sublead must revoke the sublead's auth tokens"
+    );
+}
