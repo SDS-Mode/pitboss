@@ -38,7 +38,7 @@ Gate a single in-flight action on operator approval. The lead blocks until the o
 
 **Notes:**
 - The `plan` field is optional for simple approvals but strongly recommended for non-trivial actions (deletions, multi-file edits, irreversible operations).
-- `tool_name` and `cost_estimate` are hints that allow `[[approval_policy]]` rules to match on `tool_name` / `cost_over` criteria.
+- `tool_name` and `cost_estimate` are hints that allow `[[approval_policy]]` rules to match on `tool_name` / `cost_over` criteria. **`cost_estimate` is advisory only** — caller-supplied; a buggy or adversarial caller can pass `0.0` to bypass any `cost_over` threshold. For hard cost gates use `[run].budget_usd` (server-side cap) or `auto_reject` on `tool_name`/`actor`. See [Approval policy reference → Cost gates: advisory vs hard](../operator-guide/approval-policy-reference.md#cost-gates-advisory-vs-hard).
 - Policy rules (if configured) are evaluated before the request reaches the operator queue. A matching `auto_approve` or `auto_reject` rule skips the operator entirely.
 
 ---

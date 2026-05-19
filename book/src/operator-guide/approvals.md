@@ -70,7 +70,9 @@ action = "auto_approve"
 match = { category = "plan" }
 action = "block"
 
-# Block any cost event over $0.50
+# Escalate any cost event over $0.50 to the operator
+# (advisory only — cost_estimate is caller-supplied; see "Cost gates: advisory vs hard"
+#  in the approval policy reference for hard alternatives)
 [[approval_policy]]
 match = { category = "cost", cost_over = 0.50 }
 action = "block"
@@ -85,7 +87,7 @@ Rules are evaluated first-match-wins in declaration order. A request that doesn'
 | `actor` | string | Actor path, e.g., `"root→S1"`. Unset matches all actors. |
 | `category` | string | `"tool_use"`, `"plan"`, `"cost"`. Unset matches all categories. |
 | `tool_name` | string | Specific MCP tool name. Unset matches all. |
-| `cost_over` | float | Fires when `cost_estimate > cost_over` (USD). |
+| `cost_over` | float | Fires when `cost_estimate > cost_over` (USD). **Advisory only** — `cost_estimate` is caller-supplied; see [Approval policy reference → Cost gates: advisory vs hard](./approval-policy-reference.md#cost-gates-advisory-vs-hard). |
 
 ### Actions
 
