@@ -91,8 +91,9 @@ fn main() -> Result<()> {
             run_id,
             run_dir,
             json,
+            resources,
         } => {
-            std::process::exit(status::run(&run_id, json, run_dir)?);
+            std::process::exit(status::run(&run_id, json, run_dir, resources)?);
         }
         Command::Events {
             run_id,

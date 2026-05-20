@@ -136,6 +136,7 @@ caps (which used to live here in v0.8) moved to `[lead]` in v0.9.
 | `run_dir` | string path | no | `~/.local/share/pitboss/runs` | Where per-run artifacts land. |
 | `worktree_cleanup` | `"always"` \| `"on_success"` \| `"never"` | no | `"on_success"` | What to do with each worker's worktree after completion. `"never"` for inspection-heavy runs. |
 | `emit_event_stream` | bool | no | false | When true, the dispatcher persists every control-plane envelope (sub-lead lifecycle, worker failures, approval requests, etc.) to `<run-dir>/events.jsonl` as it fires on the wire. Off by default for back-compat — older runs have no such file. Different from the per-actor `tasks/<id>/events.jsonl` audit log: that's always-on for tool-denial / pause / reprompt rows; this one is run-wide, opt-in, and carries the same envelope shape as the live SSE stream. See [`events.jsonl` structure](#eventsjsonl-structure-v013-opt-in) below. |
+| `resource_sample_secs` | int | no | 5 | How often the dispatcher samples per-actor RSS / VSZ / CPU% and container-cgroup memory headroom. `0` disables sampling entirely; the watcher task is not spawned. Default `5`. Each tick broadcasts a `resource_sample` envelope on the control-event bus (which `summary.json` rolls up into `resource_high_water` at finalize and which `events.jsonl` persists when `emit_event_stream = true`). Memory-pressure transitions emit a separate `resource_pressure { warn | error | clear }` envelope that the SPA renders as a banner. Pressure thresholds: warn at ≥70% of available memory, error at ≥90%, clear at sustained <60% (2-sample debounce). On macOS host flat dispatch the sampler logs once at INFO and exits (no `/proc`); inside `pitboss container-dispatch` the sampler runs in the linux VM regardless of host OS, so macOS still gets full pressure visibility. (#553) |
 | `claude_setting_sources` | string | no | (omitted) | `--setting-sources` override forwarded to every worker `claude … -p` spawn. Comma-separated subset of `user`, `project`, `local`. **When omitted**, pitboss applies its built-in default: `project,local` inside container-dispatch (host hooks don't leak in, #426); no filter on host-dispatch (operator's full `~/.claude/settings.json` flows through). **When set**, the operator value wins in both modes — the canonical use case is filtering user-scope `SessionStart` hooks (e.g. claude-code's "explanatory" output style that injects `★ Insight ─` blocks) out of unattended host-dispatch workers. Set to `"project,local"` to exclude `user`-scope settings; set to `"local"` to also exclude project-scope. Validated at validate time (`pitboss validate`); empty strings, unknown tokens, whitespace inside the value, and duplicate tokens all reject with hints pointing at the canonical comma-separated form. (#555) |
 | `default_approval_policy` | `"block"` \| `"auto_approve"` \| `"auto_reject"` | no | `"block"` | Hierarchical: default action for `request_approval` / `propose_plan` when no TUI is attached and no `[[approval_policy]]` rule matches. Renamed from `approval_policy` in v0.9 to disambiguate from the rules array. |
 | `denial_termination_policy` | `"adapt"` \| `"reclassify"` | no | `"adapt"` | Path B only: how a denied `permission_prompt` affects the actor's terminal status. `"adapt"` (default, post-#377) trusts the actor's exit code; per-actor `events.jsonl::tool_denied` rows and the `approvals_rejected` counter remain authoritative for what was blocked. `"reclassify"` re-labels clean exits within 30s of a denial as `ApprovalRejected` (legacy heuristic, kept for operators who want fast-give-up distinguished in the status table — accepts that successful adaptation within the window will misclassify as failure). |
@@ -734,6 +735,43 @@ Workers and sub-leads live at `<run-dir>/tasks/<task-id>/` and
 `<run-dir>/tasks/<sublead-id>/` respectively. Sub-lead ids are
 `sublead-<uuid>` — they don't match the manifest's `[lead].id`. Use
 the UUID form from `summary.jsonl` when calling `pitboss attach`.
+
+### Diagnosing OOM-kills + memory pressure (v0.15+)
+
+When a `pitboss container-dispatch` run records a cluster of worker
+failures with `exit_code: null`, `terminate_reason: null`, and empty
+stderr, the most common root cause is the podman VM OOM-killing the
+workers — pitboss's audit chain correctly reports "not me," but pre-
+#553 the operator had to drop into `podman machine ssh -- sudo dmesg`
+to confirm. With `[run].resource_sample_secs > 0` (default 5),
+inspect the finalize roll-up directly:
+
+```bash
+jq .resource_high_water <run-dir>/summary.json
+# {
+#   "total_rss_bytes_max": 1844000000,
+#   "cgroup_memory_max_bytes": 2040000000,
+#   "peak_utilization_pct": 0.904,
+#   "rss_bytes_max_by_actor": { ... },
+#   "sample_count": 412,
+#   "sample_cadence_secs": 5
+# }
+```
+
+`peak_utilization_pct ≥ 0.9` paired with a cluster of unattributed
+worker failures is the canonical OOM signature. The fix is one of:
+
+- Reduce `[lead].max_workers` (cuts the simultaneous-claude RSS).
+- Raise the podman VM ceiling: `podman machine set --memory 4096`.
+- Switch the manifest's `[container.copy]` over to mounts so the
+  in-VM copy doesn't push RSS while workers are also live.
+
+For in-flight runs, the dispatcher broadcasts `resource_pressure`
+envelopes on the same wire as workers / approvals — `pitboss-web`
+renders these as a banner above the Workers card on the Live tab
+(at warn ≥70% / error ≥90%, debounced clear at sustained <60%),
+and the Resources tab shows the cgroup-headroom chart + per-actor
+RSS sparklines.
 
 ### Sweeping orphaned runs (`pitboss prune`)
 
