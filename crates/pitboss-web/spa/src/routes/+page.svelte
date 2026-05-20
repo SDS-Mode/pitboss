@@ -301,6 +301,9 @@
           <TableHead class="w-[14ch]">Manifest</TableHead>
           <TableHead class="w-[10ch]">Status</TableHead>
           <TableHead class="w-[8ch] text-right">Tasks</TableHead>
+          <TableHead class="w-[9ch] text-right" title="Peak total RSS as a percentage of available memory (cgroup memory.max in container dispatch, host MemTotal in flat).">
+            Mem peak
+          </TableHead>
           <TableHead class="w-[8ch] text-right">Failed</TableHead>
           <TableHead>Updated</TableHead>
         </TableRow>
@@ -308,7 +311,7 @@
       <TableBody>
         {#if runs.length === 0 && !loading && !error}
           <TableRow>
-            <TableCell colspan={6} class="text-muted-foreground py-12 text-center text-sm">
+            <TableCell colspan={7} class="text-muted-foreground py-12 text-center text-sm">
               No runs found. Dispatch one with <code class="bg-muted rounded px-1.5 py-0.5"
                 >pitboss dispatch &lt;manifest.toml&gt;</code
               >.
@@ -338,6 +341,16 @@
                 <StatusBadge status={r.status} label={r.status} />
               </TableCell>
               <TableCell class="text-right tabular-nums">{r.tasks_total}</TableCell>
+              <TableCell class="text-right tabular-nums text-xs">
+                {#if typeof r.peak_utilization_pct === 'number'}
+                  {@const pct = Math.round(r.peak_utilization_pct * 100)}
+                  <span class={pct >= 80 ? 'text-destructive font-medium' : ''}>
+                    {pct}%{#if pct >= 80}<span aria-hidden="true"> ‼</span>{/if}
+                  </span>
+                {:else}
+                  <span class="text-muted-foreground">—</span>
+                {/if}
+              </TableCell>
               <TableCell class="text-right tabular-nums">
                 {#if r.tasks_failed > 0}
                   <span class="text-destructive font-medium">{r.tasks_failed}</span>

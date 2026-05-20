@@ -1125,6 +1125,7 @@ mod tests {
                 tasks_total: i,
                 tasks_failed: 0,
                 status: crate::runs::RunStatus::Aborted,
+                peak_utilization_pct: None,
             })
             .collect()
     }

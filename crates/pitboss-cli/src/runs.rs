@@ -117,6 +117,11 @@ pub struct RunEntry {
     pub tasks_total: usize,
     pub tasks_failed: usize,
     pub status: RunStatus,
+    /// Peak memory utilization (RSS / available) from
+    /// `summary.json::resource_high_water::peak_utilization_pct` (#553).
+    /// `None` when the resource watcher was disabled, unsupported on
+    /// the host, or for pre-#553 runs.
+    pub peak_utilization_pct: Option<f32>,
 }
 
 /// Returns the base directory that holds all run sub-directories.
@@ -245,6 +250,10 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
                 } else {
                     RunStatus::Complete
                 };
+                let peak_utilization_pct = s
+                    .resource_high_water
+                    .as_ref()
+                    .and_then(|hw| hw.peak_utilization_pct);
                 return RunEntry {
                     run_id,
                     run_dir: run_dir.to_path_buf(),
@@ -252,6 +261,7 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
                     tasks_total: s.tasks_total,
                     tasks_failed: s.tasks_failed,
                     status,
+                    peak_utilization_pct,
                 };
             }
             Err(e) => {
@@ -291,6 +301,9 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
             tasks_total: total,
             tasks_failed: failed,
             status: RunStatus::Aborted,
+            // Aborted-mid-write summary.json — no trustworthy
+            // high-water number.
+            peak_utilization_pct: None,
         };
     }
 
@@ -303,6 +316,9 @@ pub fn collect_run_entry(run_dir: &Path, run_id: String, mtime: SystemTime) -> R
         tasks_total: total,
         tasks_failed: failed,
         status,
+        // Live or stale dispatches don't yet have summary.json;
+        // the run-list will show "—" for these runs.
+        peak_utilization_pct: None,
     }
 }
 

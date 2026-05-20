@@ -19,6 +19,13 @@ pub struct RunDto {
     pub mtime_unix: u64,
     pub tasks_total: usize,
     pub tasks_failed: usize,
+    /// Peak memory utilization for the run (#553). Fractional value
+    /// in [0, 1+]. `None` when the resource watcher was disabled,
+    /// unsupported on the host, or for pre-#553 runs — the SPA
+    /// renders `—` in that case. `skip_serializing_if = "Option::is_none"`
+    /// keeps the JSON shape byte-identical for pre-#553 clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_utilization_pct: Option<f32>,
 }
 
 impl From<&RunEntry> for RunDto {
@@ -34,6 +41,7 @@ impl From<&RunEntry> for RunDto {
                 .unwrap_or(0),
             tasks_total: e.tasks_total,
             tasks_failed: e.tasks_failed,
+            peak_utilization_pct: e.peak_utilization_pct,
         }
     }
 }

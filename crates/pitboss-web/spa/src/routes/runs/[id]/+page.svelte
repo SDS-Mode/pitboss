@@ -18,6 +18,9 @@
     type ActorActivity,
     type SubleadInfo,
     type FailureReason,
+    type ResourceSampleEvent,
+    type ResourcePressureEvent,
+    type ResourceHighWater,
     ApiError
   } from '$lib/api';
   import { formatUnixSeconds, relativeFromUnix } from '$lib/utils';
@@ -28,6 +31,7 @@
   import RunTileGrid from '$lib/components/run-tile-grid.svelte';
   import RunGraph from '$lib/components/run-graph.svelte';
   import RunGraphInspector from '$lib/components/run-graph-inspector.svelte';
+  import ResourcesTab from '$lib/components/resources-tab.svelte';
   import type { TaskRecord } from '$lib/api';
   import {
     Card,
@@ -384,6 +388,18 @@
   let serverVersion = $state<string | null>(null);
   let pendingApprovals = $state<ApprovalRequest[]>([]);
   let activeApproval = $state<ApprovalRequest | null>(null);
+  // #553: latest in-flight resource sample + the rolling buffer the
+  // Resources tab uses for sparklines. `pressureBanner` is non-null
+  // when the live banner should render on the Live tab.
+  let latestResourceSample = $state<ResourceSampleEvent | null>(null);
+  let resourceSamples = $state<Array<{ envelope: ResourceSampleEvent; at: number }>>([]);
+  let pressureBanner = $state<ResourcePressureEvent | null>(null);
+  // Finalize-time roll-up surfaced from `summary.json`. `RunDetailDto`
+  // already passes through any extra fields the backend adds, so this
+  // is just a typed view onto `detail.resource_high_water`.
+  const resourceHighWater = $derived(
+    (detail?.resource_high_water as ResourceHighWater | undefined) ?? null
+  );
   // Banner shown when ANOTHER client takes over our slot (we get
   // `Superseded` from the dispatcher right before the socket closes).
   let superseded = $state(false);
@@ -515,6 +531,31 @@
       case 'superseded':
         superseded = true;
         break;
+      case 'resource_sample': {
+        // #553: per-tick resource samples flow through the same wire
+        // as everything else. Keep the latest sample for the Resources
+        // tab + a bounded ring buffer for the per-actor sparklines so
+        // a long-running session doesn't grow unboundedly. 240 entries
+        // at the default 5 s cadence is 20 minutes of history — past
+        // that the operator should switch to the events.jsonl replay.
+        const ev = e as ControlEnvelope & ResourceSampleEvent;
+        latestResourceSample = ev;
+        if (resourceSamples.length >= 240) resourceSamples.shift();
+        resourceSamples.push({ envelope: ev, at: Date.now() });
+        resourceSamples = resourceSamples; // trigger reactivity
+        break;
+      }
+      case 'resource_pressure': {
+        const ev = e as ControlEnvelope & ResourcePressureEvent;
+        // Banner reflects the most recent NON-clear event. A clear
+        // event dismisses the banner; warn/error replace it.
+        if (ev.level === 'clear') {
+          pressureBanner = null;
+        } else {
+          pressureBanner = ev;
+        }
+        break;
+      }
     }
   }
 
@@ -815,6 +856,14 @@
       {/if}
       <TabsTrigger value="graph">Graph</TabsTrigger>
       <TabsTrigger value="tasks">Tasks ({tasksToRender.length})</TabsTrigger>
+      <TabsTrigger value="resources">
+        Resources
+        {#if pressureBanner && pressureBanner.level !== 'clear'}
+          <span class="ml-1 text-amber-600" aria-hidden="true">⚠</span>
+        {:else if resourceHighWater && (resourceHighWater.peak_utilization_pct ?? 0) >= 0.8}
+          <span class="ml-1 text-amber-600" aria-hidden="true">⚠</span>
+        {/if}
+      </TabsTrigger>
       {#if !inProgress}
         <TabsTrigger value="replay">Replay</TabsTrigger>
       {/if}
@@ -888,6 +937,37 @@
             </CardContent>
           {/if}
         </Card>
+
+        {#if pressureBanner && pressureBanner.level !== 'clear'}
+          <!--
+            #553 live memory-pressure banner. Mounted above Workers
+            so it doesn't push the run controls off-screen. Cleared
+            automatically when the watcher emits a `clear`
+            transition; clicking the Resources tab gives the
+            operator the full chart + per-actor breakdown.
+          -->
+          <Card
+            class={pressureBanner.level === 'error'
+              ? 'border-destructive/50 bg-destructive/5'
+              : 'border-amber-500/50 bg-amber-500/5'}
+          >
+            <CardContent class="flex items-start gap-3 pt-6">
+              <AlertTriangle
+                class={pressureBanner.level === 'error'
+                  ? 'mt-0.5 size-5 shrink-0 text-destructive'
+                  : 'mt-0.5 size-5 shrink-0 text-amber-600'}
+              />
+              <div class="text-sm">
+                <p class="font-medium">
+                  Memory pressure: {pressureBanner.level}
+                </p>
+                <p class="text-muted-foreground mt-1">
+                  {pressureBanner.message ?? ''}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        {/if}
 
         <Card>
           <CardHeader class="pb-3">
@@ -1126,6 +1206,22 @@
           </Table>
         {/if}
       </Card>
+    </TabsContent>
+
+    <TabsContent value="resources" class="mt-4 space-y-4">
+      <!--
+        Resources tab (#553): live sample stream (when inProgress)
+        plus the finalize-time `resource_high_water` roll-up. The
+        sub-component owns chart, table, and headline banner; this
+        page only feeds it the wire-derived state.
+      -->
+      <ResourcesTab
+        samples={resourceSamples}
+        latest={latestResourceSample}
+        pressure={pressureBanner}
+        highWater={resourceHighWater}
+        {inProgress}
+      />
     </TabsContent>
 
     <!--
