@@ -658,6 +658,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success, 50)],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             tmp.path().join("summary.json"),
@@ -1029,6 +1030,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             tmp.path().join("summary.json"),

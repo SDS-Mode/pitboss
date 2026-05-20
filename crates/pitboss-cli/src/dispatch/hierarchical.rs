@@ -195,6 +195,19 @@ pub async fn run_hierarchical(
             s
         },
     ));
+
+    // Per-actor resource sampler (#553). Spawned right after
+    // `DispatchState::new` so it's alive for every actor that gets
+    // spawned later in this function. Disabled when
+    // `resource_sample_secs == 0`; on macOS host the spawned task
+    // exits cleanly after one INFO log line (inside container-dispatch
+    // the sampler runs in the linux VM and is unaffected).
+    let resource_watcher =
+        Some(crate::dispatch::resource_watch::ResourceWatcher::spawn(
+            state.clone(),
+            resolved.resource_sample_secs,
+        ));
+
     let mcp = McpServer::start(socket.clone(), state.clone()).await?;
 
     // Seed /resume/subleads with prior sub-lead session IDs so the root lead
@@ -360,6 +373,20 @@ pub async fn run_hierarchical(
             crate::dispatch::budget_watch::commit_iteration(&commit_baseline, &commit_model, usage);
         });
 
+    // Register the root lead's pid slot on its own layer's
+    // `workers.pids` map so the resource sampler (#553) can read
+    // `/proc/<pid>/status` for the lead just like it does for workers.
+    // Removed unconditionally after the kill+resume loop exits — same
+    // pattern as `mcp::tools::spawn::run_worker` (#553 / spawn.rs:705).
+    let lead_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    state
+        .root
+        .workers
+        .pids
+        .write()
+        .await
+        .insert(lead.id.clone(), lead_pid_slot.clone());
+
     let kr_result = crate::dispatch::kill_resume::run_kill_resume_loop(
         state.root.clone(),
         crate::dispatch::kill_resume::KillResumeArgs {
@@ -370,6 +397,7 @@ pub async fn run_hierarchical(
             stderr_path: lead_stderr_path.clone(),
             usage_observer: Some(usage_observer),
             on_iteration_done: Some(on_iteration_done),
+            pid_slot: Some(lead_pid_slot.clone()),
         },
         reprompt_rx,
         |sid, new_prompt| {
@@ -401,6 +429,12 @@ pub async fn run_hierarchical(
     let overall_started_at = kr_result.overall_started_at;
     let total_token_usage = kr_result.total_token_usage;
     let reprompt_count = kr_result.reprompt_count;
+
+    // Remove the lead's pid slot now that the kill+resume loop has
+    // exited — `SessionHandle` already cleared the slot to 0 on reap,
+    // but removing the map entry stops the resource sampler from
+    // emitting a stale skeleton sample on its next tick (#553).
+    state.root.workers.pids.write().await.remove(&lead.id);
 
     // Close the reprompt channel so further sends fail fast.
     state.root.clear_reprompt_tx().await;
@@ -777,6 +811,10 @@ pub async fn run_hierarchical(
         .as_ref()
         .map(|r| u32::try_from(r.failed_emits_total()).unwrap_or(u32::MAX));
     let spend_breakdown = pitboss_core::store::SpendBreakdown::from_tasks(&all_records, &lead.id);
+    let resource_high_water = resource_watcher
+        .as_ref()
+        .map(|w| w.high_water_snapshot())
+        .filter(|hw| hw.sample_count > 0);
     let summary = RunSummary {
         run_id,
         manifest_path,
@@ -792,6 +830,7 @@ pub async fn run_hierarchical(
         notify_failures,
         tasks: all_records,
         spend_breakdown: Some(spend_breakdown),
+        resource_high_water,
     };
     store.finalize_run(&summary).await?;
 

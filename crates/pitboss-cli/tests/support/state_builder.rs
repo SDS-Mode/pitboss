@@ -335,6 +335,7 @@ impl TestStateBuilder {
             run_dir: dir_path.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: self.lead.clone(),

@@ -97,6 +97,7 @@ mod integration_tests {
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         store.finalize_run(&summary).await.unwrap();
 

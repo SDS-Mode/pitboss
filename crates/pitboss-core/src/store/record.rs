@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -224,6 +224,62 @@ pub struct RunSummary {
     /// still load. (#253)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_breakdown: Option<SpendBreakdown>,
+    /// Headline resource numbers (RSS high-water + cgroup headroom +
+    /// per-actor peaks) for the run. `None` when the resource watcher
+    /// was disabled (`[run].resource_sample_secs = 0`), unsupported on
+    /// the host (macOS flat dispatch), or for pre-#553 `summary.json`
+    /// files. Pairs with the per-tick `resource_sample` /
+    /// `resource_pressure` envelopes in `events.jsonl` — this struct
+    /// is the finalize-time roll-up so `pitboss status` and the run-list
+    /// "Mem peak" badge don't have to walk the JSONL stream. (#553)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_high_water: Option<ResourceHighWater>,
+}
+
+/// Finalize-time roll-up of per-actor resource sampling (#553). Built
+/// from an in-memory accumulator on the dispatcher's resource-watch
+/// task, then stamped onto [`RunSummary`] when finalize runs. Persisted
+/// to `summary.json` so consumers (run-list badge, `pitboss status
+/// --resources`, `pitboss-web`) get the headline numbers without
+/// re-walking `events.jsonl`.
+///
+/// Every field carries `#[serde(default)]` so the struct survives the
+/// usual back-compat regression class — older summaries deserialise as
+/// `None`, newer summaries with extra fields don't break older
+/// consumers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResourceHighWater {
+    /// Maximum total RSS observed across all actors at any sample
+    /// during the run, in bytes. The headline figure for "did this
+    /// run come close to its memory ceiling?"
+    #[serde(default)]
+    pub total_rss_bytes_max: u64,
+    /// `cgroup memory.max` observed at sample time (constant across a
+    /// run in practice — captured for consumer convenience as the
+    /// denominator for `peak_utilization_pct`). `None` for flat host
+    /// dispatch where no cgroup limit is in scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_memory_max_bytes: Option<u64>,
+    /// Peak utilization fraction (`total_rss_bytes_max ÷ available`)
+    /// as a value in `[0.0, 1.0+]`. `None` when no denominator was
+    /// available (`/proc/meminfo` and the cgroup files both missing —
+    /// e.g. macOS flat dispatch where the watcher short-circuits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_utilization_pct: Option<f32>,
+    /// Per-actor RSS peak in bytes, keyed by `actor_id`. `BTreeMap`
+    /// for stable JSON ordering across runs (helps diffs).
+    #[serde(default)]
+    pub rss_bytes_max_by_actor: BTreeMap<String, u64>,
+    /// Number of samples folded into this summary. `0` when the
+    /// watcher was enabled but never got to take a sample before
+    /// finalize (very short flat runs, sampler-init race).
+    #[serde(default)]
+    pub sample_count: u64,
+    /// Cadence the watcher ran at, in seconds. Useful for renderers
+    /// that want to label time axes ("sampled every 5 s") without
+    /// reading `resolved.json`.
+    #[serde(default)]
+    pub sample_cadence_secs: u64,
 }
 
 impl SpendBreakdown {
@@ -563,6 +619,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("nightly"));

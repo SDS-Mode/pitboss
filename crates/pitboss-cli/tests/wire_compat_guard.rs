@@ -60,10 +60,16 @@ const PROTOCOL_RS: &str = include_str!("../src/control/protocol.rs");
 /// reason for failing-loudly on absence rather than defaulting
 /// silently — e.g. identity-bearing fields where `""` or `0` would
 /// be a silent misclassification.
-const EXEMPT_FIELDS: &[(&str, &str)] = &[(
-    "ActorActivityEntry.actor_id",
-    "identity-bearing — must fail-loud on absence rather than default to empty string",
-)];
+const EXEMPT_FIELDS: &[(&str, &str)] = &[
+    (
+        "ActorActivityEntry.actor_id",
+        "identity-bearing — must fail-loud on absence rather than default to empty string",
+    ),
+    (
+        "ResourceSampleEntry.actor_id",
+        "identity-bearing — same rationale as ActorActivityEntry.actor_id (#553)",
+    ),
+];
 
 #[test]
 fn every_nested_struct_field_in_wire_variants_has_back_compat_attr() {

@@ -545,6 +545,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             tmp.path().join("summary.json"),
@@ -581,6 +582,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Failed)],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             tmp.path().join("summary.json"),
@@ -858,6 +860,7 @@ mod tests {
             notify_failures: Some(2),
             tasks: vec![rec("a", TaskStatus::Success)],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             tmp.path().join("summary.json"),

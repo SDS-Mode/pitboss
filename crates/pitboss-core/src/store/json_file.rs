@@ -151,6 +151,7 @@ impl SessionStore for JsonFileStore {
             // to scanning `tasks` themselves; finalize-time writes
             // (`run_hierarchical`) populate this with the real value.
             spend_breakdown: None,
+            resource_high_water: None,
         })
     }
 }

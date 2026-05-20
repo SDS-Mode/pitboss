@@ -752,6 +752,20 @@ async fn spawn_sublead_session(
             );
         });
 
+    // Register the sub-lead's pid slot on its own sub-tree layer's
+    // `workers.pids` map so the resource sampler (#553) can read
+    // `/proc/<pid>/status` for it just like for workers. Removed
+    // after the kill+resume loop exits below.
+    let sublead_pid_slot = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    sub_layer_bg
+        .workers
+        .pids
+        .write()
+        .await
+        .insert(sublead_id_bg.clone(), sublead_pid_slot.clone());
+
+    let sub_layer_pid_cleanup = sub_layer_bg.clone();
+    let sublead_id_pid_cleanup = sublead_id_bg.clone();
     tokio::spawn(async move {
         // Run the kill+resume loop via the shared helper. The closure
         // captures sub-lead-specific resume-args / env / cwd resolution
@@ -769,6 +783,7 @@ async fn spawn_sublead_session(
                 stderr_path: stderr_path.clone(),
                 usage_observer: sublead_usage_observer,
                 on_iteration_done: Some(sublead_on_iteration_done),
+                pid_slot: Some(sublead_pid_slot),
             },
             reprompt_rx,
             |sid, new_prompt| {
@@ -857,6 +872,17 @@ async fn spawn_sublead_session(
         let total_token_usage = kr_result.total_token_usage;
         let reprompt_count = kr_result.reprompt_count;
         let last_session_id = kr_result.last_session_id;
+
+        // Remove the sub-lead's pid slot now that the kill+resume loop
+        // has exited (#553). Same rationale as the lead cleanup in
+        // hierarchical.rs — keeps the next resource_sample tick from
+        // emitting a skeleton entry for a reaped process.
+        sub_layer_pid_cleanup
+            .workers
+            .pids
+            .write()
+            .await
+            .remove(&sublead_id_pid_cleanup);
 
         // Apply accumulated cost once. Per-iteration accumulation moved
         // here from inside the loop; benign (no worker spawn into the

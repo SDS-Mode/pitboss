@@ -841,6 +841,7 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
         // finalize path (the production write site) populate the
         // breakdown for real runs.
         spend_breakdown: None,
+            resource_high_water: None,
     })
 }
 
@@ -1177,6 +1178,7 @@ mod sqlite_tests {
             notify_failures: None,
             tasks: vec![rec("a", TaskStatus::Success), rec("b", TaskStatus::Failed)],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         store.finalize_run(&summary).await.unwrap();
 
@@ -1304,6 +1306,7 @@ mod sqlite_tests {
             notify_failures: None,
             tasks: vec![rec.clone()],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         store.finalize_run(&summary).await.unwrap();
 
@@ -1398,6 +1401,7 @@ mod sqlite_tests {
             notify_failures: None,
             tasks: vec![rec.clone()],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         store.finalize_run(&summary).await.unwrap();
         let back = store.load_run(run_id).await.unwrap();

@@ -54,6 +54,14 @@ worktree_cleanup = "on_success"
 # summary.jsonl. Off by default.
 # emit_event_stream = false
 
+# How often (in seconds) the dispatcher samples per-actor RSS / VSZ / CPU%
+# and cgroup headroom (#553). `0` disables sampling entirely; default 5.
+# Memory-pressure events fire at 70% / 90% of available memory and clear
+# at sustained <60%. On macOS host dispatch the sampler is a no-op
+# (no /proc); inside `pitboss container-dispatch` the sampler runs in
+# the linux VM so macOS hosts still get full pressure visibility.
+# resource_sample_secs = 5
+
 # Default action for `request_approval` / `propose_plan` when no TUI is
 # attached and no [[approval_policy]] rule matches.
 #   "block"        — queue until a TUI connects (DEFAULT)

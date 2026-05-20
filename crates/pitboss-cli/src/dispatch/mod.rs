@@ -12,6 +12,7 @@ pub mod hierarchical;
 pub mod kill_resume;
 pub mod layer;
 pub mod probe;
+pub mod resource_watch;
 pub mod resume;
 pub mod runner;
 pub mod signals;

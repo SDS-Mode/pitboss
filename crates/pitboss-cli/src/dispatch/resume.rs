@@ -482,6 +482,7 @@ mod tests {
             notify_failures: None,
             tasks,
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             dir.join("summary.json"),
@@ -677,6 +678,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: Some(ResolvedLead {
@@ -766,6 +768,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![lead_record],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -803,6 +806,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: Some(ResolvedLead {
@@ -895,6 +899,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![lead_record],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -932,6 +937,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: Some(ResolvedLead {
@@ -1020,6 +1026,7 @@ mod tests {
             notify_failures: None,
             tasks: vec![lead_record],
             spend_breakdown: None,
+            resource_high_water: None,
         };
         std::fs::write(
             run_dir.join("summary.json"),
@@ -1137,6 +1144,7 @@ mod tests {
             run_dir: std::path::PathBuf::from("/tmp"),
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: None,
