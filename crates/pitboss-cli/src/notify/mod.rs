@@ -193,6 +193,18 @@ pub const DEFAULT_DEDUP_CACHE_SIZE: usize = 64;
 /// the value is non-numeric or zero. Issue #156 (L1).
 pub const DEDUP_CACHE_SIZE_ENV: &str = "PITBOSS_NOTIFY_DEDUP_CACHE_SIZE";
 
+/// Pure parser for the dedup-cache-size env var. Returns the parsed
+/// capacity when the raw value trims to a positive integer; falls back
+/// to [`DEFAULT_DEDUP_CACHE_SIZE`] otherwise (non-numeric, zero, blank,
+/// or absent). Extracted from [`NotificationRouter::new`] so tests can
+/// verify the parsing logic without mutating `std::env`. (#351 /
+/// F-TEST-11)
+pub fn parse_dedup_cache_size(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_DEDUP_CACHE_SIZE)
+}
+
 /// Router fans envelopes to multiple sinks with LRU dedup and retry.
 pub struct NotificationRouter {
     sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>,
@@ -216,12 +228,8 @@ impl NotificationRouter {
     /// honors `PITBOSS_NOTIFY_DEDUP_CACHE_SIZE` when set to a positive
     /// integer, otherwise falls back to [`DEFAULT_DEDUP_CACHE_SIZE`].
     pub fn new(sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)>) -> Self {
-        let capacity = std::env::var(DEDUP_CACHE_SIZE_ENV)
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_DEDUP_CACHE_SIZE);
-        Self::new_with_capacity(sinks, capacity)
+        let raw = std::env::var(DEDUP_CACHE_SIZE_ENV).ok();
+        Self::new_with_capacity(sinks, parse_dedup_cache_size(raw.as_deref()))
     }
 
     /// Like [`Self::new`] but with an explicit dedup-cache size — used by
@@ -423,7 +431,6 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
     #[test]
     fn severity_ord_is_info_warning_error_critical() {
@@ -648,20 +655,27 @@ mod tests {
         assert!(body.contains("synthetic emit failure"), "{body}");
     }
 
-    /// #156 (L1) regression: env-var override of dedup cache size is
-    /// honored by `NotificationRouter::new`. We can't observe the cache
-    /// size directly, so we verify the constructor doesn't panic for an
-    /// extreme value (which a misuse of NonZeroUsize might).
+    /// #156 (L1) regression: the dedup-cache-size env-var parse logic
+    /// extracted into [`parse_dedup_cache_size`] honors valid positive
+    /// integers and falls back to the default for blank / zero /
+    /// non-numeric input. Pre-#351 this test mutated `std::env` and was
+    /// gated on `#[serial(env)]`; the pure parser eliminates the
+    /// `setenv`/`getenv` race entirely.
     #[test]
-    #[serial(env)]
-    fn router_new_honors_dedup_cache_size_env() {
-        std::env::set_var(DEDUP_CACHE_SIZE_ENV, "1024");
-        let _ = NotificationRouter::new(vec![]);
-        std::env::set_var(DEDUP_CACHE_SIZE_ENV, "0"); // should fall back to default
-        let _ = NotificationRouter::new(vec![]);
-        std::env::set_var(DEDUP_CACHE_SIZE_ENV, "not a number");
-        let _ = NotificationRouter::new(vec![]);
-        std::env::remove_var(DEDUP_CACHE_SIZE_ENV);
+    fn parse_dedup_cache_size_honors_positive_integer() {
+        assert_eq!(parse_dedup_cache_size(Some("1024")), 1024);
+        assert_eq!(parse_dedup_cache_size(Some("  1024  ")), 1024);
+    }
+
+    #[test]
+    fn parse_dedup_cache_size_falls_back_on_invalid() {
+        assert_eq!(parse_dedup_cache_size(None), DEFAULT_DEDUP_CACHE_SIZE);
+        assert_eq!(parse_dedup_cache_size(Some("")), DEFAULT_DEDUP_CACHE_SIZE);
+        assert_eq!(parse_dedup_cache_size(Some("0")), DEFAULT_DEDUP_CACHE_SIZE);
+        assert_eq!(
+            parse_dedup_cache_size(Some("not a number")),
+            DEFAULT_DEDUP_CACHE_SIZE
+        );
     }
 
     /// #187 regression: a poisoned `dedup_cache` mutex must not panic the

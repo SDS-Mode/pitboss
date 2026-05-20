@@ -79,7 +79,25 @@ fn default_severity_min() -> Severity {
 /// Walk a mutable string: replace `${IDENT}` tokens with the value of
 /// `std::env::var(IDENT)`. Errors if any `${IDENT}` has no matching env var
 /// or if the name does not start with `PITBOSS_` (see ENV_VAR_ALLOWED_PREFIX).
+///
+/// Thin wrapper over [`substitute_env_vars_with`]; tests should call the
+/// pure variant with a closure to avoid mutating `std::env`. (#351 /
+/// F-TEST-11)
 pub fn substitute_env_vars(s: &str) -> Result<String> {
+    substitute_env_vars_with(s, |name| std::env::var(name).ok())
+}
+
+/// Pure variant of [`substitute_env_vars`]. `lookup` receives each
+/// `${IDENT}` name and returns the value to substitute (or `None` to
+/// emit the same "env var is not set" error the env-reading variant
+/// would). Used by callers that need deterministic substitution
+/// independent of the process env (notably the test suite, which would
+/// otherwise need `#[serial(env)]` on every call site to keep the glibc
+/// `setenv`/`getenv` race contained).
+pub fn substitute_env_vars_with<F>(s: &str, lookup: F) -> Result<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while !rest.is_empty() {
@@ -98,7 +116,7 @@ pub fn substitute_env_vars(s: &str) -> Result<String> {
                      (rename the var to `{ENV_VAR_ALLOWED_PREFIX}{name}` or similar)"
                 );
             }
-            let val = std::env::var(name).map_err(|_| {
+            let val = lookup(name).ok_or_else(|| {
                 anyhow::anyhow!("notification uses ${{{name}}} but env var is not set")
             })?;
             out.push_str(&val);
@@ -114,8 +132,17 @@ pub fn substitute_env_vars(s: &str) -> Result<String> {
 /// Run env-var substitution over every string field of the config.
 /// Currently just `url`; keep extensible if we add more string fields.
 pub fn apply_env_substitution(cfg: &mut NotificationConfig) -> Result<()> {
+    apply_env_substitution_with(cfg, |name| std::env::var(name).ok())
+}
+
+/// Pure variant of [`apply_env_substitution`]. Used by the test suite
+/// to avoid `std::env` mutation; see [`substitute_env_vars_with`].
+pub fn apply_env_substitution_with<F>(cfg: &mut NotificationConfig, lookup: F) -> Result<()>
+where
+    F: Fn(&str) -> Option<String>,
+{
     if let Some(url) = cfg.url.as_mut() {
-        *url = substitute_env_vars(url)?;
+        *url = substitute_env_vars_with(url, lookup)?;
     }
     Ok(())
 }
@@ -404,21 +431,33 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+
+    // #351 / F-TEST-11: the four `substitute_env_vars` tests below used
+    // to mutate `std::env` and were gated on `#[serial(env)]`. The
+    // refactor extracted `substitute_env_vars_with(s, lookup)` which
+    // takes a closure for the env-var lookup; each test now passes its
+    // own deterministic closure instead of touching the process env,
+    // eliminating the glibc setenv/getenv race entirely.
+
+    fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find_map(|(k, v)| (*k == name).then(|| (*v).to_string()))
+        }
+    }
 
     #[test]
-    #[serial(env)]
     fn env_var_substitution_replaces_tokens() {
-        std::env::set_var("PITBOSS_NOTIFY_TEST_URL", "https://example.com/hook");
-        let out = substitute_env_vars("${PITBOSS_NOTIFY_TEST_URL}/sub").unwrap();
+        let lk = lookup(&[("PITBOSS_NOTIFY_TEST_URL", "https://example.com/hook")]);
+        let out = substitute_env_vars_with("${PITBOSS_NOTIFY_TEST_URL}/sub", lk).unwrap();
         assert_eq!(out, "https://example.com/hook/sub");
     }
 
     #[test]
-    #[serial(env)]
     fn env_var_missing_fails_loud() {
-        std::env::remove_var("PITBOSS_NOTIFY_TEST_MISSING_XYZ");
-        let err = substitute_env_vars("${PITBOSS_NOTIFY_TEST_MISSING_XYZ}").unwrap_err();
+        let lk = lookup(&[]);
+        let err = substitute_env_vars_with("${PITBOSS_NOTIFY_TEST_MISSING_XYZ}", lk).unwrap_err();
         assert!(err.to_string().contains("env var is not set"));
     }
 
@@ -428,10 +467,12 @@ mod tests {
     /// URL — both are runtime values pitboss itself sets, and one of them
     /// (PITBOSS_PARENT_NOTIFY_URL) is itself a sensitive operator endpoint.
     #[test]
-    #[serial(env)]
     fn env_var_pitboss_run_id_not_substitutable() {
-        std::env::set_var("PITBOSS_RUN_ID", "019d0000-aaaa-bbbb-cccc-dddddddddddd");
-        let err = substitute_env_vars("${PITBOSS_RUN_ID}").unwrap_err();
+        // Even if PITBOSS_RUN_ID is "set" in our test lookup, the prefix
+        // check rejects it before lookup runs — proving the narrowed
+        // prefix is enforced at parse time, not just at env-read time.
+        let lk = lookup(&[("PITBOSS_RUN_ID", "019d0000-aaaa-bbbb-cccc-dddddddddddd")]);
+        let err = substitute_env_vars_with("${PITBOSS_RUN_ID}", lk).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("PITBOSS_NOTIFY_"),
@@ -473,10 +514,9 @@ url = "https://example.com""#;
     }
 
     #[test]
-    #[serial(env)]
     fn env_var_without_pitboss_prefix_rejected() {
-        std::env::set_var("NOTIFY_TEST_FOREIGN", "leaked");
-        let err = substitute_env_vars("${NOTIFY_TEST_FOREIGN}").unwrap_err();
+        let lk = lookup(&[("NOTIFY_TEST_FOREIGN", "leaked")]);
+        let err = substitute_env_vars_with("${NOTIFY_TEST_FOREIGN}", lk).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("PITBOSS_NOTIFY_"),

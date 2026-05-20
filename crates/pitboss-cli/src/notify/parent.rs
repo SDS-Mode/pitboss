@@ -61,9 +61,23 @@ pub const RUN_ID_ENV: &str = "PITBOSS_RUN_ID";
 /// hours later on the first emit). The returned sink bypasses the
 /// per-request SSRF guard — see the module-level comment for why that's
 /// safe.
+///
+/// This is a thin wrapper over [`build_parent_sink_from`] that reads the
+/// env var exactly once. Tests should call the pure variant directly to
+/// avoid the `setenv`/`getenv` race documented in #351 / F-TEST-11.
 pub fn build_parent_sink(http: &Arc<reqwest::Client>) -> Option<Arc<dyn NotificationSink>> {
-    let url = std::env::var(PARENT_NOTIFY_URL_ENV).ok()?;
-    let trimmed = url.trim();
+    build_parent_sink_from(std::env::var(PARENT_NOTIFY_URL_ENV).ok().as_deref(), http)
+}
+
+/// Pure variant of [`build_parent_sink`]. Takes the raw env-var value
+/// (`None` for unset) as an argument so callers can construct it without
+/// process-wide env mutation. Production code routes through the
+/// `_from_env` wrapper above; tests pass the value directly.
+pub fn build_parent_sink_from(
+    raw_url: Option<&str>,
+    http: &Arc<reqwest::Client>,
+) -> Option<Arc<dyn NotificationSink>> {
+    let trimmed = raw_url?.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -85,11 +99,24 @@ pub fn build_parent_sink(http: &Arc<reqwest::Client>) -> Option<Arc<dyn Notifica
 /// Read `PITBOSS_RUN_ID` from the current process env. Used at dispatch
 /// start to populate `RunDispatched.parent_run_id`. `None` for top-level
 /// dispatches (env var unset or empty).
+///
+/// Thin wrapper over [`parse_parent_run_id`]; see that function's
+/// docstring for the trimming/empty rules.
 pub fn parent_run_id() -> Option<String> {
-    std::env::var(RUN_ID_ENV)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    parse_parent_run_id(std::env::var(RUN_ID_ENV).ok().as_deref())
+}
+
+/// Pure variant of [`parent_run_id`]. Takes the raw env-var value
+/// (`None` for unset) and applies the same trim-and-discard-empty
+/// normalization. Tests target this function directly to avoid the
+/// `setenv`/`getenv` race documented in #351 / F-TEST-11.
+pub fn parse_parent_run_id(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Build a [`NotificationRouter`] combining manifest `[[notification]]`
@@ -106,6 +133,23 @@ pub fn build_router(
     manifest_sinks: &[NotificationConfig],
     http: &Arc<reqwest::Client>,
 ) -> Result<Option<Arc<NotificationRouter>>> {
+    build_router_with(
+        manifest_sinks,
+        std::env::var(PARENT_NOTIFY_URL_ENV).ok().as_deref(),
+        http,
+    )
+}
+
+/// Pure variant of [`build_router`]. Takes the parent-notify URL as an
+/// argument (`None` when the env var is unset) so callers can construct
+/// it without process-wide env mutation. Tests target this function
+/// directly to avoid the `setenv`/`getenv` race documented in #351 /
+/// F-TEST-11.
+pub fn build_router_with(
+    manifest_sinks: &[NotificationConfig],
+    parent_url: Option<&str>,
+    http: &Arc<reqwest::Client>,
+) -> Result<Option<Arc<NotificationRouter>>> {
     let mut sinks: Vec<(Arc<dyn NotificationSink>, SinkFilter)> = manifest_sinks
         .iter()
         .enumerate()
@@ -116,7 +160,7 @@ pub fn build_router(
         })
         .collect::<Result<_>>()?;
 
-    if let Some(parent_sink) = build_parent_sink(http) {
+    if let Some(parent_sink) = build_parent_sink_from(parent_url, http) {
         // Open filter — operator orchestrators want every signal pitboss can give.
         sinks.push((
             parent_sink,
@@ -137,69 +181,63 @@ pub fn build_router(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
-    // #351: every test in this module mutates parent-notify env vars.
-    // `#[serial(env)]` serializes against every other env-touching
-    // test in the crate, replacing the previous module-local
-    // `ENV_GUARD` (which only protected this file).
+    // #351 / F-TEST-11: pre-refactor these tests mutated PITBOSS_RUN_ID
+    // / PITBOSS_PARENT_NOTIFY_URL via std::env and gated each one on
+    // `#[serial(env)]`. The refactor extracted pure variants
+    // (`parse_parent_run_id`, `build_parent_sink_from`,
+    // `build_router_with`) that take the raw env value as a parameter,
+    // so every test below can run in parallel without touching the
+    // process env — eliminating the glibc setenv/getenv race entirely.
 
     #[test]
-    #[serial(env)]
-    fn parent_run_id_returns_none_when_unset() {
-        std::env::remove_var(RUN_ID_ENV);
-        assert!(parent_run_id().is_none());
+    fn parse_parent_run_id_returns_none_when_unset() {
+        assert!(parse_parent_run_id(None).is_none());
     }
 
     #[test]
-    #[serial(env)]
-    fn parent_run_id_returns_some_when_set() {
-        std::env::set_var(RUN_ID_ENV, "  019d0000-aaaa-bbbb-cccc-dddddddddddd  ");
-        let v = parent_run_id();
-        std::env::remove_var(RUN_ID_ENV);
+    fn parse_parent_run_id_returns_some_when_set() {
+        let v = parse_parent_run_id(Some("  019d0000-aaaa-bbbb-cccc-dddddddddddd  "));
         assert_eq!(v.as_deref(), Some("019d0000-aaaa-bbbb-cccc-dddddddddddd"));
     }
 
     #[test]
-    #[serial(env)]
-    fn parent_run_id_returns_none_when_empty() {
-        std::env::set_var(RUN_ID_ENV, "   ");
-        let v = parent_run_id();
-        std::env::remove_var(RUN_ID_ENV);
-        assert!(v.is_none());
+    fn parse_parent_run_id_returns_none_when_empty() {
+        assert!(parse_parent_run_id(Some("   ")).is_none());
+        assert!(parse_parent_run_id(Some("")).is_none());
     }
 
     #[test]
-    #[serial(env)]
-    fn build_parent_sink_returns_none_when_env_unset() {
-        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+    fn build_parent_sink_from_returns_none_when_unset() {
         let http = Arc::new(reqwest::Client::new());
-        assert!(build_parent_sink(&http).is_none());
+        assert!(build_parent_sink_from(None, &http).is_none());
     }
 
     #[test]
-    #[serial(env)]
-    fn build_parent_sink_returns_none_when_env_unparseable() {
+    fn build_parent_sink_from_returns_none_when_unparseable() {
         // A typo'd scheme (`htttp://…`) used to silently construct a sink
         // that failed on first emit. Catch it at dispatch start instead.
         // No scheme delimiter at all → reqwest::Url::parse rejects.
         // (`htttp://…` parses fine: any token is a valid scheme.)
-        std::env::set_var(PARENT_NOTIFY_URL_ENV, "definitely not a url");
         let http = Arc::new(reqwest::Client::new());
-        let sink = build_parent_sink(&http);
-        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+        let sink = build_parent_sink_from(Some("definitely not a url"), &http);
         assert!(
             sink.is_none(),
-            "unparseable URL should be rejected at build_parent_sink"
+            "unparseable URL should be rejected at build_parent_sink_from"
         );
     }
 
+    #[test]
+    fn build_parent_sink_from_returns_none_when_empty() {
+        let http = Arc::new(reqwest::Client::new());
+        assert!(build_parent_sink_from(Some("   "), &http).is_none());
+    }
+
     #[tokio::test]
-    #[serial(env)]
     async fn parent_sink_posts_run_dispatched_to_localhost() {
-        // End-to-end: env var → trusted webhook sink → POST to a local mock.
-        // Verifies that the SSRF bypass actually lets a localhost target work
-        // (the manifest path would refuse it at parse time).
+        // End-to-end: parameter → trusted webhook sink → POST to a local
+        // mock. Verifies that the SSRF bypass actually lets a localhost
+        // target work (the manifest path would refuse it at parse time).
         use crate::notify::{NotificationEnvelope, PitbossEvent, Severity};
         use chrono::Utc;
         use wiremock::matchers::{method, path};
@@ -213,10 +251,8 @@ mod tests {
             .await;
 
         let url = format!("{}/notify", mock.uri());
-        std::env::set_var(PARENT_NOTIFY_URL_ENV, &url);
         let http = Arc::new(reqwest::Client::new());
-        let sink = build_parent_sink(&http).expect("env-derived sink");
-        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+        let sink = build_parent_sink_from(Some(&url), &http).expect("sink");
 
         let env = NotificationEnvelope::new(
             "child-run-1",
@@ -234,11 +270,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(env)]
     async fn parent_sink_bypasses_https_only_check() {
-        // Manifest webhook validation rejects http:// + loopback. The env-var
-        // path must accept both, since the canonical orchestrator topology is
-        // `http://localhost:N` on the same host.
+        // Manifest webhook validation rejects http:// + loopback. The
+        // env-var path must accept both, since the canonical orchestrator
+        // topology is `http://localhost:N` on the same host.
         use crate::notify::{NotificationEnvelope, PitbossEvent, Severity};
         use chrono::Utc;
         use wiremock::matchers::method;
@@ -252,10 +287,9 @@ mod tests {
 
         // mock.uri() returns http://127.0.0.1:<port> — exactly the case the
         // SSRF guard refuses for manifest URLs.
-        std::env::set_var(PARENT_NOTIFY_URL_ENV, mock.uri());
+        let uri = mock.uri();
         let http = Arc::new(reqwest::Client::new());
-        let sink = build_parent_sink(&http).expect("env-derived sink");
-        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+        let sink = build_parent_sink_from(Some(&uri), &http).expect("sink");
 
         let env = NotificationEnvelope::new(
             "run-x",
@@ -274,21 +308,16 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
-    fn build_router_returns_none_when_no_sources() {
-        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+    fn build_router_with_returns_none_when_no_sources() {
         let http = Arc::new(reqwest::Client::new());
-        let router = build_router(&[], &http).unwrap();
+        let router = build_router_with(&[], None, &http).unwrap();
         assert!(router.is_none());
     }
 
     #[test]
-    #[serial(env)]
-    fn build_router_includes_parent_sink_when_env_set() {
-        std::env::set_var(PARENT_NOTIFY_URL_ENV, "http://127.0.0.1:9/x");
+    fn build_router_with_includes_parent_sink_when_url_provided() {
         let http = Arc::new(reqwest::Client::new());
-        let router = build_router(&[], &http).unwrap();
-        std::env::remove_var(PARENT_NOTIFY_URL_ENV);
+        let router = build_router_with(&[], Some("http://127.0.0.1:9/x"), &http).unwrap();
         assert!(
             router.is_some(),
             "router should be built when only env-var sink contributes"
