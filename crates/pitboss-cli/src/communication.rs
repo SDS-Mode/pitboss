@@ -23,7 +23,11 @@ use crate::shared_store::ActorRole;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommunicationError {
-    #[error("communication tools are disabled by [communication].mode")]
+    #[error(
+        "communication tools are disabled; the operator must set \
+         [communication].mode = \"parent_child\" in the manifest to enable \
+         mailbox (message_*) and artifact (artifact_*) tools"
+    )]
     Disabled,
     #[error("caller identity required (missing _meta)")]
     MissingIdentity,
