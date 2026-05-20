@@ -212,6 +212,21 @@ fn describe_event(event: &ControlEvent) -> (&'static str, String) {
                 "sublead_id={sublead_id} spent_usd={spent_usd:.4} unspent_usd={unspent_usd:.4}"
             ),
         ),
+        ControlEvent::ResourceSample { samples, .. } => (
+            "resource_sample",
+            format!("actor_count={}", samples.len()),
+        ),
+        ControlEvent::ResourcePressure {
+            level,
+            total_rss_bytes,
+            available_bytes,
+            ..
+        } => (
+            "resource_pressure",
+            format!(
+                "level={level:?} total_rss_bytes={total_rss_bytes} available_bytes={available_bytes}"
+            ),
+        ),
     }
 }
 

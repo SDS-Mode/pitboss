@@ -963,6 +963,7 @@ async fn dogfood_envelope_cap_rejection() {
             run_dir: dir.path().to_path_buf(),
             worktree_cleanup: pitboss_cli::manifest::schema::WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: Some(lead),

@@ -1099,6 +1099,7 @@ mod tests {
             notify_failures: None,
             tasks,
             spend_breakdown: None,
+            resource_high_water: None,
         }
     }
 

@@ -76,6 +76,16 @@ pub struct KillResumeArgs {
     /// committed cost into the running baseline so the next iteration's
     /// observer starts from the updated zero. (#253)
     pub on_iteration_done: Option<IterationDoneHook>,
+    /// Optional pid slot for the kill+resume subprocess. When set, the
+    /// `SessionHandle` for every iteration publishes the spawned pid
+    /// into this `AtomicU32` (and clears it on reap) so the
+    /// dispatcher-level resource sampler (`dispatch::resource_watch`)
+    /// can read `/proc/<pid>/status` for the lead / sublead just like
+    /// it does for workers. Workers already wire this in
+    /// `mcp::tools::spawn`; PR-A of #553 closes the lead/sublead gap.
+    /// `None` for callers that don't care about pid observation
+    /// (tests that don't drive the resource watcher).
+    pub pid_slot: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 /// Post-iteration callback type used by [`KillResumeArgs::on_iteration_done`].
@@ -166,6 +176,9 @@ pub async fn run_kill_resume_loop(
         .with_session_id_tx(session_id_tx);
         if let Some(obs) = args.usage_observer.clone() {
             handle = handle.with_usage_observer(obs);
+        }
+        if let Some(slot) = args.pid_slot.clone() {
+            handle = handle.with_pid_slot(slot);
         }
         let outcome = handle.run_to_completion(proc_cancel, args.timeout).await;
 
@@ -294,6 +307,7 @@ mod tests {
             run_dir,
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: None,
@@ -394,6 +408,7 @@ mod tests {
             stderr_path: dir.path().join("stderr.log"),
             usage_observer: None,
             on_iteration_done: None,
+            pid_slot: None,
         };
 
         let result =
@@ -470,6 +485,7 @@ mod tests {
             stderr_path: dir.path().join("stderr.log"),
             usage_observer: None,
             on_iteration_done: None,
+            pid_slot: None,
         };
 
         let result =

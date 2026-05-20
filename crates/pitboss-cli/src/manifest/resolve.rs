@@ -147,6 +147,13 @@ pub struct ResolvedManifest {
     pub run_dir: PathBuf,
     pub worktree_cleanup: WorktreeCleanup,
     pub emit_event_stream: bool,
+    /// Sample-cadence for the per-actor resource watcher (#553). `0`
+    /// disables sampling entirely; otherwise the watcher fires every
+    /// `resource_sample_secs` seconds. `#[serde(default = ...)]` so
+    /// pre-#553 `resolved.json` snapshots resume with the default
+    /// cadence (5 s) rather than silently disabling sampling.
+    #[serde(default = "crate::manifest::schema::default_resource_sample_secs")]
+    pub resource_sample_secs: u64,
     /// Optional `--setting-sources` override forwarded to every worker
     /// `claude … -p` spawn. `None` means apply pitboss's default (filter
     /// in container, no filter on host). Validated comma-separated
@@ -404,6 +411,7 @@ pub fn resolve(
         run_dir,
         worktree_cleanup: manifest.run.worktree_cleanup,
         emit_event_stream: manifest.run.emit_event_stream,
+        resource_sample_secs: manifest.run.resource_sample_secs,
         claude_setting_sources: manifest.run.claude_setting_sources.clone(),
         tasks: resolved_tasks,
         lead: resolved_lead,

@@ -579,6 +579,23 @@ pub struct RunConfig {
         help = "Write a JSONL event stream alongside summary.jsonl."
     )]
     pub emit_event_stream: bool,
+    /// Sample-cadence for the per-actor resource watcher (RSS / VSZ /
+    /// CPU% per actor, plus cgroup headroom for container dispatch). `0`
+    /// disables sampling entirely; the watcher task is not spawned and
+    /// no `resource_sample` / `resource_pressure` envelopes are emitted.
+    /// Default 5s. Memory-pressure events fire at 70% / 90% utilization
+    /// and clear at sustained <60% (#553).
+    ///
+    /// On macOS host dispatch (no `/proc`) the watcher emits one
+    /// "unsupported" log line and exits cleanly. Inside container
+    /// dispatch the watcher always runs in the linux VM, so macOS hosts
+    /// still get full pressure visibility through `pitboss container-dispatch`.
+    #[serde(default = "default_resource_sample_secs")]
+    #[field(
+        label = "Resource sample cadence (s)",
+        help = "How often to sample worker RSS / VSZ / CPU% and cgroup headroom. 0 disables. Default 5."
+    )]
+    pub resource_sample_secs: u64,
     /// `--setting-sources` override forwarded to every `claude … -p`
     /// spawn under this manifest. When omitted, pitboss falls back to
     /// its built-in default: `project,local` in container-dispatch
@@ -710,6 +727,7 @@ impl Default for RunConfig {
             run_dir: None,
             worktree_cleanup: WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: default_resource_sample_secs(),
             claude_setting_sources: None,
             default_approval_policy: None,
             denial_termination_policy: None,
@@ -723,6 +741,14 @@ impl Default for RunConfig {
 
 fn default_cleanup() -> WorktreeCleanup {
     WorktreeCleanup::OnSuccess
+}
+
+/// Default sampling cadence for the per-actor resource watcher (#553).
+/// 5 s balances responsiveness against `/proc` read overhead and gives
+/// hysteretic memory-pressure thresholds enough samples to avoid
+/// flapping without exhausting log file growth.
+pub fn default_resource_sample_secs() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

@@ -303,6 +303,58 @@ pub enum ControlEvent {
     StoreActivity {
         counters: Vec<ActorActivityEntry>,
     },
+    /// Periodic broadcast of per-actor process resource usage (RSS,
+    /// VSZ, cumulative CPU jiffies) plus, in container mode, the
+    /// run's cgroup memory headroom. Emitted by the dispatcher-level
+    /// resource watcher (`dispatch::resource_watch`) every
+    /// `[run].resource_sample_secs` seconds. Persists to
+    /// `events.jsonl` via the existing broadcast bus, so the SPA can
+    /// replay the time-series offline; the live SSE bridge fans it
+    /// out to in-flight viewers. (#553)
+    ResourceSample {
+        samples: Vec<ResourceSampleEntry>,
+        /// `cgroup memory.current` at sample time, in bytes.
+        /// `None` in flat host dispatch (no cgroup in scope).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cgroup_memory_current_bytes: Option<u64>,
+        /// `cgroup memory.max` at sample time, in bytes. Stamped on
+        /// every sample (cheap) so consumers don't have to thread a
+        /// separate "context" envelope. `None` in flat host dispatch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cgroup_memory_max_bytes: Option<u64>,
+        /// Host-side `MemTotal` fallback denominator used in flat
+        /// host dispatch when no cgroup limit applies. `None` when
+        /// the cgroup denominator is in use OR when neither could
+        /// be read (darwin flat dispatch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_mem_total_bytes: Option<u64>,
+    },
+    /// Edge-triggered memory-pressure transition emitted by the
+    /// resource watcher's hysteretic threshold tracker. Fires once
+    /// per state change — Warn at ≥70%, Error at ≥90%, Clear after
+    /// 2 consecutive samples below 60%. Consumers render an in-band
+    /// banner on the Live tab and stamp the run-list badge when the
+    /// finalize-time `resource_high_water` carries a non-zero peak.
+    /// (#553)
+    ResourcePressure {
+        level: PressureLevel,
+        /// Sum of per-actor RSS at the sample that tripped this
+        /// transition.
+        #[serde(default)]
+        total_rss_bytes: u64,
+        /// Denominator used for the threshold check (cgroup
+        /// `memory.max` in container mode, `/proc/meminfo` MemTotal
+        /// in flat linux). Stamped so the operator can read the
+        /// percentage without re-deriving it from the sibling sample.
+        #[serde(default)]
+        available_bytes: u64,
+        /// Human-readable summary built by the watcher — names the
+        /// utilization %, the headroom mode, and an actionable hint
+        /// ("consider reducing `[lead].max_workers`",
+        /// "`podman machine set --memory 4096`").
+        #[serde(default)]
+        message: String,
+    },
     /// A sub-lead was successfully spawned and its LayerState is registered.
     /// Emitted by `dispatch::sublead::spawn_sublead` after the sub-tree is
     /// fully initialised and inserted into `state.subleads`.
@@ -390,6 +442,71 @@ pub struct ActorActivityEntry {
     pub message_ops: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub artifact_ops: u64,
+}
+
+/// Threshold transition state emitted on `ResourcePressure`. Hysteretic
+/// — cross-up to `Warn` / `Error` is edge-triggered at 70% / 90%, and
+/// `Clear` fires only after two consecutive samples below 60%, so a
+/// run hovering near 70% doesn't flap. (#553)
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PressureLevel {
+    /// No active pressure or pressure just dropped below the floor.
+    /// Emitted exactly once on a drop transition, the same way the
+    /// kernel's edge-triggered file notifications work — consumers
+    /// dismiss the live banner on receipt.
+    #[default]
+    Clear,
+    /// Total RSS / available ≥ 0.70. Banner suggests reducing fan-out.
+    Warn,
+    /// Total RSS / available ≥ 0.90. Banner suggests raising headroom
+    /// (`podman machine set --memory ...`) and names the OOM risk.
+    Error,
+}
+
+fn is_default_pressure_level(l: &PressureLevel) -> bool {
+    matches!(l, PressureLevel::Clear)
+}
+
+/// Per-actor row inside a `ResourceSample`. One entry per `task_id`
+/// found in any layer's `workers.pids` map at sample time (root lead
+/// + sub-leads + workers); processes reaped between scheduling the
+/// tick and reading `/proc` are dropped silently. (#553)
+///
+/// Every field carries `#[serde(default)]` so this nested struct
+/// follows the same wire-compat contract as the rest of the protocol
+/// (see the top-of-file convention + the test at
+/// `tests/wire_compat_guard.rs`). `actor_id` is exempt — identity
+/// must fail-loud on absence rather than default to empty string —
+/// and is enumerated in `EXEMPT_FIELDS` for the same reason as
+/// `ActorActivityEntry.actor_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceSampleEntry {
+    pub actor_id: String,
+    /// OS pid at sample time. `0` when the pid slot was registered
+    /// but the subprocess hadn't published its pid yet (very narrow
+    /// race window between `with_pid_slot` install and child spawn).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub pid: u32,
+    /// Resident-set-size in bytes (parsed from `VmRSS` in
+    /// `/proc/<pid>/status`).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub rss_bytes: u64,
+    /// Virtual size in bytes (parsed from `VmSize`).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub vsz_bytes: u64,
+    /// Cumulative `utime + stime` (in clock-ticks / jiffies) from
+    /// `/proc/<pid>/stat`. Consumers compute CPU% by diffing two
+    /// consecutive samples and dividing by ticks-per-second
+    /// (`sysconf(_SC_CLK_TCK)`, typically 100 on linux). Cumulative
+    /// rather than per-tick so a freshly-connected SSE subscriber
+    /// has enough information from one envelope to start rendering.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cpu_jiffies: u64,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 /// Payload embedded inside the `WorkersSnapshot` `ControlEvent` variant.

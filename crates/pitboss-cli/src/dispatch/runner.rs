@@ -269,6 +269,11 @@ struct RunHarness {
     notification_router_for_emit: Option<Arc<crate::notify::NotificationRouter>>,
     spawner: Arc<dyn ProcessSpawner>,
     store: Arc<dyn SessionStore>,
+    /// Per-actor resource sampler (#553). `None` when sampling is
+    /// disabled (`[run].resource_sample_secs = 0`) or unsupported
+    /// (darwin host with no `/proc`); finalize then writes
+    /// `resource_high_water: None` into `summary.json`.
+    resource_watcher: Option<Arc<crate::dispatch::resource_watch::ResourceWatcher>>,
 }
 
 /// Print the dry-run plan to stdout. Caller checks the `dry_run` flag and
@@ -351,6 +356,14 @@ async fn setup_run_harness(
         notification_router,
         shared_store.clone(),
     ));
+    // Per-actor resource sampler (#553). See hierarchical.rs for the
+    // sibling spawn site — same shape, same disabled-on-darwin /
+    // disabled-when-cadence-zero short-circuits.
+    let resource_watcher =
+        Some(crate::dispatch::resource_watch::ResourceWatcher::spawn(
+            flat_state.clone(),
+            resolved.resource_sample_secs,
+        ));
     // PITBOSS_CONTROL_TCP_PORT — see hierarchical.rs for the rationale (#474).
     let tcp_bind = std::env::var("PITBOSS_CONTROL_TCP_PORT")
         .ok()
@@ -377,6 +390,7 @@ async fn setup_run_harness(
         notification_router_for_emit,
         spawner,
         store,
+        resource_watcher,
     })
 }
 
@@ -517,6 +531,16 @@ async fn finalize_run(
         .notification_router_for_emit
         .as_ref()
         .map(|r| u32::try_from(r.failed_emits_total()).unwrap_or(u32::MAX));
+    // Roll up the resource watcher's in-memory accumulator (#553).
+    // We only set the field when the watcher actually took at least
+    // one sample — empty rollups would just clutter `summary.json`
+    // for runs with sampling disabled or that exited before the
+    // first tick.
+    let resource_high_water = harness
+        .resource_watcher
+        .as_ref()
+        .map(|w| w.high_water_snapshot())
+        .filter(|hw| hw.sample_count > 0);
     let summary = RunSummary {
         run_id: init.run_id,
         manifest_path: manifest_path.to_path_buf(),
@@ -536,6 +560,7 @@ async fn finalize_run(
         notify_failures,
         tasks: records,
         spend_breakdown: None,
+        resource_high_water,
     };
     harness.store.finalize_run(&summary).await?;
 
@@ -1511,6 +1536,7 @@ mod tests {
             run_dir: PathBuf::from("/tmp/pitboss-test"),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::OnSuccess,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![],
             lead: None,
@@ -1638,6 +1664,7 @@ mod tests {
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![
                 ResolvedTask {
@@ -1768,6 +1795,7 @@ mod tests {
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![make_task("a"), make_task("b"), make_task("c")],
             lead: None,
@@ -1857,6 +1885,7 @@ mod tests {
             run_dir: run_dir.path().to_path_buf(),
             worktree_cleanup: crate::manifest::schema::WorktreeCleanup::Always,
             emit_event_stream: false,
+            resource_sample_secs: 0,
             claude_setting_sources: None,
             tasks: vec![
                 ResolvedTask {

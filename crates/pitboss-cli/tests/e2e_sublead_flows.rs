@@ -702,6 +702,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
+            resource_sample_secs: 0,
         claude_setting_sources: None,
         tasks: vec![],
         lead: Some(lead),

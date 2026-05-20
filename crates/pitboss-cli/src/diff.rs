@@ -101,6 +101,7 @@ pub fn load_summary(run_dir: &Path) -> Result<RunSummary> {
         notify_failures: None,
         tasks,
         spend_breakdown: None,
+            resource_high_water: None,
     })
 }
 
@@ -565,6 +566,7 @@ mod tests {
             notify_failures: None,
             tasks,
             spend_breakdown: None,
+            resource_high_water: None,
         }
     }
 

@@ -27,6 +27,7 @@ halt_on_failure = false
 run_dir = "/path/to/value"
 worktree_cleanup = "always"
 emit_event_stream = false
+resource_sample_secs = 0
 claude_setting_sources = "<value>"
 default_approval_policy = "block"
 denial_termination_policy = "adapt"
