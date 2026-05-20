@@ -1472,7 +1472,22 @@ impl McpServer {
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
-        let listener = tokio::net::UnixListener::bind(&socket_path).with_context(|| {
+        // F-SEC-3 (#527): clamp the process umask to 0o077 across `bind()`
+        // so the socket file is created with 0o600 atomically rather than
+        // inheriting an inherited 0o022 umask and being world-readable for
+        // the window between `bind()` and the post-hoc `set_permissions`.
+        // Restored immediately after — `start()` is called once per run
+        // from a single call site (`hierarchical::run`/`runner::run`), so
+        // the window where this thread's umask is restrictive cannot race
+        // with another file creation in the same process.
+        #[cfg(unix)]
+        let _prev_umask = unsafe { libc::umask(0o077) };
+        let bind_result = tokio::net::UnixListener::bind(&socket_path);
+        #[cfg(unix)]
+        unsafe {
+            libc::umask(_prev_umask);
+        }
+        let listener = bind_result.with_context(|| {
             format!(
                 "bind MCP socket at {} (#550: on macOS+Podman the runs dir is virtiofs-backed, \
                  which rejects AF_UNIX bind() with EINVAL — set [container].extra_args = [\"-e\", \
@@ -1480,10 +1495,9 @@ impl McpServer {
                 socket_path.display()
             )
         })?;
-        // Explicit hardening — inherited umask (e.g. 0022) would leave the
-        // socket world-readable, letting any local user connect and inject
-        // `actor_role: root_lead` in _meta to call spawn_worker / kv_set.
-        // 0o600 restricts to the running user.
+        // Belt-and-braces: re-assert 0o600 after the bind in case the
+        // umask clamp above was a no-op (e.g. a future non-Unix port, or
+        // a platform where umask doesn't apply to AF_UNIX sockets).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
