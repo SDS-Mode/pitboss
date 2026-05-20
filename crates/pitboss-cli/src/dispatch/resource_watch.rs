@@ -134,7 +134,12 @@ async fn run_sampler(
     high_water: Arc<Mutex<HighWaterAccum>>,
     cadence: Duration,
 ) {
-    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + cadence, cadence);
+    // tokio::time::interval fires the first tick immediately; using
+    // `interval_at(now + cadence, …)` would swallow the first cadence,
+    // which on short worker-spawn-storm OOMs (peak within 10-20 s) meant
+    // the motivating incident's peak landed before any sample was taken.
+    // (#553 follow-up to PR #579 R3 finding F5)
+    let mut interval = tokio::time::interval(cadence);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tracker = PressureTracker::default();
 
@@ -166,7 +171,12 @@ async fn run_sampler(
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            g.observe(total_rss, denominator, cgroup.as_ref().map(|c| c.max_bytes), &samples);
+            g.observe(
+                total_rss,
+                denominator,
+                cgroup.as_ref().map(|c| c.max_bytes),
+                &samples,
+            );
         }
 
         // Build + broadcast sample envelope first; pressure transitions
@@ -330,8 +340,14 @@ fn parse_stat_cpu_jiffies(stat: &str) -> u64 {
     // Per `man 5 proc` field numbering: 1=pid, 2=comm, 3=state, 14=utime, 15=stime.
     // After skipping past `)` we are at field 3 onwards → utime is tail-index 11, stime is index 12.
     let parts: Vec<&str> = tail.split_ascii_whitespace().collect();
-    let utime = parts.get(11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    let stime = parts.get(12).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let utime = parts
+        .get(11)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let stime = parts
+        .get(12)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
     utime.saturating_add(stime)
 }
 
@@ -341,9 +357,29 @@ struct CgroupMemory {
 }
 
 async fn read_cgroup_memory() -> Option<CgroupMemory> {
-    // cgroup v2: /sys/fs/cgroup/memory.max + memory.current.
-    let max_raw = tokio::fs::read_to_string("/sys/fs/cgroup/memory.max").await.ok()?;
-    let cur_raw = tokio::fs::read_to_string("/sys/fs/cgroup/memory.current").await.ok()?;
+    if let Some(cg) = read_cgroup_v2_files().await {
+        return Some(cg);
+    }
+    // cgroupv1 fallback: older docker, RHEL-7, K8s pre-1.25 without
+    // systemd-cgroup migration. Without this, the caller falls back to
+    // /proc/meminfo MemTotal — but MemTotal is NOT pidns-namespaced and
+    // reports the host's total RAM inside a v1 container, silently
+    // making the pressure thresholds never fire on a constrained
+    // cgroup. (#553 follow-up to PR #579 R3 finding F1)
+    read_cgroup_v1_files().await
+}
+
+async fn read_cgroup_v2_files() -> Option<CgroupMemory> {
+    let max_raw = tokio::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .await
+        .ok()?;
+    let cur_raw = tokio::fs::read_to_string("/sys/fs/cgroup/memory.current")
+        .await
+        .ok()?;
+    parse_cgroup_v2(&max_raw, &cur_raw)
+}
+
+fn parse_cgroup_v2(max_raw: &str, cur_raw: &str) -> Option<CgroupMemory> {
     let max_trim = max_raw.trim();
     if max_trim == "max" {
         // Unlimited cgroup (host root cgroup, or no limit configured).
@@ -353,7 +389,36 @@ async fn read_cgroup_memory() -> Option<CgroupMemory> {
     }
     let max_bytes = max_trim.parse::<u64>().ok()?;
     let current_bytes = cur_raw.trim().parse::<u64>().ok()?;
-    Some(CgroupMemory { max_bytes, current_bytes })
+    Some(CgroupMemory {
+        max_bytes,
+        current_bytes,
+    })
+}
+
+async fn read_cgroup_v1_files() -> Option<CgroupMemory> {
+    let max_raw = tokio::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        .await
+        .ok()?;
+    let cur_raw = tokio::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        .await
+        .ok()?;
+    parse_cgroup_v1(&max_raw, &cur_raw)
+}
+
+fn parse_cgroup_v1(max_raw: &str, cur_raw: &str) -> Option<CgroupMemory> {
+    // cgroupv1 "unlimited" sentinel: the kernel writes PAGE_COUNTER_MAX,
+    // typically 9223372036854771712 (i64::MAX rounded down to PAGE_SIZE).
+    // Treat anything within one page (4 KiB) of i64::MAX as unlimited.
+    const V1_UNLIMITED_THRESHOLD: u64 = (i64::MAX as u64) - 4096;
+    let max_bytes = max_raw.trim().parse::<u64>().ok()?;
+    if max_bytes >= V1_UNLIMITED_THRESHOLD {
+        return None;
+    }
+    let current_bytes = cur_raw.trim().parse::<u64>().ok()?;
+    Some(CgroupMemory {
+        max_bytes,
+        current_bytes,
+    })
 }
 
 async fn read_meminfo_total() -> Option<u64> {
@@ -400,9 +465,7 @@ impl PressureTracker {
             // Sub-warn band. We don't immediately drop to Clear — only
             // after a debounce window below the clear floor.
             if frac < PRESSURE_CLEAR_FRAC {
-                self.consecutive_clear_samples = self
-                    .consecutive_clear_samples
-                    .saturating_add(1);
+                self.consecutive_clear_samples = self.consecutive_clear_samples.saturating_add(1);
             } else {
                 // In the dead-band (clear..warn) we hold the previous
                 // state and reset the debounce counter — staying e.g.
@@ -454,9 +517,7 @@ fn pressure_message(level: PressureLevel, total_rss: u64, available: u64) -> Str
              OOM-kill imminent. Raise the cgroup ceiling \
              (`podman machine set --memory 4096`) or reduce worker fan-out."
         ),
-        PressureLevel::Clear => format!(
-            "Memory pressure cleared ({pct:.0}% of {avail_gb:.2} GB)."
-        ),
+        PressureLevel::Clear => format!("Memory pressure cleared ({pct:.0}% of {avail_gb:.2} GB)."),
     }
 }
 
@@ -495,8 +556,7 @@ impl HighWaterAccum {
         if total_rss > self.total_rss_bytes_max {
             self.total_rss_bytes_max = total_rss;
             if denominator > 0 {
-                self.peak_utilization_pct =
-                    Some(total_rss as f32 / denominator as f32);
+                self.peak_utilization_pct = Some(total_rss as f32 / denominator as f32);
             }
         }
         if cgroup_max.is_some() {
@@ -528,6 +588,34 @@ impl HighWaterAccum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cgroup_v2_parses_limited() {
+        let cg = parse_cgroup_v2("2147483648\n", "1073741824\n").unwrap();
+        assert_eq!(cg.max_bytes, 2_147_483_648);
+        assert_eq!(cg.current_bytes, 1_073_741_824);
+    }
+
+    #[test]
+    fn cgroup_v2_max_sentinel_returns_none() {
+        assert!(parse_cgroup_v2("max\n", "12345\n").is_none());
+    }
+
+    #[test]
+    fn cgroup_v1_parses_limited() {
+        let cg = parse_cgroup_v1("2147483648\n", "1073741824\n").unwrap();
+        assert_eq!(cg.max_bytes, 2_147_483_648);
+        assert_eq!(cg.current_bytes, 1_073_741_824);
+    }
+
+    #[test]
+    fn cgroup_v1_unlimited_sentinel_returns_none() {
+        // Kernel-written "unlimited" on cgroupv1 — PAGE_COUNTER_MAX
+        // (i64::MAX rounded down to PAGE_SIZE). Verifies the fallback
+        // doesn't accidentally treat the unlimited container as
+        // having a tiny denominator.
+        assert!(parse_cgroup_v1("9223372036854771712\n", "12345").is_none());
+    }
 
     #[test]
     fn parses_vm_rss_and_vm_size_from_status() {

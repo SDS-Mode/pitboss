@@ -359,11 +359,10 @@ async fn setup_run_harness(
     // Per-actor resource sampler (#553). See hierarchical.rs for the
     // sibling spawn site — same shape, same disabled-on-darwin /
     // disabled-when-cadence-zero short-circuits.
-    let resource_watcher =
-        Some(crate::dispatch::resource_watch::ResourceWatcher::spawn(
-            flat_state.clone(),
-            resolved.resource_sample_secs,
-        ));
+    let resource_watcher = Some(crate::dispatch::resource_watch::ResourceWatcher::spawn(
+        flat_state.clone(),
+        resolved.resource_sample_secs,
+    ));
     // PITBOSS_CONTROL_TCP_PORT — see hierarchical.rs for the rationale (#474).
     let tcp_bind = std::env::var("PITBOSS_CONTROL_TCP_PORT")
         .ok()

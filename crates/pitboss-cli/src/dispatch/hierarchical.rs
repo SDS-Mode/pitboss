@@ -202,11 +202,10 @@ pub async fn run_hierarchical(
     // `resource_sample_secs == 0`; on macOS host the spawned task
     // exits cleanly after one INFO log line (inside container-dispatch
     // the sampler runs in the linux VM and is unaffected).
-    let resource_watcher =
-        Some(crate::dispatch::resource_watch::ResourceWatcher::spawn(
-            state.clone(),
-            resolved.resource_sample_secs,
-        ));
+    let resource_watcher = Some(crate::dispatch::resource_watch::ResourceWatcher::spawn(
+        state.clone(),
+        resolved.resource_sample_secs,
+    ));
 
     let mcp = McpServer::start(socket.clone(), state.clone()).await?;
 

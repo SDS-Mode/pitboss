@@ -45,7 +45,7 @@ fn write_summary(runs_dir: &Path, name: Option<&str>, manifest_path: &str, tasks
         notify_failures: None,
         tasks,
         spend_breakdown: None,
-            resource_high_water: None,
+        resource_high_water: None,
     };
     let bytes = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(dir.join("summary.json"), bytes).unwrap();
