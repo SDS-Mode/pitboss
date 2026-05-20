@@ -16,35 +16,32 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.15.0** ships **`[[agent_profile]]`** (#545) — reusable role
-preludes for collapsing manifest prompt boilerplate. Three built-ins
-ship bundled (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
-`pitboss/worker-haiku`) carrying role conventions plus default
-model/tools/env; manifest-declared profiles can shadow them by id and
-bind to `[[worker_type]]` / `[[sublead_type]]` via a new
-`agent_profile = "<id>"` field. Composition happens at resolve time
-for `[lead]` / `[[task]]` and at MCP-spawn time for
-`spawn_worker` / `spawn_sublead`, so resolved.json, `--dry-run`, and
-resume all observe the same composed prompt the actor will receive.
-Operator config always wins over profile defaults. Inspect via
-`pitboss schema --format=agent-profiles [--manifest <path>]`. The
-companion **`[run].claude_setting_sources`** field (#556) gives
-operators control over claude-code's `--setting-sources` flag so
-headless dispatch can filter user-scope SessionStart hooks and
-project-checked-in defaults out of every worker spawn — workers run
-on the manifest contract alone, not the operator's interactive-session
-decoration. The release also closes out the worker-failure-diagnostic
-chain (#475): `terminate_reason` now attributes every force-kill path
-(#548); killed actors surface their real token cost via the
-`AssistantUsage` fallback when the stream ended without a `Result`
-event (#549); the failure-excerpt path catches every mid-event
-truncation shape we've seen (#547, #554) — a killed worker's
-`failure_reason` is never just "unknown" anymore. macOS+Podman
-container dispatch picks up two more hardening fixes — auto-injected
-`XDG_RUNTIME_DIR=/tmp` to dodge the virtiofs+AF_UNIX bind() trap
-(#551) and a control-bridge TCP forward (#546). See `CHANGELOG.md` for
-the full per-version history and `AGENTS.md` for the MCP tool
-reference, keybindings, and manifest schema.
+**v0.16.0** ships **per-actor resource sampling** (#553) — the dispatcher
+polls each `claude` subprocess's RSS / VSZ / CPU% on a configurable cadence
+(`[run].resource_sample_secs`, default 5 s, set 0 to disable) and tracks
+container-cgroup memory headroom. The web console gains a **Resources** tab
+with per-actor sparklines + a cgroup-headroom area chart, a **"Mem peak"**
+column on the run list, and proactive memory-pressure events with hysteresis
+(warn at 70% utilization, error at 90%, clear at 60%). Finalized runs persist
+a `summary.json::resource_high_water` aggregate; `pitboss status --resources`
+prints the human-readable high-water summary per actor. The motivating case:
+a 12-worker container-dispatch run hitting the Podman VM's 1.9 GiB OOM-killer
+with empty stderr left the operator with no visible cause. With this release
+that's a 30-second diagnosis from the Resources tab instead of
+`podman machine ssh -- sudo dmesg`. **Companion change** (#581): `pitboss
+container-dispatch --background` (new CLI mode) plus host-side
+`manifest.source.toml` preservation, so the web console's Fork-manifest
+button on a container-dispatched run recovers the full `[container]` block,
+and `/api/runs` auto-routes container manifests back to `container-dispatch`
+(the SPA's manifest editor shows a "Container mode detected" banner so the
+routing is visible). The release also includes a **defensive serde back-compat
+sweep** on `ControlEvent` payload structs (#566, #567, #571, #575) backed by a
+content-guard test (#578) that enforces `#[serde(default)]` automatically
+going forward, **MCP token revocation on actor exit** (#564), and a manifest
+UX pass — validation errors carry a field-path prefix (#574), four common
+errors got remediation hints, and five reference-table gaps are filled
+(#573). See `CHANGELOG.md` for the full per-version history and `AGENTS.md`
+for the MCP tool reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
