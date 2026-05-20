@@ -104,6 +104,35 @@ fn every_nested_struct_field_in_wire_variants_has_back_compat_attr() {
         wire_enums.len()
     );
 
+    // Validate every EXEMPT_FIELDS entry points at a real field. Without
+    // this, a typo (e.g. `ActorActivityEntry.actorid` instead of
+    // `actor_id`) would silently become a no-op exemption — the real
+    // field would then either be flagged (best case) or, if also typo'd
+    // in the source, missed entirely. The exemption mechanism exists
+    // precisely as a deliberate review touchpoint; a typo'd exemption
+    // defeats that purpose.
+    for (path, _reason) in EXEMPT_FIELDS {
+        let (struct_name, field_name) = path.split_once('.').unwrap_or_else(|| {
+            panic!("EXEMPT_FIELDS entry {path:?} must be `StructName.field_name`")
+        });
+        let s = structs_by_name.get(struct_name).unwrap_or_else(|| {
+            panic!(
+                "EXEMPT_FIELDS: struct {struct_name:?} not found in protocol.rs \
+                 (did the file move or the struct get renamed?)"
+            )
+        });
+        let Fields::Named(named) = &s.fields else {
+            panic!("EXEMPT_FIELDS: struct {struct_name:?} has no named fields");
+        };
+        assert!(
+            named
+                .named
+                .iter()
+                .any(|f| f.ident.as_ref().is_some_and(|i| i == field_name)),
+            "EXEMPT_FIELDS: field {field_name:?} not found on struct {struct_name:?}"
+        );
+    }
+
     let exempt: BTreeSet<String> = EXEMPT_FIELDS.iter().map(|(p, _)| p.to_string()).collect();
 
     let mut visited: BTreeSet<String> = BTreeSet::new();

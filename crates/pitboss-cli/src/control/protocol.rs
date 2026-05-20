@@ -20,7 +20,11 @@
 //!   semantic "no value" case);
 //! - or `#[serde(skip_serializing_if = "...")]` paired with one of the
 //!   above so the field is omitted on the wire when at the default,
-//!   keeping old-client JSON byte-identical.
+//!   keeping old-client JSON byte-identical;
+//! - `#[serde(skip)]` — the field is never on the wire in either
+//!   direction (so version skew can't affect it by construction);
+//! - or `#[serde(flatten)]` — back-compat is delegated to the inner
+//!   type, which must itself satisfy this contract.
 //!
 //! New variants are always safe to add: serde rejects unknown
 //! discriminators with a typed error the existing dispatch loop
