@@ -162,8 +162,35 @@ fn main() -> Result<()> {
             run_dir,
             dry_run,
             runtime,
+            background,
+            internal_run_id,
         } => {
-            run_container_dispatch(&manifest, run_dir, dry_run, runtime.as_deref());
+            // Mirror the `Dispatch` arm at line 31-68: `--background`
+            // short-circuits to a detached re-spawn that announces
+            // `run_id` on stdout. The foreground branch parses
+            // `--internal-run-id` (when present) so the host-side
+            // pre-minted run_id flows into the inner `pitboss dispatch`
+            // via `--internal-run-id` argv appending.
+            if background {
+                match dispatch::background::run_container_background(&manifest, run_dir) {
+                    Ok(code) => std::process::exit(code),
+                    Err(e) => {
+                        eprintln!("background container-dispatch: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let pre_minted = match internal_run_id.as_deref() {
+                None => None,
+                Some(s) => match dispatch::background::parse_internal_run_id(s) {
+                    Ok(u) => Some(u),
+                    Err(e) => {
+                        eprintln!("{e:#}");
+                        std::process::exit(2);
+                    }
+                },
+            };
+            run_container_dispatch(&manifest, run_dir, dry_run, runtime.as_deref(), pre_minted);
         }
         Command::ContainerBuild {
             manifest,
@@ -663,6 +690,7 @@ fn run_container_dispatch(
     run_dir: Option<std::path::PathBuf>,
     dry_run: bool,
     runtime: Option<&str>,
+    pre_minted_run_id: Option<uuid::Uuid>,
 ) -> ! {
     let env_mp = parse_env_max_parallel();
     let resolved = match manifest::load_manifest_skip_dir_check(manifest, env_mp) {
@@ -684,7 +712,12 @@ fn run_container_dispatch(
         }
     };
     match dispatch::container::run_container_dispatch(
-        manifest, container, run_dir, dry_run, runtime,
+        manifest,
+        container,
+        run_dir,
+        dry_run,
+        runtime,
+        pre_minted_run_id,
     ) {
         Ok(()) => std::process::exit(0),
         Err(e) => {

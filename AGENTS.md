@@ -863,7 +863,8 @@ Files in the run dir:
 
 | File | Purpose |
 |---|---|
-| `manifest.snapshot.toml` | Exact manifest bytes used for this run. |
+| `manifest.snapshot.toml` | Exact manifest bytes used for this run. For container-dispatched runs this copy has the `[container]` section stripped (back-compat with older images that hit `deny_unknown_fields` on the key); see `manifest.source.toml` for the operator-typed original. |
+| `manifest.source.toml` | **Container-dispatch only.** Written host-side by `pitboss container-dispatch` before `exec()`. Preserves the operator's original manifest including the `[container]` block + `[[container.mount]]` entries. `pitboss-web`'s Fork-manifest button prefers this over the snapshot so forked container runs carry their full host-side config back into the workspace. |
 | `resolved.json` | Fully resolved manifest (defaults applied). |
 | `meta.json` | `run_id`, `started_at`, `claude_version`, `pitboss_version`. |
 | `summary.json` | Written on clean finalize. Full structured summary of the run. |

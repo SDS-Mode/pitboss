@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use uuid::Uuid;
 
 use crate::manifest::schema::ContainerConfig;
 
@@ -71,17 +72,27 @@ pub(crate) fn claude_setting_sources_args(
 ///
 /// Validates that the manifest has a `[container]` section, then builds and
 /// execs the container run command.
+///
+/// `pre_minted_run_id` is `Some(_)` when the host has minted the id
+/// before exec (the `--background` re-spawn flow). When set, the id is
+/// piped into the in-container `pitboss dispatch` via `--internal-run-id`
+/// so the id the parent announced matches what lands on disk. Foreground
+/// callers pass `None`; we mint locally so the host can still write
+/// `manifest.source.toml` into a deterministic per-run directory before
+/// exec.
 pub fn run_container_dispatch(
     manifest_path: &Path,
     container: &ContainerConfig,
     run_dir_override: Option<PathBuf>,
     dry_run: bool,
     runtime_override: Option<&str>,
+    pre_minted_run_id: Option<Uuid>,
 ) -> Result<()> {
     let runtime = detect_runtime(runtime_override, container.runtime.as_deref())?;
     let manifest_abs = manifest_path
         .canonicalize()
         .with_context(|| format!("canonicalizing manifest path {}", manifest_path.display()))?;
+    let run_id = pre_minted_run_id.unwrap_or_else(Uuid::now_v7);
 
     // Phase 2: when the manifest declares derived-image inputs, prefer
     // the locally-built derived tag if it exists. `[[container.copy]]`
@@ -127,6 +138,7 @@ pub fn run_container_dispatch(
         &manifest_abs,
         run_dir_override,
         derived_image_override,
+        Some(run_id),
     )?;
 
     if dry_run {
@@ -148,9 +160,21 @@ pub fn run_container_dispatch(
     // logged but does not abort dispatch (the operator's run shouldn't
     // hinge on the audit log being writable). (#476 / F-SEC-9)
     if let Err(e) =
-        append_container_dispatch_audit(&audit_runs_base, &runtime, &args, &manifest_abs)
+        append_container_dispatch_audit(&audit_runs_base, &runtime, &args, &manifest_abs, run_id)
     {
         eprintln!("pitboss container-dispatch: warning: could not write argv audit log: {e}");
+    }
+
+    // Preserve the operator-typed manifest into the per-run dir before
+    // exec replaces the process. The in-container dispatcher writes
+    // `manifest.snapshot.toml` from the [container]-stripped copy at
+    // `/run/pitboss.toml`, so without this the original `[container]`
+    // block (and the host-side mounts it declares) would never land on
+    // disk — and `pitboss-web`'s Fork-manifest would lose them.
+    // Fail-soft for the same reason the audit log is fail-soft: a fork
+    // disconnect is bad, but it is not worse than a failed dispatch.
+    if let Err(e) = write_source_manifest_artifact(&audit_runs_base, run_id, &manifest_abs) {
+        eprintln!("pitboss container-dispatch: warning: could not write manifest.source.toml: {e}");
     }
 
     let err = Command::new(&runtime).args(&args).exec();
@@ -164,12 +188,19 @@ pub fn run_container_dispatch(
 /// resolved a built derived image (apt + COPY already baked in). When
 /// set, the Phase-1 apt-at-spin-up wrap is skipped — the work is
 /// already in the image.
+///
+/// `pre_minted_run_id` is `Some(_)` when the host has minted the run id
+/// before exec; it is appended as `--internal-run-id <uuid>` to the
+/// in-container `pitboss dispatch` argv so the id is honored end-to-end.
+/// `None` lets the in-container dispatcher mint its own (legacy
+/// behavior, used only by callers that bypass the new pre-mint path).
 fn build_run_args(
     runtime: &str,
     container: &ContainerConfig,
     manifest_abs: &Path,
     run_dir_override: Option<PathBuf>,
     derived_image_override: Option<&str>,
+    pre_minted_run_id: Option<Uuid>,
 ) -> Result<Vec<String>> {
     let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
 
@@ -385,12 +416,30 @@ fn build_run_args(
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     args.push(image);
 
+    // When the host pre-minted a run_id (e.g. via `--background` so the
+    // parent can announce the id before exec), append `--internal-run-id`
+    // to the inner dispatch argv so the in-container `pitboss dispatch`
+    // honors it instead of minting its own. Without this, the host-side
+    // `manifest.source.toml` (keyed by the pre-minted id) would land in
+    // a different per-run dir than the in-container snapshot.
+    let internal_run_id_args: Vec<String> = match pre_minted_run_id {
+        Some(id) => vec!["--internal-run-id".to_string(), id.to_string()],
+        None => Vec::new(),
+    };
+
     if bootstrap_apt {
         let pkg_list = container.extra_apt.join(" ");
+        let internal_tail = if internal_run_id_args.is_empty() {
+            String::new()
+        } else {
+            // Shell-safe: the id is a UUID v7 string, so plain interpolation
+            // is fine here.
+            format!(" {} {}", internal_run_id_args[0], internal_run_id_args[1])
+        };
         let cmd = format!(
             "apt-get update && \
              apt-get install -y --no-install-recommends {pkg_list} && \
-             exec runuser -u pitboss -- pitboss dispatch /run/pitboss.toml"
+             exec runuser -u pitboss -- pitboss dispatch /run/pitboss.toml{internal_tail}"
         );
         args.push("sh".into());
         args.push("-c".into());
@@ -399,6 +448,7 @@ fn build_run_args(
         args.push("pitboss".into());
         args.push("dispatch".into());
         args.push("/run/pitboss.toml".into());
+        args.extend(internal_run_id_args);
     }
 
     Ok(args)
@@ -726,7 +776,7 @@ fn default_run_dir() -> PathBuf {
 ///
 /// Format:
 /// ```jsonc
-/// {"at":"2026-05-14T12:34:56Z","manifest":"/abs/path/pitboss.toml",
+/// {"at":"2026-05-14T12:34:56Z","run_id":"019e4…","manifest":"/abs/…",
 ///  "runtime":"podman","argv":["run","--rm",…]}
 /// ```
 fn append_container_dispatch_audit(
@@ -734,6 +784,7 @@ fn append_container_dispatch_audit(
     runtime: &str,
     args: &[String],
     manifest_abs: &Path,
+    run_id: Uuid,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -747,6 +798,7 @@ fn append_container_dispatch_audit(
 
     let record = serde_json::json!({
         "at": chrono::Utc::now().to_rfc3339(),
+        "run_id": run_id.to_string(),
         "manifest": manifest_abs.display().to_string(),
         "runtime": runtime,
         "argv": args,
@@ -759,6 +811,45 @@ fn append_container_dispatch_audit(
         .with_context(|| format!("opening audit log {}", log_path.display()))?;
     writeln!(f, "{record}")
         .with_context(|| format!("appending to audit log {}", log_path.display()))?;
+    Ok(())
+}
+
+/// Copy the operator's unmodified manifest into the per-run dir as
+/// `manifest.source.toml` before exec replaces the host process.
+///
+/// The inner `pitboss dispatch` writes `manifest.snapshot.toml` from the
+/// `[container]`-stripped copy at `/run/pitboss.toml`, so without this
+/// the source `[container]` block (and the host-side mounts it declares)
+/// would never land on disk — and `pitboss-web`'s Fork-manifest button
+/// would lose them, leaving forked container-dispatched runs unable to
+/// re-launch cleanly from the web UI.
+///
+/// The run_id is pre-minted on the host so the per-run directory is
+/// deterministic before exec. The in-container dispatcher honors the
+/// same id via `--internal-run-id` and writes the snapshot into the
+/// same directory.
+pub(crate) fn write_source_manifest_artifact(
+    runs_base: &Path,
+    run_id: Uuid,
+    manifest_abs: &Path,
+) -> Result<()> {
+    let run_subdir = runs_base.join(run_id.to_string());
+    std::fs::create_dir_all(&run_subdir).with_context(|| {
+        format!(
+            "creating per-run dir for source manifest: {}",
+            run_subdir.display()
+        )
+    })?;
+    let dest = run_subdir.join("manifest.source.toml");
+    // Read+write rather than fs::copy so the destination is created with
+    // the host-process umask (the in-container dispatcher will write its
+    // own snapshot alongside this file under the container's `-u` UID;
+    // either ownership shape is fine — both processes act as the same
+    // effective UID via the runtime's UID-alignment logic).
+    let bytes = std::fs::read(manifest_abs)
+        .with_context(|| format!("reading source manifest {}", manifest_abs.display()))?;
+    std::fs::write(&dest, bytes)
+        .with_context(|| format!("writing source manifest to {}", dest.display()))?;
     Ok(())
 }
 
@@ -885,7 +976,7 @@ prompt = "hi"
         let cfg = make_config(vec![]);
         let manifest = temp_manifest();
         // Build args without calling exec.
-        let args = build_run_args("podman", &cfg, &manifest, None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &manifest, None, None, None).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("pitboss"), "should call pitboss: {joined}");
         assert!(
@@ -901,7 +992,7 @@ prompt = "hi"
     #[test]
     fn default_image_used_when_none_specified() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains(DEFAULT_IMAGE),
@@ -915,7 +1006,7 @@ prompt = "hi"
             image: Some("my-org/pitboss:latest".into()),
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("my-org/pitboss:latest"),
@@ -937,7 +1028,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/home/alice/project:/project:rw,z"),
@@ -955,7 +1046,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("/ref:/ref:ro,z"), "readonly flag: {joined}");
     }
@@ -963,7 +1054,7 @@ prompt = "hi"
     #[test]
     fn auto_inject_claude_when_not_in_mounts() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/home/pitboss/.claude"),
@@ -977,7 +1068,7 @@ prompt = "hi"
         // by default. A compromised worker cannot rewrite host
         // credentials or inject malicious hooks via the rw mount.
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let claude_mount = args
             .windows(2)
             .find(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.claude:"))
@@ -998,7 +1089,7 @@ prompt = "hi"
             claude_mount_rw: true,
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let claude_mount = args
             .windows(2)
             .find(|w| w[0] == "-v" && w[1].contains(":/home/pitboss/.claude:"))
@@ -1020,7 +1111,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         // Count -v args that mount to /home/pitboss/.claude — should be exactly 1
         // (the declared mount). The -w workdir may also reference the path but is
         // not a duplicate mount injection.
@@ -1044,7 +1135,7 @@ prompt = "hi"
             }],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         // -w should be followed by /project
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(args[w_pos + 1], "/project", "workdir: {args:?}");
@@ -1053,7 +1144,7 @@ prompt = "hi"
     #[test]
     fn workdir_falls_back_to_home_pitboss_when_no_mounts() {
         let cfg = make_config(vec![]);
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(
             args[w_pos + 1],
@@ -1073,7 +1164,7 @@ prompt = "hi"
             workdir: Some(PathBuf::from("/project/sub")),
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let w_pos = args.iter().position(|a| a == "-w").expect("-w flag");
         assert_eq!(
             args[w_pos + 1],
@@ -1088,7 +1179,7 @@ prompt = "hi"
             extra_args: vec!["--network=host".into(), "--cap-drop=ALL".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("docker", &cfg, &temp_manifest(), None, None, None).unwrap();
         let net_pos = args
             .iter()
             .position(|a| a == "--network=host")
@@ -1119,8 +1210,15 @@ prompt = "hi"
     fn run_dir_mount_uses_override() {
         let custom = PathBuf::from("/tmp/my-runs");
         let cfg = make_config(vec![]);
-        let args =
-            build_run_args("docker", &cfg, &temp_manifest(), Some(custom.clone()), None).unwrap();
+        let args = build_run_args(
+            "docker",
+            &cfg,
+            &temp_manifest(),
+            Some(custom.clone()),
+            None,
+            None,
+        )
+        .unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("/tmp/my-runs"),
@@ -1133,7 +1231,7 @@ prompt = "hi"
         // Sanity: with no extra_apt the entrypoint args are still the bare
         // `pitboss dispatch /run/pitboss.toml` triplet — no shell wrap.
         let cfg = make_config(vec![]);
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         assert!(
             !args.iter().any(|a| a == "sh"),
             "no sh wrapper expected: {args:?}"
@@ -1154,13 +1252,71 @@ prompt = "hi"
         );
     }
 
+    /// When the host pre-mints a run_id (e.g. via `--background` so the
+    /// parent can announce the id before exec), `build_run_args` must
+    /// append `--internal-run-id <uuid>` to the in-container
+    /// `pitboss dispatch` argv. Without this, the host-side
+    /// `manifest.source.toml` (keyed by the pre-minted id) lands in a
+    /// different per-run dir than the in-container snapshot — the bug
+    /// `Fork manifest` was supposed to fix.
+    #[test]
+    fn pre_minted_run_id_appended_to_bare_entrypoint() {
+        let id = Uuid::now_v7();
+        let cfg = make_config(vec![]);
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, Some(id)).unwrap();
+        let dispatch_pos = args.iter().position(|a| a == "dispatch").expect("dispatch");
+        assert_eq!(args[dispatch_pos + 1], "/run/pitboss.toml");
+        assert_eq!(args[dispatch_pos + 2], "--internal-run-id");
+        assert_eq!(args[dispatch_pos + 3], id.to_string());
+    }
+
+    /// The apt-bootstrap shell wrap (`sh -c "apt-get install … && exec
+    /// runuser -u pitboss -- pitboss dispatch /run/pitboss.toml"`) must
+    /// also carry the pre-minted id when one is supplied. The wrap is
+    /// a single string passed to `sh -c`, so the assertion looks for the
+    /// `--internal-run-id <uuid>` tail inside it rather than as separate
+    /// argv entries.
+    #[test]
+    fn pre_minted_run_id_appended_to_apt_bootstrap_entrypoint() {
+        let id = Uuid::now_v7();
+        let cfg = ContainerConfig {
+            extra_apt: vec!["mdbook".into()],
+            ..ContainerConfig::default()
+        };
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, Some(id)).unwrap();
+        let img_pos = args.iter().position(|a| a == DEFAULT_IMAGE).expect("image");
+        assert_eq!(args[img_pos + 1], "sh", "wrapped entrypoint: {args:?}");
+        assert_eq!(args[img_pos + 2], "-c", "wrapped entrypoint: {args:?}");
+        let cmd = &args[img_pos + 3];
+        let expected = format!(
+            "exec runuser -u pitboss -- pitboss dispatch /run/pitboss.toml --internal-run-id {id}"
+        );
+        assert!(
+            cmd.contains(&expected),
+            "shell entrypoint must carry --internal-run-id {id}: {cmd}"
+        );
+    }
+
+    /// When `pre_minted_run_id` is `None`, the legacy argv is unchanged —
+    /// no `--internal-run-id` appears. Catches accidental always-on
+    /// regressions of the pre-mint logic.
+    #[test]
+    fn bare_entrypoint_omits_internal_run_id_when_not_pre_minted() {
+        let cfg = make_config(vec![]);
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
+        assert!(
+            !args.iter().any(|a| a == "--internal-run-id"),
+            "no --internal-run-id expected when not pre-minted: {args:?}"
+        );
+    }
+
     #[test]
     fn extra_apt_wraps_entrypoint_with_apt_install_and_runuser() {
         let cfg = ContainerConfig {
             extra_apt: vec!["mdbook".into(), "jq".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
 
         // -u 0:0 must appear (so apt-get can run as root).
         let u_pos = args
@@ -1214,7 +1370,7 @@ prompt = "hi"
                 extra_apt: vec![bad.into()],
                 ..ContainerConfig::default()
             };
-            let result = build_run_args("podman", &cfg, &temp_manifest(), None, None);
+            let result = build_run_args("podman", &cfg, &temp_manifest(), None, None, None);
             assert!(
                 result.is_err(),
                 "expected rejection for {bad:?}, got: {result:?}"
@@ -1243,6 +1399,7 @@ prompt = "hi"
             &temp_manifest(),
             None,
             Some("pitboss-derived-abc123:local"),
+            None,
         )
         .unwrap();
         assert!(
@@ -1270,6 +1427,7 @@ prompt = "hi"
             &temp_manifest(),
             None,
             Some("pitboss-derived-deadbeef:local"),
+            None,
         )
         .unwrap();
         assert!(
@@ -1296,7 +1454,7 @@ prompt = "hi"
             extra_args: vec!["--privileged".into()],
             ..ContainerConfig::default()
         };
-        let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+        let err = build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
             .expect_err("--privileged must be rejected");
         let msg = err.to_string();
         assert!(
@@ -1319,7 +1477,7 @@ prompt = "hi"
                 extra_args: vec![bad.into()],
                 ..ContainerConfig::default()
             };
-            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
                 .expect_err(&format!("{bad} must be rejected"));
             assert!(
                 err.to_string().contains(bad),
@@ -1337,7 +1495,7 @@ prompt = "hi"
                 extra_args: vec![bad.into(), "/etc:/etc:rw".into()],
                 ..ContainerConfig::default()
             };
-            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
                 .expect_err(&format!("{bad} must be rejected"));
             assert!(
                 err.to_string().contains("container.mount"),
@@ -1354,7 +1512,7 @@ prompt = "hi"
             extra_args: vec!["--volume=/etc:/etc:rw".into()],
             ..ContainerConfig::default()
         };
-        let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+        let err = build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
             .expect_err("--volume=src:dst must be rejected");
         assert!(
             err.to_string().contains("--volume=/etc:/etc:rw"),
@@ -1377,7 +1535,7 @@ prompt = "hi"
                 extra_args: vec![bad.into()],
                 ..ContainerConfig::default()
             };
-            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+            let err = build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
                 .expect_err(&format!("{bad} must be rejected"));
             assert!(
                 err.to_string().contains("cap-add"),
@@ -1396,7 +1554,7 @@ prompt = "hi"
                 ..ContainerConfig::default()
             };
             assert!(
-                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                build_run_args("podman", &cfg, &temp_manifest(), None, None, None).is_err(),
                 "{bad} must be rejected"
             );
         }
@@ -1405,7 +1563,7 @@ prompt = "hi"
             ..ContainerConfig::default()
         };
         assert!(
-            build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+            build_run_args("podman", &cfg, &temp_manifest(), None, None, None).is_err(),
             "--user=0:0 must be rejected"
         );
     }
@@ -1418,7 +1576,7 @@ prompt = "hi"
                 ..ContainerConfig::default()
             };
             assert!(
-                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                build_run_args("podman", &cfg, &temp_manifest(), None, None, None).is_err(),
                 "{bad} must be rejected"
             );
         }
@@ -1436,7 +1594,7 @@ prompt = "hi"
                 ..ContainerConfig::default()
             };
             assert!(
-                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                build_run_args("podman", &cfg, &temp_manifest(), None, None, None).is_err(),
                 "{bad} must be rejected"
             );
         }
@@ -1450,7 +1608,7 @@ prompt = "hi"
                 ..ContainerConfig::default()
             };
             assert!(
-                build_run_args("podman", &cfg, &temp_manifest(), None, None).is_err(),
+                build_run_args("podman", &cfg, &temp_manifest(), None, None, None).is_err(),
                 "{bad} must be rejected"
             );
         }
@@ -1473,7 +1631,7 @@ prompt = "hi"
             ],
             ..ContainerConfig::default()
         };
-        build_run_args("podman", &cfg, &temp_manifest(), None, None)
+        build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
             .expect("realistic safe extra_args must pass validation");
     }
 
@@ -1490,7 +1648,7 @@ prompt = "hi"
             ],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None)
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None)
             .expect("realistic package names should validate");
         let img_pos = args.iter().position(|a| a == DEFAULT_IMAGE).expect("image");
         let cmd = &args[img_pos + 3];
@@ -1544,7 +1702,7 @@ prompt = "hi"
     #[test]
     fn macos_auto_injects_xdg_runtime_dir() {
         let cfg = ContainerConfig::default();
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         assert_eq!(
             count_env_inject(&args, "XDG_RUNTIME_DIR"),
             1,
@@ -1568,7 +1726,7 @@ prompt = "hi"
     #[test]
     fn linux_does_not_auto_inject_xdg_runtime_dir() {
         let cfg = ContainerConfig::default();
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         assert_eq!(
             count_env_inject(&args, "XDG_RUNTIME_DIR"),
             0,
@@ -1588,7 +1746,7 @@ prompt = "hi"
             extra_args: vec!["-e".into(), "XDG_RUNTIME_DIR=/run/custom".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         assert_eq!(
             count_env_inject(&args, "XDG_RUNTIME_DIR"),
             1,
@@ -1616,7 +1774,7 @@ prompt = "hi"
             extra_args: vec!["--env".into(), "XDG_RUNTIME_DIR=/x".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         assert_eq!(count_env_inject(&args, "XDG_RUNTIME_DIR"), 1);
         assert!(args.iter().any(|a| a == "XDG_RUNTIME_DIR=/x"));
     }
@@ -1631,7 +1789,7 @@ prompt = "hi"
             extra_args: vec!["-e=XDG_RUNTIME_DIR=/joined".into()],
             ..ContainerConfig::default()
         };
-        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None).unwrap();
+        let args = build_run_args("podman", &cfg, &temp_manifest(), None, None, None).unwrap();
         assert!(
             !args.iter().any(|a| a == "XDG_RUNTIME_DIR=/tmp"),
             "default must be suppressed by `-e=` joined override: {args:?}"

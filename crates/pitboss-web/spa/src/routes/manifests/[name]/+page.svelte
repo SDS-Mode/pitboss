@@ -46,6 +46,15 @@
 
   const dirty = $derived(contents !== original);
 
+  // Detect a `[container]` section in the editor buffer so the operator
+  // can tell at a glance that clicking Dispatch will route to
+  // container-dispatch (via `/api/runs`'s auto-routing). The regex
+  // tolerates leading whitespace and matches only the top-level table
+  // header — `[container.mount]` and `[[container.copy]]` lines also
+  // match, which is fine since their presence implies a `[container]`
+  // root table.
+  const isContainerMode = $derived(/^\s*\[\[?container/m.test(contents));
+
   async function load() {
     loading = true;
     loadError = null;
@@ -166,6 +175,14 @@
     <CardContent class="text-muted-foreground py-12 text-center text-sm">Loading…</CardContent>
   </Card>
 {:else}
+  {#if isContainerMode}
+    <div
+      class="mb-3 rounded-md border border-sky-500/40 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-300"
+    >
+      Container mode detected — dispatching this manifest will launch via
+      <code class="bg-sky-500/10 rounded px-1 py-0.5">pitboss container-dispatch</code>.
+    </div>
+  {/if}
   <div class="grid gap-4 lg:grid-cols-[1fr_22rem]">
     <Card>
       <CardHeader class="pb-3">

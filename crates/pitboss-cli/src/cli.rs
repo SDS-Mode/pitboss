@@ -185,11 +185,25 @@ pub enum Command {
         #[arg(long)]
         run_dir: Option<PathBuf>,
         /// Print the container run command and exit without executing.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["background", "internal_run_id"])]
         dry_run: bool,
         /// Override container runtime detection ("docker" or "podman").
         #[arg(long)]
         runtime: Option<String>,
+        /// Detach the dispatcher to run in the background. Mints a `run_id`
+        /// on the host, writes `manifest.source.toml` into the per-run dir,
+        /// spawns `pitboss container-dispatch --internal-run-id <id>` as a
+        /// session-leader child with stdio nulled, prints
+        /// `{run_id, manifest_path, started_at, child_pid, container: true}`
+        /// JSON to stdout, and exits 0. Same shape as `dispatch --background`.
+        #[arg(long, conflicts_with = "internal_run_id")]
+        background: bool,
+        /// Internal: re-use this UUID as the run id. Set automatically when
+        /// `--background` re-spawns the dispatcher as a detached child so
+        /// the parent's announced `run_id` matches what the child threads
+        /// through to the inner `pitboss dispatch`. Not for direct human use.
+        #[arg(long, hide = true, value_name = "UUID")]
+        internal_run_id: Option<String>,
     },
     /// Build a derived container image from the manifest's `[container]`
     /// section. Synthesizes a thin Dockerfile (`extra_apt` + `[[container.copy]]`),
