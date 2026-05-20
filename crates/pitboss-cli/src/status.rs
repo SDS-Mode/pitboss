@@ -10,7 +10,12 @@ use anyhow::{bail, Result};
 use pitboss_core::store::TaskStatus;
 
 /// Entry point for the `status` subcommand.
-pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -> Result<i32> {
+pub fn run(
+    run_id_prefix: &str,
+    json: bool,
+    run_dir_override: Option<PathBuf>,
+    resources: bool,
+) -> Result<i32> {
     let base = run_dir_override.unwrap_or_else(default_runs_dir);
     let run_dir = resolve_run_dir(&base, run_id_prefix)?;
 
@@ -52,7 +57,74 @@ pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -
         &denied_counts,
     )?;
 
+    // #553: optional resource summary block from
+    // `summary.json::resource_high_water`. Skipped when `--json` is
+    // set (caller can read the field directly off the JSON output)
+    // and when the run was sampled at cadence=0 (no high-water data
+    // present). Renders a compact human-readable block — total peak,
+    // cgroup ceiling, top-3 actors — so the operator sees the OOM
+    // story without grepping summary.json.
+    if resources {
+        if let Some(hw) = load_resource_high_water(&summary_json) {
+            render_resource_high_water(&mut stdout, &hw)?;
+        } else {
+            writeln!(
+                &mut stdout,
+                "\nresource_high_water: unavailable (resource_sample_secs=0, \
+                 darwin host, or run finalized before first sample)"
+            )?;
+        }
+    }
+
     Ok(0)
+}
+
+/// Read `summary.json` and pull off the `resource_high_water` block.
+/// Returns `None` when the file doesn't exist (in-flight run) or when
+/// the field is absent (sampling disabled / unsupported / pre-#553).
+fn load_resource_high_water(
+    summary_json: &Path,
+) -> Option<pitboss_core::store::record::ResourceHighWater> {
+    let bytes = std::fs::read(summary_json).ok()?;
+    let summary: pitboss_core::store::RunSummary = serde_json::from_slice(&bytes).ok()?;
+    summary.resource_high_water
+}
+
+fn render_resource_high_water<W: Write>(
+    out: &mut W,
+    hw: &pitboss_core::store::record::ResourceHighWater,
+) -> Result<()> {
+    let total_mb = (hw.total_rss_bytes_max as f64) / (1024.0 * 1024.0);
+    let limit_str = match hw.cgroup_memory_max_bytes {
+        Some(max) => {
+            let max_mb = (max as f64) / (1024.0 * 1024.0);
+            format!("{max_mb:.0} MB")
+        }
+        None => "host".to_string(),
+    };
+    let pct_str = match hw.peak_utilization_pct {
+        Some(p) => format!("{:.0}%", p * 100.0),
+        None => "—".to_string(),
+    };
+    writeln!(out)?;
+    writeln!(
+        out,
+        "RESOURCE HIGH-WATER ({} samples · cadence {}s)",
+        hw.sample_count, hw.sample_cadence_secs
+    )?;
+    writeln!(
+        out,
+        "  total RSS peak: {total_mb:.0} MB / {limit_str} ({pct_str})"
+    )?;
+    // Top-3 actors by RSS peak. `BTreeMap` iteration order is by key
+    // — sort by value to surface the actual hotspots first.
+    let mut by_actor: Vec<(&String, &u64)> = hw.rss_bytes_max_by_actor.iter().collect();
+    by_actor.sort_by(|a, b| b.1.cmp(a.1));
+    for (actor_id, peak) in by_actor.iter().take(3) {
+        let peak_mb = (**peak as f64) / (1024.0 * 1024.0);
+        writeln!(out, "    {actor_id:<32} {peak_mb:>6.0} MB")?;
+    }
+    Ok(())
 }
 
 /// Drain `open_run_stream(ReplayOnly)` into the snapshot shape this
@@ -363,7 +435,7 @@ mod tests {
         write_record(&run_dir, &make_record("worker-1", TaskStatus::Success));
         write_record(&run_dir, &make_record("worker-2", TaskStatus::Failed));
 
-        let result = run(run_id, false, Some(tmp.path().to_path_buf()));
+        let result = run(run_id, false, Some(tmp.path().to_path_buf()), false);
         assert_eq!(result.unwrap(), 0);
     }
 
@@ -376,7 +448,7 @@ mod tests {
 
         write_record(&run_dir, &make_record("worker-1", TaskStatus::Success));
 
-        let result = run(run_id, true, Some(tmp.path().to_path_buf()));
+        let result = run(run_id, true, Some(tmp.path().to_path_buf()), false);
         assert_eq!(result.unwrap(), 0);
     }
 
@@ -652,5 +724,46 @@ mod tests {
             !counts.contains_key("quiet"),
             "task with no jsonl must be absent from map"
         );
+    }
+
+    /// `--resources` block reads `summary.json::resource_high_water`
+    /// and prints a compact peak summary with the top actors by RSS.
+    /// (#553)
+    #[test]
+    fn render_resource_high_water_includes_peak_and_top_actors() {
+        let mut hw = pitboss_core::store::record::ResourceHighWater::default();
+        hw.total_rss_bytes_max = 1_500 * 1024 * 1024; // 1500 MB
+        hw.cgroup_memory_max_bytes = Some(2_000 * 1024 * 1024); // 2000 MB
+        hw.peak_utilization_pct = Some(0.75);
+        hw.sample_count = 100;
+        hw.sample_cadence_secs = 5;
+        hw.rss_bytes_max_by_actor.insert("worker-a".into(), 800 * 1024 * 1024);
+        hw.rss_bytes_max_by_actor.insert("worker-b".into(), 400 * 1024 * 1024);
+        hw.rss_bytes_max_by_actor.insert("worker-c".into(), 100 * 1024 * 1024);
+        let mut buf = Vec::new();
+        render_resource_high_water(&mut buf, &hw).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("100 samples"), "sample count: {out}");
+        assert!(out.contains("cadence 5s"), "cadence: {out}");
+        assert!(out.contains("1500 MB / 2000 MB"), "totals: {out}");
+        assert!(out.contains("75%"), "pct: {out}");
+        // Top-3 by RSS, sorted descending.
+        let a = out.find("worker-a").unwrap();
+        let b = out.find("worker-b").unwrap();
+        let c = out.find("worker-c").unwrap();
+        assert!(a < b && b < c, "top-3 must be sorted by peak desc: {out}");
+    }
+
+    #[test]
+    fn render_resource_high_water_handles_missing_cgroup() {
+        let mut hw = pitboss_core::store::record::ResourceHighWater::default();
+        hw.total_rss_bytes_max = 1024 * 1024 * 1024;
+        hw.cgroup_memory_max_bytes = None; // flat host
+        hw.sample_count = 1;
+        let mut buf = Vec::new();
+        render_resource_high_water(&mut buf, &hw).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("1024 MB / host"), "flat denom: {out}");
+        assert!(out.contains("—"), "pct fallback when None: {out}");
     }
 }

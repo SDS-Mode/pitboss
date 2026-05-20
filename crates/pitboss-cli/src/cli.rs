@@ -244,6 +244,15 @@ pub enum Command {
         /// Emit machine-readable JSON array instead of a table.
         #[arg(long)]
         json: bool,
+        /// Append a per-run memory-pressure summary line at the bottom
+        /// of the human-readable output, showing total RSS peak, the
+        /// cgroup ceiling (when known), and the per-actor RSS peaks.
+        /// Sourced from `summary.json::resource_high_water` (#553).
+        /// Ignored when `--json` is set; the same data is already on
+        /// the JSON payload via the full TaskRecord stream and the
+        /// `resource_high_water` field on the summary.
+        #[arg(long)]
+        resources: bool,
     },
     /// Print the persisted control-event stream for a prior run (#259).
     ///
