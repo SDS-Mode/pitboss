@@ -32,6 +32,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
     validate_mcp_server_scopes(resolved)?;
     validate_mcp_server_tools(resolved)?;
     validate_mcp_tool_consistency(resolved)?;
+    warn_unknown_actor_type_tools(resolved);
     validate_agent_profiles(resolved)?;
     validate_claude_setting_sources(resolved)?;
     if resolved.lead.is_some() {
@@ -381,6 +382,119 @@ fn validate_mcp_tool_consistency(r: &ResolvedManifest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Warn on `[[worker_type]].tools` / `[[sublead_type]].tools` entries
+/// that don't match any known claude-code built-in, pitboss MCP tool, or
+/// declared `[[mcp_server]]` namespace (F-SEC-5 / #529).
+///
+/// The typed-profile gate fails CLOSED — an unrecognized entry results
+/// in `DeniedByProfile` auto-deny at runtime, not auto-approve — so this
+/// is a typo-drift safety net, not a security gate. We warn rather than
+/// bail because:
+/// - Operators legitimately reference `mcp__<server>__<tool>` for
+///   third-party MCP servers we don't ship; raising those to errors
+///   would require enumerating every conceivable tool.
+/// - claude-code adds tools across releases; a bailing check goes stale
+///   the next time a new built-in lands. The warn-only stance ages
+///   gracefully.
+///
+/// `mcp__<declared-server>__<tool>` entries are already checked for
+/// allowlist consistency by [`validate_mcp_tool_consistency`]; this
+/// function complements that by catching typos in the bare-name and
+/// `mcp__pitboss__*` cases.
+fn warn_unknown_actor_type_tools(r: &ResolvedManifest) {
+    use crate::dispatch::runner::{COMMUNICATION_MCP_TOOLS, PITBOSS_MCP_TOOLS_BASE};
+
+    // Snapshot of claude-code's documented built-in tool names as of
+    // 2026-05. Lower-case `mcp__*` and operator-namespaced tools are
+    // handled separately below. Sourced from
+    // <https://docs.claude.com/en/docs/build-with-claude/tool-use> and
+    // the claude-code release notes; update when claude-code introduces
+    // a new built-in. Out-of-list entries do not bail — they emit a
+    // `tracing::warn` so the operator notices a likely typo without
+    // blocking the run.
+    const KNOWN_CLAUDE_TOOLS: &[&str] = &[
+        "Bash",
+        "BashOutput",
+        "Edit",
+        "ExitPlanMode",
+        "Glob",
+        "Grep",
+        "KillShell",
+        "MultiEdit",
+        "NotebookEdit",
+        "Read",
+        "SlashCommand",
+        "Task",
+        "TodoWrite",
+        "WebFetch",
+        "WebSearch",
+        "Write",
+    ];
+
+    fn check_entry(surface: &str, entry: &str, declared_servers: &[String]) {
+        // mcp__pitboss__* — match against the static pitboss tool set.
+        if let Some(rest) = entry.strip_prefix("mcp__pitboss__") {
+            let known = PITBOSS_MCP_TOOLS_BASE
+                .iter()
+                .chain(COMMUNICATION_MCP_TOOLS.iter())
+                .any(|t| t.strip_prefix("mcp__pitboss__") == Some(rest));
+            if !known {
+                tracing::warn!(
+                    "{surface}: tool {entry:?} does not match any known \
+                     pitboss MCP tool. Likely a typo — at runtime the \
+                     typed-profile gate will auto-deny this entry. \
+                     Check `pitboss agents-md` for the canonical list."
+                );
+            }
+            return;
+        }
+        // mcp__<server>__* — `validate_mcp_tool_consistency` already
+        // checks per-server allowlists. We only warn when the prefix
+        // matches a server id that ISN'T declared (operator referenced a
+        // server they forgot to declare). The longest-prefix-match logic
+        // mirrors `parse_mcp_tool_name`.
+        if let Some(rest) = entry.strip_prefix("mcp__") {
+            let resolves = declared_servers.iter().any(|id| {
+                rest.len() > id.len() + 2
+                    && rest.starts_with(id)
+                    && rest[id.len()..].starts_with("__")
+            });
+            if !resolves {
+                tracing::warn!(
+                    "{surface}: tool {entry:?} references an MCP server \
+                     that is not declared via `[[mcp_server]]`. Either \
+                     declare the server or remove the entry — at runtime \
+                     the typed-profile gate will auto-deny this entry."
+                );
+            }
+            return;
+        }
+        // Bare name — must match a known claude built-in.
+        if !KNOWN_CLAUDE_TOOLS.contains(&entry) {
+            tracing::warn!(
+                "{surface}: tool {entry:?} is not a known claude-code \
+                 built-in. Likely a typo — at runtime the typed-profile \
+                 gate will auto-deny this entry. Known built-ins: {known:?}",
+                known = KNOWN_CLAUDE_TOOLS,
+            );
+        }
+    }
+
+    let declared_servers: Vec<String> = r.mcp_servers.iter().map(|s| s.id.clone()).collect();
+    for wt in &r.worker_types {
+        let surface = format!("[[worker_type]] {:?}.tools", wt.id);
+        for entry in &wt.tools {
+            check_entry(&surface, entry, &declared_servers);
+        }
+    }
+    for st in &r.sublead_types {
+        let surface = format!("[[sublead_type]] {:?}.tools", st.id);
+        for entry in &st.tools {
+            check_entry(&surface, entry, &declared_servers);
+        }
+    }
 }
 
 /// Reject zero ceilings on `[communication]`. Zero would silently disable
