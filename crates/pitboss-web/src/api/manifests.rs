@@ -258,6 +258,29 @@ pub async fn dispatch(
         return Err(ApiError::NotFound);
     }
 
+    // Auto-route: when the manifest declares a `[container]` section,
+    // shell to `pitboss container-dispatch --background` so the run
+    // launches in container mode. Otherwise stay on flat-mode
+    // `pitboss dispatch --background`. This is what makes the SPA's
+    // Dispatch button do the right thing for forks of
+    // container-dispatched runs (where the source manifest carries
+    // the `[container]` block back into the workspace).
+    let bytes = tokio::fs::read(&manifest_path).await?;
+    let subcommand = match toml::from_slice::<toml::Value>(&bytes) {
+        Ok(v) => {
+            if v.get("container").and_then(|c| c.as_table()).is_some() {
+                "container-dispatch"
+            } else {
+                "dispatch"
+            }
+        }
+        Err(e) => {
+            return Err(ApiError::BadRequest(format!(
+                "manifest is not valid TOML: {e}"
+            )));
+        }
+    };
+
     let bin = std::env::var("PITBOSS_BIN").unwrap_or_else(|_| "pitboss".to_string());
     // Forward state.runs_dir() to the dispatcher so the new run lands
     // where THIS console will read it from. Without this, the dispatcher
@@ -265,7 +288,7 @@ pub async fn dispatch(
     // the console's --runs-dir override, leaving the SPA staring at a
     // 404 while the run is happily running somewhere else.
     let output = tokio::process::Command::new(&bin)
-        .arg("dispatch")
+        .arg(subcommand)
         .arg(&manifest_path)
         .arg("--background")
         .arg("--run-dir")
@@ -319,13 +342,21 @@ pub async fn fork_run(
     Json(body): Json<ForkBody>,
 ) -> ApiResult<Json<ForkResult>> {
     let run_seg = sanitize_run_id(&run_id)?;
-    let snapshot = state
-        .runs_dir()
-        .join(run_seg)
-        .join("manifest.snapshot.toml");
-    if !snapshot.is_file() {
+    let run_subdir = state.runs_dir().join(run_seg);
+    // Prefer `manifest.source.toml` (written host-side by
+    // `pitboss container-dispatch` before exec) so a forked container
+    // run carries its full `[container]` block back into the workspace.
+    // Fall back to `manifest.snapshot.toml` for flat-mode runs and for
+    // container runs predating the host-side source-manifest write.
+    let source_path = run_subdir.join("manifest.source.toml");
+    let snapshot_path = run_subdir.join("manifest.snapshot.toml");
+    let pick = if source_path.is_file() {
+        source_path
+    } else if snapshot_path.is_file() {
+        snapshot_path
+    } else {
         return Err(ApiError::NotFound);
-    }
+    };
     let dest = manifest_path(state.manifests_dir(), &body.new_name)?;
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -335,7 +366,7 @@ pub async fn fork_run(
             "destination manifest already exists".into(),
         ));
     }
-    tokio::fs::copy(&snapshot, &dest).await?;
+    tokio::fs::copy(&pick, &dest).await?;
     Ok(Json(ForkResult {
         name: sanitize_manifest_name(&body.new_name)?.to_string(),
     }))

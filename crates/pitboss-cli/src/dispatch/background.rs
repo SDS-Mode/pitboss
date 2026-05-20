@@ -227,6 +227,132 @@ fn stderr_log_path_for(run_dir_override: Option<&Path>, run_id: &str) -> PathBuf
     base.join(format!("{run_id}.bg-stderr.log"))
 }
 
+/// Detached spawn for `pitboss container-dispatch --background`. Mirrors
+/// [`run_background`] but re-spawns `container-dispatch --internal-run-id`
+/// instead of `dispatch --internal-run-id`. The detached child's
+/// `run_container_dispatch` honors the pre-minted id and exec()s
+/// docker/podman with the id threaded into the in-container
+/// `pitboss dispatch` argv via `--internal-run-id`.
+///
+/// The JSON announcement carries an extra `"container": true` field so
+/// orchestrators (notably `pitboss-web`'s `/api/runs`) can distinguish
+/// container-dispatched runs from flat-mode ones without re-parsing the
+/// manifest. Other fields match `run_background` exactly.
+pub fn run_container_background(
+    manifest_path: &Path,
+    run_dir_override: Option<PathBuf>,
+) -> Result<i32> {
+    let run_id = Uuid::now_v7();
+    let run_id_str = run_id.to_string();
+    let started_at = Utc::now();
+
+    // Pre-flight: validate the manifest (and require `[container]`)
+    // BEFORE forking so TOML errors and missing-section errors surface
+    // on the parent's stderr where the operator/web client can see
+    // them. Mirrors `run_background`'s fail-fast preflight (#150 M8).
+    let resolved = crate::manifest::load::load_manifest_skip_dir_check(manifest_path, None)
+        .with_context(|| {
+            format!(
+                "validate manifest before background container-dispatch: {}",
+                manifest_path.display()
+            )
+        })?;
+    if resolved.container.is_none() {
+        anyhow::bail!(
+            "pitboss container-dispatch: manifest has no [container] section.\n\
+             Add a [container] block with at least [[container.mount]] entries \
+             to use container-dispatch."
+        );
+    }
+
+    let manifest_path_canonical = std::fs::canonicalize(manifest_path)
+        .with_context(|| format!("canonicalize manifest path: {}", manifest_path.display()))?;
+    let run_dir_canonical = run_dir_override
+        .as_ref()
+        .map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
+
+    // Write `manifest.source.toml` from the parent — before announcing
+    // and before the child even spawns. This way the artifact is on
+    // disk by the time `pitboss-web` follows the announcement to load
+    // the new run (even if the detached child later fails in
+    // `detect_runtime` or during the docker/podman exec). Without this,
+    // a podman-less CI run would announce a `run_id` but never write
+    // the artifact the Fork-manifest endpoint depends on.
+    let runs_base = run_dir_canonical
+        .clone()
+        .unwrap_or_else(crate::runs::runs_base_dir);
+    if let Err(e) = crate::dispatch::container::write_source_manifest_artifact(
+        &runs_base,
+        run_id,
+        &manifest_path_canonical,
+    ) {
+        eprintln!("pitboss container-dispatch: warning: could not write manifest.source.toml: {e}");
+    }
+
+    let exe = std::env::current_exe().context("locate current pitboss binary")?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("container-dispatch")
+        .arg(&manifest_path_canonical)
+        .args(["--internal-run-id", &run_id_str]);
+    if let Some(ref dir) = run_dir_canonical {
+        cmd.arg("--run-dir").arg(dir);
+    }
+
+    let stderr_log_path = stderr_log_path_for(run_dir_canonical.as_deref(), &run_id_str);
+    let stderr_target = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_target);
+
+    // SAFETY: `pre_exec` runs in the forked child between fork() and
+    // exec(). `setsid()` is async-signal-safe per POSIX. Same shape as
+    // `run_background`.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "spawn detached container-dispatch (binary: {})",
+            exe.display()
+        )
+    })?;
+    let child_pid = child.id();
+    drop(child);
+
+    let payload = json!({
+        "run_id": run_id_str,
+        "manifest_path": manifest_path_canonical.to_string_lossy(),
+        "started_at": started_at.to_rfc3339(),
+        "child_pid": child_pid,
+        "bg_stderr_log": stderr_log_path.to_string_lossy(),
+        "container": true,
+    });
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = writeln!(out, "{payload}") {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(e).context("write background container-dispatch announcement");
+        }
+        tracing::debug!(error = %e, "background announcement: stdout EPIPE; child still running");
+    }
+    let _ = out.flush();
+
+    Ok(0)
+}
+
 /// Parse a `--internal-run-id` argument into a `Uuid`. Used by `main.rs`
 /// when forwarding the value into [`crate::dispatch::run_dispatch_inner`]
 /// or [`crate::dispatch::hierarchical::run_hierarchical`].
