@@ -10,51 +10,44 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
-## [0.15.0] — 2026-05-15
-
-v0.15.0 ships **reusable agent profiles** for collapsing manifest
-prompt boilerplate and a **headless-dispatch hook filter** for the
-operator-environment leak that was polluting worker output. Alongside
-those features, the release closes out the worker-failure-diagnostic
-chain (#475): force-kill paths now leave a `terminate_reason`
-audit-trail, killed actors surface their real token cost, and the
-stream-JSON failure-excerpt path catches every mid-event truncation
-shape we've seen in the wild. macOS+Podman container dispatch picks
-up two more hardening fixes — TCP forward for the control bridge and
-auto-injected `XDG_RUNTIME_DIR=/tmp` to dodge the virtiofs+AF_UNIX
-bind() trap.
-
-Highlights:
-
-- **`[[agent_profile]]`** — declare role-shared system-prompt preludes
-  + env/model/tools defaults at the manifest level. Three built-ins
-  ship bundled (`pitboss/lead-opus`, `pitboss/sublead-sonnet`,
-  `pitboss/worker-haiku`); manifest-declared profiles can shadow them
-  by id. Bound to `[[worker_type]]` / `[[sublead_type]]` via a new
-  `agent_profile = "<id>"` field. Operator config always wins over
-  profile defaults — profiles are default-providers, not overrides.
-  Inspect via `pitboss schema --format=agent-profiles [--manifest <path>]`.
-- **`[run].claude_setting_sources`** — operator-controlled
-  pass-through of claude-code's `--setting-sources` flag (subset of
-  `user`, `project`, `local`). Lets headless dispatch filter out
-  user-scope SessionStart hooks and project-checked-in defaults so
-  workers run on the manifest contract alone, not the operator's
-  interactive-session decoration.
-- **Killed-actor diagnostic chain** — `terminate_reason` now
-  attributed for every force-kill path (#548); killed actors surface
-  their real token cost via the `AssistantUsage` fallback when the
-  stream ended without a `Result` event (#549); failure-excerpt path
-  marks every mid-event truncation shape (#547, #554) so a killed
-  worker's `failure_reason` is never just "unknown" anymore.
-- **macOS+Podman hardening** — auto-inject `XDG_RUNTIME_DIR=/tmp` to
-  dodge the virtiofs+AF_UNIX bind() EINVAL trap (#551); control-bridge
-  TCP forward for macOS+Podman dispatch (#546); `[container].extra_args`
-  hardening + mount defaults + doc quickstart (#544).
+## [0.16.0] — 2026-05-20
 
 ### Added
 
-- Reusable agent profiles for prompt prelude + defaults ([#545](https://github.com/SDS-Mode/pitboss/pull/545))
+- SPA Resources tab + run-list "Mem peak" column (#553 PR-B)
+- Per-actor sampler + RunSummary.resource_high_water (#553 PR-A)
+
+
+### Changed
+
+- Extract ApprovalState from LayerState ([#563](https://github.com/SDS-Mode/pitboss/pull/563))
+- Extract BudgetState from LayerState ([#562](https://github.com/SDS-Mode/pitboss/pull/562))
+- Extract WorkerRegistry from LayerState ([#561](https://github.com/SDS-Mode/pitboss/pull/561))
+- Unify test mk_state factories under TestStateBuilder ([#560](https://github.com/SDS-Mode/pitboss/pull/560))
+
+
+### Fixed
+
+- Preserve [container] for Fork-manifest, auto-route web dispatch ([#581](https://github.com/SDS-Mode/pitboss/pull/581))
+- Cgroupv1 fallback + first-tick sample (PR #579 R3 review) ([#579](https://github.com/SDS-Mode/pitboss/pull/579))
+- Add wire-compat content-guard test for nested payload structs ([#578](https://github.com/SDS-Mode/pitboss/pull/578))
+- Rescue PR #574 audit closures from docs-skip in cliff.toml ([#576](https://github.com/SDS-Mode/pitboss/pull/576))
+- Bundle WorkerSnapshotEntry into same wire-compat fix ([#575](https://github.com/SDS-Mode/pitboss/pull/575))
+- Add #[serde(default)] to RunFinishedSummary fields
+- Add field-path prefix to branch-conflict error ([#574](https://github.com/SDS-Mode/pitboss/pull/574))
+- Add remediation hints to four validation errors
+- Add #[serde(default)] to ResolvedManifest optional fields ([#571](https://github.com/SDS-Mode/pitboss/pull/571))
+- Add #[serde(default)] to SubleadTerminated fields ([#567](https://github.com/SDS-Mode/pitboss/pull/567))
+- Add #[serde(default)] to SubleadSpawned.read_down ([#566](https://github.com/SDS-Mode/pitboss/pull/566))
+- Revoke MCP tokens on actor exit ([#564](https://github.com/SDS-Mode/pitboss/pull/564))
+
+
+## [0.15.0] — 2026-05-16
+
+### Added
+
 - [run].claude_setting_sources opt-in for headless dispatch ([#556](https://github.com/SDS-Mode/pitboss/pull/556))
+- Reusable agent profiles for prompt prelude + defaults
 
 
 ### Fixed
@@ -65,6 +58,7 @@ Highlights:
 - Audit-trail every force-kill path via terminate_reason ([#548](https://github.com/SDS-Mode/pitboss/pull/548))
 - Surface mid-event truncation marker in failure excerpt ([#547](https://github.com/SDS-Mode/pitboss/pull/547))
 - Control-bridge TCP forward for macOS+Podman dispatch ([#546](https://github.com/SDS-Mode/pitboss/pull/546))
+- Address review #545 HIGH + MEDIUM findings
 - Harden extra_args, mount defaults, doc quickstart ([#544](https://github.com/SDS-Mode/pitboss/pull/544))
 
 
