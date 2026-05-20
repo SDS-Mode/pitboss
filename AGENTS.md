@@ -1419,7 +1419,7 @@ Match fields (all optional; unset fields match any value):
 |---|---|---|
 | `actor` | string | `ActorPath` rendered as `"root"` or `"root→S1"` or `"root→S1→W3"` |
 | `category` | string | snake_case enum: `"tool_use"`, `"plan"`, `"cost"`, `"other"` |
-| `tool_name` | string | Exact tool name; only meaningful when `category = "tool_use"` |
+| `tool_name` | string | Tool-name matcher, only meaningful when `category = "tool_use"`. Supports glob patterns (`mcp__myserver__*` matches every tool from one MCP server, `*` matches any). A bare name like `"Bash"` matches exactly. (#530) |
 | `cost_over` | float | Matches when the `cost_estimate` hint on the approval exceeds this USD value. **Advisory only** — `cost_estimate` is caller-supplied; an actor that passes `cost_estimate=0.0` bypasses any threshold. For hard cost gates use `auto_reject` on `tool_name`/`actor`, or the server-side `[run].budget_usd` cap. (F-SEC-8 / #531) |
 
 Action values (snake_case):

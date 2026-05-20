@@ -34,7 +34,7 @@ action = "block"
 |-------|------|--------------|-------|
 | `actor` | string (optional) | The approval's `actor_path` rendered as a string (e.g., `"root"` or `"root→S1"`) equals the value | Use `"root"` for root-level requests. Use `"root→<sublead_id>"` for a specific sub-lead; sub-lead IDs are UUIDv7 and runtime-generated, so this field is most useful when you know the sub-lead's identity in advance — e.g., from a prior `spawn_sublead` response. Exact string match only; no wildcard patterns. |
 | `category` | enum (optional) | The approval's category field equals the value exactly | Allowed values: `"tool_use"`, `"plan"`, `"cost"`, `"other"`. Most `request_approval` calls land in `tool_use`; `propose_plan` lands in `plan`. Cost-category approvals are not emitted by default (see deferment notes). |
-| `tool_name` | string (optional) | The lead's optional `tool_name` hint on `request_approval` equals the value | Only fires if the lead populates the optional `tool_name` arg. Without it, this field never matches. Exact string match only. |
+| `tool_name` | string (optional) | The lead's optional `tool_name` hint on `request_approval` matches the value as a glob pattern (`mcp__myserver__*`, `*`, or a bare name like `"Bash"` for exact match) | Only fires if the lead populates the optional `tool_name` arg. Without it, this field never matches. Glob patterns from the `glob` crate (since #530); invalid patterns silently fall back to exact-string comparison. |
 | `cost_over` | float (optional) | The lead's optional `cost_estimate` hint exceeds this threshold (strict `>` comparison) | Only fires if the lead passes a `cost_estimate` arg to `request_approval`. Without it, this field never matches. Numeric greater-than comparison. **Advisory only** — see [Cost gates: advisory vs hard](#cost-gates-advisory-vs-hard) below. |
 
 ---
@@ -146,9 +146,9 @@ The following features are not in v0.6 but are requested or planned:
 
 TUI commands to add/remove rules mid-run are deferred to v0.7+. v0.6 reads the policy once at manifest load. You cannot change rules while a run is in flight.
 
-### No regex or glob patterns in match values
+### `tool_name` supports glob patterns; `actor` is exact-match only
 
-Match fields support exact string comparison only. Wildcard patterns like `tool_name = "Read*"` or `actor = "root→sublead-*"` are not supported. Matching is literal. If you have a use case that needs wildcard matching (e.g., "auto-approve all Read variants"), please file an issue.
+`tool_name` accepts glob patterns from the `glob` crate (since #530) — e.g. `mcp__myserver__*` matches every tool a single MCP server exposes, and `*` matches any tool name. A bare name like `"Bash"` continues to match exactly. `actor` and `category` are still exact-string comparisons; matching e.g. `actor = "root→sublead-*"` is not yet supported. File an issue if the actor-side wildcard would help.
 
 ### Cost-category approvals are not emitted by default
 

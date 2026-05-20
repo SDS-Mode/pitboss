@@ -26,7 +26,10 @@ pub struct ApprovalMatch {
     /// Match category exactly
     #[serde(default)]
     pub category: Option<ApprovalCategory>,
-    /// Match exact tool name (relevant for ToolUse category)
+    /// Match tool name (relevant for ToolUse category). Supports glob
+    /// patterns from the `glob` crate: `mcp__myserver__*` matches every
+    /// tool exposed by an MCP server, `*` matches any tool, and a bare
+    /// name like `"Bash"` continues to match exactly. (F-SEC-6 / #530)
     #[serde(default)]
     pub tool_name: Option<String>,
     /// Match if approval's cost > this value (relevant for Cost category).
@@ -98,9 +101,24 @@ fn rule_matches(
         }
     }
     if let Some(want) = &m.tool_name {
-        match tool_name {
-            Some(actual) if actual == want => {}
-            _ => return false,
+        let Some(actual) = tool_name else {
+            return false;
+        };
+        // F-SEC-6 (#530): treat the rule's tool_name as a glob so
+        // operators can match `mcp__myserver__*` against every tool a
+        // single MCP server exposes without enumerating each one. An
+        // invalid pattern silently falls back to exact match — the
+        // matcher is the wrong place to surface manifest errors, and
+        // failing closed (no match) would change semantics for any
+        // existing rule that happens to contain glob metacharacters.
+        match glob::Pattern::new(want) {
+            Ok(pat) if pat.matches(actual) => {}
+            Ok(_) => return false,
+            Err(_) => {
+                if actual != want {
+                    return false;
+                }
+            }
         }
     }
     // `cost_over` rules fire whenever the caller provides an explicit
@@ -210,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_name_match_requires_exact_string() {
+    fn tool_name_match_exact_string() {
         let m = PolicyMatcher::new(vec![ApprovalRule {
             r#match: ApprovalMatch {
                 tool_name: Some("Bash".into()),
@@ -224,6 +242,49 @@ mod tests {
             Some(ApprovalAction::AutoReject)
         );
         assert_eq!(m.evaluate(&a, Some("Edit"), None), None);
+        assert_eq!(m.evaluate(&a, None, None), None);
+    }
+
+    #[test]
+    fn tool_name_match_glob_mcp_server_prefix() {
+        let m = PolicyMatcher::new(vec![ApprovalRule {
+            r#match: ApprovalMatch {
+                tool_name: Some("mcp__myserver__*".into()),
+                ..Default::default()
+            },
+            action: ApprovalAction::AutoApprove,
+        }]);
+        let a = mk_approval(ActorPath::new(["root"]), ApprovalCategory::ToolUse);
+        assert_eq!(
+            m.evaluate(&a, Some("mcp__myserver__read"), None),
+            Some(ApprovalAction::AutoApprove)
+        );
+        assert_eq!(
+            m.evaluate(&a, Some("mcp__myserver__write_file"), None),
+            Some(ApprovalAction::AutoApprove)
+        );
+        assert_eq!(m.evaluate(&a, Some("mcp__otherserver__read"), None), None);
+        assert_eq!(m.evaluate(&a, Some("Bash"), None), None);
+    }
+
+    #[test]
+    fn tool_name_match_glob_wildcard() {
+        let m = PolicyMatcher::new(vec![ApprovalRule {
+            r#match: ApprovalMatch {
+                tool_name: Some("*".into()),
+                ..Default::default()
+            },
+            action: ApprovalAction::Block,
+        }]);
+        let a = mk_approval(ActorPath::new(["root"]), ApprovalCategory::ToolUse);
+        assert_eq!(
+            m.evaluate(&a, Some("Bash"), None),
+            Some(ApprovalAction::Block)
+        );
+        assert_eq!(
+            m.evaluate(&a, Some("mcp__pitboss__spawn_worker"), None),
+            Some(ApprovalAction::Block)
+        );
         assert_eq!(m.evaluate(&a, None, None), None);
     }
 }
