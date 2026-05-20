@@ -77,6 +77,7 @@ pub struct EventEnvelope {
 /// through JSON identically.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovalPlanWire {
+    #[serde(default)]
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
