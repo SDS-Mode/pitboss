@@ -469,9 +469,9 @@ fn is_default_pressure_level(l: &PressureLevel) -> bool {
 }
 
 /// Per-actor row inside a `ResourceSample`. One entry per `task_id`
-/// found in any layer's `workers.pids` map at sample time (root lead
-/// + sub-leads + workers); processes reaped between scheduling the
-/// tick and reading `/proc` are dropped silently. (#553)
+/// found in any layer's `workers.pids` map at sample time (root lead,
+/// sub-leads, workers); processes reaped between scheduling the tick
+/// and reading `/proc` are dropped silently. (#553)
 ///
 /// Every field carries `#[serde(default)]` so this nested struct
 /// follows the same wire-compat contract as the rest of the protocol

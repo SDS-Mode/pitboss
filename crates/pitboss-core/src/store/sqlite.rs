@@ -841,7 +841,7 @@ fn load_run_blocking(guard: &rusqlite::Connection, run_id: Uuid) -> Result<RunSu
         // finalize path (the production write site) populate the
         // breakdown for real runs.
         spend_breakdown: None,
-            resource_high_water: None,
+        resource_high_water: None,
     })
 }
 

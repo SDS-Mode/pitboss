@@ -1815,7 +1815,7 @@ async fn reconcile_terminated_sublead_marks_self_row_done() {
         run_dir: state.root.manifest.run_dir.clone(),
         worktree_cleanup: WorktreeCleanup::Never,
         emit_event_stream: false,
-            resource_sample_secs: 0,
+        resource_sample_secs: 0,
         claude_setting_sources: None,
         tasks: vec![],
         lead: None,

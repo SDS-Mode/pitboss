@@ -223,7 +223,7 @@ fn build_synthesized_summary(run_dir: &Path) -> Result<RunSummary> {
         notify_failures: None,
         tasks: Vec::new(),
         spend_breakdown: None,
-            resource_high_water: None,
+        resource_high_water: None,
     })
 }
 

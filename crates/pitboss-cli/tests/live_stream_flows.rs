@@ -64,7 +64,7 @@ fn manifest(run_dir: PathBuf) -> ResolvedManifest {
         run_dir,
         worktree_cleanup: WorktreeCleanup::OnSuccess,
         emit_event_stream: false,
-            resource_sample_secs: 0,
+        resource_sample_secs: 0,
         claude_setting_sources: None,
         tasks: vec![],
         lead: None,

@@ -731,15 +731,20 @@ mod tests {
     /// (#553)
     #[test]
     fn render_resource_high_water_includes_peak_and_top_actors() {
-        let mut hw = pitboss_core::store::record::ResourceHighWater::default();
-        hw.total_rss_bytes_max = 1_500 * 1024 * 1024; // 1500 MB
-        hw.cgroup_memory_max_bytes = Some(2_000 * 1024 * 1024); // 2000 MB
-        hw.peak_utilization_pct = Some(0.75);
-        hw.sample_count = 100;
-        hw.sample_cadence_secs = 5;
-        hw.rss_bytes_max_by_actor.insert("worker-a".into(), 800 * 1024 * 1024);
-        hw.rss_bytes_max_by_actor.insert("worker-b".into(), 400 * 1024 * 1024);
-        hw.rss_bytes_max_by_actor.insert("worker-c".into(), 100 * 1024 * 1024);
+        let mut hw = pitboss_core::store::record::ResourceHighWater {
+            total_rss_bytes_max: 1_500 * 1024 * 1024, // 1500 MB
+            cgroup_memory_max_bytes: Some(2_000 * 1024 * 1024), // 2000 MB
+            peak_utilization_pct: Some(0.75),
+            sample_count: 100,
+            sample_cadence_secs: 5,
+            ..Default::default()
+        };
+        hw.rss_bytes_max_by_actor
+            .insert("worker-a".into(), 800 * 1024 * 1024);
+        hw.rss_bytes_max_by_actor
+            .insert("worker-b".into(), 400 * 1024 * 1024);
+        hw.rss_bytes_max_by_actor
+            .insert("worker-c".into(), 100 * 1024 * 1024);
         let mut buf = Vec::new();
         render_resource_high_water(&mut buf, &hw).unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -756,10 +761,12 @@ mod tests {
 
     #[test]
     fn render_resource_high_water_handles_missing_cgroup() {
-        let mut hw = pitboss_core::store::record::ResourceHighWater::default();
-        hw.total_rss_bytes_max = 1024 * 1024 * 1024;
-        hw.cgroup_memory_max_bytes = None; // flat host
-        hw.sample_count = 1;
+        let hw = pitboss_core::store::record::ResourceHighWater {
+            total_rss_bytes_max: 1024 * 1024 * 1024,
+            cgroup_memory_max_bytes: None, // flat host
+            sample_count: 1,
+            ..Default::default()
+        };
         let mut buf = Vec::new();
         render_resource_high_water(&mut buf, &hw).unwrap();
         let out = String::from_utf8(buf).unwrap();
