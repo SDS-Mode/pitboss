@@ -160,7 +160,11 @@ pub struct TaskRecord {
     /// spawn was untyped or the record is from a pre-v0.12 run. Lets the
     /// TUI / `pitboss status` / `pitboss-web` group workers by class
     /// without re-deriving from the manifest snapshot. Added with #252.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Aligned to the majority `serde(default)`-only pattern of the other
+    /// `Option<_>` fields on this struct (#514) — pre-fix this carried
+    /// `skip_serializing_if`, which was the only field forcing consumers
+    /// to handle both "absent" and `null` forms.
+    #[serde(default)]
     pub actor_type: Option<String>,
     /// Set by every dispatcher-initiated kill path (budget breach, parent
     /// cancel cascade, operator Ctrl-C, MCP `terminate_*`, runtime timeout,
