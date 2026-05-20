@@ -61,6 +61,12 @@ fn mk_state(
 
 /// Build + spawn fake-claude as the lead subprocess, connecting to `mcp_sock`.
 /// Returns the SessionOutcome.
+///
+/// Retained for completeness even though every current caller routes via
+/// the bridge — F-SEC-4 (#528) requires `_meta` on every tools/call, so
+/// direct-socket usage will hit `invalid_request` at the auth layer. New
+/// tests should prefer [`run_fake_claude_lead_via_bridge`].
+#[allow(dead_code)]
 async fn run_fake_claude_lead(
     cwd: &std::path::Path,
     script_path: &std::path::Path,
@@ -188,10 +194,17 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
 
     // Run fake-claude as the lead. A real TokioSpawner subprocess, not the
     // FakeSpawner in state.root.spawner (which backs the workers it spawns).
-    let outcome = run_fake_claude_lead(
+    // Route through the bridge with a minted token — F-SEC-4 (#528) now
+    // rejects tools/call without _meta at the auth layer, so the direct-
+    // socket path is no longer a viable test shortcut.
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )
@@ -251,10 +264,14 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
-    let outcome = run_fake_claude_lead(
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )
@@ -507,10 +524,14 @@ async fn e2e_lead_request_approval_round_trip() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
-    let outcome = run_fake_claude_lead(
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &mcp_sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )
@@ -933,10 +954,14 @@ async fn e2e_lead_propose_plan_gate_unblocks_spawn() {
 "#;
     tokio::fs::write(&script, script_body).await.unwrap();
 
-    let outcome = run_fake_claude_lead(
+    let token = state.mint_token("lead", "lead").await;
+    let outcome = run_fake_claude_lead_via_bridge(
         dir.path(),
         &script,
         &mcp_sock,
+        "lead",
+        "lead",
+        &token,
         CancelToken::new(),
         Duration::from_secs(30),
     )

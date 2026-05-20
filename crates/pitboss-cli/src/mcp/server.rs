@@ -346,33 +346,40 @@ impl PitbossHandler {
     /// core of issue #145.
     ///
     /// Errors:
-    /// - `_meta` missing entirely: returns `Ok(())` (per-tool MetaField
-    ///   handlers will reject if they require it; read-only tools that
-    ///   accept `Option<MetaField>` continue to work without identity).
+    /// - `_meta` missing entirely (no `arguments` map, or no `_meta`
+    ///   key): rejected with `invalid-request` (F-SEC-4 / #528). Pre-
+    ///   #528 this returned `Ok(())` and deferred identity checks to
+    ///   per-tool handlers, which left a defense-in-depth gap: a tool
+    ///   declared with `Option<MetaField>` was silently anonymous-
+    ///   callable. The bridge injects `_meta` on every `tools/call`, so
+    ///   this strict check is invisible to production callers.
     /// - `_meta.token` present but unknown / unbindable: returns an
     ///   invalid-request error (the connection has presented a token
     ///   we did not mint).
     /// - `_meta.token` missing AND no identity already bound: returns
     ///   an invalid-request error if the wire claims an actor_id (a
     ///   weak forgery — likely a direct socket connection that bypasses
-    ///   the bridge). Calls without any `_meta` at all are still
-    ///   rejected by per-tool handlers that require it.
+    ///   the bridge).
     async fn authenticate_and_rebind(
         &self,
         request: &mut rmcp::model::CallToolRequestParams,
     ) -> Result<(), ErrorData> {
-        // Reach into params.arguments._meta. If the caller didn't supply
-        // arguments at all, there's nothing to authenticate — let the
-        // per-tool handler decide how to react.
-        let Some(args) = request.arguments.as_mut() else {
-            return Ok(());
-        };
-        // Pull out _meta as a mutable JSON object slot.
-        let Some(meta_val) = args.get_mut("_meta") else {
-            // No _meta on the wire. Per-tool handlers that require
-            // identity will reject; bail-out tools (read-only KV) accept.
-            return Ok(());
-        };
+        // F-SEC-4 (#528): require `_meta` on every tool call. The bridge
+        // injects it for production callers; tests connect via
+        // `FakeMcpClient::connect_as` / `connect_with_token` which also
+        // inject. Rejecting at the auth layer means a new tool with
+        // `Option<MetaField>` cannot accidentally create an anonymous
+        // surface — handlers no longer carry the "what if _meta is
+        // absent" branch as a defense-in-depth concern.
+        const MISSING_META_MSG: &str = "missing _meta on tool call: every tools/call must carry \
+             _meta.actor_id + _meta.actor_role (connect via pitboss mcp-bridge)";
+        let args = request
+            .arguments
+            .as_mut()
+            .ok_or_else(|| ErrorData::invalid_request(MISSING_META_MSG.to_string(), None))?;
+        let meta_val = args
+            .get_mut("_meta")
+            .ok_or_else(|| ErrorData::invalid_request(MISSING_META_MSG.to_string(), None))?;
         let Some(meta_obj) = meta_val.as_object_mut() else {
             return Err(ErrorData::invalid_request(
                 "_meta must be an object".to_string(),
