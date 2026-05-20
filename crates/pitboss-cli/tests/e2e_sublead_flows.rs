@@ -844,8 +844,9 @@ async fn sublead_session_spawns_runs_and_reconciles() {
                 "sublead_id in record should match"
             );
             assert_eq!(
-                rec.outcome, "success",
-                "sub-lead outcome should be 'success'; got: {}",
+                rec.outcome,
+                pitboss_cli::control::protocol::TerminationOutcome::Success,
+                "sub-lead outcome should be Success; got: {:?}",
                 rec.outcome
             );
         }

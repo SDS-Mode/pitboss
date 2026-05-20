@@ -77,6 +77,21 @@ impl SubleadOutcome {
         }
     }
 
+    /// Project to the wire/persistence-typed [`TerminationOutcome`] (#568).
+    /// The free-text error message on `Error(_)` is intentionally dropped —
+    /// it stays in dispatcher logs but is not part of the wire contract.
+    pub fn to_termination(&self) -> crate::control::protocol::TerminationOutcome {
+        use crate::control::protocol::TerminationOutcome;
+        match self {
+            SubleadOutcome::Success => TerminationOutcome::Success,
+            SubleadOutcome::Cancel => TerminationOutcome::Cancel,
+            SubleadOutcome::Timeout => TerminationOutcome::Timeout,
+            SubleadOutcome::Error(_) => TerminationOutcome::Error,
+            SubleadOutcome::ApprovalRejected => TerminationOutcome::ApprovalRejected,
+            SubleadOutcome::ApprovalTimedOut => TerminationOutcome::ApprovalTimedOut,
+        }
+    }
+
     /// Map to the `TaskStatus` used in `TaskRecord` and the
     /// `WorkerSnapshotEntry.state` wire string. Mirrors the on-exit
     /// classification done by `spawn_sublead_session` so the sub-lead's
@@ -1208,7 +1223,7 @@ pub async fn reconcile_terminated_sublead(
                 sublead_id: sublead_id.to_string(),
                 spent_usd: actual_spend,
                 unspent_usd: unspent,
-                outcome: outcome.as_str().to_string(),
+                outcome: outcome.to_termination(),
             },
         };
         state.root.broadcast_control_event(ev).await;
@@ -1230,7 +1245,7 @@ pub async fn reconcile_terminated_sublead(
     // Persist terminal record so wait_actor(sublead_id) can return it.
     let record = SubleadTerminalRecord {
         sublead_id: sublead_id.to_string(),
-        outcome: outcome.as_str().to_string(),
+        outcome: outcome.to_termination(),
         spent_usd: actual_spend,
         unspent_usd: unspent,
         terminated_at: chrono::Utc::now(),

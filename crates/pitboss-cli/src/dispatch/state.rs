@@ -36,8 +36,10 @@ use uuid::Uuid;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubleadTerminalRecord {
     pub sublead_id: String,
-    /// "success" | "cancel" | "timeout" | "error"
-    pub outcome: String,
+    /// Typed terminal classification (#568). Wire/JSON shape is unchanged
+    /// — see [`crate::control::protocol::TerminationOutcome`] for the
+    /// closed value set and its on-the-wire string mapping.
+    pub outcome: crate::control::protocol::TerminationOutcome,
     pub spent_usd: f64,
     pub unspent_usd: f64,
     pub terminated_at: chrono::DateTime<chrono::Utc>,
