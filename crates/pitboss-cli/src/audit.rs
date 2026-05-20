@@ -79,7 +79,7 @@ pub fn run(
     json: bool,
     run_dir_override: Option<PathBuf>,
 ) -> Result<i32> {
-    let base = run_dir_override.unwrap_or_else(default_runs_dir);
+    let base = run_dir_override.unwrap_or_else(crate::runs::runs_base_dir);
     let run_dir = crate::runs::resolve_run_dir_by_prefix(&base, run_id_prefix)?;
     let audit_path = run_dir.join("audit.jsonl");
 
@@ -269,13 +269,6 @@ fn event_detail(event: &TaskEvent) -> String {
             ..
         } => format!("tool={tool_name} actor_type={actor_type}"),
     }
-}
-
-fn default_runs_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".local/share/pitboss/runs")
 }
 
 /// Test helper exposed so integration tests can drive `render` against

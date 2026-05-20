@@ -20,7 +20,7 @@ use crate::control::protocol::{ControlEvent, EventEnvelope};
 
 /// Entry point for the `events` subcommand.
 pub fn run(run_id_prefix: &str, json: bool, run_dir_override: Option<PathBuf>) -> Result<i32> {
-    let base = run_dir_override.unwrap_or_else(default_runs_dir);
+    let base = run_dir_override.unwrap_or_else(crate::runs::runs_base_dir);
     let run_dir = crate::runs::resolve_run_dir_by_prefix(&base, run_id_prefix)?;
     let events_path = run_dir.join("events.jsonl");
 
@@ -228,13 +228,6 @@ fn describe_event(event: &ControlEvent) -> (&'static str, String) {
             ),
         ),
     }
-}
-
-fn default_runs_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".local/share/pitboss/runs")
 }
 
 /// Test helper exposed so `events::run`-equivalent integration tests

@@ -131,7 +131,9 @@ pub fn run_container_dispatch(
         None
     };
 
-    let audit_runs_base = run_dir_override.clone().unwrap_or_else(default_run_dir);
+    let audit_runs_base = run_dir_override
+        .clone()
+        .unwrap_or_else(crate::runs::runs_base_dir);
     let args = build_run_args(
         &runtime,
         container,
@@ -285,7 +287,7 @@ fn build_run_args(
     // Artifacts produced inside the container should persist on the host.
     // We mount the effective run_dir (override > default) to the same
     // absolute path inside the container.
-    let effective_run_dir = run_dir_override.unwrap_or_else(default_run_dir);
+    let effective_run_dir = run_dir_override.unwrap_or_else(crate::runs::runs_base_dir);
     // Ensure the directory exists on the host so Docker doesn't create it
     // as root-owned when the mount target is absent.
     std::fs::create_dir_all(&effective_run_dir).ok();
@@ -762,12 +764,6 @@ fn expand_tilde(path: &Path) -> PathBuf {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
-}
-
-fn default_run_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".local/share/pitboss/runs")
 }
 
 /// Append a single NDJSON record to `<runs_base>/container-dispatch.log`
