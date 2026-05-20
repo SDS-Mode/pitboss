@@ -71,7 +71,7 @@ async fn run_async(
     runs_dir_override: Option<PathBuf>,
 ) -> Result<i32> {
     validate_task_id(task_id)?;
-    let base = runs_dir_override.unwrap_or_else(default_runs_dir);
+    let base = runs_dir_override.unwrap_or_else(crate::runs::runs_base_dir);
     let run_dir = resolve_run_dir(&base, run_id_prefix)?;
     let tasks_root = run_dir.join("tasks");
     let task_dir = tasks_root.join(task_id);
@@ -135,15 +135,6 @@ fn validate_task_id(task_id: &str) -> Result<()> {
         bail!("task id must not contain path separators or NUL: '{task_id}'");
     }
     Ok(())
-}
-
-/// Returns `~/.local/share/pitboss/runs/` — matches the default used by
-/// `pitboss resume` / `pitboss diff` and the TUI's run discovery.
-fn default_runs_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".local/share/pitboss/runs")
 }
 
 /// Resolve a run id (full UUID or unique prefix) to an absolute run

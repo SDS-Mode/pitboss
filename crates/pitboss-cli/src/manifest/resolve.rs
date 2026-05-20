@@ -376,7 +376,10 @@ pub fn resolve(
         )
     };
 
-    let run_dir = manifest.run.run_dir.unwrap_or_else(default_run_dir);
+    let run_dir = manifest
+        .run
+        .run_dir
+        .unwrap_or_else(crate::runs::runs_base_dir);
 
     // Apply env-var substitution to notification URLs at resolve time.
     let mut notifications = manifest.notification.clone();
@@ -623,18 +626,6 @@ fn substitute(template: &str, vars: &HashMap<String, String>) -> Result<String> 
         }
     }
     Ok(out)
-}
-
-fn default_run_dir() -> PathBuf {
-    if let Some(h) = dirs_home() {
-        h.join(".local/share/pitboss/runs")
-    } else {
-        PathBuf::from("./pitboss-runs")
-    }
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// Convert a TOML `ApprovalRuleSpec` into a typed `ApprovalRule`.

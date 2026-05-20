@@ -16,7 +16,7 @@ pub fn run(
     run_dir_override: Option<PathBuf>,
     resources: bool,
 ) -> Result<i32> {
-    let base = run_dir_override.unwrap_or_else(default_runs_dir);
+    let base = run_dir_override.unwrap_or_else(crate::runs::runs_base_dir);
     let run_dir = resolve_run_dir(&base, run_id_prefix)?;
 
     let summary_json = run_dir.join("summary.json");
@@ -349,13 +349,6 @@ fn status_label(s: &TaskStatus) -> &'static str {
         TaskStatus::ApprovalRejected => "⊘ ApprovalRej",
         TaskStatus::ApprovalTimedOut => "⏱ ApprovalTO",
     }
-}
-
-fn default_runs_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".local/share/pitboss/runs")
 }
 
 fn resolve_run_dir(base: &Path, prefix: &str) -> Result<PathBuf> {
