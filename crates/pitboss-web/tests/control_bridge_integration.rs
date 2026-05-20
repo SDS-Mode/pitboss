@@ -246,7 +246,7 @@ async fn bridge_subscribe_shares_connection_for_multiple_subscribers() {
             sublead_id: "S1".into(),
             spent_usd: 0.5,
             unspent_usd: 0.5,
-            outcome: "success".into(),
+            outcome: pitboss_cli::control::protocol::TerminationOutcome::Success,
         },
     };
     state.root.broadcast_control_event(envelope).await;

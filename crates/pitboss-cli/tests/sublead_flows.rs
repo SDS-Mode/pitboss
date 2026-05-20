@@ -1082,7 +1082,11 @@ async fn wait_actor_returns_for_terminated_sublead() {
     match result {
         ActorTerminalRecord::Sublead(rec) => {
             assert_eq!(rec.sublead_id, sublead_id, "sublead_id should match");
-            assert_eq!(rec.outcome, "success", "outcome should be 'success'");
+            assert_eq!(
+                rec.outcome,
+                pitboss_cli::control::protocol::TerminationOutcome::Success,
+                "outcome should be Success"
+            );
             assert!((rec.spent_usd - 1.0).abs() < 1e-9, "spent should be $1.0");
             assert!(
                 (rec.unspent_usd - 1.0).abs() < 1e-9,
@@ -1150,7 +1154,10 @@ async fn wait_actor_blocks_then_wakes_on_sublead_termination() {
     match result {
         ActorTerminalRecord::Sublead(rec) => {
             assert_eq!(rec.sublead_id, sublead_id, "sublead_id should match");
-            assert_eq!(rec.outcome, "success");
+            assert_eq!(
+                rec.outcome,
+                pitboss_cli::control::protocol::TerminationOutcome::Success
+            );
         }
         ActorTerminalRecord::Worker(_) => panic!("expected Sublead variant, got Worker"),
     }

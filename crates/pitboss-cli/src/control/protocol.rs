@@ -162,6 +162,35 @@ fn is_default_client_mode(m: &ClientMode) -> bool {
     matches!(m, ClientMode::Writer)
 }
 
+/// Terminal classification for a sub-lead exit. Emitted on
+/// [`ControlEvent::SubleadTerminated`]`.outcome` and persisted on
+/// `dispatch::state::SubleadTerminalRecord.outcome`. Closed set; converted
+/// from the producer-side `dispatch::sublead::SubleadOutcome` (which
+/// additionally carries a free-text error message that the wire elides).
+///
+/// Wire shape matches the pre-typed string form 1:1
+/// (`Success` ↔ `"success"`, `ApprovalRejected` ↔ `"approval_rejected"`,
+/// …) so existing on-disk `events.jsonl` artifacts continue to parse.
+/// `rename_all = "snake_case"` (not `"lowercase"`) is load-bearing —
+/// the multi-word variants would collide with the wire format under
+/// `lowercase`.
+///
+/// `Default = Error`: a future dispatcher that omits the field on the
+/// wire (forward-compat per #515) deserializes to the safest possible
+/// terminal state rather than silently classifying a real outcome as
+/// something else.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationOutcome {
+    Success,
+    Cancel,
+    Timeout,
+    #[default]
+    Error,
+    ApprovalRejected,
+    ApprovalTimedOut,
+}
+
 /// An operation sent from the TUI (client) to the dispatcher (server).
 ///
 /// Note: `Eq` is NOT derived — `UpdatePolicy` carries `Vec<ApprovalRule>`,
@@ -421,13 +450,17 @@ pub enum ControlEvent {
         /// meaningful (full reservation spent).
         #[serde(default)]
         unspent_usd: f64,
-        /// Terminal outcome: `"success"` | `"cancel"` | `"timeout"` | `"error"`.
-        /// Carries `#[serde(default)]` for forward-compat consistency
-        /// (closes F-PROTO-2 / #515). NOT skip-serialized: an empty
-        /// string is not a valid outcome value, so eliding it would
-        /// produce silently misclassified terminations on the wire.
+        /// Terminal outcome. Typed [`TerminationOutcome`] (closes #568);
+        /// the wire format is unchanged (`"success"`, `"cancel"`,
+        /// `"timeout"`, `"error"`, `"approval_rejected"`,
+        /// `"approval_timed_out"`). Carries `#[serde(default)]` for
+        /// forward-compat consistency (closes F-PROTO-2 / #515); the
+        /// default is `Error` — the safest sentinel for an omitted
+        /// terminal state. NOT skip-serialized: the operator-facing TUI
+        /// branches on the value, so eliding it would render an unknown
+        /// terminal state.
         #[serde(default)]
-        outcome: String,
+        outcome: TerminationOutcome,
     },
 }
 
@@ -1149,7 +1182,11 @@ mod tests {
                 assert_eq!(sublead_id, "sub-A");
                 assert_eq!(spent_usd, 0.0, "missing spent_usd must default to 0.0");
                 assert_eq!(unspent_usd, 0.0, "missing unspent_usd must default to 0.0");
-                assert_eq!(outcome, "", "missing outcome must default to empty string");
+                assert_eq!(
+                    outcome,
+                    TerminationOutcome::Error,
+                    "missing outcome must default to TerminationOutcome::Error (#568)"
+                );
             }
             other => panic!("expected SubleadTerminated, got {other:?}"),
         }
@@ -1165,7 +1202,7 @@ mod tests {
             sublead_id: "sub-A".into(),
             spent_usd: 0.0,
             unspent_usd: 0.0,
-            outcome: "cancel".into(),
+            outcome: TerminationOutcome::Cancel,
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(
@@ -1187,7 +1224,7 @@ mod tests {
             sublead_id: "sub-B".into(),
             spent_usd: 1.25,
             unspent_usd: 0.75,
-            outcome: "success".into(),
+            outcome: TerminationOutcome::Success,
         };
         assert_eq!(roundtrip_event(&ev), ev);
     }

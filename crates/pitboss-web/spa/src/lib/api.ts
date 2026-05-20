@@ -354,7 +354,10 @@ export interface SubleadInfo {
   budget_usd?: number | null;
   max_workers?: number | null;
   read_down: boolean;
-  /** Set once the sub-tree exits — `success` | `cancel` | `timeout` | `error`. */
+  /** Set once the sub-tree exits — one of `success` | `cancel` | `timeout`
+   *  | `error` | `approval_rejected` | `approval_timed_out`. Mirrors the
+   *  Rust `TerminationOutcome` enum in `crates/pitboss-cli/src/control/protocol.rs`
+   *  (#568). */
   outcome?: string;
   spent_usd?: number;
   unspent_usd?: number;

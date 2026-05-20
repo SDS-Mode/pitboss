@@ -200,7 +200,7 @@ async fn sublead_terminated_event_roundtrips() {
         sublead_id: "S1".into(),
         spent_usd: 2.50,
         unspent_usd: 2.50,
-        outcome: "success".into(),
+        outcome: pitboss_cli::control::protocol::TerminationOutcome::Success,
     };
     let s = serde_json::to_string(&event).unwrap();
     assert!(
@@ -220,7 +220,10 @@ async fn sublead_terminated_event_roundtrips() {
             assert_eq!(sublead_id, "S1");
             assert!((spent_usd - 2.50).abs() < 1e-9);
             assert!((unspent_usd - 2.50).abs() < 1e-9);
-            assert_eq!(outcome, "success");
+            assert_eq!(
+                outcome,
+                pitboss_cli::control::protocol::TerminationOutcome::Success
+            );
         }
         other => panic!("expected SubleadTerminated, got {other:?}"),
     }
