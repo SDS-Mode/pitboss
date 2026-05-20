@@ -1,6 +1,6 @@
 # Install
 
-Pitboss ships two binaries: `pitboss` (the CLI dispatcher) and `pitboss-tui` (the terminal UI). Install both, or just `pitboss` if you don't need the live floor view.
+Pitboss ships three binaries: `pitboss` (the CLI dispatcher), `pitboss-tui` (the terminal UI), and `pitboss-web` (the web console + SSE event stream). Install whichever subset you need — `pitboss` is the only hard requirement; the two consoles are optional read-side views over the same run-artifact directory.
 
 ## Via shell installer (recommended)
 
@@ -9,9 +9,11 @@ Releases are built with [cargo-dist](https://github.com/astral-sh/cargo-dist) an
 ```bash
 curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-cli-installer.sh | sh
 curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-tui-installer.sh | sh
+curl -LsSf https://github.com/SDS-Mode/pitboss/releases/latest/download/pitboss-web-installer.sh | sh
 
 pitboss version
 pitboss-tui --version
+pitboss-web --version
 ```
 
 **Supported targets:** `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`.
@@ -21,6 +23,7 @@ pitboss-tui --version
 ```bash
 brew install SDS-Mode/pitboss/pitboss-cli
 brew install SDS-Mode/pitboss/pitboss-tui
+brew install SDS-Mode/pitboss/pitboss-web
 ```
 
 Formulae are auto-published to the [SDS-Mode/homebrew-pitboss](https://github.com/SDS-Mode/homebrew-pitboss) tap on every release.
@@ -56,11 +59,14 @@ git clone https://github.com/SDS-Mode/pitboss.git
 cd pitboss
 cargo install --path crates/pitboss-cli
 cargo install --path crates/pitboss-tui
+# pitboss-web bundles an embedded SvelteKit SPA — build it before installing:
+(cd crates/pitboss-web/spa && npm ci && npm run build)
+cargo install --path crates/pitboss-web
 ```
 
 ## Shell completions
 
-Both binaries emit completion scripts:
+`pitboss` and `pitboss-tui` emit completion scripts (`pitboss-web` is a server binary and doesn't):
 
 ```bash
 # bash
