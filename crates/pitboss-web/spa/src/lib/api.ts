@@ -17,6 +17,9 @@ export interface RunDto {
   mtime_unix: number;
   tasks_total: number;
   tasks_failed: number;
+  /** Peak memory utilization fraction (#553). Omitted on the wire
+   *  when no sample was taken; the run-list renders `—` in that case. */
+  peak_utilization_pct?: number;
 }
 
 export interface RunDetailDto extends RunDto {
@@ -360,6 +363,54 @@ export interface SubleadInfo {
 /** `WorkerFailed.reason` payload. Treated loosely; renderer reads `kind`. */
 export type FailureReason = { kind: string; [k: string]: unknown };
 
+// ---- Resource sampling (#553) -------------------------------------------
+
+/** Mirror of `pitboss_cli::control::protocol::ResourceSampleEntry`. */
+export interface ResourceSampleEntry {
+  actor_id: string;
+  /** Omitted on the wire when 0 (subprocess hadn't published yet). */
+  pid?: number;
+  rss_bytes?: number;
+  vsz_bytes?: number;
+  /** Cumulative `utime + stime` in clock-ticks. Consumers diff across
+   *  samples for CPU%. */
+  cpu_jiffies?: number;
+}
+
+/** Mirror of `pitboss_cli::control::protocol::PressureLevel`. */
+export type PressureLevel = 'clear' | 'warn' | 'error';
+
+/** Mirror of the `resource_sample` `ControlEvent` variant. */
+export interface ResourceSampleEvent {
+  event: 'resource_sample';
+  samples: ResourceSampleEntry[];
+  cgroup_memory_current_bytes?: number;
+  cgroup_memory_max_bytes?: number;
+  host_mem_total_bytes?: number;
+}
+
+/** Mirror of the `resource_pressure` `ControlEvent` variant. */
+export interface ResourcePressureEvent {
+  event: 'resource_pressure';
+  level: PressureLevel;
+  total_rss_bytes?: number;
+  available_bytes?: number;
+  message?: string;
+}
+
+/** Mirror of `pitboss_core::store::record::ResourceHighWater` (finalize-
+ *  time roll-up persisted to `summary.json`). */
+export interface ResourceHighWater {
+  total_rss_bytes_max?: number;
+  cgroup_memory_max_bytes?: number;
+  /** Fractional value in [0, 1+]. The "Mem peak" column on the runs
+   *  list multiplies by 100 for display. */
+  peak_utilization_pct?: number;
+  rss_bytes_max_by_actor?: Record<string, number>;
+  sample_count?: number;
+  sample_cadence_secs?: number;
+}
+
 // ---- Manifest workspace (Phase 4) ----------------------------------------
 
 export interface ManifestEntry {
@@ -529,6 +580,10 @@ export interface RunDigest {
   tasks_total: number;
   tasks_failed: number;
   failure_kinds: string[];
+  /** Peak memory utilization fraction (#553). Omitted when sampling
+   *  was disabled / unsupported / pre-#553. Rendered as the "Mem peak"
+   *  column on the run-list. */
+  peak_utilization_pct?: number;
 }
 
 export interface TaskFailureDigest {

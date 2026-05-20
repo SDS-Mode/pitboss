@@ -31,6 +31,12 @@ pub struct RunDigest {
     /// Distinct `FailureReason::kind` values that appeared in this run.
     /// Empty when the run had no failures.
     pub failure_kinds: Vec<String>,
+    /// Peak memory utilization fraction for the run (#553). `None`
+    /// when the resource watcher was disabled, unsupported, or for
+    /// pre-#553 runs. Renders as a "Mem peak" badge in the SPA run
+    /// list (`⚠` glyph at ≥80%, dash otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_utilization_pct: Option<f32>,
 }
 
 /// One row per failed task. Derived per [`pitboss_core::store::TaskRecord`]

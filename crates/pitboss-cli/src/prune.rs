@@ -363,6 +363,7 @@ mod tests {
             tasks_total: 0,
             tasks_failed: 0,
             status,
+            peak_utilization_pct: None,
         }
     }
 

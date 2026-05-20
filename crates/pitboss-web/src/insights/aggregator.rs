@@ -131,6 +131,13 @@ impl AggregateSet {
             }
 
             let outcome = compute_outcome(&entry.status, entry.tasks_failed, entry.tasks_total);
+            // #553: peak utilization is carried on summary.json; for
+            // in-progress / aborted runs without one, this is `None`
+            // and the run-list renders "—".
+            let peak_utilization_pct = summary
+                .as_ref()
+                .and_then(|s| s.resource_high_water.as_ref())
+                .and_then(|hw| hw.peak_utilization_pct);
             runs.push(RunDigest {
                 run_id: entry.run_id.clone(),
                 manifest_name: resolved_name,
@@ -143,6 +150,7 @@ impl AggregateSet {
                 tasks_total: entry.tasks_total,
                 tasks_failed: entry.tasks_failed,
                 failure_kinds,
+                peak_utilization_pct,
             });
         }
 
