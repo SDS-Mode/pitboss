@@ -91,6 +91,13 @@ commit_preprocessors = [
     { pattern = '(?m) \(#\d+\)( \(#\d+\))*$', replace = "" },
     # Fix Dependabot's double-scope (`chore(deps)(deps): bump …`).
     { pattern = '^chore\(deps\)\(deps\)', replace = "chore(deps)" },
+    # One-shot: PR #574 was retitled `docs(manifest):` → `fix(manifest):`
+    # before merge so the PR title would route to `### Fixed`, but the
+    # repo's rebase-and-merge landed the original `docs(` commit on main
+    # untouched. Rewrite that exact subject so its four audit-issue
+    # closures (#510, #511, #503, #502) appear in the v0.16.0 CHANGELOG.
+    # **Remove this rule once v0.16.0 has been tagged and released.**
+    { pattern = '^docs\(manifest\): add remediation hints to four validation errors', replace = 'fix(manifest): add remediation hints to four validation errors' },
 ]
 # Map commit type → CHANGELOG section. Order matters — first match wins.
 # The wider community uses "Added/Fixed/Changed" from Keep-a-Changelog;
