@@ -387,6 +387,14 @@ export type PressureLevel = 'clear' | 'warn' | 'error';
 export interface ResourceSampleEvent {
   event: 'resource_sample';
   samples: ResourceSampleEntry[];
+  /**
+   * Unix ms when the dispatcher took the sample. Absent / `0` for
+   * pre-v0.17 envelopes — consumers should fall back to `Date.now()`
+   * at receive time when this is missing. Stamped server-side so
+   * `events.jsonl` replay plots at the original cadence instead of
+   * collapsing onto the replay clock. (#580 FU-4)
+   */
+  sampled_at_unix_ms?: number;
   cgroup_memory_current_bytes?: number;
   cgroup_memory_max_bytes?: number;
   host_mem_total_bytes?: number;

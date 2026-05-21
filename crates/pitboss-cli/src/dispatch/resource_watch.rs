@@ -38,7 +38,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pitboss_core::store::record::ResourceHighWater;
 
@@ -192,6 +192,7 @@ async fn run_sampler(
         // the order on the wire is "facts, then judgement."
         let sample_event = ControlEvent::ResourceSample {
             samples: samples.clone(),
+            sampled_at_unix_ms: now_unix_ms(),
             cgroup_memory_current_bytes: cgroup.as_ref().map(|c| c.current_bytes),
             cgroup_memory_max_bytes: cgroup.as_ref().map(|c| c.max_bytes),
             host_mem_total_bytes: host_total,
@@ -471,6 +472,21 @@ async fn read_meminfo_total() -> Option<u64> {
 
 fn proc_filesystem_available() -> bool {
     Path::new("/proc/self/stat").exists()
+}
+
+/// Unix-epoch milliseconds at the moment of the call. Used to stamp
+/// `ResourceSample.sampled_at_unix_ms` so `events.jsonl` replay can
+/// plot at the original cadence rather than collapsing every sample
+/// onto the replay clock. (#580 FU-4)
+///
+/// Saturates to `0` on the impossible-in-practice case where
+/// `SystemTime::now()` predates `UNIX_EPOCH`; consumers treat `0` as
+/// the "no wire-time stamp" sentinel and fall back to receive-time.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 // ---- pressure tracker --------------------------------------------------
@@ -813,6 +829,16 @@ mod tests {
             }
             other => panic!("expected ResourcePressure variant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn now_unix_ms_is_post_2024() {
+        // Sanity-check the wall-clock helper: must be well above the
+        // 2024-01-01 floor (1_704_067_200_000 ms) and below i64::MAX.
+        // The exact value drifts every call; just bracket the magnitude.
+        let now = now_unix_ms();
+        assert!(now > 1_704_067_200_000, "{now} should be > 2024-01-01 ms");
+        assert!(now < (i64::MAX as u64), "{now} should fit in i64");
     }
 
     #[test]
