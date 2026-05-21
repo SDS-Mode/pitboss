@@ -425,11 +425,12 @@ mod tests {
         // Register two worker cancel tokens.
         let w1 = CancelToken::new();
         let w2 = CancelToken::new();
-        {
-            let mut cancels = sub_layer.workers.cancels.write().await;
-            cancels.insert("w1".into(), w1.clone());
-            cancels.insert("w2".into(), w2.clone());
-        }
+        sub_layer
+            .register_worker_cancel("w1".into(), w1.clone())
+            .await;
+        sub_layer
+            .register_worker_cancel("w2".into(), w2.clone())
+            .await;
 
         install_sublead_cancel_watcher(sub_layer.clone());
 
@@ -521,10 +522,9 @@ mod tests {
         ));
 
         let w1 = CancelToken::new();
-        {
-            let mut cancels = sub_layer.workers.cancels.write().await;
-            cancels.insert("w1".into(), w1.clone());
-        }
+        sub_layer
+            .register_worker_cancel("w1".into(), w1.clone())
+            .await;
 
         install_sublead_cancel_watcher(sub_layer.clone());
 
@@ -619,10 +619,9 @@ mod tests {
         ));
 
         let w1 = CancelToken::new();
-        {
-            let mut cancels = sub_layer.workers.cancels.write().await;
-            cancels.insert("w1".into(), w1.clone());
-        }
+        sub_layer
+            .register_worker_cancel("w1".into(), w1.clone())
+            .await;
 
         install_sublead_cancel_watcher(sub_layer.clone());
 

@@ -76,6 +76,14 @@ pub struct WorkerRegistry {
     /// Map of task_id → worker state. Lead is also tracked here for convenience.
     pub states: RwLock<HashMap<String, WorkerState>>,
     /// Per-worker CancelToken, keyed by task_id.
+    ///
+    /// **All production inserts MUST go through
+    /// [`LayerState::register_worker_cancel`]** — direct `.write().await.insert(...)`
+    /// bypasses the eager `cascade_to` step that closes the post-register
+    /// cascade gap (#99). The per-sublead watcher
+    /// (`install_sublead_cancel_watcher`) is fire-once: a worker registered
+    /// after the watcher has already fired would otherwise miss the cancel
+    /// signal forever.
     pub cancels: RwLock<HashMap<String, CancelToken>>,
     /// Per-worker prompt preview (first 80 chars of the worker's prompt).
     pub prompts: RwLock<HashMap<String, String>>,
