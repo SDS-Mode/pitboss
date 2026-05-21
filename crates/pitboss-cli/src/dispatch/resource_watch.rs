@@ -82,7 +82,22 @@ impl ResourceWatcher {
     /// the same code path picks up the in-container `/proc` and
     /// `/sys/fs/cgroup` mounts naturally.
     pub fn spawn(state: Arc<DispatchState>, cadence_secs: u64) -> Arc<Self> {
-        let high_water = Arc::new(Mutex::new(HighWaterAccum::with_cadence(cadence_secs)));
+        // FU-3 (#580): on `pitboss resume <run-id>` the run dir already
+        // carries a finalized `summary.json` from the prior session.
+        // Hydrate the accumulator from `resource_high_water` so the new
+        // session's finalize merges with the prior peak rather than
+        // silently overwriting it. Fresh dispatches see no summary.json
+        // (it's written at finalize, not init) — `read_run_snapshot`
+        // returns `run_summary: None` and we fall through to
+        // `with_cadence`, matching the pre-FU-3 behavior bit-for-bit.
+        let prior_high_water = pitboss_core::store::read_run_snapshot(&state.root.run_subdir)
+            .run_summary
+            .and_then(|s| s.resource_high_water);
+        let initial = match &prior_high_water {
+            Some(prior) => HighWaterAccum::hydrate(prior, cadence_secs),
+            None => HighWaterAccum::with_cadence(cadence_secs),
+        };
+        let high_water = Arc::new(Mutex::new(initial));
         let watcher = Arc::new(Self {
             high_water: Arc::clone(&high_water),
             cadence_secs,
@@ -598,6 +613,33 @@ impl HighWaterAccum {
         }
     }
 
+    /// Seed an accumulator with a prior run's `ResourceHighWater`
+    /// snapshot (#580 FU-3). Used on `pitboss resume <run-id>` so the
+    /// new dispatch's finalize merges with the prior incident rather
+    /// than overwriting it — without this, a resumed run whose new
+    /// session never tripped 70% silently loses the prior peak from
+    /// `summary.json`.
+    ///
+    /// `sample_cadence_secs` is taken from the live `cadence_secs`
+    /// rather than from the prior snapshot: an operator who changed
+    /// `[run].resource_sample_secs` between dispatch and resume gets
+    /// the new value at finalize, which matches the cadence the new
+    /// session actually ran at.
+    ///
+    /// Tracker state (`PressureTracker`) is deliberately NOT hydrated
+    /// — first re-warn within one cadence is an acceptable cost vs.
+    /// the cross-process complexity of persisting hysteresis state.
+    fn hydrate(prior: &ResourceHighWater, cadence_secs: u64) -> Self {
+        Self {
+            total_rss_bytes_max: prior.total_rss_bytes_max,
+            cgroup_memory_max_bytes: prior.cgroup_memory_max_bytes,
+            peak_utilization_pct: prior.peak_utilization_pct,
+            rss_bytes_max_by_actor: prior.rss_bytes_max_by_actor.clone(),
+            sample_count: prior.sample_count,
+            sample_cadence_secs: cadence_secs,
+        }
+    }
+
     fn observe(
         &mut self,
         total_rss: u64,
@@ -796,6 +838,108 @@ mod tests {
         let h = HighWaterAccum::with_cadence(0).into_summary();
         assert_eq!(h.sample_count, 0);
         assert_eq!(h.sample_cadence_secs, 0);
+    }
+
+    // -- HighWaterAccum::hydrate (#580 FU-3) --------------------------
+
+    /// Build a non-trivial prior snapshot, hydrate, and confirm every
+    /// field round-trips. Also covers the cadence-override case where
+    /// resume runs at a different cadence than the original.
+    #[test]
+    fn hydrate_preserves_every_prior_field_with_new_cadence() {
+        let mut by_actor = BTreeMap::new();
+        by_actor.insert("lead".to_string(), 500_000);
+        by_actor.insert("worker-1".to_string(), 1_500_000);
+        let prior = ResourceHighWater {
+            total_rss_bytes_max: 2_000_000,
+            cgroup_memory_max_bytes: Some(8_000_000),
+            peak_utilization_pct: Some(0.25),
+            rss_bytes_max_by_actor: by_actor.clone(),
+            sample_count: 42,
+            sample_cadence_secs: 5,
+        };
+        // Resume at a different cadence — finalize stamps the live
+        // cadence, not the prior one, so hydrate must honor that.
+        let hydrated = HighWaterAccum::hydrate(&prior, 10);
+        let out = hydrated.into_summary();
+        assert_eq!(out.total_rss_bytes_max, 2_000_000);
+        assert_eq!(out.cgroup_memory_max_bytes, Some(8_000_000));
+        assert_eq!(out.peak_utilization_pct, Some(0.25));
+        assert_eq!(out.rss_bytes_max_by_actor, by_actor);
+        assert_eq!(out.sample_count, 42);
+        assert_eq!(out.sample_cadence_secs, 10);
+    }
+
+    /// The motivating scenario for FU-3: prior run finalized with a
+    /// peak of 2 GB; resume's new session never tripped that peak.
+    /// Without hydrate, finalize would overwrite the prior with the
+    /// new (lower) value. With hydrate, the prior peak survives even
+    /// when the new session's `observe`s only see smaller values.
+    #[test]
+    fn hydrate_then_observe_preserves_prior_peak_when_new_samples_are_smaller() {
+        let prior = ResourceHighWater {
+            total_rss_bytes_max: 2_000_000_000,
+            cgroup_memory_max_bytes: Some(4_000_000_000),
+            peak_utilization_pct: Some(0.5),
+            rss_bytes_max_by_actor: {
+                let mut m = BTreeMap::new();
+                m.insert("worker-burst".to_string(), 1_800_000_000);
+                m
+            },
+            sample_count: 100,
+            sample_cadence_secs: 5,
+        };
+        let mut h = HighWaterAccum::hydrate(&prior, 5);
+        // Resume session sees only a tiny worker:
+        let samples = vec![ResourceSampleEntry {
+            actor_id: "lead".into(),
+            pid: 1,
+            rss_bytes: 50_000_000,
+            vsz_bytes: 0,
+            cpu_jiffies: 0,
+        }];
+        h.observe(50_000_000, 4_000_000_000, Some(4_000_000_000), &samples);
+        let out = h.into_summary();
+        // Prior peak preserved (not overwritten by smaller new sample).
+        assert_eq!(out.total_rss_bytes_max, 2_000_000_000);
+        assert_eq!(out.peak_utilization_pct, Some(0.5));
+        // Prior per-actor peak preserved.
+        assert_eq!(
+            out.rss_bytes_max_by_actor.get("worker-burst"),
+            Some(&1_800_000_000)
+        );
+        // New actor added without disturbing prior keys.
+        assert_eq!(out.rss_bytes_max_by_actor.get("lead"), Some(&50_000_000));
+        // Sample count continues from prior baseline.
+        assert_eq!(out.sample_count, 101);
+    }
+
+    /// Confirms the inverse: when the new session's incident is
+    /// LARGER than the prior, finalize captures the new peak (the
+    /// merge is `max`, not "always preserve prior").
+    #[test]
+    fn hydrate_then_observe_advances_peak_when_new_samples_are_larger() {
+        let prior = ResourceHighWater {
+            total_rss_bytes_max: 1_000_000,
+            cgroup_memory_max_bytes: Some(10_000_000),
+            peak_utilization_pct: Some(0.1),
+            rss_bytes_max_by_actor: BTreeMap::new(),
+            sample_count: 5,
+            sample_cadence_secs: 5,
+        };
+        let mut h = HighWaterAccum::hydrate(&prior, 5);
+        let samples = vec![ResourceSampleEntry {
+            actor_id: "worker".into(),
+            pid: 1,
+            rss_bytes: 8_000_000,
+            vsz_bytes: 0,
+            cpu_jiffies: 0,
+        }];
+        h.observe(8_000_000, 10_000_000, Some(10_000_000), &samples);
+        let out = h.into_summary();
+        assert_eq!(out.total_rss_bytes_max, 8_000_000);
+        assert_eq!(out.peak_utilization_pct, Some(0.8));
+        assert_eq!(out.sample_count, 6);
     }
 
     // -- shutdown-Clear synthesis (#580 FU-2) -------------------------
