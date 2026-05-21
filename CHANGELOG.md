@@ -10,6 +10,48 @@ by `git-cliff` at release time. Hand-editing this file in feature PRs
 is no longer required (or recommended — it causes merge conflicts).
 See #242 for the adoption notes.
 
+## [0.17.0] — 2026-05-21
+
+### Added
+
+- Emit tracing::warn on parser drift signals ([#599](https://github.com/SDS-Mode/pitboss/pull/599))
+- Add usage/result/rate_limit_event script actions ([#598](https://github.com/SDS-Mode/pitboss/pull/598))
+- Add result/usage/rate_limit emitters to FakeScript
+- Stamp wire-time on ResourceSample envelopes ([#591](https://github.com/SDS-Mode/pitboss/pull/591))
+- Glob matching on [[approval_policy]] tool_name ([#583](https://github.com/SDS-Mode/pitboss/pull/583))
+- Warn on unknown tools in [[worker_type]] / [[sublead_type]] profiles
+
+
+### Changed
+
+- Move runs module from pitboss-cli (#484 first cut)
+- Unify ActorPath into pitboss-core, re-export from cli ([#588](https://github.com/SDS-Mode/pitboss/pull/588))
+- Drop skip_serializing_if from TaskRecord.actor_type ([#587](https://github.com/SDS-Mode/pitboss/pull/587))
+- Type SubleadTerminated.outcome as TerminationOutcome enum
+- Collapse six default_runs_dir copies onto runs_base_dir ([#586](https://github.com/SDS-Mode/pitboss/pull/586))
+- Extract pure env-value parsers so tests skip std::env mutation ([#585](https://github.com/SDS-Mode/pitboss/pull/585))
+
+
+### Fixed
+
+- Stop double-counting terminated subleads in compute_total_spend ([#602](https://github.com/SDS-Mode/pitboss/pull/602))
+- Surface AssistantThinking + push AssistantUsage before empty-check ([#601](https://github.com/SDS-Mode/pitboss/pull/601))
+- Switch BudgetState.spent_usd to std::sync::Mutex ([#597](https://github.com/SDS-Mode/pitboss/pull/597))
+- Write gap sentinel to events.jsonl when persistence subscriber lags ([#596](https://github.com/SDS-Mode/pitboss/pull/596))
+- Terminate() now implies drain() to unblock drain-only awaiters
+- Release subleads guard before walking sub-tree workers in cancel-synthesis
+- Release subleads read guard before walking sub-tree workers ([#595](https://github.com/SDS-Mode/pitboss/pull/595))
+- Hydrate resource high-water from prior summary on resume ([#592](https://github.com/SDS-Mode/pitboss/pull/592))
+- Emit synthetic Clear pressure when watcher shuts down mid-incident ([#590](https://github.com/SDS-Mode/pitboss/pull/590))
+- Bound [run].resource_sample_secs to <= 3600s
+- Require _meta on every tools/call (close F-SEC-4 gap)
+- Close TOCTOU window between socket bind and chmod
+- Link to rendered mdBook URL instead of relative repo path ([#584](https://github.com/SDS-Mode/pitboss/pull/584))
+- Add pitboss-web to the install page
+- Drop stale "when no TUI is attached" claim from default_approval_policy
+- Make CommunicationError::Disabled actionable
+
+
 ## [0.16.0] — 2026-05-20
 
 ### Added
