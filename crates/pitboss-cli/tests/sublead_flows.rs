@@ -1029,6 +1029,56 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
     );
 }
 
+/// `resolve_envelope` enforces the `max_total_workers` cap by summing root
+/// workers + sub-tree workers + the requested `max_workers`. Walks at least
+/// one registered sub-layer to exercise the per-sub worker read.
+#[tokio::test]
+async fn resolve_envelope_rejects_when_max_total_workers_exceeded() {
+    use pitboss_cli::dispatch::sublead::{resolve_envelope, SubleadSpawnRequest};
+
+    let (_dir, state) = TestStateBuilder::new()
+        .with_lead()
+        .lead_id("root")
+        .allow_subleads()
+        .max_total_workers(2)
+        .max_workers(20)
+        .budget(20.0)
+        .build();
+
+    // Register a sub-tree entry so the cap check walks at least one sub-layer.
+    state
+        .register_sublead("sub-1".to_string(), state.root.clone())
+        .await;
+
+    let over = SubleadSpawnRequest {
+        prompt: "p".into(),
+        model: "m".into(),
+        budget_usd: Some(5.0),
+        max_workers: Some(3),
+        lead_timeout_secs: Some(1800),
+        ..Default::default()
+    };
+    let err = resolve_envelope(&state, &over)
+        .await
+        .expect_err("requesting 3 workers under a cap of 2 should be rejected");
+    assert!(
+        err.to_string().contains("max_total_workers cap"),
+        "error should mention the cap; got: {err}"
+    );
+
+    let at_cap = SubleadSpawnRequest {
+        prompt: "p".into(),
+        model: "m".into(),
+        budget_usd: Some(5.0),
+        max_workers: Some(2),
+        lead_timeout_secs: Some(1800),
+        ..Default::default()
+    };
+    resolve_envelope(&state, &at_cap)
+        .await
+        .expect("at-cap request should resolve");
+}
+
 // ── Task 1.3 fix: wait_actor works on sub-lead ids ────────────────────────────
 
 /// After `reconcile_terminated_sublead` runs, `wait_actor(sublead_id)` should
