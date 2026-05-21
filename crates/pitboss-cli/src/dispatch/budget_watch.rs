@@ -66,31 +66,76 @@ impl LeadSpendBaseline {
 }
 
 /// Snapshot of the run-wide spend, broken down by class. Computed by
-/// [`compute_total_spend`] for budget checks and surfaced into status
-/// outputs / `summary.json` so operators can see where their cost went.
+/// [`compute_total_spend`] for budget checks.
+///
+/// The bookkeeping is asymmetric across the sub-lead lifecycle because
+/// the storage layout is asymmetric: `dispatch::sublead::reconcile_terminated_sublead`
+/// rolls a terminated sub-tree's `sub.budget.spent_usd` (which itself
+/// contains workers + the sublead's own session cost) into
+/// `root.budget.spent_usd`, but does NOT roll `sub.budget.lead_spent_usd`
+/// into anything. So after reconcile:
+///
+/// * `root.spent_usd` carries the rolled-up sub-tree totals (workers +
+///   sublead-self). Reading the same `sub.spent_usd` again from
+///   `terminated_sublead_layers` double-counts it. That was the
+///   ~2× budget-trip bug fixed here.
+///
+/// * `sub.lead_spent_usd` on a terminated sub-layer represents the
+///   sublead's own session cost — already inside the `sub.spent_usd`
+///   that got rolled into `root.spent_usd`. So adding it to the run-wide
+///   total again would TRIPLE-count those dollars. But it's still
+///   needed for the `[lead].lead_budget_usd` orchestration cap check
+///   (which separately sums root-lead-self + every sub-lead-self), so
+///   we keep it in `subleads_usd` and exclude it from [`Self::total_usd`].
+///
+/// * For LIVE sub-leads (still running), `sub.spent_usd` does not yet
+///   include the sublead's own session cost — that's added once at
+///   session end by `dispatch::sublead`'s exit handler. The live
+///   sublead-self spend lives only in `sub.lead_spent_usd`. We capture
+///   it in `live_subleads_self_usd` so [`Self::total_usd`] adds it on
+///   top of `workers_usd`, which only has workers for live sub-trees.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SpendBreakdown {
-    /// Sum of `spent_usd` (committed worker cost) across the root
-    /// layer and every live + terminated sub-lead layer.
+    /// Root layer's `spent_usd` (direct root workers + rolled-up
+    /// terminated sub-trees) plus each LIVE sub-tree's `spent_usd`
+    /// (workers only — sublead-self not yet committed there).
     pub workers_usd: f64,
     /// Root lead's own token cost. Reflects the live observer reading
     /// when a subprocess is in flight, or the committed baseline when
     /// the lead is idle between iterations.
     pub lead_usd: f64,
-    /// Sum of every sub-lead's own token cost (live + terminated
-    /// sub-trees).
+    /// Sum of every sub-lead's own session cost across LIVE + TERMINATED
+    /// sub-trees. Used by the `lead_budget_usd` orchestration cap check.
+    /// For terminated sub-trees this duplicates dollars already in
+    /// `workers_usd` (because reconcile rolled `sub.spent_usd` — which
+    /// includes the sublead's own session — into `root.spent_usd`); see
+    /// [`Self::total_usd`] for the de-duplicated run-wide total.
     pub subleads_usd: f64,
+    /// Internal: sub-lead self-spend for LIVE sub-trees only. Used by
+    /// [`Self::total_usd`] to add live sublead-self spend (which isn't
+    /// in `workers_usd` yet) without re-adding the terminated portion
+    /// (which is already in `workers_usd` via the reconcile roll-up).
+    pub live_subleads_self_usd: f64,
 }
 
 impl SpendBreakdown {
+    /// Run-wide total spend with no double-counting.
+    ///
+    /// Equals `root.spent_usd + Σ live.spent_usd + Σ live.lead_spent_usd
+    /// + root.lead_spent_usd`. Excludes `subleads_usd`'s terminated
+    /// component because those dollars are already in `workers_usd` via
+    /// the reconcile roll-up (see [`SpendBreakdown`]'s docstring).
     #[must_use]
     pub fn total_usd(&self) -> f64 {
-        self.workers_usd + self.lead_usd + self.subleads_usd
+        self.workers_usd + self.lead_usd + self.live_subleads_self_usd
     }
 }
 
 /// Walk every layer in the run (root + live sub-leads + terminated
-/// sub-leads) and assemble the current spend totals.
+/// sub-leads) and assemble the current spend totals. See [`SpendBreakdown`]
+/// for the asymmetric accumulator semantics that motivate skipping
+/// `terminated_sublead_layers` from the worker-cost accumulator while
+/// still summing them for the orchestration-cost (`subleads_usd`) bucket.
 pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
     let workers_root = *state
         .root
@@ -107,6 +152,7 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
 
     let mut workers_subs = 0.0_f64;
     let mut subleads_usd = 0.0_f64;
+    let mut live_subleads_self_usd = 0.0_f64;
     {
         let live = state.subleads.read().await;
         for layer in live.values() {
@@ -115,21 +161,23 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
                 .spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            subleads_usd += *layer
+            let self_spend = *layer
                 .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            subleads_usd += self_spend;
+            live_subleads_self_usd += self_spend;
         }
     }
     {
+        // Terminated sub-trees: do NOT add `spent_usd` to workers_subs
+        // (already rolled into `workers_root` at reconcile time). DO
+        // add `lead_spent_usd` to `subleads_usd` for the orchestration
+        // cap check; it's accounted in workers_root via the roll-up
+        // but `lead_budget_usd` needs the orchestration-only subtotal.
         let terminated = state.terminated_sublead_layers.read().await;
         for layer in terminated.iter() {
-            workers_subs += *layer
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             subleads_usd += *layer
                 .budget
                 .lead_spent_usd
@@ -142,6 +190,7 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
         workers_usd: workers_root + workers_subs,
         lead_usd,
         subleads_usd,
+        live_subleads_self_usd,
     }
 }
 
@@ -171,6 +220,7 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
 
     let mut workers_subs = 0.0_f64;
     let mut subleads_usd = 0.0_f64;
+    let mut live_subleads_self_usd = 0.0_f64;
     if let Ok(live) = state.subleads.try_read() {
         for layer in live.values() {
             workers_subs += *layer
@@ -178,20 +228,20 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
                 .spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            subleads_usd += *layer
+            let self_spend = *layer
                 .budget
                 .lead_spent_usd
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            subleads_usd += self_spend;
+            live_subleads_self_usd += self_spend;
         }
     }
     if let Ok(terminated) = state.terminated_sublead_layers.try_read() {
+        // Terminated sub-trees: do NOT add `spent_usd` to workers_subs
+        // (already rolled into `workers_root` at reconcile time). See
+        // [`SpendBreakdown`] for the asymmetric rationale.
         for layer in terminated.iter() {
-            workers_subs += *layer
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             subleads_usd += *layer
                 .budget
                 .lead_spent_usd
@@ -204,6 +254,7 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
         workers_usd: workers_root + workers_subs,
         lead_usd,
         subleads_usd,
+        live_subleads_self_usd,
     }
 }
 
@@ -477,6 +528,156 @@ mod tests {
         // lead_spent_usd should reflect the priced cost.
         let live = *layer.budget.lead_spent_usd.lock().unwrap();
         assert!(live > 0.0 && live < 1.0, "live spend out of range: {live}");
+    }
+
+    /// Regression: post-reconcile, `compute_total_spend_blocking` must not
+    /// double-count `sub.spent_usd` (already rolled into `root.spent_usd`)
+    /// nor triple-count the sublead-self portion within `subleads_usd`.
+    ///
+    /// Simulates the exact state that tripped a $4 cap at $4.71 in
+    /// validation run `019e4b2b-ad23-7eb3-b4b2-ce6eb7c3cdad`: two
+    /// reconciled subleads each contributing $0.81 / $0.83 of (workers +
+    /// self) to root.spent_usd, with their sub-layer accumulators still
+    /// populated in terminated_sublead_layers.
+    #[tokio::test]
+    async fn terminated_subleads_do_not_double_count_in_total_usd() {
+        use crate::dispatch::layer::LayerState;
+        use std::sync::Arc;
+        // Build a state — caps unused; we drive the accumulators directly.
+        let (_dir, state) = mk_state_with_caps(Some(4.0), Some(2.0));
+
+        // Simulate reconcile_terminated_sublead's roll-up: root.spent_usd
+        // gets += sub.spent_usd for both subleads. Use the exact figures
+        // from the buggy run.
+        const SUB_A_SPENT: f64 = 0.81389724; // workers + sublead-self
+        const SUB_B_SPENT: f64 = 0.82939324;
+        *state
+            .root
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = SUB_A_SPENT + SUB_B_SPENT;
+
+        // Build two terminated sub-layer doppelgangers carrying the same
+        // figures in their own accumulators (state after sublead.rs:914
+        // ran but before reconcile removed them from the live map).
+        // Reuse the root layer's Arc (which has its own LayerState) and
+        // override the relevant fields — for the cap-arithmetic test we
+        // only need the budget accumulators populated.
+        let make_term_layer = |spent: f64, lead_spent: f64| -> Arc<LayerState> {
+            let layer: Arc<LayerState> = TestStateBuilder::new().with_lead().build_layer().1.into();
+            *layer
+                .budget
+                .spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = spent;
+            *layer
+                .budget
+                .lead_spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = lead_spent;
+            layer
+        };
+
+        // For each terminated sublead, lead_spent_usd ≈ $0.69 / $0.73
+        // (the orchestration-cost portion that's also inside spent_usd).
+        const SUB_A_LEAD: f64 = 0.69;
+        const SUB_B_LEAD: f64 = 0.73;
+        let term_a = make_term_layer(SUB_A_SPENT, SUB_A_LEAD);
+        let term_b = make_term_layer(SUB_B_SPENT, SUB_B_LEAD);
+        {
+            let mut t = state.terminated_sublead_layers.write().await;
+            t.push(term_a);
+            t.push(term_b);
+        }
+
+        // Tiny root lead self-spend, matching the buggy run.
+        const ROOT_LEAD_SELF: f64 = 0.004;
+        *state
+            .root
+            .budget
+            .lead_spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ROOT_LEAD_SELF;
+
+        let breakdown = compute_total_spend_blocking(&state);
+
+        // workers_usd = root.spent_usd (no live subleads).
+        let expected_workers_usd = SUB_A_SPENT + SUB_B_SPENT;
+        assert!(
+            (breakdown.workers_usd - expected_workers_usd).abs() < 1e-9,
+            "workers_usd should reflect ONLY root.spent_usd post-reconcile (got {})",
+            breakdown.workers_usd
+        );
+
+        // subleads_usd keeps the terminated lead_spent_usd for the
+        // lead_budget_usd cap check.
+        let expected_subleads_usd = SUB_A_LEAD + SUB_B_LEAD;
+        assert!(
+            (breakdown.subleads_usd - expected_subleads_usd).abs() < 1e-9,
+            "subleads_usd should sum terminated lead_spent_usd (got {})",
+            breakdown.subleads_usd
+        );
+
+        // The key assertion: total_usd MUST NOT include subleads_usd
+        // post-reconcile (those dollars are already in workers_usd).
+        let expected_total = expected_workers_usd + ROOT_LEAD_SELF;
+        assert!(
+            (breakdown.total_usd() - expected_total).abs() < 1e-9,
+            "total_usd should be workers_usd + lead_usd only (terminated subleads' \
+             self-spend already inside workers_usd) — expected {expected_total}, got {}",
+            breakdown.total_usd()
+        );
+        // And it must NOT trip the $4 cap (actual run total was $1.65).
+        assert!(
+            breakdown.total_usd() < 4.0,
+            "total $4.0 cap must not trip on real $1.65 spend; got {}",
+            breakdown.total_usd()
+        );
+    }
+
+    /// Live (in-flight) subleads contribute their `lead_spent_usd` to
+    /// `total_usd` via `live_subleads_self_usd` because `sub.spent_usd`
+    /// does not yet contain the sublead's own session cost — that's
+    /// only added once at session end by `dispatch::sublead`'s exit
+    /// handler. Without this term, mid-run total would under-count
+    /// every live sublead's orchestration spend.
+    #[tokio::test]
+    async fn live_sublead_self_spend_counted_in_total_usd() {
+        use crate::dispatch::layer::LayerState;
+        use std::sync::Arc;
+        let (_dir, state) = mk_state_with_caps(Some(4.0), Some(2.0));
+
+        // One live sublead: workers contributed $0.10 to sub.spent_usd
+        // (via spawn.rs:835 on worker finish); the sublead is still
+        // running so its own session cost (the live observer's writes
+        // to sub.lead_spent_usd) is $0.50 — NOT yet rolled into
+        // sub.spent_usd.
+        let live_layer: Arc<LayerState> =
+            TestStateBuilder::new().with_lead().build_layer().1.into();
+        *live_layer
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.10;
+        *live_layer
+            .budget
+            .lead_spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.50;
+        state
+            .subleads
+            .write()
+            .await
+            .insert("live-sub".to_string(), live_layer);
+
+        let breakdown = compute_total_spend_blocking(&state);
+        // Expected: workers $0.10 + sublead-self $0.50 + root $0 = $0.60
+        assert!(
+            (breakdown.total_usd() - 0.60).abs() < 1e-9,
+            "live sublead-self must be added to total_usd; got {}",
+            breakdown.total_usd()
+        );
     }
 
     /// `commit_iteration` folds the iteration's committed cost into the
