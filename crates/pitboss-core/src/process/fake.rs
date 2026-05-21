@@ -49,6 +49,70 @@ impl FakeScript {
         self
     }
 
+    /// Emit a stream-json `assistant` message line whose `content` carries
+    /// one `text` block and whose `message.usage` matches `usage`. This is
+    /// what triggers [`crate::parser::Event::AssistantUsage`] in the
+    /// parser (#253), letting callers exercise the per-turn usage path.
+    pub fn assistant_usage(mut self, text: &str, usage: crate::parser::TokenUsage) -> Self {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{ "type": "text", "text": text }],
+                "usage": {
+                    "input_tokens": usage.input,
+                    "output_tokens": usage.output,
+                    "cache_read_input_tokens": usage.cache_read,
+                    "cache_creation_input_tokens": usage.cache_creation,
+                }
+            }
+        });
+        self.actions.push(Action::StdoutLine(line.to_string()));
+        self
+    }
+
+    /// Emit a terminal stream-json `result` line so callers can drive the
+    /// budget-watch finalization path. `session_id` is required by real
+    /// claude; pass any unique string for tests.
+    pub fn result_event(mut self, session_id: &str, usage: crate::parser::TokenUsage) -> Self {
+        let line = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "session_id": session_id,
+            "result": "done",
+            "usage": {
+                "input_tokens": usage.input,
+                "output_tokens": usage.output,
+                "cache_read_input_tokens": usage.cache_read,
+                "cache_creation_input_tokens": usage.cache_creation,
+            }
+        });
+        self.actions.push(Action::StdoutLine(line.to_string()));
+        self
+    }
+
+    /// Emit a stream-json `rate_limit_event` line. `resets_at` is a Unix
+    /// epoch-seconds timestamp.
+    pub fn rate_limit_event(
+        mut self,
+        status: &str,
+        rate_limit_type: Option<&str>,
+        resets_at: Option<u64>,
+    ) -> Self {
+        let mut info = serde_json::json!({ "status": status });
+        if let Some(kind) = rate_limit_type {
+            info["rateLimitType"] = serde_json::Value::String(kind.to_string());
+        }
+        if let Some(ts) = resets_at {
+            info["resetsAt"] = serde_json::Value::from(ts);
+        }
+        let line = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": info,
+        });
+        self.actions.push(Action::StdoutLine(line.to_string()));
+        self
+    }
+
     pub fn exit_code(mut self, code: i32) -> Self {
         self.exit_code = code;
         self
@@ -213,4 +277,84 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
 fn exit_status_from_code(code: i32) -> ExitStatus {
     use std::os::windows::process::ExitStatusExt;
     ExitStatus::from_raw(code as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{parse_line_all, Event, TokenUsage};
+
+    fn emitted_lines(script: &FakeScript) -> Vec<String> {
+        script
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::StdoutLine(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn assistant_usage_helper_emits_a_parseable_assistant_with_usage() {
+        let usage = TokenUsage {
+            input: 100,
+            output: 200,
+            cache_read: 50,
+            cache_creation: 25,
+        };
+        let script = FakeScript::new().assistant_usage("hello", usage);
+        let line = emitted_lines(&script).pop().expect("one line");
+        let events = parse_line_all(line.as_bytes()).expect("parse");
+        // Expect AssistantText + AssistantUsage in order.
+        assert!(matches!(events[0], Event::AssistantText { .. }));
+        match &events[1] {
+            Event::AssistantUsage { usage: u } => assert_eq!(*u, usage),
+            other => panic!("expected AssistantUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_event_helper_emits_a_parseable_result_line() {
+        let usage = TokenUsage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_creation: 4,
+        };
+        let script = FakeScript::new().result_event("sess_xyz", usage);
+        let line = emitted_lines(&script).pop().expect("one line");
+        let events = parse_line_all(line.as_bytes()).expect("parse");
+        match &events[0] {
+            Event::Result {
+                session_id,
+                usage: u,
+                ..
+            } => {
+                assert_eq!(session_id, "sess_xyz");
+                assert_eq!(*u, usage);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_event_helper_emits_a_parseable_rate_limit_line() {
+        let script =
+            FakeScript::new().rate_limit_event("rejected", Some("five_hour"), Some(1_776_402_000));
+        let line = emitted_lines(&script).pop().expect("one line");
+        let events = parse_line_all(line.as_bytes()).expect("parse");
+        match &events[0] {
+            Event::RateLimit {
+                status,
+                rate_limit_type,
+                resets_at,
+            } => {
+                assert_eq!(status, "rejected");
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert_eq!(*resets_at, Some(1_776_402_000));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+    }
 }

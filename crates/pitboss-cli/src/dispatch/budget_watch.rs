@@ -492,4 +492,63 @@ mod tests {
             "baseline after one iteration should be $0.90, got {after}"
         );
     }
+
+    /// End-to-end pipeline test (F-TEST-3): FakeSpawner emits stream-json
+    /// `assistant_usage` lines whose cumulative cost exceeds `budget_usd`,
+    /// the parser surfaces `AssistantUsage`, the usage observer prices it,
+    /// and the layer's cancel token terminates mid-stream — all without
+    /// hand-calling `obs(usage)`. Closes the audit's "no integration test
+    /// exercises the full pipeline from stream-json output through
+    /// budget-trip to cancel" gap.
+    #[tokio::test]
+    async fn fakespawner_overspend_trips_cancel_through_full_pipeline() {
+        use pitboss_core::process::fake::{FakeScript, FakeSpawner};
+        use pitboss_core::process::{ProcessSpawner, SpawnCmd};
+        use pitboss_core::session::SessionHandle;
+        use std::time::Duration;
+
+        // Tight $0.50 cap; one Opus turn at 50k input + 50k output prices to
+        // $0.75 + $3.75 = $4.50, well past the cap.
+        let (_dir, state) = mk_state_with_caps(Some(0.50), None);
+        let layer = state.root.clone();
+        let baseline = LeadSpendBaseline::new();
+
+        let script = FakeScript::new()
+            .stdout_line(r#"{"type":"system","subtype":"init","session_id":"sess-trip"}"#)
+            .assistant_usage("burning tokens", usage(50_000, 50_000))
+            .result_event("sess-trip", usage(50_000, 50_000))
+            .exit_code(0);
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(FakeSpawner::new(script));
+        let cmd = SpawnCmd {
+            program: std::path::PathBuf::from("fake-claude"),
+            args: vec![],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: std::collections::HashMap::new(),
+        };
+        let observer = build_lead_usage_observer(
+            layer.clone(),
+            Arc::clone(&state),
+            "claude-opus-4-7".into(),
+            "lead".into(),
+            Arc::clone(&baseline),
+            state.root.manifest.budget_usd,
+            state.root.manifest.lead_budget_usd,
+        );
+        let handle = SessionHandle::new("lead", spawner, cmd).with_usage_observer(observer);
+        let cancel = layer.cancel.clone();
+        let _outcome = handle
+            .run_to_completion(cancel, Duration::from_millis(100))
+            .await;
+
+        assert!(
+            layer.cancel.is_terminated(),
+            "cancel token should be terminated after parser-driven budget trip"
+        );
+        let reason = layer.budget.abort_reason.lock().unwrap().clone();
+        let msg = reason.expect("abort reason should be stamped");
+        assert!(
+            msg.contains("budget_usd"),
+            "abort reason should name the cap: {msg}"
+        );
+    }
 }
