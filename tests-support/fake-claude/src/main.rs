@@ -6,6 +6,17 @@
 //!   {"sleep_ms": N}   — sleeps for N milliseconds
 //!   {"tool_use": {"name": "...", "input": {...}}}
 //!       — emits a stream-json assistant tool_use event on stdout
+//!   {"usage": {"text": "...", "input": N, "output": N,
+//!              "cache_read": N, "cache_creation": N}}
+//!       — emits an assistant message with `message.usage` so the parser
+//!         surfaces Event::AssistantUsage (#253). Per-turn budget watch.
+//!   {"result": {"session_id": "...", "subtype": "...", "text": "...",
+//!               "usage": {"input_tokens": N, ...}}}
+//!       — emits the terminal stream-json result line (drives the
+//!         budget-watch finalization path and SessionOutcome).
+//!   {"rate_limit_event": {"status": "...", "rate_limit_type": "...",
+//!                          "resets_at": N}}
+//!       — emits a rate_limit_event line.
 //!   {"mcp_call": {"name": "...", "args": {...}, "bind": "...", "allow_err": bool}}
 //!       — issues an MCP tool call (requires PITBOSS_FAKE_MCP_SOCKET).
 //!
