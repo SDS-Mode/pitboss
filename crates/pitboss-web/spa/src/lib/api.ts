@@ -409,6 +409,16 @@ export interface ResourcePressureEvent {
   message?: string;
 }
 
+/** Mirror of the `persistence_gap` `ControlEvent` variant. Written to
+ *  `events.jsonl` by the persistence subscriber when the broadcast
+ *  channel reports `Lagged(n)` — N envelopes were dropped before this
+ *  sentinel. Replay consumers should treat this as a discontinuity
+ *  marker and refetch live state if reconciliation matters. */
+export interface PersistenceGapEvent {
+  event: 'persistence_gap';
+  dropped?: number;
+}
+
 /** Mirror of `pitboss_core::store::record::ResourceHighWater` (finalize-
  *  time roll-up persisted to `summary.json`). */
 export interface ResourceHighWater {

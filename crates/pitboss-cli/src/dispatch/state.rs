@@ -516,6 +516,17 @@ impl DispatchState {
                                 "events.jsonl persistence subscriber lagged; \
                                  some envelopes will be missing from the log",
                             );
+                            // Persist a sentinel so downstream replay can
+                            // detect the discontinuity instead of silently
+                            // reading a file with missing records.
+                            let sentinel = crate::control::protocol::EventEnvelope {
+                                actor_path: crate::dispatch::actor::ActorPath::default(),
+                                seq: log.next_seq(),
+                                event: crate::control::protocol::ControlEvent::PersistenceGap {
+                                    dropped: n,
+                                },
+                            };
+                            log.persist(&sentinel).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }

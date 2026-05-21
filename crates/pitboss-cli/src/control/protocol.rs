@@ -474,6 +474,19 @@ pub enum ControlEvent {
         #[serde(default)]
         outcome: TerminationOutcome,
     },
+    /// Gap sentinel emitted by the `events.jsonl` persistence subscriber
+    /// when the broadcast channel reports `Lagged(n)`. Without this, the
+    /// on-disk log silently skips `n` envelopes and downstream replay
+    /// (`pitboss events`, SPA Replay tab) sees a discontinuity it can't
+    /// detect. The sentinel is the dispatcher-side analogue of the SSE
+    /// `lagged` event (#445): consumers should treat it as "an unknown
+    /// number of envelopes were dropped here" and refetch live state if
+    /// reconciliation matters.
+    PersistenceGap {
+        /// Count reported by `broadcast::error::RecvError::Lagged(n)`.
+        #[serde(default)]
+        dropped: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -926,6 +939,16 @@ mod tests {
             }
             other => panic!("expected WorkersSnapshot, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn persistence_gap_roundtrip() {
+        let gap = ControlEvent::PersistenceGap { dropped: 42 };
+        assert_eq!(
+            serde_json::to_string(&gap).unwrap(),
+            r#"{"event":"persistence_gap","dropped":42}"#
+        );
+        assert_eq!(roundtrip_event(&gap), gap);
     }
 
     #[test]
