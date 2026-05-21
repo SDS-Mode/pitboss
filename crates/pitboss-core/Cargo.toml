@@ -26,9 +26,19 @@ tracing      = { workspace = true }
 async-trait  = { workspace = true }
 libc         = { workspace = true }
 rusqlite     = { workspace = true }
+# Pulled in by `runs.rs` (relocated from `pitboss-cli` in #484). Kept as
+# `anyhow::Result` here rather than introducing a fresh `thiserror` enum
+# — every caller of `resolve_run_dir_by_prefix` already handles `Result`
+# at the binary edge.
+anyhow       = { workspace = true }
+# Per `runs::runs_base_dir` — `dirs::data_dir()` resolves the
+# platform-canonical runs directory (macOS Library, Linux XDG).
+dirs         = { workspace = true }
 
 [dev-dependencies]
 pitboss-core = { path = ".", features = ["test-support"] }
 tempfile     = { workspace = true }
 tokio        = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+# `runs` tests touch `XDG_RUNTIME_DIR` and so must `#[serial(env)]`.
+serial_test  = "3.4"
