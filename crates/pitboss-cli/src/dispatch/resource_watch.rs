@@ -142,11 +142,19 @@ async fn run_sampler(
     let mut interval = tokio::time::interval(cadence);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tracker = PressureTracker::default();
+    // FU-2 (#580): retain the most recent (total_rss, denominator) so
+    // the synthetic shutdown-Clear envelope carries non-zero context
+    // when a run finalizes mid-incident. Only updated when we had a
+    // usable denominator (otherwise the % is undefined anyway).
+    let mut last_observed: Option<(u64, u64)> = None;
 
     loop {
         tokio::select! {
             _ = state.root.cancel.await_terminate() => {
                 tracing::debug!("resource_watch: cancel fired, exiting sampler");
+                if let Some(event) = synthesize_shutdown_clear(tracker.state, last_observed) {
+                    broadcast(&state.root, event).await;
+                }
                 break;
             }
             _ = interval.tick() => {}
@@ -191,6 +199,7 @@ async fn run_sampler(
         broadcast(&state.root, sample_event).await;
 
         if denominator > 0 {
+            last_observed = Some((total_rss, denominator));
             if let Some(transition) = tracker.observe(total_rss, denominator) {
                 let message = pressure_message(transition.level, total_rss, denominator);
                 broadcast(
@@ -206,6 +215,34 @@ async fn run_sampler(
             }
         }
     }
+}
+
+/// Build a synthetic `ResourcePressure { level: Clear, .. }` envelope
+/// when the sampler shuts down while the tracker is still in Warn or
+/// Error. Without this, live banners stay stuck until SSE disconnects
+/// and `events.jsonl` replay tooling sees a stale warn/error as the
+/// final pressure event for the run. Returns `None` when the tracker
+/// is already in `Clear` — no transition to announce. (#580 FU-2)
+///
+/// `last_observed` carries the freshest `(total_rss, denominator)` the
+/// sampler ever saw with a valid denominator; falls back to `(0, 0)`
+/// when the sampler exited before its first successful read.
+fn synthesize_shutdown_clear(
+    current: PressureLevel,
+    last_observed: Option<(u64, u64)>,
+) -> Option<ControlEvent> {
+    if matches!(current, PressureLevel::Clear) {
+        return None;
+    }
+    let (total_rss, available) = last_observed.unwrap_or((0, 0));
+    Some(ControlEvent::ResourcePressure {
+        level: PressureLevel::Clear,
+        total_rss_bytes: total_rss,
+        available_bytes: available,
+        message:
+            "Memory pressure cleared (run finalized while a warn/error transition was active)."
+                .to_string(),
+    })
 }
 
 async fn broadcast(layer: &LayerState, event: ControlEvent) {
@@ -743,5 +780,61 @@ mod tests {
         let h = HighWaterAccum::with_cadence(0).into_summary();
         assert_eq!(h.sample_count, 0);
         assert_eq!(h.sample_cadence_secs, 0);
+    }
+
+    // -- shutdown-Clear synthesis (#580 FU-2) -------------------------
+
+    #[test]
+    fn shutdown_clear_skipped_when_tracker_already_clear() {
+        // Tracker never tripped (or already cleared) → no synthetic
+        // envelope. Avoids emitting redundant Clears on every run.
+        assert!(synthesize_shutdown_clear(PressureLevel::Clear, Some((100, 1000))).is_none());
+        assert!(synthesize_shutdown_clear(PressureLevel::Clear, None).is_none());
+    }
+
+    #[test]
+    fn shutdown_clear_emitted_when_tracker_is_warn() {
+        let ev = synthesize_shutdown_clear(PressureLevel::Warn, Some((700, 1000)))
+            .expect("warn → clear envelope");
+        match ev {
+            ControlEvent::ResourcePressure {
+                level,
+                total_rss_bytes,
+                available_bytes,
+                message,
+            } => {
+                assert_eq!(level, PressureLevel::Clear);
+                assert_eq!(total_rss_bytes, 700);
+                assert_eq!(available_bytes, 1000);
+                assert!(
+                    message.contains("cleared"),
+                    "shutdown message should signal clearance; got: {message}"
+                );
+            }
+            other => panic!("expected ResourcePressure variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shutdown_clear_emitted_when_tracker_is_error_with_no_observation() {
+        // Sampler exited before its first successful denominator read
+        // (e.g. /proc unavailable on darwin; or every read failed). We
+        // still emit Clear so consumers dismiss the banner — total_rss
+        // and available default to 0.
+        let ev =
+            synthesize_shutdown_clear(PressureLevel::Error, None).expect("error → clear envelope");
+        match ev {
+            ControlEvent::ResourcePressure {
+                level,
+                total_rss_bytes,
+                available_bytes,
+                ..
+            } => {
+                assert_eq!(level, PressureLevel::Clear);
+                assert_eq!(total_rss_bytes, 0);
+                assert_eq!(available_bytes, 0);
+            }
+            other => panic!("expected ResourcePressure variant, got {other:?}"),
+        }
     }
 }
