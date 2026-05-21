@@ -214,7 +214,11 @@ pub async fn handle_spawn_worker(
         // inside the same critical section to keep the arithmetic on a
         // single consistent snapshot.
         let mut reserved_guard = target_layer.budget.reserved_usd.lock().await;
-        let spent = *target_layer.budget.spent_usd.lock().await;
+        let spent = *target_layer
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let reserved = *reserved_guard;
         // (#253) Include the lead/sub-lead's own token spend in the
         // budget check — `budget_usd` is now the run-wide cap across
@@ -829,7 +833,11 @@ async fn run_worker(
 
     // Accumulate cost into the layer's spent_usd.
     if let Some(cost) = pitboss_core::prices::cost_usd(&model, &rec.token_usage) {
-        *layer.budget.spent_usd.lock().await += cost;
+        *layer
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += cost;
     }
 
     // Transition to Done + broadcast on the layer's done channel.
