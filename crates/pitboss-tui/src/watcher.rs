@@ -828,6 +828,15 @@ fn format_single_event(event: Event) -> Option<String> {
             let capped = cap_with_marker(first_line, CAP_ASSISTANT_TEXT);
             Some(format!("> {capped}"))
         }
+        Event::AssistantThinking { thinking } => {
+            let first_line = thinking
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(&thinking);
+            let capped = cap_with_marker(first_line, CAP_ASSISTANT_TEXT);
+            // `~` prefix distinguishes draft reasoning from `>` final text.
+            Some(format!("~ {capped}"))
+        }
         Event::AssistantToolUse {
             tool_name,
             input_summary,
