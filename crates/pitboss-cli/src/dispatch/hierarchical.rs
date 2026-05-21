@@ -751,8 +751,14 @@ pub async fn run_hierarchical(
         }
     }
     {
-        let subleads = state.subleads.read().await;
-        for (sublead_id, sub) in subleads.iter() {
+        // Snapshot (id, Arc) pairs and drop the outer `subleads` guard before
+        // awaiting any inner lock — otherwise `subleads.write()` (register /
+        // reconcile) starves until the cancel-synthesis walk completes.
+        let sub_layers: Vec<(String, std::sync::Arc<crate::dispatch::layer::LayerState>)> = {
+            let guard = state.subleads.read().await;
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        for (sublead_id, sub) in &sub_layers {
             let workers = sub.workers.states.read().await;
             let models = sub.workers.models.read().await;
             let actor_types = sub.workers.actor_types.read().await;
