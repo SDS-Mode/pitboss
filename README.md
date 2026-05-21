@@ -16,32 +16,43 @@ To browse offline:
     cargo install mdbook  # one time
     mdbook serve --open
 
-**v0.16.0** ships **per-actor resource sampling** (#553) — the dispatcher
-polls each `claude` subprocess's RSS / VSZ / CPU% on a configurable cadence
-(`[run].resource_sample_secs`, default 5 s, set 0 to disable) and tracks
-container-cgroup memory headroom. The web console gains a **Resources** tab
-with per-actor sparklines + a cgroup-headroom area chart, a **"Mem peak"**
-column on the run list, and proactive memory-pressure events with hysteresis
-(warn at 70% utilization, error at 90%, clear at 60%). Finalized runs persist
-a `summary.json::resource_high_water` aggregate; `pitboss status --resources`
-prints the human-readable high-water summary per actor. The motivating case:
-a 12-worker container-dispatch run hitting the Podman VM's 1.9 GiB OOM-killer
-with empty stderr left the operator with no visible cause. With this release
-that's a 30-second diagnosis from the Resources tab instead of
-`podman machine ssh -- sudo dmesg`. **Companion change** (#581): `pitboss
-container-dispatch --background` (new CLI mode) plus host-side
-`manifest.source.toml` preservation, so the web console's Fork-manifest
-button on a container-dispatched run recovers the full `[container]` block,
-and `/api/runs` auto-routes container manifests back to `container-dispatch`
-(the SPA's manifest editor shows a "Container mode detected" banner so the
-routing is visible). The release also includes a **defensive serde back-compat
-sweep** on `ControlEvent` payload structs (#566, #567, #571, #575) backed by a
-content-guard test (#578) that enforces `#[serde(default)]` automatically
-going forward, **MCP token revocation on actor exit** (#564), and a manifest
-UX pass — validation errors carry a field-path prefix (#574), four common
-errors got remediation hints, and five reference-table gaps are filled
-(#573). See `CHANGELOG.md` for the full per-version history and `AGENTS.md`
-for the MCP tool reference, keybindings, and manifest schema.
+**v0.17.0** is a **stabilization release** focused on budget enforcement
+correctness and parser coverage for Claude CLI 2.x. The headline fix
+(#602) closes a double-count in `compute_total_spend` for terminated
+sub-leads: pre-fix, a hierarchical run with reconciled sub-trees saw the
+live budget watcher trip at ~2× the actual run spend (a $1.65 run tripped
+a $4.00 cap at $4.71 in validation). Post-fix, the live watcher's view
+matches `summary.json::spend_breakdown.total_usd` byte-for-byte. **Parser
+support for extended-thinking content blocks** (#601) — real Claude CLI
+emits `{"type":"thinking", ...}` content blocks inside assistant messages
+under haiku-4-5 / sonnet-4-5 / opus-4-x; pre-fix these were silently
+dropped, and on thinking-only turns the line was discarded entirely
+(losing `Event::AssistantUsage` so mid-run budget enforcement saw stale
+spend). The fix surfaces `Event::AssistantThinking`, reorders
+`parse_assistant` so `AssistantUsage` always lands, and renders thinking
+content with a `~` prefix in `pitboss attach` / TUI. **Parser drift
+detector** (#599) — the parser now emits `tracing::warn!` on unknown
+stream-json `type` fields and unknown assistant content blocks, so future
+Claude CLI wire-format changes surface in production tracing the first
+time they fire (this very detector caught the thinking-block issue on
+the first live run after merge). **Concurrency hardening** — six
+medium-severity audit findings closed: nested `RwLock` releases in
+`resolve_envelope` (#595) and `hierarchical` cancel-synthesis (#596),
+`terminate()` now implies `drain()` so drain-only awaiters unblock on
+budget kills (#596), a `persistence_gap` sentinel marks `events.jsonl`
+holes from broadcast lag (#596), `BudgetState.spent_usd` switches to
+`std::sync::Mutex` so the synchronous usage observer reads under
+contention without zero-fallback (#597), and a rustdoc invariant pins
+`register_worker_cancel` as the only safe insertion path (#597).
+**Resource sampling polish** (#580 FU-1 through FU-5): `[run].resource_sample_secs`
+is bounded to ≤ 3600 s, a synthetic `Clear` pressure event fires if the
+watcher shuts down mid-incident, `ResourceSample` envelopes carry a
+parent-side `sampled_at_unix_ms` wire-time stamp so replay plots at the
+original cadence, `resource_high_water` hydrates from prior summary on
+resume, and a wire-compat enum guard prevents future protocol-struct
+changes from breaking back-compat at compile time. See `CHANGELOG.md`
+for the full per-version history and `AGENTS.md` for the MCP tool
+reference, keybindings, and manifest schema.
 
 Rust toolkit for running and observing parallel Claude Code sessions. A
 dispatcher (`pitboss`) fans out `claude` subprocesses under a concurrency
