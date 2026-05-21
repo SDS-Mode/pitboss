@@ -46,6 +46,21 @@
 //! 5. Identity-bearing fields that must fail-loudly on absence
 //!    (e.g. `ActorActivityEntry.actor_id`) live in `EXEMPT_FIELDS`
 //!    with a documented reason.
+//!
+//! ## Companion check: enum-typed field types (#580 FU-5)
+//!
+//! `every_nested_struct_field_in_wire_variants_has_back_compat_attr`
+//! verifies the field has a back-compat attribute. It does NOT
+//! verify the field's type can actually decode when absent — for
+//! enum-typed fields, "decodes when absent" requires the enum to
+//! be `Default`-reachable (`#[derive(Default)]` + a `#[default]`
+//! variant). A second test,
+//! `enums_used_as_wire_field_types_are_default_reachable`, closes
+//! this gap by walking every locally-defined enum in `protocol.rs`
+//! and asserting it's `Default`-reachable whenever it's referenced
+//! as a field type on a struct or an inline variant. Fields wrapped
+//! in `Option<E>` (`None` is the default) and fields carrying
+//! `#[serde(default = "fn")]` (explicit defaulter) are exempt.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -381,5 +396,398 @@ pub struct SyntheticSummary {
             .iter()
             .any(|v| v.contains("SyntheticSummary.failed")),
         "guard should name SyntheticSummary.failed; got {violations:?}"
+    );
+}
+
+// =================================================================
+// #580 FU-5 — enum-typed wire field guard
+// =================================================================
+
+/// Enums intentionally exempt from the Default-reachability check.
+///
+/// Each entry is `"EnumName"` plus a one-line reason. Add an entry
+/// only when an enum has a documented design reason for failing-loudly
+/// when absent rather than defaulting silently.
+const EXEMPT_ENUMS: &[(&str, &str)] = &[
+    // (currently empty — every payload enum in protocol.rs is
+    // Default-reachable. Entries are added here as the rare exception,
+    // not the rule.)
+];
+
+/// Every locally-defined enum that appears as a field type on a
+/// `ControlOp` / `ControlEvent` variant (inline) or on a nested
+/// payload struct must be **Default-reachable**: `#[derive(Default)]`
+/// somewhere on its declaration AND a variant marked `#[default]`.
+///
+/// Without this guard, a contributor could declare:
+///
+/// ```ignore
+/// enum NewKind { A, B }            // no Default
+/// struct WirePayload {
+///     #[serde(default)]            // ❌ won't compile, but…
+///     kind: NewKind,
+/// }
+/// ```
+///
+/// …or worse, leave the field bare (no `#[serde(default)]`) so the
+/// field becomes required on the wire — silently breaking every
+/// older client. The sibling guard above checks fields-have-attrs;
+/// this guard checks that the attrs would actually work for the
+/// field's type.
+///
+/// Fields whose type is `Option<E>` are skipped — `None` is the
+/// default. Fields carrying `#[serde(default = "fn")]` are skipped
+/// — the explicit defaulter handles the absent case.
+#[test]
+fn enums_used_as_wire_field_types_are_default_reachable() {
+    let parsed: File = syn::parse_file(PROTOCOL_RS).expect("parse protocol.rs as a Rust file");
+
+    // Locally-defined enums minus the wire-tagged enums (ControlOp /
+    // ControlEvent): tagged enums reject unknown discriminators
+    // cleanly via a serde error — "defaulting" them is not a concept.
+    let payload_enums: BTreeMap<String, &ItemEnum> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if !has_serde_tag(&e.attrs) => Some((e.ident.to_string(), e)),
+            _ => None,
+        })
+        .collect();
+
+    let wire_enums: Vec<&ItemEnum> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if has_serde_tag(&e.attrs) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let structs: Vec<&ItemStruct> = parsed
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Struct(s) = item {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let exempt: BTreeSet<String> = EXEMPT_ENUMS.iter().map(|(n, _)| n.to_string()).collect();
+    let mut violations: Vec<String> = Vec::new();
+
+    // Nested struct fields.
+    for s in &structs {
+        if let Fields::Named(named) = &s.fields {
+            for field in &named.named {
+                let field_name = field
+                    .ident
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                check_enum_field(
+                    field,
+                    &format!("{}.{field_name}", s.ident),
+                    &payload_enums,
+                    &exempt,
+                    &mut violations,
+                );
+            }
+        }
+    }
+
+    // Inline variant fields on wire enums — this is the surface the
+    // sibling guard intentionally skips, and is exactly where the
+    // motivating `level: PressureLevel` case lives.
+    for we in &wire_enums {
+        for variant in &we.variants {
+            let fields_iter: Box<dyn Iterator<Item = &Field>> = match &variant.fields {
+                Fields::Named(named) => Box::new(named.named.iter()),
+                Fields::Unnamed(unnamed) => Box::new(unnamed.unnamed.iter()),
+                Fields::Unit => continue,
+            };
+            for field in fields_iter {
+                let field_name = field
+                    .ident
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                check_enum_field(
+                    field,
+                    &format!("{}::{}.{field_name}", we.ident, variant.ident),
+                    &payload_enums,
+                    &exempt,
+                    &mut violations,
+                );
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        let lines = violations
+            .iter()
+            .map(|v| format!("  - {v}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!(
+            "\nnon-Default-reachable enum field types found ({}):\n\n{lines}\n\n\
+             Every enum referenced as a wire field type must be Default-reachable\n  \
+             (`#[derive(Default)]` on the enum AND a variant marked `#[default]`)\n  \
+             so absence on the wire decodes cleanly. Alternatives:\n    \
+             - wrap the field as `Option<E>` (None is the default), or\n    \
+             - add `#[serde(default = \"fn\")]` to the field for an explicit defaulter, or\n    \
+             - exempt the enum via EXEMPT_ENUMS with a documented fail-loud reason.\n",
+            violations.len(),
+        );
+    }
+}
+
+fn check_enum_field(
+    field: &Field,
+    host_path: &str,
+    payload_enums: &BTreeMap<String, &ItemEnum>,
+    exempt: &BTreeSet<String>,
+    violations: &mut Vec<String>,
+) {
+    if field_is_option(&field.ty) {
+        return;
+    }
+    if has_explicit_default_fn(&field.attrs) {
+        return;
+    }
+    let mut refs: BTreeSet<String> = BTreeSet::new();
+    collect_enum_refs(&field.ty, payload_enums, &mut refs);
+    for enum_name in refs {
+        if exempt.contains(&enum_name) {
+            continue;
+        }
+        let e = payload_enums
+            .get(&enum_name)
+            .expect("collect_enum_refs only emits keys present in payload_enums");
+        if !enum_is_default_reachable(e) {
+            violations.push(format!(
+                "{host_path} uses non-Default-reachable enum {enum_name}"
+            ));
+        }
+    }
+}
+
+fn enum_is_default_reachable(e: &ItemEnum) -> bool {
+    let has_default_derive = e.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("Default") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    });
+    let has_default_variant = e
+        .variants
+        .iter()
+        .any(|v| v.attrs.iter().any(|a| a.path().is_ident("default")));
+    has_default_derive && has_default_variant
+}
+
+fn field_is_option(ty: &Type) -> bool {
+    if let Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            return seg.ident == "Option";
+        }
+    }
+    false
+}
+
+/// Detect `#[serde(default = "fn_name")]` — the explicit-defaulter
+/// form. Distinct from bare `#[serde(default)]`, which uses the
+/// type's own `Default` impl (and so still requires the enum to be
+/// Default-reachable — compile-time enforced, no need to check here).
+fn has_explicit_default_fn(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("serde") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("default") {
+                // Only `default = "fn"` carries a value; the bare
+                // `default` form doesn't.
+                if let Ok(value) = meta.value() {
+                    let _ = value.parse::<syn::Expr>();
+                    found = true;
+                }
+                return Ok(());
+            }
+            if let Ok(value) = meta.value() {
+                let _ = value.parse::<syn::Expr>();
+            }
+            Ok(())
+        });
+        found
+    })
+}
+
+fn collect_enum_refs(
+    ty: &Type,
+    payload_enums: &BTreeMap<String, &ItemEnum>,
+    out: &mut BTreeSet<String>,
+) {
+    if let Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            let name = seg.ident.to_string();
+            if payload_enums.contains_key(&name) {
+                out.insert(name);
+            }
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                for arg in &args.args {
+                    if let GenericArgument::Type(inner) = arg {
+                        collect_enum_refs(inner, payload_enums, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Sanity-check the new guard catches a future regression. Mirrors
+/// `guard_catches_synthetic_regression` for the original guard. A
+/// silent no-op here would let the regression class slip through
+/// (the same way #577 originally did before the sibling test).
+#[test]
+fn enum_guard_catches_synthetic_regression() {
+    // Three shapes:
+    //   - struct field of a non-Default enum (should flag)
+    //   - inline variant field of a non-Default enum (should flag)
+    //   - Option<non-Default enum> field (should NOT flag — None is default)
+    //   - non-Default enum with #[serde(default = "fn")] (should NOT flag)
+    let synthetic = r#"
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub enum NoDefaultKind {
+    A,
+    B,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub enum WithDefault {
+    #[default]
+    Alpha,
+    Beta,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct InnerPayload {
+    pub bad_field: NoDefaultKind,           // ❌ should flag
+    pub good_field: WithDefault,            // ✅ Default-reachable
+    pub optional: Option<NoDefaultKind>,    // ✅ Option exempt
+    #[serde(default = "explicit_default")]
+    pub explicit: NoDefaultKind,            // ✅ explicit defaulter exempt
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "event")]
+pub enum WireEvent {
+    Variant {
+        kind: NoDefaultKind,                // ❌ should flag (inline variant)
+        inner: InnerPayload,
+    },
+}
+"#;
+
+    let parsed: File = syn::parse_file(synthetic).expect("parse synthetic snippet");
+
+    let payload_enums: BTreeMap<String, &ItemEnum> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if !has_serde_tag(&e.attrs) => Some((e.ident.to_string(), e)),
+            _ => None,
+        })
+        .collect();
+    let wire_enums: Vec<&ItemEnum> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if has_serde_tag(&e.attrs) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let structs: Vec<&ItemStruct> = parsed
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Struct(s) = item {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let exempt: BTreeSet<String> = BTreeSet::new();
+    let mut violations: Vec<String> = Vec::new();
+
+    for s in &structs {
+        if let Fields::Named(named) = &s.fields {
+            for field in &named.named {
+                let field_name = field
+                    .ident
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                check_enum_field(
+                    field,
+                    &format!("{}.{field_name}", s.ident),
+                    &payload_enums,
+                    &exempt,
+                    &mut violations,
+                );
+            }
+        }
+    }
+    for we in &wire_enums {
+        for variant in &we.variants {
+            if let Fields::Named(named) = &variant.fields {
+                for field in &named.named {
+                    let field_name = field
+                        .ident
+                        .as_ref()
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
+                    check_enum_field(
+                        field,
+                        &format!("{}::{}.{field_name}", we.ident, variant.ident),
+                        &payload_enums,
+                        &exempt,
+                        &mut violations,
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        violations.len(),
+        2,
+        "expected exactly 2 violations (InnerPayload.bad_field + WireEvent::Variant.kind), \
+         got {violations:#?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("InnerPayload.bad_field")),
+        "expected InnerPayload.bad_field flagged; got {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("WireEvent::Variant.kind")),
+        "expected WireEvent::Variant.kind flagged; got {violations:?}"
     );
 }
