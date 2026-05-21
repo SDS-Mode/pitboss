@@ -12,13 +12,15 @@
 //! ## Where this lives
 //!
 //! The RFC put the unified API in `pitboss-core::stream`. We can't quite
-//! deliver that today because [`EventEnvelope`] depends on
-//! `dispatch::actor::ActorPath` and `mcp::policy::ApprovalRule`, both
-//! `pitboss-cli`-only types. Moving them down to `pitboss-core` is its
-//! own refactor; for now the live consumer lives **here** in
-//! `pitboss-cli::stream` and `pitboss-core::stream` exposes only the
-//! disk side. The two compose via [`From<RunStreamItem>`] for
-//! [`LiveStreamItem`].
+//! deliver that today because the typed [`EventEnvelope`] depends on
+//! `mcp::policy::ApprovalRule` and the rest of the `ControlEvent`
+//! payload types, which carry MCP/approval concerns that don't belong in
+//! `pitboss-core` (#481 unified `ActorPath` — the other half of the
+//! dependency — but stopped short of dragging `ApprovalRule` down as
+//! well; see `pitboss-core::control_protocol`'s preamble). For now the
+//! live consumer lives **here** in `pitboss-cli::stream` and
+//! `pitboss-core::stream` exposes only the disk side. The two compose
+//! via [`From<RunStreamItem>`] for [`LiveStreamItem`].
 //!
 //! ## What about `Subscribe { since_seq }`?
 //!

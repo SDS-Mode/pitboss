@@ -30,18 +30,53 @@
 //! `ControlOp::Subscribe` — same tag (`"op":"subscribe"`), same payload
 //! shape. See [`crate::stream`] for the consumer-side handshake.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// Tree-path from root to the actor that produced an event. Serialized
 /// as a JSON array of actor-id strings; an empty path is omitted from
-/// the wire (matching `pitboss-cli`'s typed mirror).
+/// the wire (the `EventEnvelope` field carries
+/// `skip_serializing_if = "ActorPath::is_empty"`).
+///
+/// Lives in `pitboss-core` so the dispatcher (`pitboss-cli`), the unified
+/// consumer stream ([`crate::stream`]), and read-side consumers
+/// (`pitboss-tui`, `pitboss-web`) share one definition. The dispatcher
+/// re-exports it as `pitboss_cli::dispatch::actor::ActorPath` for source
+/// compatibility — pre-unification both crates carried their own copy
+/// (#481). The `EventEnvelope` itself stays split (typed `ControlEvent`
+/// in `pitboss-cli`, `serde_json::Value` here) by design — the typed
+/// enum carries MCP policy and approval-handling types that don't belong
+/// in `pitboss-core` (see this module's preamble).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ActorPath(pub Vec<String>);
 
 impl ActorPath {
+    /// Construct from any iterable of stringy ids.
+    pub fn new<I, S>(ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        ActorPath(ids.into_iter().map(Into::into).collect())
+    }
+
+    /// Append an actor id to produce a deeper path.
+    #[must_use]
+    pub fn child(&self, id: impl Into<String>) -> Self {
+        let mut next = self.0.clone();
+        next.push(id.into());
+        ActorPath(next)
+    }
+
+    /// Last segment (the actor id this path identifies).
+    #[must_use]
+    pub fn leaf(&self) -> Option<&String> {
+        self.0.last()
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -51,6 +86,12 @@ impl ActorPath {
     #[must_use]
     pub fn depth(&self) -> usize {
         self.0.len()
+    }
+}
+
+impl fmt::Display for ActorPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.join("→"))
     }
 }
 
@@ -168,6 +209,42 @@ mod tests {
             back.event.get("event").and_then(|v| v.as_str()),
             Some("op_acked")
         );
+    }
+
+    #[test]
+    fn actor_path_renders_with_arrow_separator() {
+        let path = ActorPath(vec!["root".into(), "S1".into(), "W3".into()]);
+        assert_eq!(path.to_string(), "root→S1→W3");
+    }
+
+    #[test]
+    fn actor_path_renders_root_only() {
+        let path = ActorPath(vec!["root".into()]);
+        assert_eq!(path.to_string(), "root");
+    }
+
+    #[test]
+    fn actor_path_renders_empty_as_empty_string() {
+        let path = ActorPath::default();
+        assert_eq!(path.to_string(), "");
+    }
+
+    #[test]
+    fn actor_path_child_appends_segment() {
+        let path = ActorPath::new(["root"]);
+        let child = path.child("S1");
+        assert_eq!(child.0, vec!["root", "S1"]);
+        // Parent unchanged.
+        assert_eq!(path.0, vec!["root"]);
+    }
+
+    #[test]
+    fn actor_path_leaf_returns_last_segment() {
+        assert_eq!(
+            ActorPath::new(["root", "S1"]).leaf(),
+            Some(&"S1".to_string())
+        );
+        assert_eq!(ActorPath::default().leaf(), None);
     }
 
     /// Pre-PR-B dispatchers wrote bare `ControlEvent` without the
