@@ -1973,8 +1973,10 @@ dependencies = [
 name = "pitboss-core"
 version = "0.16.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
+ "dirs",
  "futures-util",
  "git2",
  "libc",
@@ -1982,6 +1984,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
