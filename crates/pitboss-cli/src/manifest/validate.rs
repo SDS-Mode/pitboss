@@ -25,6 +25,7 @@ fn validate_inner(resolved: &ResolvedManifest, skip_dir_check: bool) -> Result<(
         crate::notify::config::validate(cfg)?;
     }
     validate_lifecycle(resolved)?;
+    validate_run_settings(resolved)?;
     validate_container(resolved)?;
     validate_communication(resolved)?;
     validate_actor_types(resolved)?;
@@ -745,6 +746,33 @@ fn validate_mode(r: &ResolvedManifest) -> Result<()> {
     }
     if r.tasks.is_empty() && r.lead.is_none() {
         bail!("empty manifest: define either [[task]] entries or exactly one [lead]");
+    }
+    Ok(())
+}
+
+/// Upper bound on `[run].resource_sample_secs` (#580 FU-1). 3600 s = 1 h.
+/// Beyond this the sampler effectively never fires, silently defeating the
+/// purpose — operators who set e.g. `86400` would see a never-tripped
+/// `resource_pressure` banner and an empty `resource_high_water` even on
+/// runs that came close to the cgroup ceiling.
+const RESOURCE_SAMPLE_SECS_MAX: u64 = 3600;
+
+/// Validate `[run]`-scoped settings that apply in both flat and
+/// hierarchical mode. Currently only enforces the
+/// `[run].resource_sample_secs` envelope. `0` remains the documented
+/// "disable sampling" sentinel — the upper bound exists because beyond
+/// ~1 hour the watcher is effectively dormant. (#580 FU-1)
+fn validate_run_settings(r: &ResolvedManifest) -> Result<()> {
+    if r.resource_sample_secs > RESOURCE_SAMPLE_SECS_MAX {
+        bail!(
+            "[run].resource_sample_secs = {} exceeds the supported envelope \
+             (0 disables sampling; otherwise pick a value in [1, {}] seconds). \
+             Cadences beyond ~1 h are effectively dormant — the watcher would \
+             never trip the 70% / 90% memory-pressure thresholds before a \
+             typical run finalizes.",
+            r.resource_sample_secs,
+            RESOURCE_SAMPLE_SECS_MAX,
+        );
     }
     Ok(())
 }
@@ -3306,5 +3334,48 @@ mod tests {
                 "{bad:?} error should name the canonical form; got: {err}"
             );
         }
+    }
+
+    // -- [run].resource_sample_secs envelope (#580 FU-1) ---------------
+
+    /// `0` stays valid — it is the documented "disable sampling"
+    /// sentinel that `ResourceWatcher::spawn` keys off (returns an
+    /// empty accumulator instead of spawning the periodic task).
+    /// Rejecting it would silently break manifests that intentionally
+    /// turn the watcher off.
+    #[test]
+    fn resource_sample_secs_zero_sentinel_is_accepted() {
+        let r = rm_with(|m| m.resource_sample_secs = 0);
+        assert!(validate_skip_dir_check(&r).is_ok());
+    }
+
+    #[test]
+    fn resource_sample_secs_at_upper_bound_is_accepted() {
+        let r = rm_with(|m| m.resource_sample_secs = RESOURCE_SAMPLE_SECS_MAX);
+        assert!(validate_skip_dir_check(&r).is_ok());
+    }
+
+    #[test]
+    fn resource_sample_secs_above_upper_bound_is_rejected() {
+        let r = rm_with(|m| m.resource_sample_secs = RESOURCE_SAMPLE_SECS_MAX + 1);
+        let err = validate_skip_dir_check(&r).unwrap_err().to_string();
+        assert!(
+            err.contains("resource_sample_secs"),
+            "error should name the offending field; got: {err}"
+        );
+        assert!(
+            err.contains("3600"),
+            "error should name the upper bound so an operator can fix it; got: {err}"
+        );
+    }
+
+    /// `86400` (one sample per day) was the motivating case in the
+    /// audit ticket — silently dormant on real-world run lengths.
+    /// Pin a value far above the envelope so a future bump still
+    /// rejects this without test churn.
+    #[test]
+    fn resource_sample_secs_one_per_day_is_rejected() {
+        let r = rm_with(|m| m.resource_sample_secs = 86_400);
+        assert!(validate_skip_dir_check(&r).is_err());
     }
 }
