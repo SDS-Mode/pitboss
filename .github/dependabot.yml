@@ -56,3 +56,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # `dtolnay/rust-toolchain` uses Rust version numbers as its action tags
+    # (`@1.95.0` installs Rust 1.95.0). The toolchain is pinned via
+    # `rust-toolchain.toml`; bumping the action tag would silently change
+    # the installed Rust version and conflict with the documented pin.
+    # See workspace CLAUDE.md: never bump rust-toolchain.toml to fix CI.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
