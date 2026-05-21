@@ -240,14 +240,17 @@ pub async fn resolve_envelope(
     // ── Cap: max_total_workers ─────────────────────────────────────────
     if let Some(cap) = lead.and_then(|l| l.max_total_workers) {
         let root_workers = state.root.workers.states.read().await.len() as u32;
-        let subleads_guard = state.subleads.read().await;
-        let sub_workers: u32 = {
-            let mut total = 0u32;
-            for sub in subleads_guard.values() {
-                total += sub.workers.states.read().await.len() as u32;
-            }
-            total
+        // Snapshot sub-layer Arcs and drop the outer guard before awaiting
+        // inner locks — otherwise `subleads.write()` (register/reconcile)
+        // starves until this walk completes.
+        let sub_layers: Vec<Arc<LayerState>> = {
+            let guard = state.subleads.read().await;
+            guard.values().cloned().collect()
         };
+        let mut sub_workers = 0u32;
+        for sub in &sub_layers {
+            sub_workers += sub.workers.states.read().await.len() as u32;
+        }
         let projected = root_workers + sub_workers + max_workers;
         if projected > cap {
             return Err(anyhow!(

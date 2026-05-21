@@ -219,6 +219,13 @@ impl TestStateBuilder {
         self
     }
 
+    pub fn max_total_workers(mut self, n: u32) -> Self {
+        let mut lead = self.lead.unwrap_or_else(default_lead);
+        lead.max_total_workers = Some(n);
+        self.lead = Some(lead);
+        self
+    }
+
     // ── runtime knobs ───────────────────────────────────────────────────────
 
     pub fn spawner(mut self, s: Arc<dyn ProcessSpawner>) -> Self {
