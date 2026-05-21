@@ -1,4 +1,12 @@
 //! Line-oriented parser for Claude Code `--output-format stream-json` output.
+//!
+//! Drift detection (#542): the parser emits `tracing::warn!` on every
+//! line whose top-level `type` is unrecognized (falls through to
+//! [`Event::Unknown`]) and on every assistant content-block whose `type`
+//! is neither `text` nor `tool_use`. Operators monitoring `tracing`
+//! output see Claude CLI wire-format additions in the first production
+//! run after the upgrade, instead of waiting for a missed feature or a
+//! broken downstream consumer to surface the drift.
 
 pub mod events;
 
@@ -59,9 +67,15 @@ pub fn parse_line_all(bytes: &[u8]) -> Result<Vec<Event>, ParseError> {
         Some("user") => parse_user(&value, raw).map(|e| vec![e]),
         Some("result") => parse_result(&value, raw).map(|e| vec![e]),
         Some("rate_limit_event") => Ok(vec![parse_rate_limit(&value)]),
-        _ => Ok(vec![Event::Unknown {
-            raw: raw.to_string(),
-        }]),
+        _ => {
+            tracing::warn!(
+                event_type = ?ty,
+                "parser drift: unrecognized stream-json `type` field — may indicate a Claude CLI wire-format change (#542)"
+            );
+            Ok(vec![Event::Unknown {
+                raw: raw.to_string(),
+            }])
+        }
     }
 }
 
@@ -98,7 +112,12 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, P
                     input_summary,
                 });
             }
-            _ => {}
+            other => {
+                tracing::warn!(
+                    block_type = %other,
+                    "parser drift: unrecognized assistant content-block `type` — may indicate a Claude CLI wire-format change (#542)"
+                );
+            }
         }
     }
 
@@ -476,5 +495,56 @@ mod tests {
         let line = br#"{"message":"hi"}"#;
         let ev = parse_line(line).unwrap();
         assert!(matches!(ev, Event::Unknown { .. }));
+    }
+
+    // ── Drift detection (#542) ─────────────────────────────────────────
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn unknown_top_level_type_emits_drift_warn() {
+        let line = br#"{"type":"freshly_added_event_type","payload":"x"}"#;
+        let _ = parse_line(line).unwrap();
+        assert!(logs_contain(
+            "parser drift: unrecognized stream-json `type`"
+        ));
+        assert!(logs_contain("freshly_added_event_type"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn unknown_assistant_content_block_type_emits_drift_warn() {
+        // Claude could add a new content block (e.g. "thinking" / "image"
+        // / something else entirely) inside an assistant message. The
+        // parser silently dropped these pre-#542 — now they surface as
+        // a drift warn so operators see the addition in tracing output.
+        let line = br#"{"type":"assistant","message":{"content":[
+            {"type":"text","text":"hello"},
+            {"type":"thinking","content":"reasoning"}
+        ]}}"#;
+        let _ = parse_line_all(line).unwrap();
+        assert!(logs_contain(
+            "parser drift: unrecognized assistant content-block"
+        ));
+        assert!(logs_contain("thinking"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn known_event_types_do_not_emit_drift_warns() {
+        // Baseline: a clean stream-json line for every known top-level
+        // type must NOT trigger the drift warn — the warn is a signal,
+        // not noise.
+        let _ = parse_line(br#"{"type":"system","subtype":"init","session_id":"s"}"#).unwrap();
+        let _ = parse_line(
+            br#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .unwrap();
+        let _ = parse_line(
+            br#"{"type":"result","session_id":"s","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
+        let _ = parse_line(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"ok"}}"#)
+            .unwrap();
+        assert!(!logs_contain("parser drift"));
     }
 }
