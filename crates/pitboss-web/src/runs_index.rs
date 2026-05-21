@@ -1,13 +1,14 @@
-//! Run discovery + JSON DTO mapping. Wraps `pitboss_cli::runs` so we
+//! Run discovery + JSON DTO mapping. Wraps `pitboss_core::runs` so we
 //! reuse the canonical `RunStatus` classifier and avoid a second source
-//! of truth for what counts as `Running` vs `Stale`.
+//! of truth for what counts as `Running` vs `Stale`. Lifted out of
+//! `pitboss-cli` in #484.
 
 use std::path::Path;
 use std::time::SystemTime;
 
 use serde::Serialize;
 
-use pitboss_cli::runs::{collect_run_entries, RunEntry, RunStatus};
+use pitboss_core::runs::{collect_run_entries, RunEntry, RunStatus};
 
 /// JSON shape for `GET /api/runs`. Compact summary — clients fetch
 /// `GET /api/runs/:id` for the full `summary.json`.

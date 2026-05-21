@@ -12,6 +12,7 @@ pub mod fmt;
 pub mod parser;
 pub mod prices;
 pub mod process;
+pub mod runs;
 pub mod session;
 pub mod store;
 pub mod stream;
