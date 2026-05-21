@@ -73,7 +73,11 @@ impl WorktreeManager {
             // `ref: refs/heads/<branch>`; read it directly. Falls back to
             // the Repository::open path only on read/parse failure so
             // detached-HEAD or symbolic-ref forms still classify.
-            for wt_name in repo.worktrees()?.iter().flatten() {
+            // git2 0.21 widened StringArray::iter() to yield
+            // `Result<Option<&str>, Error>` (was `Option<&str>`); collapse
+            // both layers so callees still see a plain `&str`. Entries that
+            // fail UTF-8 conversion or are absent are skipped.
+            for wt_name in repo.worktrees()?.iter().flatten().flatten() {
                 let wt = repo.find_worktree(wt_name)?;
                 let checked_out = head_branch_for_worktree(repo_root, wt_name)
                     .or_else(|| head_branch_via_open(wt.path()));
@@ -187,7 +191,7 @@ fn head_branch_via_open(wt_path: &Path) -> Option<String> {
     wt_repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(str::to_string))
+        .and_then(|h| h.shorthand().ok().map(str::to_string))
 }
 
 #[cfg(test)]
