@@ -227,6 +227,9 @@ fn describe_event(event: &ControlEvent) -> (&'static str, String) {
                 "level={level:?} total_rss_bytes={total_rss_bytes} available_bytes={available_bytes}"
             ),
         ),
+        ControlEvent::PersistenceGap { dropped } => {
+            ("persistence_gap", format!("dropped={dropped}"))
+        }
     }
 }
 
