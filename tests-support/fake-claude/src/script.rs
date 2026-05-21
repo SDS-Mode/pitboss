@@ -2,9 +2,11 @@
 //!
 //! Reads a JSONL script line-by-line from a `BufRead`, executing each
 //! action in order. Existing action types (stdout/stderr/sleep_ms/
-//! tool_use) preserve their pre-v0.4.1 behavior exactly. The new
-//! `mcp_call` action issues a real MCP tool call through an optionally-
-//! provided client.
+//! tool_use/mcp_call) preserve their prior behavior exactly. The
+//! `usage`, `result`, and `rate_limit_event` actions added for #539
+//! emit the corresponding stream-json wire shapes so integration tests
+//! can exercise the budget_watch / SessionOutcome paths that those
+//! events drive.
 
 #![allow(dead_code)]
 
@@ -69,6 +71,75 @@ pub async fn execute_script<R: BufRead>(reader: R, mut client: Option<McpClient>
                         "input": tu.get("input").cloned().unwrap_or(Value::Null),
                     }]
                 }
+            });
+            let mut out = stdout.lock();
+            writeln!(out, "{}", serde_json::to_string(&wrapper)?)?;
+            out.flush()?;
+        } else if let Some(u) = action.get("usage") {
+            // Emit an assistant message whose `message.usage` triggers
+            // Event::AssistantUsage in the parser (#253). The `text` block
+            // mirrors `tool_use` above: real claude always carries a content
+            // block alongside the usage snapshot.
+            let text = u.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let wrapper = serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{ "type": "text", "text": text }],
+                    "usage": {
+                        "input_tokens": u.get("input").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "output_tokens": u.get("output").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "cache_read_input_tokens":
+                            u.get("cache_read").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "cache_creation_input_tokens":
+                            u.get("cache_creation").and_then(|v| v.as_u64()).unwrap_or(0),
+                    }
+                }
+            });
+            let mut out = stdout.lock();
+            writeln!(out, "{}", serde_json::to_string(&wrapper)?)?;
+            out.flush()?;
+        } else if let Some(r) = action.get("result") {
+            // Emit the terminal stream-json result line so tests can drive
+            // the budget-watch finalization path and SessionOutcome's
+            // session_id / token_usage fallback (#475 / #549).
+            let session_id = r
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sess-fake");
+            let subtype = r
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("success");
+            let result_text = r.get("text").and_then(|v| v.as_str()).unwrap_or("done");
+            let usage = r
+                .get("usage")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({ "input_tokens": 0, "output_tokens": 0 }));
+            let wrapper = serde_json::json!({
+                "type": "result",
+                "subtype": subtype,
+                "session_id": session_id,
+                "result": result_text,
+                "usage": usage,
+            });
+            let mut out = stdout.lock();
+            writeln!(out, "{}", serde_json::to_string(&wrapper)?)?;
+            out.flush()?;
+        } else if let Some(rl) = action.get("rate_limit_event") {
+            let status = rl
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let mut info = serde_json::json!({ "status": status });
+            if let Some(kind) = rl.get("rate_limit_type").and_then(|v| v.as_str()) {
+                info["rateLimitType"] = Value::String(kind.to_string());
+            }
+            if let Some(ts) = rl.get("resets_at").and_then(|v| v.as_u64()) {
+                info["resetsAt"] = Value::from(ts);
+            }
+            let wrapper = serde_json::json!({
+                "type": "rate_limit_event",
+                "rate_limit_info": info,
             });
             let mut out = stdout.lock();
             writeln!(out, "{}", serde_json::to_string(&wrapper)?)?;
