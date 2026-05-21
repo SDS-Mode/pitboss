@@ -45,7 +45,13 @@ impl CancelToken {
     /// trail reaches `TaskRecord::terminate_reason`. Retained for the
     /// shutdown-cascade path where the reason is already set on the
     /// parent token and `cascade_to` will propagate it. (#475)
+    ///
+    /// Also flips the drain signal so `await_drain` observers wake on
+    /// terminate too — terminate is strictly stronger than drain, and
+    /// any actor with a drain-only listener would otherwise hang when
+    /// cancellation skipped straight to terminate (budget-abort path).
     pub fn terminate(&self) {
+        let _ = self.drain_tx.send(true);
         let _ = self.terminate_tx.send(true);
     }
 
@@ -56,8 +62,12 @@ impl CancelToken {
     /// facing audit trail names the kill site. Setting the reason BEFORE
     /// the boolean signal prevents an observer racing on terminate from
     /// reading `None`. (#475)
+    ///
+    /// Send order is `reason → drain → terminate`: drain wakes ahead of
+    /// terminate so a drain-only awaiter sees the reason already in place.
     pub fn terminate_with_reason(&self, reason: TerminateReason) {
         let _ = self.reason_tx.send(Some(reason));
+        let _ = self.drain_tx.send(true);
         let _ = self.terminate_tx.send(true);
     }
 
@@ -152,11 +162,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn terminate_is_independent_of_drain() {
+    async fn terminate_implies_drain() {
+        // terminate is strictly stronger than drain: any actor with a
+        // drain-only listener would otherwise hang on the budget-abort
+        // path that goes straight to terminate.
         let t = CancelToken::new();
         t.terminate();
         assert!(t.is_terminated());
-        assert!(!t.is_draining());
+        assert!(t.is_draining());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn terminate_unblocks_await_drain() {
+        let t = CancelToken::new();
+        let handle = {
+            let t = t.clone();
+            tokio::spawn(async move { t.await_drain().await })
+        };
+        tokio::time::advance(Duration::from_millis(10)).await;
+        t.terminate();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn terminate_with_reason_unblocks_await_drain() {
+        let t = CancelToken::new();
+        let handle = {
+            let t = t.clone();
+            tokio::spawn(async move { t.await_drain().await })
+        };
+        tokio::time::advance(Duration::from_millis(10)).await;
+        t.terminate_with_reason(TerminateReason::OperatorCtrlC);
+        handle.await.unwrap();
+        assert_eq!(t.terminate_reason(), Some(TerminateReason::OperatorCtrlC));
     }
 
     #[test]
@@ -185,9 +223,9 @@ mod tests {
         parent.terminate();
         parent.cascade_to(&child);
         assert!(child.is_terminated());
-        // Whether `is_draining` is also true depends on whether
-        // terminate implicitly sets drain; we deliberately only assert
-        // terminate here because that's the dominant signal.
+        // terminate implies drain on the child too — drain-only awaiters
+        // shouldn't hang when cancellation skips the graceful step.
+        assert!(child.is_draining());
     }
 
     #[test]
@@ -197,12 +235,11 @@ mod tests {
         parent.drain();
         parent.terminate();
         parent.cascade_to(&child);
+        // The stricter signal still wins for the cascade choice
+        // (child.terminate(), not child.drain()), but child.terminate()
+        // now also raises drain so an `await_drain` observer wakes.
         assert!(child.is_terminated());
-        // Crucially, drain is NOT applied to the child when terminate
-        // is also set on the parent — the stricter signal wins, so we
-        // never tell the child "you may finish current work" while the
-        // parent has already said "stop now".
-        assert!(!child.is_draining());
+        assert!(child.is_draining());
     }
 
     // ── #475: terminate_reason audit trail ──────────────────────────────
