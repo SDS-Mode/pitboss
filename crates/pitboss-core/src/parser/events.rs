@@ -24,6 +24,15 @@ pub enum Event {
         tool_name: String,
         input_summary: String,
     },
+    /// Extended-thinking content block (`content[i].type == "thinking"`).
+    /// The reasoning text lives at `content[i].thinking` on the wire and is
+    /// surfaced here. The wire also carries a `signature` continuity token
+    /// (opaque base64) — we do not preserve it today, since pitboss has no
+    /// thinking-re-injection path on resume. Add a `signature` field here
+    /// if/when that capability lands. (#600)
+    AssistantThinking {
+        thinking: String,
+    },
     ToolResult {
         content_summary: String,
     },

@@ -112,6 +112,14 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, P
                     input_summary,
                 });
             }
+            "thinking" => {
+                let thinking = block
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                events.push(Event::AssistantThinking { thinking });
+            }
             other => {
                 tracing::warn!(
                     block_type = %other,
@@ -121,16 +129,13 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, P
         }
     }
 
-    if events.is_empty() {
-        return Err(ParseError::malformed(
-            "assistant content had no text or tool_use block",
-            raw,
-        ));
-    }
     // Surface per-message usage when claude carries it on the wire so
     // the dispatcher can reconcile lead spend per-turn instead of
-    // only at terminal `Event::Result`. (#253) Optional: older builds
-    // and the fake-claude harness omit it, so absence is not an error.
+    // only at terminal `Event::Result`. (#253) Pushed BEFORE the empty
+    // check so a thinking-only turn — common with extended-thinking
+    // models — still surfaces its usage to the budget watcher. (#600)
+    // Older builds and the fake-claude harness omit `message.usage`,
+    // so absence is not an error.
     if let Some(usage_val) = value.get("message").and_then(|m| m.get("usage")) {
         let usage = TokenUsage {
             input: u64_field(usage_val, "input_tokens"),
@@ -139,6 +144,13 @@ fn parse_assistant(value: &serde_json::Value, raw: &str) -> Result<Vec<Event>, P
             cache_creation: u64_field(usage_val, "cache_creation_input_tokens"),
         };
         events.push(Event::AssistantUsage { usage });
+    }
+
+    if events.is_empty() {
+        return Err(ParseError::malformed(
+            "assistant content had no text, tool_use, or thinking block (and no message.usage)",
+            raw,
+        ));
     }
     Ok(events)
 }
@@ -344,6 +356,82 @@ mod tests {
         assert!(matches!(events[0], Event::AssistantText { .. }));
     }
 
+    // ── Extended-thinking blocks (#600) ────────────────────────────────
+
+    #[test]
+    fn parses_assistant_thinking_block() {
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"reasoning...","signature":"sig-opaque"}]}}"#;
+        let ev = parse_line(line).unwrap();
+        assert_eq!(
+            ev,
+            Event::AssistantThinking {
+                thinking: "reasoning...".into()
+            }
+        );
+    }
+
+    #[test]
+    fn thinking_only_turn_still_emits_assistant_usage() {
+        // Regression for #600: real claude (haiku-4-5 etc.) emits turns
+        // that contain ONLY a thinking block alongside `message.usage`.
+        // Pre-fix the parser's empty-events check fired before the usage
+        // push, dropping the entire line — including the usage update
+        // the budget watcher needs for live enforcement. Fix reorders
+        // usage push above the empty-check.
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}],"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let events = parse_line_all(line).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], Event::AssistantThinking { .. }));
+        match &events[1] {
+            Event::AssistantUsage { usage } => {
+                assert_eq!(usage.input, 5);
+                assert_eq!(usage.output, 1);
+            }
+            other => panic!("expected AssistantUsage second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_thinking_and_text_emits_all_three_events() {
+        let line = br#"{"type":"assistant","message":{"content":[
+            {"type":"thinking","thinking":"plan"},
+            {"type":"text","text":"answer"}
+        ],"usage":{"input_tokens":1,"output_tokens":2}}}"#;
+        let events = parse_line_all(line).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], Event::AssistantThinking { .. }));
+        assert!(matches!(events[1], Event::AssistantText { .. }));
+        assert!(matches!(events[2], Event::AssistantUsage { .. }));
+    }
+
+    #[test]
+    fn unknown_block_only_turn_still_surfaces_usage() {
+        // A turn whose only content is a future/unknown block type — but
+        // which carries `message.usage` — must still emit AssistantUsage
+        // so budget enforcement stays accurate even when the parser's
+        // type coverage lags behind claude wire format. (#600)
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"future_block","payload":"x"}],"usage":{"input_tokens":7,"output_tokens":3}}}"#;
+        let events = parse_line_all(line).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::AssistantUsage { usage } => {
+                assert_eq!(usage.input, 7);
+                assert_eq!(usage.output, 3);
+            }
+            other => panic!("expected AssistantUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fully_empty_assistant_turn_still_malformed() {
+        // No recognized blocks AND no usage → still Malformed. Preserves
+        // the "something is genuinely wrong with this line" signal even
+        // after the #600 reorder.
+        let line = br#"{"type":"assistant","message":{"content":[{"type":"future_block"}]}}"#;
+        let err = parse_line_all(line).unwrap_err();
+        assert!(matches!(err, ParseError::Malformed { .. }));
+    }
+
     #[test]
     fn parses_user_tool_result_string() {
         let line = br#"{"type":"user","message":{"content":[{"type":"tool_result","content":"file written"}]}}"#;
@@ -513,19 +601,22 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn unknown_assistant_content_block_type_emits_drift_warn() {
-        // Claude could add a new content block (e.g. "thinking" / "image"
-        // / something else entirely) inside an assistant message. The
-        // parser silently dropped these pre-#542 — now they surface as
-        // a drift warn so operators see the addition in tracing output.
+        // Claude could add a new content block ("redacted_thinking",
+        // "image", etc.) inside an assistant message. The parser
+        // silently dropped these pre-#542 — now they surface as a
+        // drift warn so operators see the addition in tracing output.
+        // `future_unknown_block` is a stable stand-in for the next
+        // unknown type; using a real-but-currently-unmapped type
+        // would couple this test to the parser's coverage roadmap.
         let line = br#"{"type":"assistant","message":{"content":[
             {"type":"text","text":"hello"},
-            {"type":"thinking","content":"reasoning"}
+            {"type":"future_unknown_block","payload":"x"}
         ]}}"#;
         let _ = parse_line_all(line).unwrap();
         assert!(logs_contain(
             "parser drift: unrecognized assistant content-block"
         ));
-        assert!(logs_contain("thinking"));
+        assert!(logs_contain("future_unknown_block"));
     }
 
     #[tracing_test::traced_test]
