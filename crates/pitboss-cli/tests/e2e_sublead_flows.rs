@@ -158,7 +158,11 @@ async fn root_spawns_sublead_which_completes() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
-        *sub_layer.budget.spent_usd.lock().await = actual_spend;
+        *sub_layer
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = actual_spend;
     }
 
     // Trigger reconciliation (mimics Event::Result terminal event).
@@ -177,7 +181,12 @@ async fn root_spawns_sublead_which_completes() {
         "root.budget.reserved_usd should be 0 after reconcile"
     );
     assert_eq!(
-        *state.root.budget.spent_usd.lock().await,
+        *state
+            .root
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
         actual_spend,
         "root.budget.spent_usd should equal sub-lead actual spend"
     );
@@ -569,7 +578,12 @@ async fn budget_envelope_returns_to_root_pool() {
 
     // Record root's pre-spawn baseline.
     let pre_spawn_reserved = *state.root.budget.reserved_usd.lock().await;
-    let pre_spawn_spent = *state.root.budget.spent_usd.lock().await;
+    let pre_spawn_spent = *state
+        .root
+        .budget
+        .spent_usd
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Root lead spawns sub-lead with $5 envelope.
     let req = SubleadSpawnRequest {
@@ -601,7 +615,11 @@ async fn budget_envelope_returns_to_root_pool() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer must exist");
-        *sub_layer.budget.spent_usd.lock().await = actual_spend;
+        *sub_layer
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = actual_spend;
     }
 
     // Reconcile (terminate the sub-lead).
@@ -623,7 +641,12 @@ async fn budget_envelope_returns_to_root_pool() {
         "root.budget.reserved_usd should return to pre-spawn value after reconcile"
     );
     assert_eq!(
-        *state.root.budget.spent_usd.lock().await,
+        *state
+            .root
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
         pre_spawn_spent + actual_spend,
         "root.budget.spent_usd should increase by the sub-lead's actual spend"
     );

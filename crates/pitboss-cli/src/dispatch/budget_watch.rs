@@ -92,7 +92,12 @@ impl SpendBreakdown {
 /// Walk every layer in the run (root + live sub-leads + terminated
 /// sub-leads) and assemble the current spend totals.
 pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
-    let workers_root = *state.root.budget.spent_usd.lock().await;
+    let workers_root = *state
+        .root
+        .budget
+        .spent_usd
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lead_usd = *state
         .root
         .budget
@@ -105,7 +110,11 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
     {
         let live = state.subleads.read().await;
         for layer in live.values() {
-            workers_subs += *layer.budget.spent_usd.lock().await;
+            workers_subs += *layer
+                .budget
+                .spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             subleads_usd += *layer
                 .budget
                 .lead_spent_usd
@@ -116,7 +125,11 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
     {
         let terminated = state.terminated_sublead_layers.read().await;
         for layer in terminated.iter() {
-            workers_subs += *layer.budget.spent_usd.lock().await;
+            workers_subs += *layer
+                .budget
+                .spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             subleads_usd += *layer
                 .budget
                 .lead_spent_usd
@@ -134,18 +147,21 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
 
 /// Synchronous variant of [`compute_total_spend`]. Used inside the
 /// usage observer, which runs from a non-async context inside the
-/// session stream loop. Uses `try_lock` on the tokio mutexes — if a
-/// `worker_status` MCP call happens to be reading worker spend at the
-/// same instant the contention is benign and the next observer fire
-/// gets a fresh reading.
+/// session stream loop. `spent_usd` and `lead_spent_usd` are
+/// `std::sync::Mutex<f64>` and acquired with a short blocking
+/// `.lock()` — critical sections are an f64 read away. The remaining
+/// `try_read()` on `state.subleads` is a tokio `RwLock` and falls
+/// back to a partial sum on contention with a concurrent
+/// `register_sublead` / `reconcile_terminated_sublead`; those writes
+/// are rare (one per sub-lead lifecycle event) so the next observer
+/// fire gets a fresh reading.
 fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
-    let workers_root = state
+    let workers_root = *state
         .root
         .budget
         .spent_usd
-        .try_lock()
-        .map(|g| *g)
-        .unwrap_or(0.0);
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lead_usd = *state
         .root
         .budget
@@ -157,7 +173,11 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
     let mut subleads_usd = 0.0_f64;
     if let Ok(live) = state.subleads.try_read() {
         for layer in live.values() {
-            workers_subs += layer.budget.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
+            workers_subs += *layer
+                .budget
+                .spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             subleads_usd += *layer
                 .budget
                 .lead_spent_usd
@@ -167,7 +187,11 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
     }
     if let Ok(terminated) = state.terminated_sublead_layers.try_read() {
         for layer in terminated.iter() {
-            workers_subs += layer.budget.spent_usd.try_lock().map(|g| *g).unwrap_or(0.0);
+            workers_subs += *layer
+                .budget
+                .spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             subleads_usd += *layer
                 .budget
                 .lead_spent_usd

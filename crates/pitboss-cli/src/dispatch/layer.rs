@@ -148,7 +148,16 @@ pub struct BudgetState {
     /// Total USD spent so far on completed workers in this layer.
     /// Lead and sub-lead token spend are accounted in `lead_spent_usd`;
     /// helpers that compute the total run spend sum across layers.
-    pub spent_usd: Mutex<f64>,
+    ///
+    /// Uses `std::sync::Mutex` rather than `tokio::sync::Mutex` because
+    /// `dispatch::budget_watch::compute_total_spend_blocking` (run from
+    /// the synchronous session-stream usage observer) needs to read it
+    /// without `try_lock` — previously, contention from a concurrent
+    /// `worker_status` MCP call would silently zero this contribution
+    /// and delay budget-abort by one or more assistant turns. Critical
+    /// sections are short (f64 read/write); no `.await` may cross the
+    /// guard.
+    pub spent_usd: std::sync::Mutex<f64>,
     /// USD reserved for in-flight workers at spawn time.
     pub reserved_usd: Mutex<f64>,
     /// Token spend (USD) attributed to *this layer's lead* (the root
@@ -173,7 +182,7 @@ impl BudgetState {
     /// and `abort_reason` is `None`.
     pub fn new() -> Self {
         Self {
-            spent_usd: Mutex::new(0.0),
+            spent_usd: std::sync::Mutex::new(0.0),
             reserved_usd: Mutex::new(0.0),
             lead_spent_usd: std::sync::Mutex::new(0.0),
             abort_reason: std::sync::Mutex::new(None),
@@ -605,7 +614,11 @@ impl LayerState {
 
     pub async fn budget_remaining(&self) -> Option<f64> {
         let budget = self.manifest.budget_usd?;
-        let spent = *self.budget.spent_usd.lock().await;
+        let spent = *self
+            .budget
+            .spent_usd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Some((budget - spent).max(0.0))
     }
 
@@ -659,7 +672,14 @@ mod tests {
         let (_dir, layer) = mk_layer();
         assert!(layer.workers.states.read().await.is_empty());
         assert!(layer.workers.cancels.read().await.is_empty());
-        assert_eq!(*layer.budget.spent_usd.lock().await, 0.0);
+        assert_eq!(
+            *layer
+                .budget
+                .spent_usd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0.0
+        );
         assert_eq!(*layer.budget.reserved_usd.lock().await, 0.0);
     }
 

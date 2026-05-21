@@ -458,7 +458,12 @@ async fn spawn_worker_refuses_when_max_workers_reached() {
 #[tokio::test]
 async fn spawn_worker_refuses_when_budget_exceeded() {
     let state = test_state().await; // budget_usd = 5.0
-    *state.root.budget.spent_usd.lock().await = 5.0; // at cap
+    *state
+        .root
+        .budget
+        .spent_usd
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = 5.0; // at cap
     let args = SpawnWorkerArgs {
         prompt: "p".into(),
         directory: None,
@@ -878,7 +883,12 @@ async fn spawn_worker_completes_and_updates_spent_usd_and_parent_task_id() {
 
     // Verify cost accumulation. claude-haiku-4-5: input $0.80/1M, output $4.00/1M.
     // 1000 input = $0.0008; 2000 output = $0.008; total = $0.0088.
-    let spent = *state.root.budget.spent_usd.lock().await;
+    let spent = *state
+        .root
+        .budget
+        .spent_usd
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
         (spent - 0.0088).abs() < 1e-6,
         "expected spent_usd ≈ 0.0088, got {spent}"
