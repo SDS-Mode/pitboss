@@ -541,7 +541,16 @@
         const ev = e as ControlEnvelope & ResourceSampleEvent;
         latestResourceSample = ev;
         if (resourceSamples.length >= 240) resourceSamples.shift();
-        resourceSamples.push({ envelope: ev, at: Date.now() });
+        // Prefer the server-side wire timestamp (#580 FU-4) so the
+        // chart's X-axis matches sample order, not receive order, and
+        // events.jsonl replay plots at the original cadence. Fall
+        // back to receive time for pre-v0.17 envelopes where the
+        // field is absent or zero.
+        const at =
+          ev.sampled_at_unix_ms && ev.sampled_at_unix_ms > 0
+            ? ev.sampled_at_unix_ms
+            : Date.now();
+        resourceSamples.push({ envelope: ev, at });
         resourceSamples = resourceSamples; // trigger reactivity
         break;
       }

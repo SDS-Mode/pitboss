@@ -342,6 +342,18 @@ pub enum ControlEvent {
     /// out to in-flight viewers. (#553)
     ResourceSample {
         samples: Vec<ResourceSampleEntry>,
+        /// Unix milliseconds at the moment the watcher took the sample
+        /// (parent-side `SystemTime::now`). Stamped so `events.jsonl`
+        /// replay tooling can plot the time-series at the original
+        /// cadence — without this, replaying N hours of samples
+        /// collapses to a single instant (the replay clock) and live
+        /// X-axes match receive order instead of sample order under
+        /// tokio scheduler backlog. `#[serde(default)]` (= `0`) so
+        /// pre-v0.17 envelopes decode cleanly; SPA consumers prefer
+        /// this when present (`> 0`) and fall back to `Date.now()`
+        /// otherwise. (#580 FU-4)
+        #[serde(default)]
+        sampled_at_unix_ms: u64,
         /// `cgroup memory.current` at sample time, in bytes.
         /// `None` in flat host dispatch (no cgroup in scope).
         #[serde(default, skip_serializing_if = "Option::is_none")]
