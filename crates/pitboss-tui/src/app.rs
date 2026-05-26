@@ -46,7 +46,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
     // sourced `Task` and `Lifecycle` arms through this same channel and
     // retire the watcher's separate snapshot path.
     let (ctrl_events_tx, ctrl_events_rx) =
-        std::sync::mpsc::channel::<pitboss_cli::stream::LiveStreamItem>();
+        std::sync::mpsc::channel::<pitboss_cli::live_stream::LiveStreamItem>();
 
     // Channel for asynchronously-computed git-diff summaries (#154 M3).
     // `enter_detail_for` spawns a worker thread that shells out to `git
@@ -91,10 +91,10 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
             .block_on(async {
                 tokio::time::timeout(
                     std::time::Duration::from_millis(200),
-                    pitboss_cli::stream::open_run_session(
+                    pitboss_cli::live_stream::open_run_session(
                         run_dir,
                         socket_path,
-                        pitboss_cli::stream::LiveStreamMode::LiveOnly,
+                        pitboss_cli::live_stream::LiveStreamMode::LiveOnly,
                     ),
                 )
                 .await
@@ -302,7 +302,7 @@ pub fn run(run_dir: PathBuf, run_id: String) -> anyhow::Result<()> {
         // `Task`/`Lifecycle` payloads from the watcher through this
         // same channel and the watcher will retire.
         while let Ok(item) = ctrl_events_rx.try_recv() {
-            if let pitboss_cli::stream::LiveStreamPayload::Event(env) = item.payload {
+            if let pitboss_cli::live_stream::LiveStreamPayload::Event(env) = item.payload {
                 apply_control_event(&mut state, env.event);
             }
         }

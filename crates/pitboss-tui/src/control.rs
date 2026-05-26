@@ -1,6 +1,6 @@
 //! TUI-side control-socket client.
 //!
-//! Wraps the writer half of a [`pitboss_cli::stream::RunStreamSession`]
+//! Wraps the writer half of a [`pitboss_cli::live_stream::RunStreamSession`]
 //! so keypress handlers can issue control ops while the read half feeds
 //! the unified stream consumed by the main event loop. Updated for
 //! PR-D of #438 (TUI cutover to unified consumer).
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use pitboss_cli::control::protocol::ControlOp;
-use pitboss_cli::stream::RunStreamWriter;
+use pitboss_cli::live_stream::RunStreamWriter;
 
 #[derive(Debug)]
 pub struct ControlClient {
@@ -20,7 +20,7 @@ pub struct ControlClient {
 
 impl ControlClient {
     /// Wrap a session writer. The writer is produced by
-    /// [`pitboss_cli::stream::open_run_session`] when a live socket
+    /// [`pitboss_cli::live_stream::open_run_session`] when a live socket
     /// connection succeeds; otherwise no client is constructed and the
     /// TUI stays observe-only.
     #[must_use]

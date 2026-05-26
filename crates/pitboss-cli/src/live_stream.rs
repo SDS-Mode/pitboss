@@ -7,20 +7,29 @@
 //! [`pitboss_core::stream`]'s disk-replay foundation (PR-A) with the
 //! per-run control socket's live envelope stream (PR-B's `seq` plumbing)
 //! into one [`LiveStreamItem`] channel. It is the substrate the TUI
-//! cutover (PR-D) will sit on; web SSE and CLI one-shots follow.
+//! cutover (PR-D) sits on; web SSE and CLI one-shots compose the same
+//! way.
 //!
-//! ## Where this lives
+//! ## Why this is `live_stream`, not `stream`
 //!
 //! The RFC put the unified API in `pitboss-core::stream`. We can't quite
 //! deliver that today because the typed [`EventEnvelope`] depends on
 //! `mcp::policy::ApprovalRule` and the rest of the `ControlEvent`
 //! payload types, which carry MCP/approval concerns that don't belong in
-//! `pitboss-core` (#481 unified `ActorPath` — the other half of the
-//! dependency — but stopped short of dragging `ApprovalRule` down as
-//! well; see `pitboss-core::control_protocol`'s preamble). For now the
-//! live consumer lives **here** in `pitboss-cli::stream` and
+//! `pitboss-core` (#481 unified `ActorPath` and the type-erased envelope
+//! shell; the typed `ApprovalRule` half of the dependency was left in
+//! place — see `pitboss-core::control_protocol`'s preamble). So the
+//! live consumer lives **here** in `pitboss-cli::live_stream` and
 //! `pitboss-core::stream` exposes only the disk side. The two compose
 //! via [`From<RunStreamItem>`] for [`LiveStreamItem`].
+//!
+//! The module was previously named `pitboss-cli::stream`, which collided
+//! with `pitboss-core::stream` in navigation (two modules with the same
+//! name across crates, with overlapping but non-identical surfaces — a
+//! reader couldn't tell which one a `use ...::stream::X` was pulling
+//! from without checking the import line). Renamed to `live_stream` per
+//! F-ARCH-6 (#485) to make the role explicit: disk-only lives in
+//! `pitboss-core::stream`, live+disk composition lives here.
 //!
 //! ## What about `Subscribe { since_seq }`?
 //!
