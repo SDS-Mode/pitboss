@@ -87,7 +87,7 @@ async fn sublead_kv_writes_isolated_from_root() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -135,6 +135,7 @@ async fn sublead_kv_writes_isolated_from_root() {
         !sub_read["entry"].is_null(),
         "sub-lead should be able to read its own write; got: {sub_read}"
     );
+    server.shutdown().await;
 }
 
 /// Strict peer-visibility: within any layer, `/peer/<X>/*` is readable only
@@ -154,7 +155,7 @@ async fn sublead_workers_cannot_read_sibling_peer_slots() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -186,6 +187,7 @@ async fn sublead_workers_cannot_read_sibling_peer_slots() {
         err_msg.contains("strict peer visibility") || err_msg.contains("forbidden"),
         "error should mention peer visibility; got: {err_msg}"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -194,7 +196,7 @@ async fn sublead_workers_cannot_wait_on_sibling_peer_slots() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -219,13 +221,14 @@ async fn sublead_workers_cannot_wait_on_sibling_peer_slots() {
         err_msg.contains("strict peer visibility") || err_msg.contains("forbidden"),
         "error should mention peer visibility; got: {err_msg}"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
 async fn spawn_sublead_tool_is_exposed_to_root() {
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -235,6 +238,7 @@ async fn spawn_sublead_tool_is_exposed_to_root() {
         tools.iter().any(|t| t.name == "spawn_sublead"),
         "spawn_sublead should be in the root lead's MCP toolset"
     );
+    server.shutdown().await;
 }
 
 /// Mirror of `spawn_sublead_tool_is_exposed_to_root`: when the manifest
@@ -255,7 +259,7 @@ async fn spawn_sublead_tool_is_exposed_to_root() {
 async fn spawn_sublead_tool_hidden_when_allow_subleads_false() {
     let (_dir, state) = mk_state_without_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -271,6 +275,7 @@ async fn spawn_sublead_tool_hidden_when_allow_subleads_false() {
         "list_tools must hide every ROOT_ONLY_TOOLS entry when \
          allow_subleads = false; leaks: {leaks:?}"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -279,7 +284,7 @@ async fn spawn_sublead_creates_isolated_layer() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -327,6 +332,7 @@ async fn spawn_sublead_creates_isolated_layer() {
 
     // Root's reservation should reflect the sub-lead's envelope.
     assert_eq!(*state.root.budget.reserved_usd.lock().await, 5.0);
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -335,7 +341,7 @@ async fn root_cancel_cascades_to_sublead_workers() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -388,6 +394,7 @@ async fn root_cancel_cascades_to_sublead_workers() {
         tok.is_draining(),
         "sub-tree worker should be cancelled by root cascade"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -396,7 +403,7 @@ async fn sublead_cannot_call_spawn_sublead() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -420,6 +427,7 @@ async fn sublead_cannot_call_spawn_sublead() {
         err_msg.contains("depth-2") || err_msg.contains("only available to the root lead"),
         "error message should mention depth-2 invariant, got: {err_msg}"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -498,7 +506,7 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -563,6 +571,7 @@ async fn run_lease_blocks_cross_subtree_acquisition() {
         )
         .await;
     assert!(acq3.is_ok(), "s2 should acquire after s1 releases");
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -688,7 +697,7 @@ async fn policy_auto_approves_sublead_actor() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -756,6 +765,7 @@ async fn policy_auto_approves_sublead_actor() {
         "policy short-circuit must not enqueue approval; queue has {} items",
         queue.len()
     );
+    server.shutdown().await;
 }
 
 // ── Task 4.1: Rich approval record fields ────────────────────────────────────
@@ -878,7 +888,7 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -969,6 +979,7 @@ async fn kill_worker_with_reason_reprompts_parent_sublead() {
         "reprompt should include reason; got: {}",
         received[0]
     );
+    server.shutdown().await;
 }
 
 // ── Task 5.1: Manifest schema for allow_subleads and caps ─────────────────────
@@ -1022,7 +1033,7 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
     let (_dir, state) = mk_state_with_sublead_budget_cap(3.0);
 
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
     let mut root = connect_actor(&state, &socket, "root", "root_lead").await;
@@ -1039,6 +1050,7 @@ async fn spawn_sublead_rejected_when_over_max_sublead_budget() {
         err.contains("exceeds per-sublead cap"),
         "error should mention the cap; got: {err}"
     );
+    server.shutdown().await;
 }
 
 /// `resolve_envelope` enforces the `max_total_workers` cap by summing root
@@ -1308,7 +1320,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1366,6 +1378,7 @@ async fn sublead_spawn_worker_registers_in_sub_tree_layer() {
         Some(sublead_id.as_str()),
         "worker_layer_index must point to sublead_id; got: {indexed_layer:?}"
     );
+    server.shutdown().await;
 }
 
 /// A worker actor (with `_meta.actor_role = "worker"`) calls `spawn_worker`.
@@ -1376,7 +1389,7 @@ async fn worker_cannot_spawn_worker() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1395,6 +1408,7 @@ async fn worker_cannot_spawn_worker() {
         err_msg.contains("depth-2") || err_msg.contains("not available to workers"),
         "error should mention the depth-2 cap; got: {err_msg}"
     );
+    server.shutdown().await;
 }
 
 /// Calling `spawn_worker` WITHOUT `_meta` (the v0.5 backward-compat path)
@@ -1454,7 +1468,7 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1537,6 +1551,7 @@ async fn kill_with_reason_delivers_synthetic_reprompt_to_running_lead() {
         msg.contains("[SYSTEM]"),
         "reprompt message should use [SYSTEM] prefix; got: {msg}"
     );
+    server.shutdown().await;
 }
 
 /// When the parent lead has already terminated (workers map entry is Done),
@@ -1549,7 +1564,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1652,6 +1667,7 @@ async fn kill_with_reason_skips_delivery_when_lead_already_terminated() {
 
     // No assertion on result — the point is no panic, no hang.
     let _ = result;
+    server.shutdown().await;
 }
 
 /// Sub-lead (with its own $5 envelope) spawns a worker. The spend reservation
@@ -1750,7 +1766,7 @@ async fn kill_with_reason_delivers_to_root_lead() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1807,6 +1823,7 @@ async fn kill_with_reason_delivers_to_root_lead() {
         msg.contains("[SYSTEM]"),
         "reprompt message should use [SYSTEM] prefix; got: {msg}"
     );
+    server.shutdown().await;
 }
 
 /// v0.5 back-compat regression: when no kill-with-reason events are issued,

@@ -29,7 +29,7 @@ fn mk_state() -> (TempDir, Arc<DispatchState>) {
 async fn mcp_spawn_and_list_round_trip() {
     let (_dir, state) = mk_state();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -57,13 +57,14 @@ async fn mcp_spawn_and_list_round_trip() {
     assert_eq!(list[0]["task_id"].as_str().unwrap(), task_id);
 
     client.close().await.unwrap();
+    server.shutdown().await;
 }
 
 #[tokio::test]
 async fn mcp_spawn_over_max_workers_returns_error() {
     let (_dir, state) = mk_state(); // max_workers = 4
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
     let token = mint_root_token(&state).await;
@@ -103,6 +104,7 @@ async fn mcp_spawn_over_max_workers_returns_error() {
     }
 
     client.close().await.unwrap();
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -115,7 +117,7 @@ async fn mcp_spawn_over_budget_returns_error() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = 5.0;
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
     let token = mint_root_token(&state).await;
@@ -144,6 +146,7 @@ async fn mcp_spawn_over_budget_returns_error() {
     }
 
     client.close().await.unwrap();
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -151,7 +154,7 @@ async fn mcp_spawn_while_draining_returns_error() {
     let (_dir, state) = mk_state();
     state.root.cancel.drain();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
     let token = mint_root_token(&state).await;
@@ -180,6 +183,7 @@ async fn mcp_spawn_while_draining_returns_error() {
     }
 
     client.close().await.unwrap();
+    server.shutdown().await;
 }
 
 // Task 26 of the v0.3 plan left a placeholder here; the full
@@ -196,7 +200,7 @@ async fn wait_actor_alias_resolves_worker_id() {
 
     let (_dir, state) = mk_state();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -261,6 +265,7 @@ async fn wait_actor_alias_resolves_worker_id() {
     assert!(result.is_ok(), "wait_actor should accept worker actor_ids");
 
     client.close().await.unwrap();
+    server.shutdown().await;
 }
 
 #[test]
@@ -296,10 +301,10 @@ async fn concurrent_runs_isolate_sockets_and_tokens() {
         "concurrent runs must derive distinct socket paths from their UUIDv7 run_ids"
     );
 
-    let _server_a = McpServer::start(socket_a.clone(), state_a.clone())
+    let server_a = McpServer::start(socket_a.clone(), state_a.clone())
         .await
         .unwrap();
-    let _server_b = McpServer::start(socket_b.clone(), state_b.clone())
+    let server_b = McpServer::start(socket_b.clone(), state_b.clone())
         .await
         .unwrap();
 
@@ -330,4 +335,6 @@ async fn concurrent_runs_isolate_sockets_and_tokens() {
         "expected 'invalid actor token' rejection, got: {msg}"
     );
     let _ = client_cross.close().await;
+    server_a.shutdown().await;
+    server_b.shutdown().await;
 }

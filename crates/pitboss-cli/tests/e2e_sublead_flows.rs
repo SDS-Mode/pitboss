@@ -331,7 +331,7 @@ async fn run_global_lease_serializes_two_subleads() {
     let (run_id, state) = mk_state_hold_workers(dir.path());
 
     let socket = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -414,6 +414,7 @@ async fn run_global_lease_serializes_two_subleads() {
     );
 
     state.root.cancel.terminate();
+    server.shutdown().await;
 }
 
 // ── Test 4: Reject-with-reason reaches sub-lead session ──────────────────────
