@@ -15,11 +15,18 @@ fn main() {
     // and then never again even if `TMPDIR` was fixed.
     println!("cargo:rerun-if-env-changed=TMPDIR");
 
-    #[cfg(target_os = "macos")]
-    check_tmpdir_length();
+    // Read the **target** OS via cargo's `CARGO_CFG_TARGET_OS`. A naive
+    // `#[cfg(target_os = "macos")]` inside a build script reflects the
+    // *host*, not the target — wrong for cross-compilation (e.g. a Linux
+    // host cross-compiling for `aarch64-apple-darwin` would skip the
+    // check, and a macOS host cross-compiling for Linux would fire it
+    // spuriously). `dist-workspace.toml` cross-compiles to both, so
+    // host-gating is incorrect for this project.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        check_tmpdir_length();
+    }
 }
 
-#[cfg(target_os = "macos")]
 fn check_tmpdir_length() {
     // The documented workaround `/private/tmp/pb` is 15 chars. The default
     // macOS `/var/folders/...` is ~49 chars. 35 is comfortably above the
