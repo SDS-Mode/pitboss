@@ -95,7 +95,7 @@ async fn yield_for_cascade_watcher() {
 async fn sublead_spawned_after_root_drain_inherits_drain() {
     let (_dir, state) = mk_state();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -122,6 +122,7 @@ async fn sublead_spawned_after_root_drain_inherits_drain() {
         sub_layer.cancel.is_draining(),
         "sub-lead spawned post-drain must inherit drain via the eager cascade"
     );
+    server.shutdown().await;
 }
 
 /// Sub-lead spawned **after** `state.root.cancel.terminate()` must
@@ -132,7 +133,7 @@ async fn sublead_spawned_after_root_drain_inherits_drain() {
 async fn sublead_spawned_after_root_terminate_inherits_terminate() {
     let (_dir, state) = mk_state();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -159,6 +160,7 @@ async fn sublead_spawned_after_root_terminate_inherits_terminate() {
         sub_layer.cancel.is_terminated(),
         "sub-lead spawned post-terminate must inherit terminate via the eager cascade"
     );
+    server.shutdown().await;
 }
 
 /// Worker registered in a **drained sub-tree** (root still healthy) must
@@ -170,7 +172,7 @@ async fn sublead_spawned_after_root_terminate_inherits_terminate() {
 async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
     let (_dir, state) = mk_state();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -212,6 +214,7 @@ async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
         tok.is_draining(),
         "worker spawned in drained sub-tree must inherit drain via the eager cascade"
     );
+    server.shutdown().await;
 }
 
 /// Production-behavior pin: terminating a sub-tree reaps the sub-lead.
@@ -226,7 +229,7 @@ async fn worker_spawned_in_subtree_after_subtree_drain_inherits_drain() {
 async fn worker_spawn_after_subtree_terminate_fails_with_unknown_sublead() {
     let (_dir, state) = mk_state();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -262,4 +265,5 @@ async fn worker_spawn_after_subtree_terminate_fails_with_unknown_sublead() {
         msg.contains("unknown sublead_id"),
         "expected reaping to make the sub-lead unknown; got: {msg}"
     );
+    server.shutdown().await;
 }

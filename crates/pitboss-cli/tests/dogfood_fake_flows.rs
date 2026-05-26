@@ -250,7 +250,7 @@ async fn dogfood_isolation_strict_tree() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -420,6 +420,7 @@ async fn dogfood_isolation_strict_tree() {
     )
     .await
     .unwrap();
+    server.shutdown().await;
 }
 
 // ── Spotlight #03: kill-cascade-drain ────────────────────────────────────────
@@ -460,7 +461,7 @@ async fn dogfood_kill_cascade_drain() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -587,6 +588,7 @@ async fn dogfood_kill_cascade_drain() {
         state.root.cancel.is_draining(),
         "root cancel should be draining after operator cancel"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -599,7 +601,7 @@ async fn dogfood_run_lease_contention() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -713,6 +715,7 @@ async fn dogfood_run_lease_contention() {
         acq3_resp["holder"], s2_id,
         "S2 acquire should list S2 as holder (not S1)"
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -732,7 +735,7 @@ async fn dogfood_policy_auto_filter() {
 
     let (_dir, state) = mk_state_with_subleads();
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -910,6 +913,7 @@ async fn dogfood_policy_auto_filter() {
 
     // Clean up the hanging plan approval.
     plan_req_handle.abort();
+    server.shutdown().await;
 }
 
 // ── Spotlight #06: Envelope cap rejection ──────────────────────────────────────
@@ -1012,7 +1016,7 @@ async fn dogfood_envelope_cap_rejection() {
     };
 
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1108,4 +1112,5 @@ async fn dogfood_envelope_cap_rejection() {
     }
 
     eprintln!("Spotlight #06 passed: cap enforcement clean rejection + successful retry");
+    server.shutdown().await;
 }

@@ -177,7 +177,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
 
     // Start the MCP server so fake-claude's mcp_call can land somewhere.
     let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+    let server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Write the script. spawn_worker returns {task_id: "worker-..."},
     // stored under "w1"; wait_for_worker then consumes $w1.task_id.
@@ -240,6 +240,7 @@ async fn e2e_lead_spawns_worker_via_real_subprocess() {
 
     // Explicit cleanup: cancel the run token so any stray tasks exit.
     state.root.cancel.terminate();
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -250,7 +251,7 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
     let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
 
     let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+    let server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Three spawn_workers then one wait_for_any. Workers complete quickly
     // under the FakeSpawner so wait_for_any resolves once the first exits.
@@ -303,6 +304,7 @@ async fn e2e_lead_spawns_three_workers_and_waits_for_any() {
     );
 
     state.root.cancel.terminate();
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -387,7 +389,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
     ));
 
     let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+    let server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // spawn_worker (worker hangs), sleep for slot fill, cancel_worker, list.
     let script = dir.path().join("script.jsonl");
@@ -439,6 +441,7 @@ async fn e2e_lead_cancels_worker_mid_flight() {
     }
 
     state.root.cancel.terminate();
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -674,7 +677,7 @@ async fn e2e_lead_reprompts_running_worker() {
     ));
 
     let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+    let server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Spawn a worker, sleep for init+result to land (session_id captured),
     // reprompt it.
@@ -732,6 +735,7 @@ async fn e2e_lead_reprompts_running_worker() {
     assert_eq!(counters.reprompt_count, 1);
 
     state.root.cancel.terminate();
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -1008,7 +1012,7 @@ async fn e2e_lead_through_mcp_bridge_injects_meta() {
     let (run_id, state) = mk_state(dir.path(), ApprovalPolicy::Block);
 
     let sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
+    let server = McpServer::start(sock.clone(), state.clone()).await.unwrap();
 
     // Lead script: init, kv_set on /shared/bridge_probe, result.
     // kv_set carries `_meta` as a required field — the bridge's job is
@@ -1065,6 +1069,7 @@ async fn e2e_lead_through_mcp_bridge_injects_meta() {
     );
 
     state.root.cancel.terminate();
+    server.shutdown().await;
 }
 
 /// Test-only ProcessSpawner that rewrites each spawn to run fake-claude
@@ -1204,7 +1209,7 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
     ));
 
     let mcp_sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(mcp_sock.clone(), state.clone())
+    let server = McpServer::start(mcp_sock.clone(), state.clone())
         .await
         .unwrap();
 
@@ -1257,4 +1262,5 @@ async fn e2e_freeze_pause_and_continue_real_subprocess_worker() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     state.root.cancel.terminate();
     tokio::time::sleep(Duration::from_millis(200)).await;
+    server.shutdown().await;
 }

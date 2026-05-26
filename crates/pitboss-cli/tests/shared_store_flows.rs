@@ -496,7 +496,7 @@ async fn lease_released_when_mcp_connection_drops() {
     ));
 
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -549,6 +549,7 @@ async fn lease_released_when_mcp_connection_drops() {
         "lease should be free after session A dropped: {acq_b}"
     );
     client_b.close().await.unwrap();
+    server.shutdown().await;
 }
 
 /// End-to-end test of the per-connection run-global-lease cleanup hook.
@@ -652,7 +653,7 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
     ));
 
     let socket = socket_path_for_run(state.root.run_id, &state.root.manifest.run_dir);
-    let _server = McpServer::start(socket.clone(), state.clone())
+    let server = McpServer::start(socket.clone(), state.clone())
         .await
         .unwrap();
 
@@ -705,4 +706,5 @@ async fn run_global_lease_released_when_mcp_connection_drops() {
         "run-global lease should be free after session A dropped: {acq_b}"
     );
     client_b.close().await.unwrap();
+    server.shutdown().await;
 }
