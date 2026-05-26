@@ -130,6 +130,29 @@ impl FakeScript {
     }
 }
 
+/// In-process spawner used by tests to play back a scripted child
+/// process without touching the OS.
+///
+/// **Signal-path coverage is intentionally limited.** Every [`FakeChild`]
+/// reports `pid: 1` and routes `terminate()` / `kill()` through an
+/// internal `oneshot` channel rather than real `kill(2)` syscalls. That
+/// means tests using `FakeSpawner` exercise the dispatcher's
+/// kill-then-resume control flow, but they do **not** exercise:
+///
+/// - The `dispatch/signals.rs` `SIGSTOP` / `SIGCONT` freeze/thaw path
+///   (which signals the child's process group via the real pid).
+/// - Process-group teardown via `kill(-pgid, …)` from
+///   [`crate::process::tokio::TokioChild`].
+/// - `/proc/<pid>/status` state inspection on Linux (used by
+///   `freeze_then_resume_flips_proc_state`).
+///
+/// The real-process signal tests in `pitboss-cli::dispatch::signals` are
+/// `#[cfg(target_os = "linux")]`-gated, so **Linux CI is the ground
+/// truth for signal coverage**. macOS local runs and the macOS CI matrix
+/// intentionally skip those tests; making `FakeSpawner` mint a real pid
+/// would invite tests that pretend to cover the signal path but actually
+/// don't (the kernel won't deliver signals to a pid we didn't spawn).
+/// See issue #540 (F-TEST-6) for the audit finding.
 #[derive(Clone)]
 pub struct FakeSpawner {
     script: FakeScript,
@@ -260,6 +283,9 @@ impl ProcessSpawner for FakeSpawner {
             exit_rx: Some(exit_rx),
             cached_exit_code: None,
             kill_tx: Some(kill_tx),
+            // Deliberately bogus — see the `FakeSpawner` doc comment.
+            // Tests that need real signal-path coverage must run under
+            // `TokioSpawner` on Linux CI, not `FakeSpawner`.
             pid: 1,
         }))
     }
