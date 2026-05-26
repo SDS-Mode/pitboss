@@ -312,11 +312,17 @@ mod tests {
             .await
             .unwrap();
 
+        // Clean up the env var BEFORE the assertion. If the assertion
+        // were to panic, a `remove_var` AFTER it would never run and
+        // `PITBOSS_RUN_ID` would leak into subsequent #[serial(env)]
+        // tests in the same process. Capturing the captured value first
+        // and clearing the env *before* asserting closes that gap.
+        let captured = init.parent_run_id.clone();
+        std::env::remove_var("PITBOSS_RUN_ID");
         assert_eq!(
-            init.parent_run_id.as_deref(),
+            captured.as_deref(),
             Some("01234567-89ab-7def-8123-456789abcdef")
         );
-        std::env::remove_var("PITBOSS_RUN_ID");
     }
 
     #[tokio::test]
@@ -380,13 +386,19 @@ mod tests {
         assert_eq!(snapshot, manifest_text);
 
         // resolved.json must be valid JSON and re-parse into a
-        // ResolvedManifest — `run_dir` is the only field with a
-        // non-Default value here so checking it round-trips is the
-        // cheapest end-to-end deserialization assertion.
+        // ResolvedManifest. Assert two structurally distinct fields to
+        // exercise both PathBuf round-trip (run_dir) and an enum-tagged
+        // value (worktree_cleanup) — a serde regression in either path
+        // would otherwise pass a single-field check silently.
         let resolved_bytes = tokio::fs::read(init.run_subdir.join("resolved.json"))
             .await
             .unwrap();
         let round_trip: ResolvedManifest = serde_json::from_slice(&resolved_bytes).unwrap();
         assert_eq!(round_trip.run_dir, dir.path());
+        assert!(matches!(
+            round_trip.worktree_cleanup,
+            WorktreeCleanup::OnSuccess
+        ));
+        assert_eq!(round_trip.max_parallel_tasks, Some(1));
     }
 }
