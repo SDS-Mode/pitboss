@@ -179,8 +179,14 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     if !pid_path.as_os_str().is_empty() {
         eprintln!("pidfile: {}", pid_path.display());
     }
-    if let Some(t) = &args.token {
-        eprintln!("auth required: Authorization: Bearer {}", t);
+    // #612: never print the token itself. The operator who passed
+    // `--token` already knows the value; printing it persists the
+    // secret in any aggregator that captures startup stderr (systemd
+    // journal, docker logs, k8s log collection). To verify the token
+    // loaded, `curl --fail` against any endpoint without the header
+    // returns 401 — a stronger check than visual confirmation.
+    if args.token.is_some() {
+        eprintln!("auth required: Bearer token configured");
     } else {
         eprintln!("no auth (loopback only)");
     }
