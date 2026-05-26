@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pitboss_core::process::ProcessSpawner;
@@ -134,6 +135,66 @@ impl Default for WorkerRegistry {
     }
 }
 
+/// An atomic USD counter. Holds an `f64` value bit-cast into an
+/// `AtomicU64`, so reads and writes are lock-free and can cross
+/// sync↔async boundaries without the std-vs-tokio Mutex hazard.
+///
+/// Motivation (F-ARCH-10): `spent_usd` and `lead_spent_usd` used to be
+/// `std::sync::Mutex<f64>` while `reserved_usd` is a `tokio::sync::Mutex`.
+/// Holding the std Mutex's guard across an `.await` would block the
+/// executor; the rule was hand-maintained at every call site. Switching
+/// the two counters to `BudgetCounter` removes the guard-across-await
+/// foot-gun without restoring the original "session-stream sync observer
+/// vs `try_lock` partial-sum" hazard — atomic ops don't suspend, so the
+/// fallback path in `compute_total_spend_blocking` is no longer needed
+/// for *these* fields (the tokio `RwLock` on `state.subleads` still
+/// keeps its `try_read()` fallback).
+///
+/// Concurrency for the spawn-time "check spent + reserved against
+/// budget → bump reserved" critical section still lives on the async
+/// `reserved_usd` Mutex (the per-spawn TOCTOU guard from #106); the
+/// atomic doesn't try to replace that lock.
+#[derive(Debug, Default)]
+pub struct BudgetCounter(AtomicU64);
+
+impl BudgetCounter {
+    /// New counter at $0.00.
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// Read the current value.
+    pub fn load(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    /// Replace the value (`=` semantics). Returns the previous value.
+    pub fn store(&self, v: f64) -> f64 {
+        f64::from_bits(self.0.swap(v.to_bits(), Ordering::Relaxed))
+    }
+
+    /// Atomically add `delta` (`+=` semantics). Returns the new total.
+    /// Implemented as a CAS loop — uncontended paths complete in one
+    /// iteration; the worst-case retry rate scales with concurrent
+    /// writers, which for spend counters is bounded by the number of
+    /// in-flight workers/leads.
+    pub fn add(&self, delta: f64) -> f64 {
+        let mut prev = self.0.load(Ordering::Relaxed);
+        loop {
+            let new = (f64::from_bits(prev) + delta).to_bits();
+            match self.0.compare_exchange_weak(
+                prev,
+                new,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return f64::from_bits(new),
+                Err(actual) => prev = actual,
+            }
+        }
+    }
+}
+
 /// Layer-aggregate USD spend counters + the budget-abort reason.
 ///
 /// Split out of `LayerState` (#487 step 2) so handlers that only need
@@ -149,26 +210,32 @@ pub struct BudgetState {
     /// Lead and sub-lead token spend are accounted in `lead_spent_usd`;
     /// helpers that compute the total run spend sum across layers.
     ///
-    /// Uses `std::sync::Mutex` rather than `tokio::sync::Mutex` because
-    /// `dispatch::budget_watch::compute_total_spend_blocking` (run from
-    /// the synchronous session-stream usage observer) needs to read it
-    /// without `try_lock` — previously, contention from a concurrent
-    /// `worker_status` MCP call would silently zero this contribution
-    /// and delay budget-abort by one or more assistant turns. Critical
-    /// sections are short (f64 read/write); no `.await` may cross the
-    /// guard.
-    pub spent_usd: std::sync::Mutex<f64>,
-    /// USD reserved for in-flight workers at spawn time.
+    /// Held as a `BudgetCounter` (atomic f64) so the synchronous
+    /// session-stream usage observer can read it without contention
+    /// concerns — previously, `std::sync::Mutex<f64>` contention from a
+    /// concurrent `worker_status` MCP call could silently zero this
+    /// contribution and delay budget-abort by one or more assistant
+    /// turns. The atomic also removes the std-vs-tokio Mutex hazard
+    /// documented in F-ARCH-10.
+    pub spent_usd: BudgetCounter,
+    /// USD reserved for in-flight workers at spawn time. Kept as
+    /// `tokio::sync::Mutex<f64>` (not `BudgetCounter`) because callers
+    /// hold the guard across a `read spent_usd → compare to budget →
+    /// add to reserved_usd` critical section to defeat the TOCTOU
+    /// between concurrent `spawn_worker` invocations (#106). Atomics
+    /// can't span that compound check without a separate lock; the
+    /// async Mutex is the lock.
     pub reserved_usd: Mutex<f64>,
     /// Token spend (USD) attributed to *this layer's lead* (the root
     /// lead for the root layer; the sub-lead for a sub-tree layer).
     /// Updated live as each assistant turn's cumulative usage is
     /// observed from the stream-json output, so budget enforcement can
     /// abort mid-subprocess rather than waiting for terminal exit.
-    /// Uses `std::sync::Mutex` rather than `tokio::sync::Mutex` because
-    /// it is written from the session stream loop's synchronous event
-    /// observer — no `.await` may cross the lock guard. (#253)
-    pub lead_spent_usd: std::sync::Mutex<f64>,
+    ///
+    /// Atomic for the same reason as `spent_usd`: the session-stream
+    /// usage observer is a sync callback, and an `.await` on a tokio
+    /// Mutex inside it would block the executor. (#253, F-ARCH-10)
+    pub lead_spent_usd: BudgetCounter,
     /// Set to `Some(reason)` when the dispatcher decides to abort the
     /// lead/sub-lead because of a budget cap breach. Cleared on dispatch
     /// startup and read by `failure_detection` so the lead's
@@ -182,9 +249,9 @@ impl BudgetState {
     /// and `abort_reason` is `None`.
     pub fn new() -> Self {
         Self {
-            spent_usd: std::sync::Mutex::new(0.0),
+            spent_usd: BudgetCounter::new(),
             reserved_usd: Mutex::new(0.0),
-            lead_spent_usd: std::sync::Mutex::new(0.0),
+            lead_spent_usd: BudgetCounter::new(),
             abort_reason: std::sync::Mutex::new(None),
         }
     }
@@ -614,11 +681,7 @@ impl LayerState {
 
     pub async fn budget_remaining(&self) -> Option<f64> {
         let budget = self.manifest.budget_usd?;
-        let spent = *self
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let spent = self.budget.spent_usd.load();
         Some((budget - spent).max(0.0))
     }
 
@@ -672,14 +735,7 @@ mod tests {
         let (_dir, layer) = mk_layer();
         assert!(layer.workers.states.read().await.is_empty());
         assert!(layer.workers.cancels.read().await.is_empty());
-        assert_eq!(
-            *layer
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            0.0
-        );
+        assert_eq!(layer.budget.spent_usd.load(), 0.0);
         assert_eq!(*layer.budget.reserved_usd.lock().await, 0.0);
     }
 
