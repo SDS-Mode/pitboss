@@ -7,11 +7,7 @@
 //! console can read the audit trail without depending on `pitboss-cli`.
 //! The `pitboss-cli::dispatch::events` module is a re-export shim.
 
-#![allow(
-    dead_code,
-    clippy::must_use_candidate,
-    clippy::needless_pass_by_value
-)]
+#![allow(dead_code, clippy::must_use_candidate, clippy::needless_pass_by_value)]
 
 use std::path::Path;
 
