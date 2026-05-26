@@ -6,6 +6,12 @@
 //!   {"sleep_ms": N}   — sleeps for N milliseconds
 //!   {"tool_use": {"name": "...", "input": {...}}}
 //!       — emits a stream-json assistant tool_use event on stdout
+//!   {"tool_result": {"tool_use_id": "...", "content": "..." | [...],
+//!                    "is_error": bool}}
+//!       — emits the `user`-turn wrapper that real claude sends after
+//!         each tool_use. Pair with a prior `tool_use` action to exercise
+//!         the full assistant→tool_use→user→tool_result cycle through
+//!         the dispatcher's parser pipeline (#541).
 //!   {"usage": {"text": "...", "input": N, "output": N,
 //!              "cache_read": N, "cache_creation": N}}
 //!       — emits an assistant message with `message.usage` so the parser

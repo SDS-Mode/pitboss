@@ -6,7 +6,10 @@
 //! `usage`, `result`, and `rate_limit_event` actions added for #539
 //! emit the corresponding stream-json wire shapes so integration tests
 //! can exercise the budget_watch / SessionOutcome paths that those
-//! events drive.
+//! events drive. The `tool_result` action added for #541 emits the
+//! `user`-turn wrapper that real claude sends after every `tool_use`,
+//! letting tests cover the full assistant→tool_use→user→tool_result
+//! cycle through the dispatcher's stream-json pipeline.
 
 #![allow(dead_code)]
 
@@ -70,6 +73,43 @@ pub async fn execute_script<R: BufRead>(reader: R, mut client: Option<McpClient>
                         "name": tu.get("name").and_then(|n| n.as_str()).unwrap_or(""),
                         "input": tu.get("input").cloned().unwrap_or(Value::Null),
                     }]
+                }
+            });
+            let mut out = stdout.lock();
+            writeln!(out, "{}", serde_json::to_string(&wrapper)?)?;
+            out.flush()?;
+        } else if let Some(tr) = action.get("tool_result") {
+            // Emit the user-turn wrapper that real claude sends after every
+            // tool_use. Pair this with a prior `tool_use` action to exercise
+            // the full assistant→tool_use→user→tool_result cycle through
+            // the dispatcher's stream-json pipeline (parse_user /
+            // Event::ToolResult). See issue #541.
+            //
+            // `content` accepts either a plain string (rendered as
+            // `{"content":"..."}`) or any JSON value (passed through —
+            // real claude uses an array of `{type, text}` blocks).
+            let tool_use_id = tr
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let content = tr.get("content").cloned().unwrap_or(Value::Null);
+            let is_error = tr
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut block = serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+            });
+            if is_error {
+                block["is_error"] = Value::Bool(true);
+            }
+            let wrapper = serde_json::json!({
+                "type": "user",
+                "message": {
+                    "content": [block]
                 }
             });
             let mut out = stdout.lock();
