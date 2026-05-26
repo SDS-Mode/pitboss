@@ -174,3 +174,219 @@ pub async fn build_notification_router_and_emit_dispatched(
     }
     Ok(router)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Branch coverage for `init_run_state` (#532 / F-TEST-1). The function
+    //! is exercised end-to-end via subprocess dispatch in `dogfood_fake_flows.rs`,
+    //! but the four input axes (pre-minted vs fresh run-id, `PITBOSS_RUN_ID`
+    //! snapshotting from env, `run_dir_override` vs `resolved.run_dir`, and
+    //! manifest snapshot file creation) need direct asserts so a regression
+    //! in any one branch — e.g. an accidental swap of `pre_minted_run_id` /
+    //! `Uuid::now_v7()` ordering — fails fast at the unit level.
+
+    use super::*;
+    use crate::manifest::resolve::ResolvedManifest;
+    use crate::manifest::schema::WorktreeCleanup;
+    use pitboss_core::store::JsonFileStore;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    /// Minimal `ResolvedManifest` for unit tests in this module. `run_dir`
+    /// points at the caller's `TempDir` so artifacts land in a scoped
+    /// location; everything else is zeroed/empty.
+    fn mk_manifest(run_dir: PathBuf) -> ResolvedManifest {
+        ResolvedManifest {
+            manifest_schema_version: 0,
+            name: None,
+            max_parallel_tasks: Some(1),
+            halt_on_failure: false,
+            run_dir,
+            worktree_cleanup: WorktreeCleanup::OnSuccess,
+            emit_event_stream: false,
+            resource_sample_secs: 0,
+            claude_setting_sources: None,
+            tasks: vec![],
+            lead: None,
+            max_workers: Some(1),
+            budget_usd: None,
+            lead_budget_usd: None,
+            lead_timeout_secs: None,
+            default_approval_policy: None,
+            denial_termination_policy: None,
+            notifications: vec![],
+            dump_shared_store: false,
+            require_plan_approval: false,
+            approval_rules: vec![],
+            container: None,
+            mcp_servers: vec![],
+            communication: Default::default(),
+            lifecycle: None,
+            worker_types: vec![],
+            sublead_types: vec![],
+            require_actor_type: false,
+            untyped_actor_policy: Default::default(),
+            agent_profiles: ::std::collections::HashMap::new(),
+        }
+    }
+
+    fn mk_store(dir: &Path) -> Arc<dyn SessionStore> {
+        Arc::new(JsonFileStore::new(dir.to_path_buf()))
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn fresh_run_id_is_minted_when_none_passed() {
+        // `PITBOSS_RUN_ID` MUST be unset for this test — otherwise
+        // parent_run_id() would see the prior test's value. The
+        // `#[serial(env)]` marker serializes against other env-touching
+        // tests; we additionally clear here for hygiene.
+        std::env::remove_var("PITBOSS_RUN_ID");
+        let dir = TempDir::new().unwrap();
+        let manifest = mk_manifest(dir.path().to_path_buf());
+        let store = mk_store(dir.path());
+        let manifest_path = dir.path().join("pitboss.toml");
+
+        let init = init_run_state(
+            &manifest,
+            "manifest=text",
+            &manifest_path,
+            None,
+            &store,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // UUIDv7's high nibble of byte 6 is `0x7`, so any fresh mint
+        // sets the version field to 7. Pinning this rejects regressions
+        // that swap minting algorithms (e.g. v4) without anyone noticing.
+        assert_eq!(init.run_id.get_version_num(), 7);
+        assert!(init.parent_run_id.is_none());
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn pre_minted_run_id_is_honored() {
+        std::env::remove_var("PITBOSS_RUN_ID");
+        let dir = TempDir::new().unwrap();
+        let manifest = mk_manifest(dir.path().to_path_buf());
+        let store = mk_store(dir.path());
+        let manifest_path = dir.path().join("pitboss.toml");
+
+        // Fixed UUID from bytes — the workspace only enables uuid's `v7`
+        // feature, so `Uuid::new_v4()` would be unavailable. Equality
+        // alone proves passthrough: a regression that overwrote our
+        // pre-mint with a fresh `now_v7()` would return a different ID.
+        let pre_minted = Uuid::from_u128(0x1122_3344_5566_7788_9900_aabb_ccdd_eeff_u128);
+        let init = init_run_state(
+            &manifest,
+            "m",
+            &manifest_path,
+            None,
+            &store,
+            Some(pre_minted),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(init.run_id, pre_minted);
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn parent_run_id_snapshotted_from_env() {
+        // Set the env var BEFORE calling — init_run_state must capture
+        // the parent value into `RunInit.parent_run_id`. The contract
+        // documented at notify/parent.rs is the source of truth for
+        // what counts as a non-empty parent run id (trim + discard empty).
+        std::env::set_var("PITBOSS_RUN_ID", "01234567-89ab-7def-8123-456789abcdef");
+        let dir = TempDir::new().unwrap();
+        let manifest = mk_manifest(dir.path().to_path_buf());
+        let store = mk_store(dir.path());
+        let manifest_path = dir.path().join("pitboss.toml");
+
+        let init = init_run_state(&manifest, "m", &manifest_path, None, &store, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            init.parent_run_id.as_deref(),
+            Some("01234567-89ab-7def-8123-456789abcdef")
+        );
+        std::env::remove_var("PITBOSS_RUN_ID");
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn run_dir_override_takes_precedence_over_resolved() {
+        std::env::remove_var("PITBOSS_RUN_ID");
+        let resolved_dir = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        let manifest = mk_manifest(resolved_dir.path().to_path_buf());
+        let store = mk_store(resolved_dir.path());
+        let manifest_path = resolved_dir.path().join("pitboss.toml");
+
+        let init = init_run_state(
+            &manifest,
+            "m",
+            &manifest_path,
+            None,
+            &store,
+            None,
+            Some(override_dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+        // run_dir picks the override; run_subdir is under it; the
+        // resolved manifest's run_dir is NOT consulted in this branch.
+        assert_eq!(init.run_dir, override_dir.path());
+        assert!(init.run_subdir.starts_with(override_dir.path()));
+        assert!(!init.run_subdir.starts_with(resolved_dir.path()));
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn snapshot_files_written_to_run_subdir() {
+        std::env::remove_var("PITBOSS_RUN_ID");
+        let dir = TempDir::new().unwrap();
+        let manifest = mk_manifest(dir.path().to_path_buf());
+        let store = mk_store(dir.path());
+        let manifest_path = dir.path().join("pitboss.toml");
+        let manifest_text = "name = \"unit-test\"\n";
+
+        let init = init_run_state(
+            &manifest,
+            manifest_text,
+            &manifest_path,
+            None,
+            &store,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // manifest.snapshot.toml must contain the raw bytes verbatim so
+        // resume can re-load + re-substitute env (notifications are
+        // deliberately dropped from resolved.json — see resume.rs and
+        // dispatch-cli CLAUDE.md).
+        let snapshot = tokio::fs::read_to_string(init.run_subdir.join("manifest.snapshot.toml"))
+            .await
+            .unwrap();
+        assert_eq!(snapshot, manifest_text);
+
+        // resolved.json must be valid JSON and re-parse into a
+        // ResolvedManifest — `run_dir` is the only field with a
+        // non-Default value here so checking it round-trips is the
+        // cheapest end-to-end deserialization assertion.
+        let resolved_bytes = tokio::fs::read(init.run_subdir.join("resolved.json"))
+            .await
+            .unwrap();
+        let round_trip: ResolvedManifest = serde_json::from_slice(&resolved_bytes).unwrap();
+        assert_eq!(round_trip.run_dir, dir.path());
+    }
+}
