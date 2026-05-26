@@ -32,59 +32,8 @@ fn control_socket_path_uses_xdg_or_run_dir() {
 #[tokio::test]
 async fn pause_op_writes_events_jsonl() {
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "".into(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
     let worker_token = CancelToken::new();
     state
         .root
@@ -261,59 +210,8 @@ async fn event_envelope_empty_actor_path_omitted_on_wire() {
 #[tokio::test]
 async fn server_emits_monotonic_seqs_on_wire() {
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        String::new(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
     state.root.workers.states.write().await.insert(
         "w-seq".into(),
         WorkerState::Running {
@@ -399,60 +297,14 @@ async fn server_emits_monotonic_seqs_on_wire() {
 #[tokio::test]
 async fn emit_event_stream_writes_envelopes_to_events_jsonl() {
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        // The flag this PR activates.
-        emit_event_stream: true,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        String::new(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, run_subdir) = make_control_test_state(
+        &dir,
+        ControlTestConfig {
+            emit_event_stream: true,
+            ..Default::default()
+        },
+    )
+    .await;
     state.root.workers.states.write().await.insert(
         "w-1".into(),
         WorkerState::Running {
@@ -510,59 +362,8 @@ async fn emit_event_stream_writes_envelopes_to_events_jsonl() {
 #[tokio::test]
 async fn emit_event_stream_off_does_not_create_events_jsonl() {
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false, // back-compat default
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        String::new(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     let sock = dir.path().join("events-off.sock");
     let _h = start_control_server(
@@ -600,59 +401,15 @@ async fn emit_event_stream_off_does_not_create_events_jsonl() {
 #[tokio::test]
 async fn headless_broadcast_persists_events_jsonl_without_client() {
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: true,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, _run_id, run_subdir) = make_control_test_state(
+        &dir,
+        ControlTestConfig {
+            emit_event_stream: true,
+            run_label: "lead".into(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // No control server. No client. Fire two broadcast events
     // directly on the root layer — the only path that exercises the
@@ -722,59 +479,14 @@ async fn block_policy_queue_drains_on_tui_connect() {
     use std::time::Duration;
 
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, _run_subdir) = make_control_test_state(
+        &dir,
+        ControlTestConfig {
+            run_label: "lead".into(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Kick off a blocking request on a background task (no TUI attached yet).
     let bridge = ApprovalBridge::new(state.clone());
@@ -848,59 +560,15 @@ async fn block_policy_queue_drains_on_tui_connect() {
 async fn auto_approve_policy_responds_without_tui() {
     use std::time::Duration;
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::AutoApprove),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::AutoApprove,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, _run_id, _run_subdir) = make_control_test_state(
+        &dir,
+        ControlTestConfig {
+            approval_policy: ApprovalPolicy::AutoApprove,
+            run_label: "lead".into(),
+            ..Default::default()
+        },
+    )
+    .await;
     let bridge = ApprovalBridge::new(state);
     let resp = bridge
         .request(
@@ -921,59 +589,15 @@ async fn auto_approve_policy_responds_without_tui() {
 async fn auto_reject_policy_responds_without_tui() {
     use std::time::Duration;
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::AutoReject),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::AutoReject,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, _run_id, _run_subdir) = make_control_test_state(
+        &dir,
+        ControlTestConfig {
+            approval_policy: ApprovalPolicy::AutoReject,
+            run_label: "lead".into(),
+            ..Default::default()
+        },
+    )
+    .await;
     let bridge = ApprovalBridge::new(state);
     let resp = bridge
         .request(
@@ -1003,59 +627,15 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
     use std::time::Duration;
 
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: true,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        "lead".into(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir,
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, _run_subdir) = make_control_test_state(
+        &dir,
+        ControlTestConfig {
+            require_plan_approval: true,
+            run_label: "lead".into(),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Baseline: spawn_worker is gated.
     let err = handle_spawn_worker(
@@ -1196,59 +776,8 @@ async fn propose_plan_end_to_end_unblocks_spawn_gate() {
 #[tokio::test]
 async fn subscribe_op_acks_and_keeps_dispatcher_responsive() {
     let dir = TempDir::new().unwrap();
-    let run_id = uuid::Uuid::now_v7();
-    let run_subdir = dir.path().join(run_id.to_string());
-    tokio::fs::create_dir_all(&run_subdir).await.unwrap();
-    let manifest = ResolvedManifest {
-        manifest_schema_version: 0,
-        name: None,
-        max_parallel_tasks: Some(4),
-        halt_on_failure: false,
-        run_dir: dir.path().to_path_buf(),
-        worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
-        resource_sample_secs: 0,
-        claude_setting_sources: None,
-        tasks: vec![],
-        lead: None,
-        max_workers: Some(4),
-        budget_usd: Some(1.0),
-        lead_budget_usd: None,
-        lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
-        denial_termination_policy: None,
-        notifications: vec![],
-        dump_shared_store: false,
-        require_plan_approval: false,
-        approval_rules: vec![],
-        container: None,
-        mcp_servers: vec![],
-        communication: Default::default(),
-        lifecycle: None,
-        worker_types: vec![],
-        sublead_types: vec![],
-        require_actor_type: false,
-        untyped_actor_policy: Default::default(),
-        agent_profiles: ::std::collections::HashMap::new(),
-    };
-    let store: Arc<dyn SessionStore> = Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
-    let spawner: Arc<dyn ProcessSpawner> = Arc::new(TokioSpawner::new());
-    let wt_mgr = Arc::new(WorktreeManager::new());
-    let state = Arc::new(DispatchState::new(
-        run_id,
-        manifest,
-        store,
-        CancelToken::new(),
-        String::new(),
-        spawner,
-        PathBuf::from("/bin/true"),
-        wt_mgr,
-        CleanupPolicy::Never,
-        run_subdir.clone(),
-        ApprovalPolicy::Block,
-        None,
-        std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
-    ));
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     let sock = dir.path().join("subscribe.sock");
     let _h = start_control_server(
@@ -1330,13 +859,50 @@ async fn subscribe_op_acks_and_keeps_dispatcher_responsive() {
 }
 
 // ----------------------------------------------------------------------
-// PR-P of #438 — subscriber-mode client flows.
+// Shared test scaffolding
 // ----------------------------------------------------------------------
 
-/// Build a minimal `DispatchState` + run id + run subdir for PR-P's
-/// subscriber-mode tests. Manifest fields stay at defaults; the tests
-/// below only need the control-socket lifecycle, not the dispatch loop.
-async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid, PathBuf) {
+/// Config for `make_control_test_state`. Every field has a `Default`
+/// matching the historical inline boilerplate; tests that drive a
+/// specific code path override only the relevant field via struct-update
+/// syntax (e.g. `ControlTestConfig { run_label: "lead".into(),
+/// ..Default::default() }`).
+struct ControlTestConfig {
+    /// `[run].emit_event_stream` — activates `events.jsonl` persistence
+    /// (PR-G/H of #259).
+    emit_event_stream: bool,
+    /// Drives both the manifest's `default_approval_policy` and
+    /// `DispatchState::new`'s `default_approval_policy` arg. The two
+    /// were always paired in practice, so a single knob keeps them in
+    /// sync — diverging them was the latent footgun #536 flagged.
+    approval_policy: ApprovalPolicy,
+    /// `[run].require_plan_approval` — exercised by
+    /// `propose_plan_end_to_end_unblocks_spawn_gate`.
+    require_plan_approval: bool,
+    /// 5th positional arg to `DispatchState::new` — the actor-role label
+    /// for the lead. Empty in headless / writer-only tests; "lead" for
+    /// tests that exercise actor-routed approval and broadcast paths.
+    run_label: String,
+}
+
+impl Default for ControlTestConfig {
+    fn default() -> Self {
+        Self {
+            emit_event_stream: false,
+            approval_policy: ApprovalPolicy::Block,
+            require_plan_approval: false,
+            run_label: String::new(),
+        }
+    }
+}
+
+/// Build a minimal `DispatchState` + run id + run subdir from a config.
+/// Replaces the per-test 80-line scaffolding block (29-line manifest
+/// literal + 14-line `DispatchState::new` call) — see #536.
+async fn make_control_test_state(
+    dir: &TempDir,
+    cfg: ControlTestConfig,
+) -> (Arc<DispatchState>, Uuid, PathBuf) {
     let run_id = uuid::Uuid::now_v7();
     let run_subdir = dir.path().join(run_id.to_string());
     tokio::fs::create_dir_all(&run_subdir).await.unwrap();
@@ -1347,7 +913,7 @@ async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid,
         halt_on_failure: false,
         run_dir: dir.path().to_path_buf(),
         worktree_cleanup: WorktreeCleanup::OnSuccess,
-        emit_event_stream: false,
+        emit_event_stream: cfg.emit_event_stream,
         resource_sample_secs: 0,
         claude_setting_sources: None,
         tasks: vec![],
@@ -1356,11 +922,11 @@ async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid,
         budget_usd: Some(1.0),
         lead_budget_usd: None,
         lead_timeout_secs: None,
-        default_approval_policy: Some(ApprovalPolicy::Block),
+        default_approval_policy: Some(cfg.approval_policy),
         denial_termination_policy: None,
         notifications: vec![],
         dump_shared_store: false,
-        require_plan_approval: false,
+        require_plan_approval: cfg.require_plan_approval,
         approval_rules: vec![],
         container: None,
         mcp_servers: vec![],
@@ -1380,18 +946,22 @@ async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid,
         manifest,
         store,
         CancelToken::new(),
-        String::new(),
+        cfg.run_label,
         spawner,
         PathBuf::from("/bin/true"),
         wt_mgr,
         CleanupPolicy::Never,
         run_subdir.clone(),
-        ApprovalPolicy::Block,
+        cfg.approval_policy,
         None,
         std::sync::Arc::new(pitboss_cli::shared_store::SharedStore::new()),
     ));
     (state, run_id, run_subdir)
 }
+
+// ----------------------------------------------------------------------
+// PR-P of #438 — subscriber-mode client flows.
+// ----------------------------------------------------------------------
 
 /// A second client attaching in subscriber mode must not displace the
 /// connected writer: the dispatcher's `control_writer` slot stays bound
@@ -1400,7 +970,8 @@ async fn make_subscriber_test_state(dir: &TempDir) -> (Arc<DispatchState>, Uuid,
 #[tokio::test]
 async fn subscriber_hello_does_not_supersede_writer() {
     let dir = TempDir::new().unwrap();
-    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     let sock = dir.path().join("subscriber-coexist.sock");
     let _h = start_control_server(
@@ -1472,7 +1043,8 @@ async fn subscriber_hello_does_not_supersede_writer() {
 #[tokio::test]
 async fn subscriber_writer_op_returns_op_failed() {
     let dir = TempDir::new().unwrap();
-    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     // Install a worker so a misrouted CancelWorker has something to find.
     // The cancel must NOT fire — we rely on the workers.cancels token
@@ -1555,7 +1127,8 @@ async fn subscriber_writer_op_returns_op_failed() {
 #[tokio::test]
 async fn multiple_subscribers_coexist() {
     let dir = TempDir::new().unwrap();
-    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     let sock = dir.path().join("multi-subscriber.sock");
     let _h = start_control_server(
@@ -1624,7 +1197,8 @@ async fn multiple_subscribers_coexist() {
 #[tokio::test]
 async fn legacy_hello_without_mode_defaults_to_writer() {
     let dir = TempDir::new().unwrap();
-    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     let sock = dir.path().join("legacy-hello.sock");
     let _h = start_control_server(
@@ -1689,7 +1263,8 @@ async fn legacy_hello_without_mode_defaults_to_writer() {
 #[tokio::test]
 async fn op_replies_broadcast_to_subscribers() {
     let dir = TempDir::new().unwrap();
-    let (state, run_id, _run_subdir) = make_subscriber_test_state(&dir).await;
+    let (state, run_id, _run_subdir) =
+        make_control_test_state(&dir, ControlTestConfig::default()).await;
 
     // Install a worker so ListWorkers has a non-empty snapshot to return.
     state.root.workers.states.write().await.insert(
