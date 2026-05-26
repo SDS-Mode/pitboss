@@ -1,4 +1,4 @@
-//! Integration tests for `pitboss_cli::stream::open_live_run_stream`.
+//! Integration tests for `pitboss_cli::live_stream::open_live_run_stream`.
 //! Stand up a real control server, point the live consumer at it, and
 //! assert that disk replay precedes socket envelopes in `ReplayThenLive`
 //! mode and that the socket arm produces `Event` items in `LiveOnly`.
@@ -11,7 +11,7 @@ use pitboss_cli::control::server::start_control_server;
 use pitboss_cli::dispatch::state::{ApprovalPolicy, DispatchState, WorkerState};
 use pitboss_cli::manifest::resolve::ResolvedManifest;
 use pitboss_cli::manifest::schema::WorktreeCleanup;
-use pitboss_cli::stream::{
+use pitboss_cli::live_stream::{
     open_live_run_stream, open_run_session, LiveStreamMode, LiveStreamPayload,
 };
 use pitboss_core::parser::TokenUsage;
