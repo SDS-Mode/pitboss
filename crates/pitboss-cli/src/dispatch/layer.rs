@@ -182,12 +182,10 @@ impl BudgetCounter {
         let mut prev = self.0.load(Ordering::Relaxed);
         loop {
             let new = (f64::from_bits(prev) + delta).to_bits();
-            match self.0.compare_exchange_weak(
-                prev,
-                new,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .0
+                .compare_exchange_weak(prev, new, Ordering::Relaxed, Ordering::Relaxed)
+            {
                 Ok(_) => return f64::from_bits(new),
                 Err(actual) => prev = actual,
             }

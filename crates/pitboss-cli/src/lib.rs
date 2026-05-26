@@ -16,6 +16,7 @@ pub mod diff;
 pub mod dispatch;
 pub mod events;
 pub mod list;
+pub mod live_stream;
 pub mod manifest;
 pub mod mcp;
 pub mod notify;
@@ -23,7 +24,6 @@ pub mod prune;
 pub mod runs;
 pub mod shared_store;
 pub mod status;
-pub mod live_stream;
 pub mod tree;
 pub mod tui_table;
 

@@ -1342,7 +1342,10 @@ async fn expire_layer_approvals(
         let expired_now = match queue[i].metadata.ttl_secs {
             Some(ttl_secs) => {
                 let age = clamped_age_secs(now, queue[i].metadata.created_at);
-                let fallback = queue[i].metadata.fallback.unwrap_or(ApprovalFallback::Block);
+                let fallback = queue[i]
+                    .metadata
+                    .fallback
+                    .unwrap_or(ApprovalFallback::Block);
                 age >= ttl_secs && !matches!(fallback, ApprovalFallback::Block)
             }
             None => false,
