@@ -835,14 +835,16 @@ async fn approval_ttl_triggers_auto_reject_fallback() {
     let request_id = uuid::Uuid::now_v7().to_string();
     let approval = pitboss_cli::dispatch::state::QueuedApproval {
         request_id: request_id.clone(),
-        task_id: "task-1".into(),
-        summary: "test approval".into(),
-        plan: None,
-        kind: pitboss_cli::control::protocol::ApprovalKind::Action,
         responder,
-        ttl_secs: Some(1), // 1 second
-        fallback: Some(pitboss_cli::mcp::approval::ApprovalFallback::AutoReject),
-        created_at: chrono::Utc::now(),
+        metadata: pitboss_cli::dispatch::state::ApprovalMetadata {
+            task_id: "task-1".into(),
+            summary: "test approval".into(),
+            plan: None,
+            kind: pitboss_cli::control::protocol::ApprovalKind::Action,
+            ttl_secs: Some(1), // 1 second
+            fallback: Some(pitboss_cli::mcp::approval::ApprovalFallback::AutoReject),
+            created_at: chrono::Utc::now(),
+        },
     };
 
     state.root.approvals.queue.lock().await.push_back(approval);

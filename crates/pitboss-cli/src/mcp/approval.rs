@@ -248,13 +248,15 @@ impl ApprovalBridge {
                 request_id.clone(),
                 crate::dispatch::state::BridgeEntry {
                     responder: tx,
-                    task_id: task_id.clone(),
-                    summary: summary.clone(),
-                    plan: plan.clone(),
-                    kind,
-                    ttl_secs,
-                    fallback,
-                    created_at: chrono::Utc::now(),
+                    metadata: crate::dispatch::state::ApprovalMetadata {
+                        task_id: task_id.clone(),
+                        summary: summary.clone(),
+                        plan: plan.clone(),
+                        kind,
+                        ttl_secs,
+                        fallback,
+                        created_at: chrono::Utc::now(),
+                    },
                 },
             );
             let ev = crate::control::protocol::ControlEvent::ApprovalRequest {
@@ -356,14 +358,16 @@ impl ApprovalBridge {
                 .await
                 .push_back(QueuedApproval {
                     request_id: request_id.clone(),
-                    task_id: task_id.clone(),
-                    summary: summary.clone(),
-                    plan,
-                    kind,
                     responder: tx,
-                    ttl_secs,
-                    fallback,
-                    created_at: chrono::Utc::now(),
+                    metadata: crate::dispatch::state::ApprovalMetadata {
+                        task_id: task_id.clone(),
+                        summary: summary.clone(),
+                        plan,
+                        kind,
+                        ttl_secs,
+                        fallback,
+                        created_at: chrono::Utc::now(),
+                    },
                 });
 
             // Fire approval_pending notification.
@@ -444,7 +448,7 @@ impl ApprovalBridge {
         // under the same file.
         let _ = crate::dispatch::events::append_event(
             &self.state.root.run_subdir,
-            &bridge_entry.task_id,
+            &bridge_entry.metadata.task_id,
             &crate::dispatch::events::TaskEvent::ApprovalResponse {
                 at: chrono::Utc::now(),
                 request_id: request_id.to_string(),
@@ -454,7 +458,7 @@ impl ApprovalBridge {
         )
         .await;
         let approved = resp.approved;
-        let caller_id = bridge_entry.task_id.clone();
+        let caller_id = bridge_entry.metadata.task_id.clone();
         bridge_entry
             .responder
             .send(resp)

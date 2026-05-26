@@ -407,32 +407,27 @@ async fn serve_connection(
                 // and display fields so expire_layer_approvals can still expire
                 // the entry and — per #102 — a subsequent TUI reconnect can
                 // replay pending approvals held by the bridge.
+                let request_id = q.request_id;
+                let event = ControlEvent::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    task_id: q.metadata.task_id.clone(),
+                    summary: q.metadata.summary.clone(),
+                    plan: q
+                        .metadata
+                        .plan
+                        .clone()
+                        .map(crate::mcp::approval::approval_plan_to_wire),
+                    kind: q.metadata.kind,
+                };
                 state.root.approvals.bridge.lock().await.insert(
-                    q.request_id.clone(),
+                    request_id,
                     crate::dispatch::state::BridgeEntry {
                         responder: q.responder,
-                        task_id: q.task_id.clone(),
-                        summary: q.summary.clone(),
-                        plan: q.plan.clone(),
-                        kind: q.kind,
-                        ttl_secs: q.ttl_secs,
-                        fallback: q.fallback,
-                        created_at: q.created_at,
+                        metadata: q.metadata,
                     },
                 );
                 // And push the event (wrapped + persisted via the helper).
-                let _ = enqueue_envelope(
-                    &ev_tx,
-                    &event_log,
-                    ControlEvent::ApprovalRequest {
-                        request_id: q.request_id,
-                        task_id: q.task_id,
-                        summary: q.summary,
-                        plan: q.plan.map(crate::mcp::approval::approval_plan_to_wire),
-                        kind: q.kind,
-                    },
-                )
-                .await;
+                let _ = enqueue_envelope(&ev_tx, &event_log, event).await;
             }
         }
 
@@ -460,13 +455,14 @@ async fn serve_connection(
                 // when the expiry is processed (#109).
                 .map(|(request_id, entry)| ControlEvent::ApprovalRequest {
                     request_id: request_id.clone(),
-                    task_id: entry.task_id.clone(),
-                    summary: entry.summary.clone(),
+                    task_id: entry.metadata.task_id.clone(),
+                    summary: entry.metadata.summary.clone(),
                     plan: entry
+                        .metadata
                         .plan
                         .clone()
                         .map(crate::mcp::approval::approval_plan_to_wire),
-                    kind: entry.kind,
+                    kind: entry.metadata.kind,
                 })
                 .collect()
         }; // lock released here
@@ -1530,7 +1526,7 @@ async fn dispatch_op(
         } => {
             let bridge_entry = state.root.approvals.bridge.lock().await.remove(&request_id);
             if let Some(bridge_entry) = bridge_entry {
-                let caller_id = bridge_entry.task_id.clone();
+                let caller_id = bridge_entry.metadata.task_id.clone();
                 let edited = edited_summary.is_some();
                 let _ = bridge_entry
                     .responder
@@ -1927,13 +1923,15 @@ mod tests {
             "req-1".into(),
             crate::dispatch::state::BridgeEntry {
                 responder: tx,
-                task_id: "test-task".into(),
-                summary: "test".into(),
-                plan: None,
-                kind: crate::control::protocol::ApprovalKind::Action,
-                ttl_secs: None,
-                fallback: None,
-                created_at: chrono::Utc::now(),
+                metadata: crate::dispatch::state::ApprovalMetadata {
+                    task_id: "test-task".into(),
+                    summary: "test".into(),
+                    plan: None,
+                    kind: crate::control::protocol::ApprovalKind::Action,
+                    ttl_secs: None,
+                    fallback: None,
+                    created_at: chrono::Utc::now(),
+                },
             },
         );
 
@@ -2017,19 +2015,21 @@ mod tests {
             "req-ghost".into(),
             crate::dispatch::state::BridgeEntry {
                 responder: tx,
-                task_id: "worker-a".into(),
-                summary: "drop staging index".into(),
-                plan: Some(crate::mcp::tools::ApprovalPlan {
+                metadata: crate::dispatch::state::ApprovalMetadata {
+                    task_id: "worker-a".into(),
                     summary: "drop staging index".into(),
-                    rationale: Some("obsolete".into()),
-                    resources: vec!["db/idx_foo".into()],
-                    risks: vec![],
-                    rollback: Some("restore from snapshot".into()),
-                }),
-                kind: crate::control::protocol::ApprovalKind::Plan,
-                ttl_secs: None,
-                fallback: None,
-                created_at: chrono::Utc::now(),
+                    plan: Some(crate::mcp::approval::ApprovalPlan {
+                        summary: "drop staging index".into(),
+                        rationale: Some("obsolete".into()),
+                        resources: vec!["db/idx_foo".into()],
+                        risks: vec![],
+                        rollback: Some("restore from snapshot".into()),
+                    }),
+                    kind: crate::control::protocol::ApprovalKind::Plan,
+                    ttl_secs: None,
+                    fallback: None,
+                    created_at: chrono::Utc::now(),
+                },
             },
         );
 
