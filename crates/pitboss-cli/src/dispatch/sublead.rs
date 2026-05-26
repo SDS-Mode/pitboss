@@ -326,12 +326,7 @@ pub async fn spawn_sublead(
             // Fixes the TOCTOU described in #106: two independent lock
             // snapshots + an unlocked check allowed both callers to pass
             // the guard before either wrote, enabling budget over-commit.
-            let spent = *state
-                .root
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let spent = state.root.budget.spent_usd.load();
             let mut reserved = state.root.budget.reserved_usd.lock().await;
             if spent + *reserved + amount > cap {
                 bail!(
@@ -912,11 +907,7 @@ async fn spawn_sublead_session(
         // sub-tree can occur between iterations because the sub-lead's
         // MCP session is closed while its subprocess is dead).
         if let Some(cost) = pitboss_core::prices::cost_usd(&model_bg, &total_token_usage) {
-            *sub_layer_bg
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) += cost;
+            sub_layer_bg.budget.spent_usd.add(cost);
         }
 
         // Close the reprompt channel so further sends return errors.
@@ -1119,11 +1110,7 @@ pub async fn reconcile_terminated_sublead(
         .await
         .push(sub_layer.clone());
 
-    let actual_spend = *sub_layer
-        .budget
-        .spent_usd
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let actual_spend = sub_layer.budget.spent_usd.load();
     let original_reservation_usd = sub_layer.original_reservation_usd.unwrap_or(0.0);
     let unspent = (original_reservation_usd - actual_spend).max(0.0);
 
@@ -1216,15 +1203,7 @@ pub async fn reconcile_terminated_sublead(
         *reserved = (*reserved - original_reservation_usd).max(0.0);
     }
     // Then record the actual spend
-    {
-        let mut spent = state
-            .root
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *spent += actual_spend;
-    }
+    state.root.budget.spent_usd.add(actual_spend);
 
     tracing::info!(
         sublead_id = %sublead_id,

@@ -465,11 +465,7 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
-        *sub_layer
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = 2.0;
+        sub_layer.budget.spent_usd.store(2.0);
     }
 
     // Trigger reconciliation
@@ -484,15 +480,7 @@ async fn unspent_sublead_envelope_returns_to_root_pool() {
     // After: root's reserved_usd dropped by $5, spent_usd rose by $2,
     // releasing $3 to reservable pool.
     assert_eq!(*state.root.budget.reserved_usd.lock().await, 0.0);
-    assert_eq!(
-        *state
-            .root
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-        2.0
-    );
+    assert_eq!(state.root.budget.spent_usd.load(), 2.0);
     // Verify sub-layer was removed during reconciliation
     assert!(
         state.subleads.read().await.get(&sublead_id).is_none(),
@@ -1142,11 +1130,7 @@ async fn wait_actor_returns_for_terminated_sublead() {
     {
         let subleads = state.subleads.read().await;
         let sub_layer = subleads.get(&sublead_id).expect("sub-layer should exist");
-        *sub_layer
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = 1.0;
+        sub_layer.budget.spent_usd.store(1.0);
     }
 
     // Reconcile (terminate the sub-lead).

@@ -137,18 +137,8 @@ impl SpendBreakdown {
 /// `terminated_sublead_layers` from the worker-cost accumulator while
 /// still summing them for the orchestration-cost (`subleads_usd`) bucket.
 pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
-    let workers_root = *state
-        .root
-        .budget
-        .spent_usd
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let lead_usd = *state
-        .root
-        .budget
-        .lead_spent_usd
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workers_root = state.root.budget.spent_usd.load();
+    let lead_usd = state.root.budget.lead_spent_usd.load();
 
     let mut workers_subs = 0.0_f64;
     let mut subleads_usd = 0.0_f64;
@@ -156,16 +146,8 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
     {
         let live = state.subleads.read().await;
         for layer in live.values() {
-            workers_subs += *layer
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let self_spend = *layer
-                .budget
-                .lead_spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            workers_subs += layer.budget.spent_usd.load();
+            let self_spend = layer.budget.lead_spent_usd.load();
             subleads_usd += self_spend;
             live_subleads_self_usd += self_spend;
         }
@@ -178,11 +160,7 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
         // but `lead_budget_usd` needs the orchestration-only subtotal.
         let terminated = state.terminated_sublead_layers.read().await;
         for layer in terminated.iter() {
-            subleads_usd += *layer
-                .budget
-                .lead_spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            subleads_usd += layer.budget.lead_spent_usd.load();
         }
     }
 
@@ -197,42 +175,24 @@ pub async fn compute_total_spend(state: &DispatchState) -> SpendBreakdown {
 /// Synchronous variant of [`compute_total_spend`]. Used inside the
 /// usage observer, which runs from a non-async context inside the
 /// session stream loop. `spent_usd` and `lead_spent_usd` are
-/// `std::sync::Mutex<f64>` and acquired with a short blocking
-/// `.lock()` — critical sections are an f64 read away. The remaining
-/// `try_read()` on `state.subleads` is a tokio `RwLock` and falls
-/// back to a partial sum on contention with a concurrent
-/// `register_sublead` / `reconcile_terminated_sublead`; those writes
-/// are rare (one per sub-lead lifecycle event) so the next observer
-/// fire gets a fresh reading.
+/// `BudgetCounter`s (atomic f64) so per-layer reads never block; the
+/// remaining `try_read()` on `state.subleads` and
+/// `state.terminated_sublead_layers` is a tokio `RwLock` and falls back
+/// to a partial sum on contention with a concurrent `register_sublead`
+/// / `reconcile_terminated_sublead`. Those writes are rare (one per
+/// sub-lead lifecycle event) so the next observer fire gets a fresh
+/// reading. (F-ARCH-10)
 fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
-    let workers_root = *state
-        .root
-        .budget
-        .spent_usd
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let lead_usd = *state
-        .root
-        .budget
-        .lead_spent_usd
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workers_root = state.root.budget.spent_usd.load();
+    let lead_usd = state.root.budget.lead_spent_usd.load();
 
     let mut workers_subs = 0.0_f64;
     let mut subleads_usd = 0.0_f64;
     let mut live_subleads_self_usd = 0.0_f64;
     if let Ok(live) = state.subleads.try_read() {
         for layer in live.values() {
-            workers_subs += *layer
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let self_spend = *layer
-                .budget
-                .lead_spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            workers_subs += layer.budget.spent_usd.load();
+            let self_spend = layer.budget.lead_spent_usd.load();
             subleads_usd += self_spend;
             live_subleads_self_usd += self_spend;
         }
@@ -242,11 +202,7 @@ fn compute_total_spend_blocking(state: &DispatchState) -> SpendBreakdown {
         // (already rolled into `workers_root` at reconcile time). See
         // [`SpendBreakdown`] for the asymmetric rationale.
         for layer in terminated.iter() {
-            subleads_usd += *layer
-                .budget
-                .lead_spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            subleads_usd += layer.budget.lead_spent_usd.load();
         }
     }
 
@@ -282,14 +238,7 @@ pub fn build_lead_usage_observer(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let lead_total = baseline_usd + this_iter_cost;
 
-        {
-            let mut g = layer
-                .budget
-                .lead_spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *g = lead_total;
-        }
+        layer.budget.lead_spent_usd.store(lead_total);
 
         // Don't re-fire abort once already triggered (observer can fire
         // many times in quick succession; cancel() is idempotent but the
@@ -526,7 +475,7 @@ mod tests {
         assert!(layer.budget.abort_reason.lock().unwrap().is_none());
         assert!(!layer.cancel.is_terminated());
         // lead_spent_usd should reflect the priced cost.
-        let live = *layer.budget.lead_spent_usd.lock().unwrap();
+        let live = layer.budget.lead_spent_usd.load();
         assert!(live > 0.0 && live < 1.0, "live spend out of range: {live}");
     }
 
@@ -551,12 +500,7 @@ mod tests {
         // from the buggy run.
         const SUB_A_SPENT: f64 = 0.81389724; // workers + sublead-self
         const SUB_B_SPENT: f64 = 0.82939324;
-        *state
-            .root
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = SUB_A_SPENT + SUB_B_SPENT;
+        state.root.budget.spent_usd.store(SUB_A_SPENT + SUB_B_SPENT);
 
         // Build two terminated sub-layer doppelgangers carrying the same
         // figures in their own accumulators (state after sublead.rs:914
@@ -566,16 +510,8 @@ mod tests {
         // only need the budget accumulators populated.
         let make_term_layer = |spent: f64, lead_spent: f64| -> Arc<LayerState> {
             let layer: Arc<LayerState> = TestStateBuilder::new().with_lead().build_layer().1.into();
-            *layer
-                .budget
-                .spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = spent;
-            *layer
-                .budget
-                .lead_spent_usd
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = lead_spent;
+            layer.budget.spent_usd.store(spent);
+            layer.budget.lead_spent_usd.store(lead_spent);
             layer
         };
 
@@ -593,12 +529,7 @@ mod tests {
 
         // Tiny root lead self-spend, matching the buggy run.
         const ROOT_LEAD_SELF: f64 = 0.004;
-        *state
-            .root
-            .budget
-            .lead_spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ROOT_LEAD_SELF;
+        state.root.budget.lead_spent_usd.store(ROOT_LEAD_SELF);
 
         let breakdown = compute_total_spend_blocking(&state);
 
@@ -655,16 +586,8 @@ mod tests {
         // sub.spent_usd.
         let live_layer: Arc<LayerState> =
             TestStateBuilder::new().with_lead().build_layer().1.into();
-        *live_layer
-            .budget
-            .spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.10;
-        *live_layer
-            .budget
-            .lead_spent_usd
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.50;
+        live_layer.budget.spent_usd.store(0.10);
+        live_layer.budget.lead_spent_usd.store(0.50);
         state
             .subleads
             .write()
