@@ -440,7 +440,7 @@ async fn reject_with_reason_reaches_sublead_session() {
         .unwrap();
 
     let mcp_sock = socket_path_for_run(run_id, &state.root.manifest.run_dir);
-    let _mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
+    let mcp_server = McpServer::start(mcp_sock.clone(), state.clone())
         .await
         .unwrap();
 
@@ -558,6 +558,7 @@ async fn reject_with_reason_reaches_sublead_session() {
     );
 
     state.root.cancel.terminate();
+    mcp_server.shutdown().await;
 }
 
 // ── Test 5: Budget envelope returns to root pool ──────────────────────────────
@@ -795,7 +796,7 @@ async fn sublead_session_spawns_runs_and_reconciles() {
     // written. The sub-lead subprocess doesn't need to connect — fake-claude
     // only reads PITBOSS_FAKE_MCP_SOCKET when that env var is set.
     let socket = socket_path_for_run(run_id, dir.path());
-    let _mcp = McpServer::start(socket.clone(), state.clone())
+    let mcp = McpServer::start(socket.clone(), state.clone())
         .await
         .expect("start MCP server");
 
@@ -893,4 +894,5 @@ async fn sublead_session_spawns_runs_and_reconciles() {
     );
 
     state.root.cancel.terminate();
+    mcp.shutdown().await;
 }
