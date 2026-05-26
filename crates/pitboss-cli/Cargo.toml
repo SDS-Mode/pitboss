@@ -17,15 +17,6 @@ path = "src/lib.rs"
 name = "pitboss"
 path = "src/main.rs"
 
-[features]
-# test-support was introduced alongside a self-dependency trick to enable
-# pitboss-core's test-support feature in pitboss-cli's own unit tests. Since
-# pitboss-cli now pulls pitboss-core's test-support directly via dev-dependencies,
-# this feature is no longer load-bearing. Kept as an empty opt-in so external
-# consumers that previously passed `--features pitboss-cli/test-support` don't
-# break.
-test-support = ["pitboss-core/test-support"]
-
 [dependencies]
 pitboss-core       = { path = "../pitboss-core" }
 pitboss-schema     = { path = "../pitboss-schema" }
