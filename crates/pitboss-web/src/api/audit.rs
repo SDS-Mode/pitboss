@@ -25,7 +25,7 @@ use axum::{
     response::Response,
 };
 use chrono::{DateTime, Utc};
-use pitboss_cli::audit::{AuditEntry, AuditFilter};
+use pitboss_core::audit::{AuditEntry, AuditFilter};
 use serde::Deserialize;
 
 use crate::{
@@ -138,7 +138,7 @@ fn resolve_run_dir(runs_dir: &std::path::Path, run_id: &str) -> ApiResult<PathBu
 mod tests {
     use super::*;
     use chrono::Duration;
-    use pitboss_cli::dispatch::events::{DeniedReasonKind, TaskEvent};
+    use pitboss_core::task_events::{DeniedReasonKind, TaskEvent};
 
     fn entry_pause(actor: &str, at: DateTime<Utc>) -> AuditEntry {
         AuditEntry {

@@ -5,6 +5,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 pub mod atomic_write;
+pub mod audit;
 pub mod control_protocol;
 pub mod error;
 pub mod failure_classify;
@@ -16,6 +17,7 @@ pub mod runs;
 pub mod session;
 pub mod store;
 pub mod stream;
+pub mod task_events;
 pub mod worktree;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

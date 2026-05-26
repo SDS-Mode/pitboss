@@ -186,7 +186,7 @@ pub struct SubtreeView {
 }
 
 /// One `tool_denied` row read from a per-actor `events.jsonl`. Lightweight
-/// TUI-local mirror of the canonical `pitboss_cli::dispatch::events::TaskEvent::ToolDenied`
+/// TUI-local mirror of the canonical `pitboss_core::task_events::TaskEvent::ToolDenied`
 /// variant; carrying the typed enum here would force `pitboss-tui` to
 /// take a `pitboss-cli` dep just to read its own jsonl. The watcher
 /// extracts these fields via `serde_json::Value` discriminated on
