@@ -351,6 +351,41 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// macOS analogue of `freeze_then_resume_flips_proc_state` (#533).
+    /// macOS has no `/proc`, so polls `ps -o state= -p <pid>` instead.
+    /// `S`/`I` cover sleeping (Idle is BSD-style sleep > 20s); `R` is
+    /// running; `T` is stopped via SIGSTOP. The first character of the
+    /// ps state column is the BSD state code — modifiers like `N`
+    /// (lowered priority) or `+` (foreground process group) follow.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn freeze_then_resume_flips_ps_state() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").process_group(0);
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+
+        freeze(pid).unwrap();
+        assert!(
+            wait_for_ps_state(pid, &['T'], Duration::from_secs(2)),
+            "expected stopped state within 2s, final state: {:?}",
+            read_ps_state(pid)
+        );
+
+        resume_stopped(pid).unwrap();
+        assert!(
+            wait_for_ps_state(pid, &['S', 'R', 'I'], Duration::from_secs(2)),
+            "expected sleeping/running/idle state within 2s, final state: {:?}",
+            read_ps_state(pid)
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     /// `install_sublead_cancel_watcher` cascades drain to registered workers.
     #[tokio::test]
     async fn sublead_watcher_cascades_drain_to_workers() {
@@ -671,6 +706,42 @@ mod tests {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some(c) = read_proc_state(pid) {
+                if expected.contains(&c) {
+                    return true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// macOS analogue of `read_proc_state`. macOS has no `/proc`, so we
+    /// shell out to `ps -o state= -p <pid>` and read the **first** char
+    /// of the result. `ps` may emit a multi-character state (e.g. `SN`
+    /// for sleeping + lowered nice priority); only the first char is
+    /// the BSD state code we care about (`R`/`S`/`I`/`T`/`Z`).
+    #[cfg(target_os = "macos")]
+    fn read_ps_state(pid: u32) -> Option<char> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = std::str::from_utf8(&out.stdout).ok()?;
+        s.trim().chars().next()
+    }
+
+    /// Poll `ps` every 10ms until the state's first char is one of
+    /// `expected`, or `timeout` elapses. Returns true on match.
+    #[cfg(target_os = "macos")]
+    fn wait_for_ps_state(pid: u32, expected: &[char], timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(c) = read_ps_state(pid) {
                 if expected.contains(&c) {
                     return true;
                 }
