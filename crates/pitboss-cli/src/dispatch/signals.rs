@@ -246,9 +246,12 @@ async fn cancel_and_find_parent(
 /// `LayerState::register_worker_cancel` — these two paths together form
 /// the full timeline. Pinned by `tests/cancel_cascade_flows.rs`.
 ///
-/// Call exactly once at sub-lead spawn time
-/// (see `DispatchState::register_sublead`).
-pub fn install_sublead_cancel_watcher(sub_layer: Arc<crate::dispatch::layer::LayerState>) {
+/// Call exactly once at sub-lead spawn time. The only valid caller is
+/// `DispatchState::register_sublead`; the visibility is `pub(super)` so
+/// the dispatcher itself is the only thing that can sequence
+/// registration + watcher install + cascade. External code (including
+/// integration tests) must go through `register_sublead`. (F-ARCH-11)
+pub(super) fn install_sublead_cancel_watcher(sub_layer: Arc<crate::dispatch::layer::LayerState>) {
     tokio::spawn(async move {
         tokio::select! {
             () = sub_layer.cancel.await_drain() => {}
