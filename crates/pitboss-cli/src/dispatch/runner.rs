@@ -63,6 +63,18 @@ pub fn apply_pitboss_env_defaults(
             // so claude's gate is active. Pitboss registers
             // `permission_prompt` MCP tool to intercept checks. Do NOT
             // set sdk-ts — that would bypass the gate we want to route.
+            //
+            // #608: also strip an *inherited* sdk-ts value. Operator env
+            // layers in BEFORE this helper, so a `CLAUDE_CODE_ENTRYPOINT=sdk-ts`
+            // left over from the operator shell (e.g. a prior Path A
+            // interactive run) or from a grandparent Path A pitboss
+            // process would silently disable claude's gate and defeat
+            // Path B's whole purpose. Only `sdk-ts` is the bypass shape;
+            // a deliberate operator override to e.g. `cli` for telemetry
+            // stays preserved.
+            if env.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str) == Some("sdk-ts") {
+                env.remove("CLAUDE_CODE_ENTRYPOINT");
+            }
         }
     }
 }
@@ -1461,6 +1473,50 @@ mod tests {
             env.get("CLAUDE_CODE_ENTRYPOINT"),
             Some(&"cli".to_string()),
             "operator-set value must not be overwritten"
+        );
+    }
+
+    /// #608 regression: under Path B, an inherited
+    /// `CLAUDE_CODE_ENTRYPOINT=sdk-ts` from the operator shell or a
+    /// grandparent Path A pitboss process must be stripped — leaving it
+    /// would silently disable claude's gate and defeat Path B's whole
+    /// "claude's permission gate stays active" invariant. The gap was
+    /// reachable on every run after #393 flipped the default routing to
+    /// Path B in v0.12.
+    #[test]
+    fn apply_pitboss_env_defaults_path_b_strips_inherited_sdk_ts() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "sdk-ts".to_string());
+        apply_pitboss_env_defaults(
+            &mut env,
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathB,
+        );
+        assert_ne!(
+            env.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
+            Some("sdk-ts"),
+            "Path B must not allow an inherited sdk-ts entrypoint to bypass claude's gate"
+        );
+    }
+
+    /// #608 corollary: the Path B strip is surgical — it only removes
+    /// the `sdk-ts` bypass shape. A deliberate operator override to a
+    /// non-bypass value (e.g. `cli` for telemetry, mirroring the
+    /// Path A `apply_pitboss_env_defaults_honors_operator_override`
+    /// precedent) must pass through unchanged.
+    #[test]
+    fn apply_pitboss_env_defaults_path_b_preserves_non_sdk_ts_override() {
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
+        apply_pitboss_env_defaults(
+            &mut env,
+            "test-run-id",
+            crate::manifest::schema::PermissionRouting::PathB,
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_ENTRYPOINT"),
+            Some(&"cli".to_string()),
+            "Path B must preserve a non-sdk-ts operator override"
         );
     }
 
