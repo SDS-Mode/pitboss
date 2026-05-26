@@ -257,64 +257,67 @@ pub struct PendingApproval {
     pub fallback: crate::mcp::approval::ApprovalFallback,
 }
 
-/// An approval request that arrived before a TUI attached. Block-mode runs
-/// queue these; they drain when the next TUI connects.
-pub struct QueuedApproval {
-    pub request_id: String,
-    pub task_id: String,
-    pub summary: String,
-    /// Typed approval plan — same option as on the request path. `None`
-    /// for simple summary-only approvals, so pre-v0.4.5 queuers still
-    /// round-trip through this struct without issue.
-    pub plan: Option<crate::mcp::tools::ApprovalPlan>,
-    /// Discriminator between in-flight action approvals and pre-flight
-    /// plan approvals. Carried through the queue so the TUI renders
-    /// the right modal header when the queue drains.
-    pub kind: crate::control::protocol::ApprovalKind,
-    pub responder: oneshot::Sender<ApprovalResponse>,
-    /// Seconds after `created_at` before the fallback fires (Task 4.4).
-    /// `None` means never expires (preserves v0.5 behavior).
-    pub ttl_secs: Option<u64>,
-    /// What to do when `ttl_secs` elapses with no operator response (Task 4.4).
-    /// `None` means Block (never expires, preserves v0.5 behavior).
-    pub fallback: Option<crate::mcp::approval::ApprovalFallback>,
-    /// Wall-clock time the request was created (Task 4.4, for age computation).
-    /// Used only when `ttl_secs` is Some.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// An approval request that has been handed to a live TUI via the bridge map.
-///
-/// Carries TTL metadata so `expire_layer_approvals` can expire bridge entries
-/// that the operator never acted on — the same guarantee it provides for
-/// `approvals.queue` entries. Without this, an approval that moves from queue
-/// to bridge (when a TUI connects) loses TTL coverage: the queue is empty so
-/// the watcher does nothing, while the bridge has no metadata to check against.
-///
-/// Also retains the display fields (`summary`, `plan`, `kind`) so a TUI that
-/// connects after a previous TUI died without responding can have the pending
-/// approval replayed from the bridge. Before #102, transfer from queue→bridge
-/// dropped these fields, and a reconnecting TUI saw nothing for the still-live
-/// responder until a TTL fallback resolved it.
-pub struct BridgeEntry {
-    /// Oneshot sender; deliver the operator's decision here.
-    pub responder: oneshot::Sender<ApprovalResponse>,
-    /// Actor that submitted the approval request (for counter attribution).
+/// Fields shared by `QueuedApproval` (pre-TUI-attach) and `BridgeEntry`
+/// (post-attach). Extracted so adding a new approval-metadata field
+/// (e.g. priority, category, retry budget) touches one type instead of
+/// three. Equivalent to the "Phase 4 unification" TODO that previously
+/// lived on `PendingApproval`'s doc comment — except that `PendingApproval`
+/// is a richer record-level type (typed `ApprovalCategory`, required
+/// `ttl_secs`/`fallback`, actor lineage) so it stays separate for now.
+/// (F-ARCH-12)
+#[derive(Debug)]
+pub struct ApprovalMetadata {
+    /// Actor that submitted the approval request (for counter attribution
+    /// and audit-event correlation).
     pub task_id: String,
     /// Short summary line rendered in the TUI modal + approval-list pane.
     pub summary: String,
     /// Typed structured plan body (rationale, resources, risks, rollback).
     /// `None` for bare summary-only approvals.
-    pub plan: Option<crate::mcp::tools::ApprovalPlan>,
+    pub plan: Option<crate::mcp::approval::ApprovalPlan>,
     /// Discriminator between `Action` (in-flight) and `Plan` (pre-flight)
-    /// approvals — controls which modal header the TUI renders.
+    /// approvals — controls which modal header the TUI renders. Carried
+    /// through the queue so the TUI renders the right modal header when
+    /// the queue drains.
     pub kind: crate::control::protocol::ApprovalKind,
-    /// Seconds after `created_at` before the fallback fires. `None` = no TTL.
+    /// Seconds after `created_at` before the fallback fires. `None` = no
+    /// TTL (preserves v0.5 behavior of "never expires").
     pub ttl_secs: Option<u64>,
-    /// What to do when `ttl_secs` elapses. `None` = Block (never auto-resolve).
+    /// What to do when `ttl_secs` elapses. `None` = Block (never
+    /// auto-resolve; preserves v0.5 behavior).
     pub fallback: Option<crate::mcp::approval::ApprovalFallback>,
     /// Wall-clock time the request was created (for age computation).
+    /// Used only when `ttl_secs` is `Some`.
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// An approval request that arrived before a TUI attached. Block-mode runs
+/// queue these; they drain when the next TUI connects.
+pub struct QueuedApproval {
+    pub request_id: String,
+    pub responder: oneshot::Sender<ApprovalResponse>,
+    pub metadata: ApprovalMetadata,
+}
+
+/// An approval request that has been handed to a live TUI via the bridge map.
+///
+/// Carries TTL metadata (via `metadata`) so `expire_layer_approvals` can
+/// expire bridge entries that the operator never acted on — the same
+/// guarantee it provides for `approvals.queue` entries. Without this, an
+/// approval that moves from queue to bridge (when a TUI connects) loses TTL
+/// coverage: the queue is empty so the watcher does nothing, while the
+/// bridge has no metadata to check against.
+///
+/// Also retains the display fields (`summary`, `plan`, `kind` on
+/// `metadata`) so a TUI that connects after a previous TUI died without
+/// responding can have the pending approval replayed from the bridge.
+/// Before #102, transfer from queue→bridge dropped these fields, and a
+/// reconnecting TUI saw nothing for the still-live responder until a TTL
+/// fallback resolved it.
+pub struct BridgeEntry {
+    /// Oneshot sender; deliver the operator's decision here.
+    pub responder: oneshot::Sender<ApprovalResponse>,
+    pub metadata: ApprovalMetadata,
 }
 
 // ── DispatchState ────────────────────────────────────────────────────────────

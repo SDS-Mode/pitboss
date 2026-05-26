@@ -1339,10 +1339,10 @@ async fn expire_layer_approvals(
     let mut i = 0;
     let mut expired_queue = Vec::new();
     while i < queue.len() {
-        let expired_now = match queue[i].ttl_secs {
+        let expired_now = match queue[i].metadata.ttl_secs {
             Some(ttl_secs) => {
-                let age = clamped_age_secs(now, queue[i].created_at);
-                let fallback = queue[i].fallback.unwrap_or(ApprovalFallback::Block);
+                let age = clamped_age_secs(now, queue[i].metadata.created_at);
+                let fallback = queue[i].metadata.fallback.unwrap_or(ApprovalFallback::Block);
                 age >= ttl_secs && !matches!(fallback, ApprovalFallback::Block)
             }
             None => false,
@@ -1356,11 +1356,11 @@ async fn expire_layer_approvals(
     drop(queue);
 
     for entry in expired_queue {
-        let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+        let fallback = entry.metadata.fallback.unwrap_or(ApprovalFallback::Block);
         let approved = matches!(fallback, ApprovalFallback::AutoApprove);
         tracing::info!(
             request_id = %entry.request_id,
-            task_id = %entry.task_id,
+            task_id = %entry.metadata.task_id,
             fallback = ?fallback,
             approved,
             "approval queue TTL expired, applying fallback"
@@ -1373,9 +1373,10 @@ async fn expire_layer_approvals(
             from_ttl: true,
         };
         state
-            .record_last_approval_response(&entry.task_id, approved, true)
+            .record_last_approval_response(&entry.metadata.task_id, approved, true)
             .await;
-        crate::mcp::approval::record_approval_outcome(state, &entry.task_id, approved).await;
+        crate::mcp::approval::record_approval_outcome(state, &entry.metadata.task_id, approved)
+            .await;
         let _ = entry.responder.send(response);
     }
 
@@ -1387,12 +1388,12 @@ async fn expire_layer_approvals(
         bridge
             .iter()
             .filter_map(|(id, entry)| {
-                let ttl = entry.ttl_secs?;
-                let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+                let ttl = entry.metadata.ttl_secs?;
+                let fallback = entry.metadata.fallback.unwrap_or(ApprovalFallback::Block);
                 if matches!(fallback, ApprovalFallback::Block) {
                     return None;
                 }
-                let age = clamped_age_secs(now, entry.created_at);
+                let age = clamped_age_secs(now, entry.metadata.created_at);
                 if age >= ttl {
                     Some(id.clone())
                 } else {
@@ -1405,11 +1406,11 @@ async fn expire_layer_approvals(
     for request_id in expired_bridge_ids {
         let entry = layer.approvals.bridge.lock().await.remove(&request_id);
         if let Some(entry) = entry {
-            let fallback = entry.fallback.unwrap_or(ApprovalFallback::Block);
+            let fallback = entry.metadata.fallback.unwrap_or(ApprovalFallback::Block);
             let approved = matches!(fallback, ApprovalFallback::AutoApprove);
             tracing::info!(
                 request_id = %request_id,
-                task_id = %entry.task_id,
+                task_id = %entry.metadata.task_id,
                 fallback = ?fallback,
                 approved,
                 "approval bridge TTL expired, applying fallback"
@@ -1422,9 +1423,10 @@ async fn expire_layer_approvals(
                 from_ttl: true,
             };
             state
-                .record_last_approval_response(&entry.task_id, approved, true)
+                .record_last_approval_response(&entry.metadata.task_id, approved, true)
                 .await;
-            crate::mcp::approval::record_approval_outcome(state, &entry.task_id, approved).await;
+            crate::mcp::approval::record_approval_outcome(state, &entry.metadata.task_id, approved)
+                .await;
             let _ = entry.responder.send(response);
         }
     }
