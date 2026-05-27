@@ -172,6 +172,15 @@ pub async fn cancel_actor_with_reason(
 /// under a held `state.subleads` read lock — O(N) per cancel call,
 /// blocking new sublead registration. The `worker_layer_index` lookup
 /// mirrors `resolve_layer_for_caller`'s routing for KV ops (#150 audit).
+///
+/// **Lock-acquisition order (project invariant):** `state.subleads` →
+/// `state.worker_layer_index` → `sub_layer.workers.cancels`. Every
+/// callsite that holds any pair of these locks acquires them in this
+/// order. Inverting it under a `subleads.write()` would deadlock; today
+/// no such path exists because every `subleads.write()` callsite uses a
+/// single-statement guard (`register_sublead`, `reconcile_terminated_sublead`).
+/// Mirror of the convention documented in `hierarchical.rs::await_workers_drained`.
+/// (F-CONC-4 #494)
 async fn cancel_and_find_parent(
     state: &Arc<DispatchState>,
     target: &str,
