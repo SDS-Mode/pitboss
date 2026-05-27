@@ -109,12 +109,22 @@ pub struct WorkerRegistry {
 }
 
 impl WorkerRegistry {
-    /// Construct an empty registry with a fresh 64-slot `done_tx` channel.
-    /// The capacity matches the pre-split `LayerState::new` default; the
-    /// channel is mostly there for `wait_for_worker` consumers and a
+    /// Construct an empty registry with a fresh 1024-slot `done_tx` channel.
+    /// The channel is mostly there for `wait_for_worker` consumers and a
     /// `Lagged` receiver re-syncs from the `states` map.
+    ///
+    /// **Capacity (F-CONC-12 #491):** sized to absorb a mass-cancel storm
+    /// across a fully-saturated depth-2 tree (root + N sub-leads, each
+    /// with their own worker pool) without the slowest `wait_for_*`
+    /// subscriber lagging into the recovery rescan. The `Lagged` →
+    /// `refresh_in_flight_from_maps` path in
+    /// `hierarchical.rs::await_workers_drained` remains correct and is
+    /// kept as belt-and-braces, not the expected fast path. The pre-F-CONC-12
+    /// capacity of 64 matched the historical single-layer default, but
+    /// post depth-2 every root subscriber sees every worker's completion
+    /// across the whole tree.
     pub fn new() -> Self {
-        let (done_tx, _) = broadcast::channel(64);
+        let (done_tx, _) = broadcast::channel(1024);
         Self {
             states: RwLock::new(HashMap::new()),
             cancels: RwLock::new(HashMap::new()),
