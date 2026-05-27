@@ -566,6 +566,32 @@ impl DispatchState {
     /// `dispatch/sublead.rs:340-383` so the watcher install + eager
     /// cascade can never drift out of order.  Pinned by the integration
     /// tests in `tests/cancel_cascade_flows.rs`.
+    ///
+    /// **Step order is load-bearing — do not reorder (F-CONC-8 #498):**
+    ///
+    /// - `insert` MUST happen before `cascade_to`. The cascade-watcher
+    ///   installed by `install_cascade_cancel_watcher` walks
+    ///   `cascade_to_subleads`, which reads `self.subleads`; if the
+    ///   sublead were not yet inserted, a concurrent root-cancel could
+    ///   miss this sub-layer and the eager `cascade_to` at step 3 would
+    ///   be the only signal that ever reaches it.
+    /// - `install_sublead_cancel_watcher` MUST happen before the eager
+    ///   `cascade_to`. The per-sub-layer watcher is fire-once on the
+    ///   sub-layer's own `CancelToken`; if `cascade_to` runs first and
+    ///   already toggles drain/terminate, the watcher started afterwards
+    ///   still observes the canceled state and fans out to workers as
+    ///   intended (the watcher's `select!` over `await_drain`/`await_terminate`
+    ///   resolves immediately for an already-canceled token). The
+    ///   ordering exists so the watcher is *registered* on the canonical
+    ///   pre-cancel state for the (more common) non-canceled path.
+    ///
+    /// Between steps 1 and 3 there is a benign window where a concurrent
+    /// root cancellation's `cascade_to_subleads` walk could fire and
+    /// no-op (root not yet canceled when walked) — the eager `cascade_to`
+    /// at step 3 closes this window. The sublead subprocess is not
+    /// launched until after `register_sublead` returns
+    /// (`dispatch/sublead.rs::spawn_sublead_session`), so no worker
+    /// observes the transient state.
     pub async fn register_sublead(&self, sublead_id: String, sub_layer: Arc<LayerState>) {
         self.subleads
             .write()

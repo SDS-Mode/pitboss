@@ -654,6 +654,14 @@ async fn serve_connection(
                     }
                 } else {
                     let reply = dispatch_op(&state, op).await;
+                    // F-CONC-11 #490: broadcasting op replies to every
+                    // subscriber (including the SPA's SSE bridge) is
+                    // intentional — see the PR-Q routing block above for
+                    // the design rationale and the `OpUnknownState` /
+                    // current-state-leak analysis. Audit re-validation
+                    // confirmed `current_state` is the same coarse enum
+                    // already published via `WorkerStatus`, so the
+                    // "subscriber visibility" surface is not a leak.
                     state
                         .root
                         .broadcast_control_event(EventEnvelope {
