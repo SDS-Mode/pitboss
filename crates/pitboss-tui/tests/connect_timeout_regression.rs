@@ -31,16 +31,16 @@ fn timeout_constructed_inside_async_block_does_not_panic() {
     // runtime context is entered. `open_run_session` returns a
     // `RunStreamSession` directly (not a `Result`), so the outer
     // `Result` is purely the timeout's elapsed-vs-completed flag.
-    let result: Result<pitboss_cli::stream::RunStreamSession, tokio::time::error::Elapsed> =
+    let result: Result<pitboss_cli::live_stream::RunStreamSession, tokio::time::error::Elapsed> =
         runtime.block_on(async {
             tokio::time::timeout(
                 Duration::from_millis(50),
-                pitboss_cli::stream::open_run_session(
+                pitboss_cli::live_stream::open_run_session(
                     PathBuf::from("/tmp/pitboss-tui-tests-nonexistent-run-dir"),
                     Some(PathBuf::from(
                         "/tmp/pitboss-tui-tests-nonexistent-control.sock",
                     )),
-                    pitboss_cli::stream::LiveStreamMode::LiveOnly,
+                    pitboss_cli::live_stream::LiveStreamMode::LiveOnly,
                 ),
             )
             .await
@@ -75,12 +75,12 @@ fn naive_block_on_pattern_panics_when_constructed_outside_runtime() {
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(tokio::time::timeout(
             Duration::from_millis(50),
-            pitboss_cli::stream::open_run_session(
+            pitboss_cli::live_stream::open_run_session(
                 PathBuf::from("/tmp/pitboss-tui-tests-nonexistent-run-dir"),
                 Some(PathBuf::from(
                     "/tmp/pitboss-tui-tests-nonexistent-control.sock",
                 )),
-                pitboss_cli::stream::LiveStreamMode::LiveOnly,
+                pitboss_cli::live_stream::LiveStreamMode::LiveOnly,
             ),
         ))
     }))

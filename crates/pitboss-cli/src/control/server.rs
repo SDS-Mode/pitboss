@@ -1541,9 +1541,16 @@ async fn dispatch_op(
                 // control-socket path produces the same audit trail as
                 // ApprovalBridge::respond would. Matters when the approval
                 // was drained from the queue (no TUI at request time).
+                //
+                // #366 twin: this row must land in the *originating actor's*
+                // tasks dir, not the root lead's, so request/response pairs
+                // co-locate under one events.jsonl. `caller_id` was extracted
+                // from `bridge_entry.metadata.task_id` above for this purpose;
+                // pre-fix we passed `state.root.lead_id` and worker/sub-lead
+                // approvals lost their response row entirely.
                 let _ = crate::dispatch::events::append_event(
                     &state.root.run_subdir,
-                    &state.root.lead_id,
+                    &caller_id,
                     &crate::dispatch::events::TaskEvent::ApprovalResponse {
                         at: chrono::Utc::now(),
                         request_id: request_id.clone(),
@@ -1991,6 +1998,128 @@ mod tests {
 
         // Silence unused warnings on ApprovalBridge import.
         let _ = ApprovalBridge::new(state);
+        drop(handle);
+    }
+
+    /// #366 twin: when an approval drains from the queue (request was
+    /// raised before any TUI attached) and the operator subsequently
+    /// approves it via the control socket, the `ApprovalResponse` audit
+    /// row must land under `tasks/<requesting actor>/events.jsonl`, NOT
+    /// under `tasks/<root lead>/events.jsonl`. Pre-fix the handler hard-
+    /// coded `state.root.lead_id`, so a worker's approval response row
+    /// silently went to the lead's file and the worker's events.jsonl
+    /// was missing its `approval_response` audit entry — same bug class
+    /// as #366 in `ApprovalBridge::respond`, which was fixed for the
+    /// bridge path but not for the queue-drain path.
+    #[tokio::test]
+    async fn approve_op_writes_response_row_to_caller_tasks_dir() {
+        use std::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let state = mk_state(dir.path(), run_id);
+
+        // Pre-seed the bridge as if the queue-drain path placed the
+        // entry there. The originating actor is a worker, not the lead.
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.root.approvals.bridge.lock().await.insert(
+            "req-worker-approval".into(),
+            crate::dispatch::state::BridgeEntry {
+                responder: tx,
+                metadata: crate::dispatch::state::ApprovalMetadata {
+                    task_id: "worker-7".into(),
+                    summary: "drop staging index".into(),
+                    plan: None,
+                    kind: crate::control::protocol::ApprovalKind::Action,
+                    ttl_secs: None,
+                    fallback: None,
+                    created_at: chrono::Utc::now(),
+                },
+            },
+        );
+
+        let sock = dir.path().join("approve-routing.sock");
+        let handle = start_control_server(
+            sock.clone(),
+            "0.17.0".into(),
+            run_id.to_string(),
+            "hierarchical".into(),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let (r, mut w) = stream.split();
+        let mut lines = BufReader::new(r).lines();
+
+        // Same hello + replay drain as the sibling test (the server
+        // replays live bridge entries on Hello, #102, and that replay
+        // arrives before our Approve reply).
+        w.write_all(b"{\"op\":\"hello\",\"client_version\":\"0.17.0\"}\n")
+            .await
+            .unwrap();
+        let _hello = lines.next_line().await.unwrap();
+        let _replay = lines.next_line().await.unwrap().unwrap();
+
+        w.write_all(
+            b"{\"op\":\"approve\",\"request_id\":\"req-worker-approval\",\"approved\":true}\n",
+        )
+        .await
+        .unwrap();
+        let reply_line = lines.next_line().await.unwrap().unwrap();
+        let reply: ControlEvent = serde_json::from_str(&reply_line).unwrap();
+        assert!(matches!(
+            reply,
+            ControlEvent::OpAcked { ref op, .. } if op == "approve"
+        ));
+
+        // Give the handler a brief moment to finish the post-ack
+        // events.jsonl write (it happens before the OpAcked reply but
+        // the file may not be visible until the kernel flushes — short
+        // poll with a deadline rather than a fixed sleep).
+        let worker_events = state
+            .root
+            .run_subdir
+            .join("tasks")
+            .join("worker-7")
+            .join("events.jsonl");
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        while !worker_events.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            worker_events.exists(),
+            "approval_response row should land under worker-7's tasks dir; \
+             instead nothing was written. Path checked: {}",
+            worker_events.display(),
+        );
+        let body = tokio::fs::read_to_string(&worker_events).await.unwrap();
+        assert!(
+            body.contains("\"kind\":\"approval_response\""),
+            "worker-7 events.jsonl missing approval_response: {body}",
+        );
+        assert!(
+            body.contains("\"request_id\":\"req-worker-approval\""),
+            "worker-7 events.jsonl missing request_id correlation: {body}",
+        );
+
+        // The lead's events.jsonl must NOT have received this row
+        // (the pre-fix bug had it landing there instead).
+        let lead_events = state
+            .root
+            .run_subdir
+            .join("tasks")
+            .join(&state.root.lead_id)
+            .join("events.jsonl");
+        if lead_events.exists() {
+            let lead_body = tokio::fs::read_to_string(&lead_events).await.unwrap();
+            assert!(
+                !lead_body.contains("req-worker-approval"),
+                "lead events.jsonl wrongly received worker-7's approval row: {lead_body}",
+            );
+        }
+
         drop(handle);
     }
 
