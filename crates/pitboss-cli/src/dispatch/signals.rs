@@ -68,6 +68,12 @@ fn send_group_signal(pid: u32, sig: libc::c_int, name: &'static str) -> Result<(
 ///   2nd SIGINT within window → terminate
 /// After the window, re-armed: a single later SIGINT is treated as a fresh first.
 ///
+/// **Drain-mode auto-escalation (opt-in, F-CONC-7 #497):** set the env
+/// var `PITBOSS_CTRLC_DRAIN_ESCALATE_SECS=<n>` (positive integer seconds)
+/// to make the watcher escalate to terminate after `n` seconds of drain
+/// without a second Ctrl-C. Default behaviour (env unset / unparseable /
+/// zero) is to remain in drain mode indefinitely.
+///
 /// **Idempotent.** Calling more than once in the same process is a no-op
 /// after the first install — pitboss has two callsites today (flat-mode
 /// and hierarchical entry points) and a future third callsite would
@@ -102,12 +108,59 @@ pub fn install_ctrl_c_watcher(cancel: CancelToken) {
                     return;
                 }
                 _ => {
-                    tracing::info!("drain window expired; continuing in drain mode");
-                    // Loop again: if another Ctrl-C arrives later, start a new window.
+                    // F-CONC-7 #497: optionally auto-escalate to terminate
+                    // after a configurable drain-mode timeout, so operators
+                    // who walk away after a single Ctrl-C don't leave the
+                    // run hanging behind a stuck worker. Opt-in via env var
+                    // to preserve the "drain forever" default behaviour.
+                    if let Some(escalate_after) = drain_escalate_timeout() {
+                        tracing::warn!(
+                            "drain window expired; auto-escalating to terminate in {:?} \
+                             (PITBOSS_CTRLC_DRAIN_ESCALATE_SECS) unless another Ctrl-C arrives",
+                            escalate_after,
+                        );
+                        tokio::select! {
+                            () = tokio::time::sleep(escalate_after) => {
+                                cancel.terminate_with_reason(
+                                    pitboss_core::store::TerminateReason::OperatorCtrlC,
+                                );
+                                tracing::warn!(
+                                    "drain-mode timeout reached — terminating subprocesses",
+                                );
+                                return;
+                            }
+                            res = tokio::signal::ctrl_c() => {
+                                if res.is_ok() {
+                                    cancel.terminate_with_reason(
+                                        pitboss_core::store::TerminateReason::OperatorCtrlC,
+                                    );
+                                    tracing::warn!(
+                                        "received Ctrl-C during drain-mode timeout — terminating",
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                    } else {
+                        tracing::info!("drain window expired; continuing in drain mode");
+                        // Loop again: if another Ctrl-C arrives later, start a new window.
+                    }
                 }
             }
         }
     });
+}
+
+/// Read the optional drain-mode auto-escalation timeout from
+/// `PITBOSS_CTRLC_DRAIN_ESCALATE_SECS`. Returns `None` if the env var is
+/// unset, empty, or unparseable as a positive integer — keeping the
+/// pre-F-CONC-7 "drain forever" semantics as the default.
+fn drain_escalate_timeout() -> Option<Duration> {
+    std::env::var("PITBOSS_CTRLC_DRAIN_ESCALATE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .map(Duration::from_secs)
 }
 
 // ── Kill-with-reason cascade (Task 4.5) ─────────────────────────────────────
@@ -306,6 +359,7 @@ pub fn install_cascade_cancel_watcher(state: Arc<DispatchState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn freeze_rejects_pid_zero() {
@@ -317,6 +371,45 @@ mod tests {
     fn resume_rejects_pid_zero() {
         let err = resume_stopped(0).unwrap_err();
         assert!(err.to_string().contains("pid is 0"));
+    }
+
+    /// F-CONC-7 #497: the opt-in drain-mode auto-escalation timeout
+    /// returns `None` when the env var is unset (preserving the
+    /// pre-fix "drain forever" default) and `Some(_)` only for a
+    /// positive integer.
+    #[test]
+    #[serial(env)]
+    fn drain_escalate_timeout_is_opt_in() {
+        // SAFETY: `#[serial(env)]` serializes against other env-touching
+        // tests so we don't race readers in tracing/reqwest/locale init.
+        let key = "PITBOSS_CTRLC_DRAIN_ESCALATE_SECS";
+        std::env::remove_var(key);
+        assert_eq!(drain_escalate_timeout(), None, "unset → no escalation");
+
+        std::env::set_var(key, "");
+        assert_eq!(drain_escalate_timeout(), None, "empty → no escalation");
+
+        std::env::set_var(key, "0");
+        assert_eq!(drain_escalate_timeout(), None, "zero → no escalation");
+
+        std::env::set_var(key, "not-a-number");
+        assert_eq!(
+            drain_escalate_timeout(),
+            None,
+            "unparseable → no escalation"
+        );
+
+        std::env::set_var(key, "300");
+        assert_eq!(drain_escalate_timeout(), Some(Duration::from_secs(300)));
+
+        std::env::set_var(key, "  60  ");
+        assert_eq!(
+            drain_escalate_timeout(),
+            Some(Duration::from_secs(60)),
+            "surrounding whitespace tolerated"
+        );
+
+        std::env::remove_var(key);
     }
 
     /// End-to-end: spawn a sleeping child, SIGSTOP it, confirm
