@@ -67,7 +67,7 @@ tracing-test       = { workspace = true }
 # concurrent set_var/remove_var calls don't race glibc's environ
 # reallocation against background getenv readers (tracing, reqwest,
 # locale init). All env-touching tests must carry `#[serial(env)]`.
-serial_test        = "3.4"
+serial_test        = "3.5"
 # #577: wire-compat content-guard test parses control/protocol.rs at
 # test time to enforce the per-field #[serde(default)] convention
 # mechanically rather than by reviewer vigilance.
