@@ -162,7 +162,7 @@ jobs:
       # directory (issue #435). Required for every target since
       # cargo-dist builds the full workspace, including pitboss-web.
       - name: Install Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Build pitboss-web SPA
